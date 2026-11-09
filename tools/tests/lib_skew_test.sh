@@ -83,6 +83,32 @@ for s in "${SCRIPTS[@]}"; do
     check "${s} with its own library: not refused" "" "$("$BASH" "$T/cur/${s}.sh" --help 2>&1 < /dev/null | grep 'is older than this')"
 done
 
+# KEYS
+# ---- edit-config's keytool verify hook: its helpers are on the list ----------------------
+# listed WORDS WORD -- "yes" when WORD is one of WORDS (a function: bash 3.2 cannot
+# run a case with bare patterns inside $( )).
+listed() {
+    case " $1 " in
+        *" $2 "*) echo yes ;;
+        *) echo no ;;
+    esac
+}
+req="$(required_of edit-config)"
+for fn in tn_launch_runner tn_keytool_has tn_keytool _tn_cred_plain_ok _tn_passfile_trim_safe; do
+    check "edit-config: names ${fn} to tn_require_fns" yes "$(listed "$req" "$fn")"
+done
+# A library without them is refused with the one message, not a "command not found"
+# later in a credential action. (Before the part that needs git, which ends the file
+# early without it.)
+for fn in tn_keytool_has tn_launch_runner; do
+    sed "s/^${fn}() {/${fn}_absent_here() {/" "$REPO/lib/common.sh" > "$T/cur/lib/common.sh"
+    rc=0
+    "$BASH" "$T/cur/edit-config.sh" --reseal > "$T/out" 2>&1 < /dev/null || rc=$?
+    check "edit-config --reseal without ${fn}: one message, rc 1" "1 1 0" \
+        "${rc} $(grep -c 'is older than this edit-config.sh: run update-scripts.sh' "$T/out") $(grep -c 'command not found' "$T/out")"
+done
+cp "$REPO/lib/common.sh" "$T/cur/lib/common.sh"
+
 if ! command -v git >/dev/null 2>&1 \
     || ! git -C "$REPO" cat-file -e "${OLD}^{commit}" 2>/dev/null; then
     skip "scripts against the ${OLD} library" "git or commit ${OLD} not available"

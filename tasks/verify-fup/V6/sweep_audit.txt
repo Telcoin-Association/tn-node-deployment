@@ -1,0 +1,67 @@
+V6 sweep audit of tools/check-network-hits.sh --list at 02adda6 (148 hits, numbered in network_hits_list_02adda6.txt).
+Random sample: nl list | shuf -n 40 --random-source=<(yes V6); plus 21 targeted entries (gating claims).
+Verdict per entry: TRUE = the reason holds for the code around the line; IMPRECISE = true but incomplete.
+
+#1   random   lib/common.sh:20                 TRUE
+#13  random   lib/common.sh:1532               IMPRECISE: also the testnet example (edit-config.sh:2522, setup-node.sh:593) and the recorded-tag fallback (lib/common.sh:7964); every use is testnet-gated
+#16  random   lib/common.sh:1708               TRUE
+#18  random   lib/common.sh:1739               TRUE
+#19  random   lib/common.sh:1754               TRUE (marker line splits a comment sentence)
+#22  random   lib/common.sh:2002               TRUE (marker line splits a comment sentence)
+#25  random   lib/common.sh:2013               TRUE
+#28  random   lib/common.sh:2754               TRUE
+#31  random   lib/common.sh:4926               TRUE (marker line splits a comment sentence)
+#34  random   lib/common.sh:6725               TRUE
+#36  random   lib/common.sh:7507               TRUE
+#37  random   lib/common.sh:7508               TRUE
+#41  random   lib/common.sh:7548               TRUE
+#44  random   lib/common.sh:8331               TRUE
+#48  random   lib/common.sh:8365               TRUE
+#56  random   lib/common.sh:10242              TRUE
+#59  random   lib/observability.sh:77          TRUE
+#62  random   lib/observability.sh:232         TRUE
+#65  random   lib/observability.sh:354         TRUE (marker inside the quoted heredoc: rendered into the fallback config)
+#68  random   check-node.sh:760                TRUE
+#71  random   edit-config.sh:71                TRUE (message or help seen on mainnet too; names a testnet form)
+#74  random   edit-config.sh:2603              TRUE (message or help seen on mainnet too; names a testnet form)
+#77  random   install-caddy.sh:57              TRUE
+#80  random   install-caddy.sh:793             TRUE (message or help seen on mainnet too; names a testnet form)
+#84  random   setup-node.sh:19                 TRUE
+#87  random   setup-node.sh:92                 TRUE (message or help seen on mainnet too; names a testnet form)
+#90  random   setup-node.sh:1228               TRUE (message or help seen on mainnet too; names a testnet form)
+#91  random   setup-node.sh:1231               TRUE
+#93  random   setup-node.sh:1312               TRUE (message or help seen on mainnet too; names a testnet form)
+#94  random   setup-node.sh:1333               TRUE (message or help seen on mainnet too; names a testnet form)
+#96  random   setup-node.sh:2298               TRUE (message or help seen on mainnet too; names a testnet form)
+#99  random   setup-node.sh:2315               TRUE (message or help seen on mainnet too; names a testnet form)
+#102 random   update-node.sh:52                TRUE (message or help seen on mainnet too; names a testnet form)
+#105 random   update-node.sh:2010              TRUE
+#108 random   ui/server.py:286                 TRUE
+#111 random   ui/server.py:329                 TRUE
+#115 random   ui/server.py:350                 TRUE
+#118 random   ui/server.py:433                 TRUE
+#121 random   ui/server.py:1375                TRUE
+#125 random   ui/server.py:2945                TRUE
+#2   targeted lib/common.sh:21                 TRUE
+#5   targeted lib/common.sh:89                 TRUE
+#11  targeted lib/common.sh:1527               TRUE
+#43  targeted lib/common.sh:8325               TRUE
+#45  targeted lib/common.sh:8339               TRUE
+#57  targeted lib/observability.sh:43          TRUE
+#58  targeted lib/observability.sh:45          TRUE
+#70  targeted check-node.sh:1363               TRUE
+#79  targeted install-caddy.sh:788             TRUE (message or help seen on mainnet too; names a testnet form)
+#83  targeted remove-node.sh:1387              TRUE
+#100 targeted setup-node.sh:3032               TRUE
+#106 targeted update-node.sh:2023              TRUE
+#126 targeted ui/server.py:5111                TRUE
+#127 targeted ui/server.py:5606                TRUE
+#132 targeted ui/telcoin-ui-helper.sh:916      TRUE
+#134 targeted ui/static/index.html:449         TRUE
+#135 targeted ui/static/index.html:575         TRUE
+#139 targeted ui/static/index.html:3603        TRUE (HTML marker inside a JS template literal: rendered into the DOM)
+#141 targeted ui/static/index.html:3638        TRUE
+#142 targeted ui/static/index.html:3657        TRUE
+#144 targeted ui/static/index.html:3829        TRUE
+
+Result: 61 entries read in context, 0 false reasons, 1 imprecise (#13).

@@ -1,0 +1,17 @@
+# Written by firewall-setup.sh: loads the per-source limit on new P2P flows
+# (nftables table inet tn_p2p) at boot. firewall-setup.sh rewrites
+# /etc/telcoin/p2p-limit.nft with the table and removes both files when the
+# limit is not wanted.
+[Unit]
+Description=Telcoin Network per-source limit on new P2P flows (nftables table inet tn_p2p)
+After=ufw.service network-pre.target
+ConditionPathExists=/etc/telcoin/p2p-limit.nft
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/telcoin/p2p-limit.nft
+ExecStop=-/usr/sbin/nft delete table inet tn_p2p
+
+[Install]
+WantedBy=multi-user.target

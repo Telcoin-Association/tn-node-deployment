@@ -446,7 +446,7 @@ const state = {
   logBuffer: [],                          // client-side line buffer (static + live)
   logFilter: { level:'all', search:'' },  // level (all/error/warn/info) + text search
   setupStep: 1,
-  setup: { network:'adiri', method:'source',
+  setup: { network:'adiri', method:'source',  // network-gated: the wizard starts on testnet; the helper reads adiri as testnet
            eth:'', bls:'', blsConfirm:'', buildRef:'', dockerImage:'', publicIp:'', internalIp:'',
            sourceRef:'',          // latest release tag for this network (/api/setup/defaults); the only source build offered
            rpcPublic:false, advName:'', dataDir:'', serviceUser:'', serviceGroup:'', defaultsLoaded:false,
@@ -571,6 +571,7 @@ async function api(path, opts){
 // then test with validHost and send the normalised value.
 // =============================================================================
 const HOST_RE = /^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/;
+// network-gated: placeholder of last resort in the testnet domain; shown only as an example
 const DEFAULT_RPC_HOST = 'node7.adiri.telcoin.network';   // placeholder of last resort
 function normHost(s){
   let h = String(s==null?'':s).trim().toLowerCase();
@@ -584,6 +585,7 @@ function sameHost(a, b){
   const x = normHost(a);
   return x!=='' && x===normHost(b);
 }
+// network-gated: example URL in a comment
 // Host part of an advertised URL such as https://node7.adiri.telcoin.network/,
 // normalised; '' when there is none.
 function hostOfUrl(u){
@@ -1527,11 +1529,21 @@ async function augmentDashboardNetstat(){
 }
 
 // =============================================================================
-// NETWORK TAB -- Adiri Testnet status panel (moved off the Dashboard). Pulls
-// the public status page (cached 60s server-side); refreshes on the 15s tick;
-// degrades to a grey "status unavailable" state, never an error. Same page
-// layout style as the Dashboard (.dash container).
+// NETWORK TAB -- the selected node's network status panel (moved off the
+// Dashboard). Pulls the public status page (cached 60s server-side); refreshes
+// on the 15s tick; degrades to a grey "status unavailable" state, never an
+// error. Same page layout style as the Dashboard (.dash container).
 // =============================================================================
+
+// The "status page" link: the server's status_page for the network (an https
+// URL), or nothing when the network has no public page (mainnet until it is
+// published, devnet).
+function statusPageLink(d){
+  const url = String((d && d.status_page) || '');
+  if(!/^https:\/\/[^\s"'<>]+$/.test(url)) return '';
+  return `<a href="${esc(url)}" target="_blank" rel="noopener" style="margin-left:auto;font-size:12px">status page ↗</a>`;
+}
+
 async function renderNetwork(){
   const c = $('#view-network');
   if(!c) return;
@@ -1600,7 +1612,7 @@ async function renderNetwork(){
       <div class="svc-row" style="margin-bottom:10px">
         <h3 style="margin:0">${esc(d.title||(netName+' Network Status'))}</h3>
         ${pill}
-        <a href="https://status.adiri.telcoin.network/" target="_blank" rel="noopener" style="margin-left:auto;font-size:12px">status page ↗</a>
+        ${statusPageLink(d)}
       </div>
       ${consensusRow}
       <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(180px,1fr));margin-top:12px">${cells}</div>
@@ -2388,10 +2400,12 @@ async function fillUpdateStatus(){
     actions = `<p style="color:var(--text2);font-size:13px;margin-top:12px">Install method
       <strong>${esc(method)}</strong> can't be updated from here — only release, source and Docker installs are supported.</p>`;
   } else {
+    // network-gated: testnet and mainnet examples side by side
+    const refHint = 'release tag, e.g. v0.16.0-adiri (testnet) or v1.0.0 (mainnet)';
     actions = `
       <div class="field"><label>Target release tag</label>
         <input id="updRef" value="${esc(u.latest_ref || u.current_ref || '')}"
-          placeholder="release tag, e.g. v0.16.0-adiri (testnet) or v1.0.0 (mainnet)"></div>
+          placeholder="${refHint}"></div>
       <div class="svc-row" style="margin-top:14px">
         <button class="btn btn-green" id="updPrepare">⬇ Prepare</button>
         ${pending?'<button class="btn btn-out" id="updApply">▶ Apply pending</button>':''}
@@ -3224,6 +3238,88 @@ function fwExtraPorts(f){
   return out;
 }
 
+// The P2P source list the node keeps (the server's p2p_sources, from
+// .node-meta): the list, "every address" when it keeps none, the server's
+// p2p_sources_note when the list cannot be used, else "—" (unknown). With P2P
+// committee mode on (p2p_committee.enabled), the P2P ports take the committee
+// allowlist, which also holds the kept list, so the text says so first.
+function fwP2pSourcesText(f){
+  const l = f && f.p2p_sources;
+  const c = f && f.p2p_committee;
+  const committee = !!(c && typeof c==='object' && c.enabled===true);
+  if(!Array.isArray(l)){
+    const note = (f && typeof f.p2p_sources_note==='string' && f.p2p_sources_note) || '';
+    if(committee) return 'committee allowlist' + (note ? ' ('+note+')' : '');
+    return note || '—';
+  }
+  const items = l.filter(x=>typeof x==='string' && x);
+  if(committee) return 'committee allowlist' + (items.length ? ', plus '+items.join(', ') : '');
+  return items.length ? items.join(', ') : 'every address';
+}
+
+// The P2P new-flow limit firewall-setup.sh reports in p2p_new_flow_limit:
+// {active, rate, burst, reason, persistent}. The meter counts packets of new
+// flows the node has not answered yet: rate is such packets a minute per
+// source, after a burst of burst packets; established flows are not limited.
+// Inactive: reason is committee, p2p-list, nft-missing, not-applied or
+// unreadable. A source is an IPv4 address or an IPv6 /64. '' when the engine
+// reports none.
+const FW_LIMIT_REASONS = {
+  'committee': 'the P2P committee allowlist replaces it',
+  'p2p-list': 'a P2P source list is set',
+  'nft-missing': 'nftables is not installed',
+  'not-applied': 'not applied yet; enable the firewall',
+  'unreadable': 'state could not be read',
+};
+function fwNewFlowLimitText(l){
+  if(!l || typeof l!=='object') return '';
+  const n = v => (Number.isInteger(v) && v>0) ? String(v) : '?';
+  if(l.active===true){
+    return 'active, '+n(l.rate)+' packets per minute of new, unanswered flows per source after a burst of '+n(l.burst)
+      + (l.persistent===false ? ' (not restored at boot)' : '');
+  }
+  const r = typeof l.reason==='string' ? l.reason : '';
+  return 'inactive' + (r ? ': '+(FW_LIMIT_REASONS[r] || r) : '');
+}
+
+// The P2P committee allowlist firewall-setup.sh reports in p2p_committee:
+// enabled (P2P committee mode is on), persistent (loaded again at boot), timer
+// (the sync timer runs, so the list follows the committee) and reason, then,
+// when reason is null, the status of tn-p2p-allow-sync: loaded (its nftables
+// table is there), allowed_v4 and allowed_v6 (addresses let through, the
+// bootstrap floor included), static (networks of the P2P source list), floor,
+// age_secs (since the last good sync), stale (older than two epochs) and
+// stale_reason. A reason means the tool's keys are absent: off, unreadable,
+// tool-missing or tool-error. '' when the engine reports none.
+const FW_COMMITTEE_REASONS = {
+  'off': 'off',
+  'unreadable': 'unknown; P2P_COMMITTEE is set more than once in .node-meta',
+  'tool-missing': 'on, but tn-p2p-allow-sync is missing; run firewall-setup.sh --p2p-committee sync on the server',
+  'tool-error': 'on, but tn-p2p-allow-sync could not report its status',
+};
+function fwCommitteeText(c){
+  if(!c || typeof c!=='object') return '';
+  if(c.enabled===false) return 'off';
+  const r = typeof c.reason==='string' ? c.reason : '';
+  if(r) return FW_COMMITTEE_REASONS[r] || 'unknown: '+r;
+  if(c.enabled!==true) return 'unknown';
+  const n = v => (Number.isInteger(v) && v>=0) ? v : null;
+  const cnt = v => n(v)==null ? '?' : String(v);
+  const ago = s => s<120 ? s+' s' : s<7200 ? Math.round(s/60)+' min' : Math.round(s/3600)+' h';
+  const allowed = (n(c.allowed_v4)==null || n(c.allowed_v6)==null) ? '?' : String(c.allowed_v4+c.allowed_v6);
+  const why = typeof c.stale_reason==='string' ? c.stale_reason : '';
+  const parts = [
+    c.loaded===true ? 'on' : c.loaded===false ? 'on, but its table is not loaded, so P2P is open to every source' : 'on, table state unknown',
+    allowed+' addresses allowed ('+cnt(c.floor)+' bootstrap floor), '+cnt(c.static)+' static networks',
+    n(c.age_secs)==null ? 'no good sync yet' : 'last good sync '+ago(c.age_secs)+' ago',
+  ];
+  if(c.stale===true) parts.push('stale'+(why ? ': '+why : ''));
+  else if(/^(rpc-method-missing|snapshot-version-)/.test(why)) parts.push('last sync failed: '+why);
+  if(c.persistent===false) parts.push('not restored at boot');
+  if(c.timer===false) parts.push('the sync timer is not running');
+  return parts.join('; ');
+}
+
 async function loadFirewall(){
   const card=$('#fwCard'); if(!card) return;
   const f = await api('/api/firewall');
@@ -3233,6 +3329,8 @@ async function loadFirewall(){
   }
   const ports = f.ports||{};
   const active = !!f.active && !isReadonly();
+  const limitText = fwNewFlowLimitText(f.p2p_new_flow_limit);
+  const committeeText = fwCommitteeText(f.p2p_committee);
 
   // Port rows: interactive when ufw is active; dimmed + button-less when not
   // (or when the selected node is external/read-only).
@@ -3273,7 +3371,7 @@ async function loadFirewall(){
   // ufw off: enable it here with firewall-setup.sh's lockout-safe defaults. The
   // SSH sources the operator enters go to the engine as --ssh-from; a mainnet
   // node without them (and without a stored list) is refused by the engine, and
-  // its message is shown as is.
+  // its message is shown as is. The P2P sources go as --p2p-from.
   const enableForm = (!f.active && !isReadonly())
     ? `<div class="note" style="margin-top:12px;border-color:rgba(255,217,61,0.35);background:rgba(255,217,61,0.07)">
         UFW is ${f.installed?'not active':'not installed'}. Port management is disabled until the firewall is enabled.
@@ -3281,10 +3379,14 @@ async function loadFirewall(){
         (SSH, the node ports, then deny everything else).
         <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
           <input id="fwSshFrom" style="flex:1;min-width:220px" placeholder="SSH sources, e.g. 203.0.113.7/32, 198.51.100.0/24" autocomplete="off">
+          <input id="fwP2pFrom" style="flex:1;min-width:220px" placeholder="P2P sources (optional), e.g. 198.51.100.0/24" autocomplete="off">
           <button class="btn btn-green" id="fwEnable">Enable firewall</button>
         </div>
         <div class="muted" style="font-size:12px;margin-top:6px">SSH sources: addresses or CIDRs (/8 or narrower), separated by commas.
           When given, SSH is allowed from these only. Required on mainnet unless the node already has a stored list.</div>
+        <div class="muted" style="font-size:12px;margin-top:4px">P2P sources: the same form, at most 16. When given, the node's P2P ports accept these only,
+          so peers outside the list cannot reach this node. When empty, the list the node already keeps is used, else every address,
+          with a per-source limit on packets of new, unanswered flows.</div>
         <div id="fwEnableErr" style="display:none;margin-top:8px;color:var(--red);font-size:13px"></div>
       </div>`
     : '';
@@ -3312,6 +3414,9 @@ async function loadFirewall(){
     ${enableForm}
     <div class="kv"><span class="k">Default inbound</span><span class="v">${esc(f.default_incoming||'—')}</span></div>
     <div class="kv"><span class="k">SSH port</span><span class="v">${esc(f.ssh_port||'—')}</span></div>
+    <div class="kv"><span class="k">P2P sources</span><span class="v mono" style="overflow-wrap:anywhere">${esc(fwP2pSourcesText(f))}</span></div>
+    ${limitText?`<div class="kv"><span class="k" title="Counts the packets of P2P flows this node has not answered yet, per source (an IPv4 address or an IPv6 /64); answered flows are not limited.">P2P new-flow limit</span><span class="v">${esc(limitText)}</span></div>`:''}
+    ${committeeText?`<div class="kv"><span class="k" title="Turned on and off on the server with firewall-setup.sh --p2p-committee: the P2P ports take only the current committee, the bootstrap floor and the P2P source list, refreshed every 5 minutes.">P2P committee allowlist</span><span class="v">${esc(committeeText)}</span></div>`:''}
     ${portRows}
     ${extraRows}
     ${expectedBlock}
@@ -3338,12 +3443,12 @@ async function loadHostAudit(){
     ${a.items.map(i=>`<div class="kv" style="align-items:center"><span class="k" style="flex:0 0 auto">${badge(i.level)}</span><span class="v" style="text-align:left;overflow-wrap:anywhere">${esc(i.text)}</span></div>`).join('')}`;
 }
 
-// The SSH sources as the server checks them: addresses or CIDRs (/8 or
-// narrower), split on commas, spaces or new lines, at most 16. The server and
-// the helper check them again; the engine has the last word.
-function fwSshSources(text){
+// The SSH or P2P sources (what) as the server checks them: addresses or CIDRs
+// (/8 or narrower), split on commas, spaces or new lines, at most 16. The server
+// and the helper check them again; the engine has the last word.
+function fwSources(text, what){
   const items = String(text||'').split(/[\s,]+/).filter(Boolean);
-  if(items.length > 16) return {error:'at most 16 SSH sources'};
+  if(items.length > 16) return {error:'at most 16 '+what+' sources'};
   for(const it of items){
     const m = /^([0-9A-Fa-f.:]+)(?:\/([1-9][0-9]{0,2}))?$/.exec(it);
     const v4 = m && /^(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3}$/.test(m[1]);
@@ -3351,7 +3456,7 @@ function fwSshSources(text){
     const mask = m && m[2] ? Number(m[2]) : null;
     const bad = !m || (!v4 && !v6) || m[1]==='0.0.0.0' || m[1]==='::'
       || (mask!==null && (mask<8 || mask>(v4?32:128)));
-    if(bad) return {error:'not an address or a CIDR of /8 or narrower: '+it};
+    if(bad) return {error:what+' sources: not an address or a CIDR of /8 or narrower: '+it};
   }
   return {list: items.join(',')};
 }
@@ -3359,15 +3464,20 @@ function fwSshSources(text){
 async function enableFirewall(btn){
   const errBox=$('#fwEnableErr');
   const show = msg => { if(errBox){ errBox.textContent=msg; errBox.style.display=msg?'block':'none'; } };
-  const src = fwSshSources(($('#fwSshFrom')||{}).value);
+  const src = fwSources(($('#fwSshFrom')||{}).value, 'SSH');
   if(src.error){ show(src.error); return; }
+  const p2p = fwSources(($('#fwP2pFrom')||{}).value, 'P2P');
+  if(p2p.error){ show(p2p.error); return; }
   show('');
   const who = src.list ? 'SSH will be allowed only from '+src.list.split(',').join(', ')+'.' : 'SSH stays open (or limited to the list this node already keeps).';
-  if(!confirm('Enable the firewall with the recommended defaults? '+who+' Everything else inbound is denied.')) return;
+  const peers = p2p.list
+    ? ' The P2P ports will accept only '+p2p.list.split(',').join(', ')+'; peers outside that list cannot reach this node.'
+    : ' The P2P ports stay open to every address (or limited to the list this node already keeps).';
+  if(!confirm('Enable the firewall with the recommended defaults? '+who+peers+' Everything else inbound is denied.')) return;
   if(btn){ btn.disabled=true; btn.innerHTML='<span class="spinner"></span>'; }
   const r = await api('/api/firewall/enable', {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({ssh_from: src.list}),
+    body:JSON.stringify({ssh_from: src.list, p2p_from: p2p.list}),
   });
   if(r.ok){ toast('Firewall enabled','success'); loadFirewall(); return; }
   if(btn){ btn.disabled=false; btn.textContent='Enable firewall'; }
@@ -3540,10 +3650,12 @@ function hwInfoRow(hw, pf){
 }
 
 function stepNetwork(body){
+  // network-gated: the testnet card; the wizard names testnet adiri, which the helper reads as testnet
+  const testnetCard = {net: 'adiri', label: 'Adiri Testnet'};
   body.innerHTML = `<h3>Step 2 · Network</h3>
     <div class="radio-cards">
-      <div class="rcard ${state.setup.network==='adiri'?'sel':''}" data-net="adiri">
-        <div class="rt">Adiri Testnet</div><div class="rd">Telcoin's public test network. Recommended for new nodes.</div></div>
+      <div class="rcard ${state.setup.network===testnetCard.net?'sel':''}" data-net="${testnetCard.net}">
+        <div class="rt">${testnetCard.label}</div><div class="rd">Telcoin's public test network. Recommended for new nodes.</div></div>
       ${SETUP_MAINNET_ENABLED
         ? `<div class="rcard ${state.setup.network==='mainnet'?'sel':''}" data-net="mainnet">
         <div class="rt">Mainnet</div><div class="rd">Production network. Installs a signed release and logs to the systemd journal by default.</div></div>`
@@ -3567,6 +3679,10 @@ function stepSourceField(){
       <select id="mSourceMode"><option value="tag" selected>${esc(sref)} — latest release</option></select></div>`;
 }
 
+// The image package of each network (server.py IMAGE_REPO, lib/common.sh
+// TN_MAINNET_IMAGE_REPO and TN_TESTNET_IMAGE_REPO), named in the image field.
+const IMAGE_REPO = {mainnet:'ghcr.io/telcoin-association/tn-mainnet', testnet:'ghcr.io/telcoin-association/tn-testnet'};
+
 // The Docker image field takes a release tag of the network (the engine runs
 // that release's image by digest) or the image by digest; latest is refused.
 function dockerImageError(v){
@@ -3576,6 +3692,7 @@ function dockerImageError(v){
   // The same grammar as the library's tn_release_tag_ok: no leading zero in a part; a testnet
   // release candidate (-rcN) is accepted here because it is a named tag, never a default.
   const part = '(0|[1-9][0-9]*)';
+  // network-gated: testnet tag form, chosen unless the wizard's network is mainnet
   const tag = new RegExp(setupNetwork()==='mainnet' ? '^v'+part+'\\.'+part+'\\.'+part+'$' : '^v'+part+'\\.'+part+'\\.'+part+'-adiri(-rc[1-9][0-9]*)?$');
   const t = x.includes('@') ? '' : x.replace(/^.*:/, '');
   if(tag.test(t)) return '';
@@ -3594,8 +3711,9 @@ function stepMethod(body){
   const mainnet = setupNetwork()==='mainnet';
   const methodField = (m==='source' || m==='release')
     ? stepSourceField()
-    : `<div class="field"><label>Docker image: a release tag (${mainnet?'v1.2.3':'v0.16.0-adiri'}) or the image by digest (…@sha256:…); latest is refused</label>
-        <input id="mDockerImage" placeholder="${mainnet?'v1.2.3':'v0.16.0-adiri'}" value="${esc(state.setup.dockerImage||'')}"></div>`;
+    // network-gated: example tag in the testnet form, chosen unless the wizard's network is mainnet
+    : `<div class="field"><label>Docker image: a release tag (${mainnet?'v1.2.3':'v0.16.0-adiri'}) or the image by digest (${esc(IMAGE_REPO[mainnet?'mainnet':'testnet'])}@sha256:…); latest is refused</label>
+        <input id="mDockerImage" placeholder="${mainnet?'v1.2.3':'v0.16.0-adiri'}" value="${esc(state.setup.dockerImage||'')}"></div>`;  // network-gated: the same example, chosen by network
   body.innerHTML = `<h3>Step 3 · Install Method</h3>
     <div class="radio-cards" style="grid-template-columns:1fr 1fr">
       <div class="rcard ${m==='release'?'sel':''}" data-m="release"><div class="rt">Signed Release${mainnet?' <span class="tag">default</span>':''}</div><div class="rd">Download the published binary; its signature and checksums are verified before install (x86_64).</div></div>
@@ -3765,6 +3883,7 @@ function stepConfigure(body){
 function stepReview(body){
   const s = state.setup;
   const rows = [
+    // network-gated: label of the testnet choice in the review
     ['Network', s.network==='adiri'?'Adiri Testnet':s.network],
     ['Install Method', s.method + ((s.method==='source'||s.method==='release')?' ('+(s.buildRef||'?')+')':(s.dockerImage?' ('+s.dockerImage+')':''))],
     ['Address', s.eth||'(not set)'],
@@ -4052,9 +4171,11 @@ function fmtTel(x){
   if(!isFinite(n)) return null;
   return n.toLocaleString('en-US', {maximumFractionDigits:4}) + ' TEL';
 }
+// network-gated: display names keyed by network
 function netLabel(n){ return ({testnet:'Adiri Testnet', devnet:'Adiri Devnet', mainnet:'Telcoin Mainnet'})[n] || (n?cap(n):'—'); }
 
 // =============================================================================
+// network-gated: names the testnet in a comment
 // Nav-bar network status pill (Adiri Testnet, from /api/network/status)
 // =============================================================================
 function setNavNetPill(d){

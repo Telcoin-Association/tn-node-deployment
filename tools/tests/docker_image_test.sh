@@ -5,9 +5,12 @@
 # release tag accepted, latest and other tags never); devnet images by digest
 # from TN_DEVNET_IMAGE_REPOS (a devnet tag only with =0, testnet tags and
 # main-<sha> never), and with no network given the host's (_tn_guard_network:
-# NETWORK=devnet in .node-meta); tn_docker_repo_for per network (ghcr for testnet
-# and mainnet, the legacy repository for devnet), tn_docker_repos_for and
-# tn_docker_repo_ok per network (whitespace refused); against a curl shim: the ghcr pull token on the tags and manifest calls (none for the
+# NETWORK=devnet in .node-meta); tn_docker_repo_for per network (the tn-testnet
+# and tn-mainnet packages, the legacy repository for devnet), tn_docker_repos_for,
+# tn_docker_repo_ok (whitespace refused), tn_docker_pull_repos_for and
+# tn_docker_pull_repo_ok per network (the old single ghcr.io package recognised on
+# testnet and devnet, never pulled; the dev package tn-dev on devnet only, for
+# both); against a curl shim: the ghcr pull token on the tags and manifest calls (none for the
 # legacy registry), fetched once and shared by a run's lookups for 120 s,
 # tn_release_newest_tag over a Releases API answer (drafts,
 # prereleases, an rc newer than the newest final, a mainnet final, no release,
@@ -18,10 +21,17 @@
 # legacy repository's newest final, then the pinned default; nothing on
 # mainnet); tn_docker_local_digest against a docker shim;
 # tn_docker_image_for_tag (signed digest first, the registry's on testnet only
-# when no signed release exists, never after a failed verification; a devnet tag
-# refused before any download), tn_docker_resolve_ref (devnet: digests only),
+# when no signed release exists, asking the testnet package and then the legacy
+# repository, never on mainnet, never after a failed verification; a devnet tag
+# refused before any download), tn_docker_resolve_ref (devnet: digests only; the
+# other network's package and the old single package refused on every network),
 # tn_docker_release_tag_for on devnet (the .node-meta record only, no registry
-# call) and tn_docker_holds_digest.
+# call), tn_docker_holds_digest and, against a docker shim that prints a canned
+# --version per image, tn_docker_image_network_ok (mainnet: no build features;
+# testnet: adiri, faucet allowed; the line missing or doubled refused; a run that
+# fails refused; the run named, behind --init, under timeout -k 5 60 where
+# timeout exists, and a run that timed out (rc 124, or 137 after the KILL)
+# refused after docker rm -f of its container; devnet not checked).
 #
 #   bash tools/tests/docker_image_test.sh
 #
@@ -53,24 +63,42 @@ allowed "whitespace refused" 1 "${R}@sha256:${D64} --privileged"
 allowed "mainnet: the legacy testnet repository refused" 1 "${R}@sha256:${D64}" mainnet
 allowed "devnet: the legacy repository by digest accepted" 0 "${R}@sha256:${D64}" devnet
 allowed "default image is allowed" 0 "$DEFAULT_DOCKER_IMAGE"
-GH="ghcr.io/telcoin-association/telcoin-network"
-check "TN_GHCR_IMAGE_REPO" "$GH" "$TN_GHCR_IMAGE_REPO"
+# GH the testnet package, GM the mainnet package, GL the old single package.
+GH="ghcr.io/telcoin-association/tn-testnet"
+GM="ghcr.io/telcoin-association/tn-mainnet"
+GL="ghcr.io/telcoin-association/telcoin-network"
+GD="ghcr.io/telcoin-association/tn-dev"
+check "TN_TESTNET_IMAGE_REPO" "$GH" "$TN_TESTNET_IMAGE_REPO"
+check "TN_MAINNET_IMAGE_REPO" "$GM" "$TN_MAINNET_IMAGE_REPO"
+check "TN_GHCR_LEGACY_IMAGE_REPO" "$GL" "$TN_GHCR_LEGACY_IMAGE_REPO"
+check "TN_DEV_IMAGE_REPO" "$GD" "$TN_DEV_IMAGE_REPO"
 check "GAR_IMAGE_BASE is the legacy repository" "$TN_TESTNET_LEGACY_IMAGE_REPO" "$GAR_IMAGE_BASE"
 allowed "testnet: the release workflow's repository by digest accepted" 0 "${GH}@sha256:${D64}"
+allowed "testnet: the old single package recognised" 0 "${GL}@sha256:${D64}"
+allowed "testnet: the mainnet package refused" 1 "${GM}@sha256:${D64}"
 allowed "testnet: another ghcr.io repository refused" 1 "ghcr.io/someone-else/telcoin-network@sha256:${D64}"
 allowed "testnet: a repository that only starts like an allowed one refused" 1 "${GH}-x@sha256:${D64}"
 allowed "testnet: a repository that only ends like an allowed one refused" 1 "evil.example/${GH}@sha256:${D64}"
-allowed "mainnet: the ghcr repository by digest accepted" 0 "${GH}@sha256:${D64}" mainnet
+allowed "mainnet: the mainnet package by digest accepted" 0 "${GM}@sha256:${D64}" mainnet
+allowed "mainnet: the testnet package refused" 1 "${GH}@sha256:${D64}" mainnet
+allowed "mainnet: the old single package refused" 1 "${GL}@sha256:${D64}" mainnet
+allowed "testnet: the dev package refused" 1 "${GD}@sha256:${D64}"
+allowed "mainnet: the dev package refused" 1 "${GD}@sha256:${D64}" mainnet
 allowed "testnet: a tag on the release workflow's repository refused by default" 1 "${GH}:v0.16.0-adiri"
-# Devnet: digests from TN_DEVNET_IMAGE_REPOS (the legacy repository and ghcr.io);
-# a tag is refused by default, as on every network.
-allowed "devnet: the ghcr repository by digest accepted" 0 "${GH}@sha256:${D64}" devnet
+# Devnet: digests from TN_DEVNET_IMAGE_REPOS (the legacy repository, the old
+# single ghcr.io package and the dev package); a tag is refused by default, as on
+# every network.
+allowed "devnet: the old single package by digest recognised" 0 "${GL}@sha256:${D64}" devnet
+allowed "devnet: the dev package by digest accepted" 0 "${GD}@sha256:${D64}" devnet
+allowed "devnet: a repository that only starts like the dev package refused" 1 "${GD}x@sha256:${D64}" devnet
+allowed "devnet: the testnet package refused" 1 "${GH}@sha256:${D64}" devnet
+allowed "devnet: the mainnet package refused" 1 "${GM}@sha256:${D64}" devnet
 allowed "devnet: another repository by digest refused" 1 "evil.example/adiri@sha256:${D64}" devnet
 allowed "devnet: another ghcr.io repository refused" 1 "ghcr.io/someone-else/telcoin-network@sha256:${D64}" devnet
 allowed "devnet: a devnet tag refused by default" 1 "${R}:v0.2.0-devnet" devnet
 allowed "devnet: a main-<sha> tag refused" 1 "${R}:main-0123abc" devnet
 allowed "devnet: a testnet release tag refused" 1 "${R}:v0.16.0-adiri" devnet
-allowed "devnet: whitespace refused" 1 "${GH}@sha256:${D64} --privileged" devnet
+allowed "devnet: whitespace refused" 1 "${GL}@sha256:${D64} --privileged" devnet
 TN_DOCKER_REQUIRE_DIGEST=0
 allowed "=0: release tag accepted" 0 "${R}:v0.16.0-adiri"
 allowed "=0: latest refused" 1 "${R}:latest"
@@ -83,7 +111,7 @@ allowed "=0: release tag on another repository refused" 1 "evil.example/adiri:v0
 allowed "=0: a testnet release candidate accepted" 0 "${R}:v0.17.0-adiri-rc1"
 allowed "=0: rc0 refused" 1 "${R}:v0.17.0-adiri-rc0"
 allowed "=0: a devnet tag accepted on devnet" 0 "${R}:v0.2.0-devnet" devnet
-allowed "=0: a devnet tag on ghcr accepted on devnet" 0 "${GH}:v0.2.0-devnet" devnet
+allowed "=0: a devnet tag on the old ghcr package accepted on devnet" 0 "${GL}:v0.2.0-devnet" devnet
 allowed "=0: a testnet release tag refused on devnet" 1 "${R}:v0.16.0-adiri" devnet
 allowed "=0: main-<sha> refused on devnet" 1 "${R}:main-0123abc" devnet
 allowed "=0: a devnet tag on another repository refused" 1 "evil.example/adiri:v0.2.0-devnet" devnet
@@ -108,7 +136,7 @@ guard_case() {  # NAME EXPECTED-RC META-NETWORK DETECTED IMAGE
     ) 2>/dev/null || rc=$?
     check_rc "$1" "$2" "$rc"
 }
-guard_case "no network given, a devnet host: a devnet digest accepted" 0 devnet "" "${GH}@sha256:${D64}"
+guard_case "no network given, a devnet host: a devnet digest accepted" 0 devnet "" "${GL}@sha256:${D64}"
 guard_case "no network given, a devnet host: validate_docker_image too" 0 devnet "" "${R}@sha256:${D64}"
 guard_case "no network given, a devnet host: a tag still refused" 1 devnet "" "${R}:v0.2.0-devnet"
 guard_case "no network given, a testnet host: tn_detect_network's network" 0 "" testnet "${R}@sha256:${D64}"
@@ -119,14 +147,14 @@ guard_case "no network given, .node-meta names testnet but detection fails: refu
 # --- tn_docker_repo_for --------------------------------------------------------------
 rc=0; out="$(tn_docker_repo_for testnet 2>/dev/null)" || rc=$?
 check_rc "repo testnet" 0 "$rc"
-check "repo testnet value (ghcr, not the list)" "ghcr.io/telcoin-association/telcoin-network" "$out"
+check "repo testnet value (the testnet package, not the list)" "ghcr.io/telcoin-association/tn-testnet" "$out"
 rc=0; out="$(tn_docker_repo_for mainnet 2>/dev/null)" || rc=$?
-check "repo mainnet: ghcr" "0 ghcr.io/telcoin-association/telcoin-network" "$rc $out"
+check "repo mainnet: the mainnet package" "0 ghcr.io/telcoin-association/tn-mainnet" "$rc $out"
 rc=0; out="$(tn_docker_repo_for devnet 2>"$T/err")" || rc=$?
 check_rc "repo devnet" 0 "$rc"
 check "repo devnet: the legacy repository" "us-docker.pkg.dev/telcoin-network/tn-public/adiri" "$out"
 check "repo devnet: nothing on stderr" "" "$(cat "$T/err")"
-check "TN_DEVNET_IMAGE_REPOS" "us-docker.pkg.dev/telcoin-network/tn-public/adiri ghcr.io/telcoin-association/telcoin-network" "$TN_DEVNET_IMAGE_REPOS"
+check "TN_DEVNET_IMAGE_REPOS" "us-docker.pkg.dev/telcoin-network/tn-public/adiri ghcr.io/telcoin-association/telcoin-network ghcr.io/telcoin-association/tn-dev" "$TN_DEVNET_IMAGE_REPOS"
 rc=0; out="$(tn_docker_repo_for foo 2>/dev/null)" || rc=$?
 check_rc "repo foo refused" 1 "$rc"
 rc=0; out="$(tn_docker_repo_for "" 2>/dev/null)" || rc=$?
@@ -137,7 +165,39 @@ check "repos testnet: TN_TESTNET_IMAGE_REPOS" "0 ${TN_TESTNET_IMAGE_REPOS}" "$rc
 rc=0; out="$(tn_docker_repos_for devnet 2>/dev/null)" || rc=$?
 check "repos devnet: TN_DEVNET_IMAGE_REPOS" "0 ${TN_DEVNET_IMAGE_REPOS}" "$rc $out"
 rc=0; out="$(tn_docker_repos_for mainnet 2>/dev/null)" || rc=$?
-check "repos mainnet: its repository alone" "0 ghcr.io/telcoin-association/telcoin-network" "$rc $out"
+check "repos mainnet: its repository alone" "0 ghcr.io/telcoin-association/tn-mainnet" "$rc $out"
+check "TN_TESTNET_IMAGE_REPOS: the legacy repository, the old package, the testnet package" \
+    "us-docker.pkg.dev/telcoin-network/tn-public/adiri ghcr.io/telcoin-association/telcoin-network ghcr.io/telcoin-association/tn-testnet" "$TN_TESTNET_IMAGE_REPOS"
+# tn_docker_pull_repos_for: the list without the old single package.
+rc=0; out="$(tn_docker_pull_repos_for testnet 2>/dev/null)" || rc=$?
+check "pull repos testnet: the legacy repository and the testnet package" "0 ${R} ${GH}" "$rc $out"
+rc=0; out="$(tn_docker_pull_repos_for devnet 2>/dev/null)" || rc=$?
+check "pull repos devnet: the devnet repository and the dev package" "0 ${R} ${GD}" "$rc $out"
+rc=0; out="$(tn_docker_pull_repos_for mainnet 2>/dev/null)" || rc=$?
+check "pull repos mainnet: the mainnet package alone" "0 ${GM}" "$rc $out"
+rc=0; out="$(tn_docker_pull_repos_for foo 2>/dev/null)" || rc=$?
+check "pull repos foo refused" "1 " "$rc $out"
+pull_ok() {  # pull_ok NETWORK REPO -- the rc of tn_docker_pull_repo_ok
+    local rc=0
+    tn_docker_pull_repo_ok "$1" "$2" || rc=$?
+    echo "$rc"
+}
+check "pull_ok testnet: the testnet package" 0 "$(pull_ok testnet "$GH")"
+check "pull_ok testnet: the legacy repository" 0 "$(pull_ok testnet "$R")"
+check "pull_ok testnet: the old single package refused" 1 "$(pull_ok testnet "$GL")"
+check "pull_ok testnet: the mainnet package refused" 1 "$(pull_ok testnet "$GM")"
+check "pull_ok mainnet: the mainnet package" 0 "$(pull_ok mainnet "$GM")"
+check "pull_ok mainnet: the testnet package refused" 1 "$(pull_ok mainnet "$GH")"
+check "pull_ok mainnet: the old single package refused" 1 "$(pull_ok mainnet "$GL")"
+check "pull_ok mainnet: the legacy repository refused" 1 "$(pull_ok mainnet "$R")"
+check "pull_ok devnet: the devnet repository" 0 "$(pull_ok devnet "$R")"
+check "pull_ok devnet: the old single package refused" 1 "$(pull_ok devnet "$GL")"
+check "pull_ok devnet: the testnet package refused" 1 "$(pull_ok devnet "$GH")"
+check "pull_ok devnet: the dev package" 0 "$(pull_ok devnet "$GD")"
+check "pull_ok testnet: the dev package refused" 1 "$(pull_ok testnet "$GD")"
+check "pull_ok mainnet: the dev package refused" 1 "$(pull_ok mainnet "$GD")"
+check "pull_ok testnet: a prefix of the testnet package refused" 1 "$(pull_ok testnet "${GH%t}")"
+check "pull_ok testnet: two words refused" 1 "$(pull_ok testnet "$GH $R")"
 # in_list WORD LIST -- 1 when WORD is one of LIST's space separated words, else 0
 # (a function: bash 3.2 misparses a case inside $(...)).
 in_list() {
@@ -186,7 +246,7 @@ case "$url" in
         f="$REC/dl/${url#https://github.com/Telcoin-Association/telcoin-network/releases/download/}"
         [ -f "$f" ] || exit 22
         if [ -n "$out" ]; then cat "$f" > "$out"; else cat "$f"; fi ;;
-    https://ghcr.io/token\?scope=repository:telcoin-association/telcoin-network:pull)
+    https://ghcr.io/token\?scope=repository:telcoin-association/*:pull)
         [ -f "$REC/token.down" ] && exit 22
         printf '{"token":"TOK123"}' ;;
     https://ghcr.io/*)
@@ -229,10 +289,11 @@ rc=0; out="$(tn_registry_token "$R")" || rc=$?
 check "token: none for another registry" "0 " "$rc $out"
 rc=0; out="$(tn_registry_digest "$GH" v0.17.0-adiri)" || rc=$?
 check "ghcr digest with the token" "0 sha256:${D64}" "$rc $out"
-check_has "ghcr manifest HEAD carried the Bearer token" "1 Authorization:_Bearer_TOK123 https://ghcr.io/v2/telcoin-association/telcoin-network/manifests/v0.17.0-adiri" "$(cat "$REC/curl.log")"
+check_has "ghcr manifest HEAD carried the Bearer token" "1 Authorization:_Bearer_TOK123 https://ghcr.io/v2/telcoin-association/tn-testnet/manifests/v0.17.0-adiri" "$(cat "$REC/curl.log")"
 rc=0; out="$(tn_registry_tags "$GH" | tr '\n' ' ')" || rc=$?
 check "ghcr tags with the token" "0 v0.17.0-adiri v0.17.0-adiri-rc1 " "$rc $out"
-check_has "ghcr tags/list carried the Bearer token" "0 Authorization:_Bearer_TOK123 https://ghcr.io/v2/telcoin-association/telcoin-network/tags/list" "$(cat "$REC/curl.log")"
+check_has "ghcr tags/list carried the Bearer token" "0 Authorization:_Bearer_TOK123 https://ghcr.io/v2/telcoin-association/tn-testnet/tags/list" "$(cat "$REC/curl.log")"
+check_has "ghcr token asked for the testnet package" "0 - https://ghcr.io/token?scope=repository:telcoin-association/tn-testnet:pull" "$(cat "$REC/curl.log")"
 : > "$REC/curl.log"
 rc=0; out="$(tn_registry_digest "$R" v0.17.0-adiri)" || rc=$?
 check "legacy digest" "0 sha256:${D64}" "$rc $out"
@@ -500,6 +561,51 @@ check "for_tag: no signed release published (rc 2), testnet: registry digest" "0
 FETCH_RC=1
 rc=0; out="$(tn_docker_image_for_tag testnet v0.17.0-adiri 2>/dev/null)" || rc=$?
 check "for_tag: a release that fails verification is never replaced" "1 " "$rc $out"
+# The registry fallback, with its lookups recorded: tn_registry_digest logs
+# "<repository> <tag>" to $REC/reg.log and answers with a digest only while
+# $REC/reg.answer exists. It runs on testnet only and asks the testnet package,
+# then the legacy repository; never the old single package or tn-dev. On mainnet
+# a signed release that cannot be fetched (rc 2) is refused with no lookup, with
+# a registry that would answer.
+reg_for_tag() {  # reg_for_tag NETWORK TAG -- tn_docker_image_for_tag, lookups logged
+    tn_registry_digest() {
+        printf '%s %s\n' "$1" "$2" >> "$REC/reg.log"
+        [ -f "$REC/reg.answer" ] || return 1
+        printf 'sha256:%s\n' "$D64"
+    }
+    tn_docker_image_for_tag "$1" "$2"
+}
+regs() { tr '\n' '|' < "$REC/reg.log" | sed 's/|$//'; }
+FETCH_RC=2
+: > "$REC/reg.answer"; : > "$REC/reg.log"; : > "$REC/curl.log"
+rc=0; out="$(reg_for_tag mainnet v1.0.0 2>"$T/err")" || rc=$?
+check "for_tag, mainnet, no signed release to read (rc 2): refused" "1 " "$rc $out"
+check "for_tag, mainnet, rc 2: no registry lookup" "" "$(regs)"
+check "for_tag, mainnet, rc 2: no registry call" "0" "$(grep -c 'ghcr.io\|pkg.dev' "$REC/curl.log")"
+check_lacks "for_tag, mainnet, rc 2: no registry digest offered" "the registry serves" "$(cat "$T/err")"
+: > "$REC/reg.log"
+rc=0; out="$(reg_for_tag testnet v0.17.0-adiri 2>/dev/null)" || rc=$?
+check "for_tag, testnet, rc 2: the testnet package answers first" "0 ${GH}@sha256:${D64}" "$rc $out"
+check "for_tag, testnet, rc 2: only the testnet package asked" "${GH} v0.17.0-adiri" "$(regs)"
+rm -f "$REC/reg.answer"
+: > "$REC/reg.log"
+rc=0; out="$(reg_for_tag testnet v0.17.0-adiri 2>"$T/err")" || rc=$?
+check "for_tag, testnet, rc 2, no registry answers: refused" "1 " "$rc $out"
+check "for_tag, testnet, rc 2: the testnet package, then the legacy repository, nothing else" \
+    "${GH} v0.17.0-adiri|${R} v0.17.0-adiri" "$(regs)"
+check_has "for_tag, testnet: the refusal names both repositories" "1" \
+    "$(grep -cF "The registry gave no digest for v0.17.0-adiri in ${GH} or ${R}." "$T/err")"
+rm -f "$T/keys/k.asc"
+: > "$REC/reg.log"
+rc=0; out="$(reg_for_tag testnet v0.17.0-adiri 2>/dev/null)" || rc=$?
+check "for_tag, no release key, testnet: the same two repositories, in order" \
+    "1 ${GH} v0.17.0-adiri|${R} v0.17.0-adiri" "$rc $(regs)"
+: > "$REC/reg.answer"; : > "$REC/reg.log"
+rc=0; out="$(reg_for_tag mainnet v1.0.0 2>/dev/null)" || rc=$?
+check "for_tag, no release key, mainnet: refused, no registry lookup" "1 " "$rc $(regs)"
+rm -f "$REC/reg.answer"
+: > "$T/keys/k.asc"
+unset -f reg_for_tag regs
 FETCH_RC=0
 # Devnet has no signed releases: a devnet tag names no image and is refused
 # before any release is fetched or any registry asked, with a release key present;
@@ -538,6 +644,62 @@ res "resolve: short digest refused" "${R}@sha256:abc" 1 ""
 res "resolve: the release workflow's repository by digest taken as given" "${GH}@sha256:${D64}" 0 "${GH}@sha256:${D64} "
 res "resolve: release tag on the release workflow's repository" "${GH}:v0.17.0-adiri" 0 "${R}@sha256:${D64} v0.17.0-adiri"
 res "resolve: a third repository by digest refused" "ghcr.io/someone-else/telcoin-network@sha256:${D64}" 1 ""
+# The old single package is never pulled from, and the mainnet package is not
+# testnet's.
+res "resolve: the old single package by digest refused" "${GL}@sha256:${D64}" 1 ""
+res "resolve: a release tag on the old single package refused" "${GL}:v0.17.0-adiri" 1 ""
+res "resolve: the mainnet package by digest refused on testnet" "${GM}@sha256:${D64}" 1 ""
+res "resolve: a mainnet release tag on the mainnet package refused on testnet" "${GM}:v0.1.0" 1 ""
+res "resolve: a plain tag refused on testnet" v0.1.0 1 ""
+rc=0; o="$(tn_docker_resolve_ref testnet "${GL}@sha256:${D64}" 2>"$T/err")" || rc=$?
+check_has "resolve: the old package refusal says no release was published there" "1" "$(grep -c "No release was ever published to ${GL}, so no image is pulled from it; testnet images come from ${GH}. Give the testnet release tag instead." "$T/err")"
+# Mainnet: the testnet package, the old package and an -adiri tag are refused
+# before any release is fetched.
+mresx() {  # mresx NAME ARG
+    local rc=0 o
+    o="$(tn_docker_resolve_ref mainnet "$2" 2>/dev/null)" || rc=$?
+    check "$1" "1 " "$rc $o"
+}
+mresx "resolve, mainnet: a testnet release on the testnet package refused" "${GH}:v0.17.0-adiri"
+mresx "resolve, mainnet: the testnet package by digest refused" "${GH}@sha256:${D64}"
+mresx "resolve, mainnet: the old single package by digest refused" "${GL}@sha256:${D64}"
+mresx "resolve, mainnet: a release tag on the old single package refused" "${GL}:v1.0.0"
+mresx "resolve, mainnet: a bare -adiri tag refused" v0.17.0-adiri
+unset -f mresx
+# Mainnet, a digest given alone: only the signed release says which digest is a
+# mainnet release image, so the digest is taken only when .node-meta records a
+# mainnet release tag for it (a real .node-meta under TN_ROOT_PREFIX here, read by
+# the library's own meta_get).
+MAINNET_DIGEST_OFF="Image refused: on mainnet an image is named by its release tag, so the digest comes from the signed release; sha256:${D64} is not the image of a mainnet release this node has installed. Give the mainnet release tag instead."
+mkdir -p "$T/mroot/etc/telcoin"
+TN_ROOT_PREFIX="$T/mroot"
+mmeta() { printf '%s\n' "NETWORK=mainnet" "$@" > "$T/mroot/etc/telcoin/.node-meta"; }
+mres() {  # mres NAME EXPECTED-RC EXPECTED-OUT [REASON]
+    local rc=0 o
+    o="$(tn_docker_resolve_ref mainnet "${GM}@sha256:${D64}" 2>"$T/err")" || rc=$?
+    check "$1" "$2 $3" "$rc $o"
+    if [[ -n "${4:-}" ]]; then
+        check_has "$1: the reason on stderr" "$(printf '%s' "$4" | sed 's/^/  [WARN] /')" "$(sed 's/\x1b\[[0-9;]*m//g' "$T/err")"
+    fi
+}
+mmeta
+mres "resolve, mainnet: a digest with nothing recorded refused" 1 "" "$MAINNET_DIGEST_OFF"
+mmeta "DOCKER_IMAGE_DIGEST=sha256:${D64}" "RELEASE_TAG=v1.0.0"
+mres "resolve, mainnet: a digest recorded as v1.0.0 taken, with its tag" 0 "${GM}@sha256:${D64} v1.0.0"
+check "resolve, mainnet: a recorded release: no warning" "" "$(cat "$T/err")"
+mmeta "DOCKER_IMAGE_DIGEST=sha256:$(printf '%s' "$D64" | tr 0 e)" "RELEASE_TAG=v1.0.0"
+mres "resolve, mainnet: another digest recorded: refused" 1 "" "$MAINNET_DIGEST_OFF"
+mmeta "DOCKER_IMAGE_DIGEST=sha256:${D64}" "RELEASE_TAG=v0.16.0-adiri"
+mres "resolve, mainnet: a testnet tag recorded for it: refused" 1 "" "$MAINNET_DIGEST_OFF"
+mmeta "DOCKER_IMAGE_DIGEST=sha256:${D64}"
+mres "resolve, mainnet: the digest recorded without a release tag: refused" 1 "" "$MAINNET_DIGEST_OFF"
+# Testnet keeps taking the same digest alone, with the warning, against the same file.
+printf 'NETWORK=testnet\n' > "$T/mroot/etc/telcoin/.node-meta"
+rc=0; o="$(tn_docker_resolve_ref testnet "${GH}@sha256:${D64}" 2>"$T/err")" || rc=$?
+check "resolve, testnet: a digest with nothing recorded still taken" "0 ${GH}@sha256:${D64} " "$rc $o"
+check "resolve, testnet: still warns the checks cannot be applied" yes "$(grep -q 'digest alone.*cannot be applied' "$T/err" && echo yes || echo no)"
+TN_ROOT_PREFIX=""
+unset -f mmeta mres
 # A digest given alone: the release .node-meta records for that digest, else a
 # warning that the downgrade and oldest-release checks cannot be applied.
 META_DIGEST="" META_TAG=""
@@ -569,7 +731,11 @@ resd() {  # resd NAME ARG EXPECTED-RC EXPECTED-OUT
     check "$1" "$3 $4" "$rc $o"
 }
 resd "resolve, devnet: the legacy repository by digest" "${R}@sha256:${D64}" 0 "${R}@sha256:${D64} "
-resd "resolve, devnet: the ghcr repository by digest" "${GH}@sha256:${D64}" 0 "${GH}@sha256:${D64} "
+resd "resolve, devnet: the old single package by digest refused" "${GL}@sha256:${D64}" 1 ""
+resd "resolve, devnet: the dev package by digest taken as given" "${GD}@sha256:${D64}" 0 "${GD}@sha256:${D64} "
+resd "resolve, devnet: a tag on the dev package refused" "${GD}:dev-devnet-v0.2.0" 1 ""
+resd "resolve, devnet: the testnet package by digest refused" "${GH}@sha256:${D64}" 1 ""
+resd "resolve, devnet: the mainnet package by digest refused" "${GM}@sha256:${D64}" 1 ""
 resd "resolve, devnet: another repository by digest refused" "docker.io/library/busybox@sha256:${D64}" 1 ""
 resd "resolve, devnet: a third ghcr.io repository refused" "ghcr.io/someone-else/telcoin-network@sha256:${D64}" 1 ""
 resd "resolve, devnet: a bare devnet tag refused" v0.2.0-devnet 1 ""
@@ -579,10 +745,12 @@ resd "resolve, devnet: main-<sha> refused" main-0123abc 1 ""
 resd "resolve, devnet: latest refused" "${R}:latest" 1 ""
 resd "resolve, devnet: short digest refused" "${R}@sha256:abc" 1 ""
 resd "resolve, devnet: leading dash refused" "-${R}@sha256:${D64}" 1 ""
-rc=0; o="$(tn_docker_resolve_ref devnet "${GH}@sha256:${D64}" 2>"$T/err")" || rc=$?
+rc=0; o="$(tn_docker_resolve_ref devnet "${R}@sha256:${D64}" 2>"$T/err")" || rc=$?
 check_has "resolve, devnet: digest alone: the devnet warning" "1" "$(grep -c 'as every devnet image is, so the release it holds is unknown: the downgrade check cannot be applied' "$T/err")"
 rc=0; o="$(tn_docker_resolve_ref devnet "docker.io/library/busybox@sha256:${D64}" 2>"$T/err")" || rc=$?
-check_has "resolve, devnet: a refusal names the devnet repositories" "1" "$(grep -cF "from one of these repositories: ${TN_DEVNET_IMAGE_REPOS}." "$T/err")"
+check_has "resolve, devnet: a refusal names the repositories a devnet pull takes" "1" "$(grep -cF "from one of these repositories: ${R} ${GD}." "$T/err")"
+rc=0; o="$(tn_docker_resolve_ref devnet "${GL}@sha256:${D64}" 2>"$T/err")" || rc=$?
+check_has "resolve, devnet: the old package refusal names the repositories a devnet pull takes" "1" "$(grep -cF "No release was ever published to ${GL}, so no image is pulled from it; give the devnet image by digest, <repository>@sha256:<digest>, from one of these repositories: ${R} ${GD}." "$T/err")"
 META_DIGEST="sha256:${D64}" META_TAG="v0.2.0-devnet"
 resd "resolve, devnet: digest alone, a devnet tag recorded for it: that tag" "${R}@sha256:${D64}" 0 "${R}@sha256:${D64} v0.2.0-devnet"
 META_TAG="v0.16.0-adiri"
@@ -602,7 +770,7 @@ check "tag for a digest, devnet, nothing recorded: none" "1 " "$rc $out"
 rc=0; out="$(loud_tag_for "$DEFAULT_DOCKER_IMAGE" 2>&1)" || rc=$?
 check "tag for a digest, devnet: the pinned testnet default names no devnet release" "1 " "$rc $out"
 META_DIGEST="sha256:${D64}" META_TAG="v0.2.0-devnet"
-rc=0; out="$(loud_tag_for "${GH}@sha256:${D64}" 2>&1)" || rc=$?
+rc=0; out="$(loud_tag_for "${GL}@sha256:${D64}" 2>&1)" || rc=$?
 check "tag for a digest, devnet: the .node-meta record" "0 v0.2.0-devnet" "$rc $out"
 check "tag for a digest, devnet: the registry lookups never called" "" "$(cat "$REC/loud.log")"
 check "tag for a digest, devnet: no registry call" "" "$(cat "$REC/curl.log")"
@@ -610,17 +778,26 @@ unset -f resd loud_tag_for
 unset -f meta_get
 rc=0; o="$(tn_docker_resolve_ref mainnet "${R}@sha256:${D64}" 2>/dev/null)" || rc=$?
 check "resolve: mainnet refuses the legacy testnet repository" "1 " "$rc $o"
-for repo in "$R" "$GH" "ghcr.io/someone-else/telcoin-network"; do
-    rc=0; tn_docker_repo_ok testnet "$repo" || rc=$?
-    check "repo_ok testnet ${repo}" "$([[ "$repo" == *someone-else* ]] && echo 1 || echo 0)" "$rc"
+# The dev package is devnet's only: refused on testnet and mainnet, by digest and by tag.
+for n in testnet mainnet; do
+    for a in "${GD}@sha256:${D64}" "${GD}:v0.17.0-adiri" "${GD}:v1.0.0"; do
+        rc=0; o="$(tn_docker_resolve_ref "$n" "$a" 2>/dev/null)" || rc=$?
+        check "resolve, ${n}: the dev package refused (${a##*/})" "1 " "$rc $o"
+    done
 done
-rc=0; tn_docker_repo_ok mainnet "$GH" || rc=$?
-check_rc "repo_ok mainnet: ghcr" 0 "$rc"
-rc=0; tn_docker_repo_ok mainnet "$R" || rc=$?
-check_rc "repo_ok mainnet: the legacy repository refused" 1 "$rc"
-for repo in "$R" "$GH" "ghcr.io/someone-else/telcoin-network" "evil.example/adiri"; do
+for repo in "$R" "$GL" "$GH" "$GM" "$GD" "ghcr.io/someone-else/telcoin-network"; do
+    rc=0; tn_docker_repo_ok testnet "$repo" || rc=$?
+    check "repo_ok testnet ${repo}" "$([[ "$repo" == *someone-else* || "$repo" == "$GM" || "$repo" == "$GD" ]] && echo 1 || echo 0)" "$rc"
+done
+rc=0; tn_docker_repo_ok mainnet "$GM" || rc=$?
+check_rc "repo_ok mainnet: the mainnet package" 0 "$rc"
+for repo in "$R" "$GL" "$GH" "$GD" "${GM}-x" "evil.example/${GM}"; do
+    rc=0; tn_docker_repo_ok mainnet "$repo" || rc=$?
+    check_rc "repo_ok mainnet: ${repo} refused" 1 "$rc"
+done
+for repo in "$R" "$GL" "$GD" "$GH" "$GM" "ghcr.io/someone-else/telcoin-network" "evil.example/adiri"; do
     rc=0; tn_docker_repo_ok devnet "$repo" || rc=$?
-    check "repo_ok devnet ${repo}" "$([[ "$repo" == "$R" || "$repo" == "$GH" ]] && echo 0 || echo 1)" "$rc"
+    check "repo_ok devnet ${repo}" "$([[ "$repo" == "$R" || "$repo" == "$GL" || "$repo" == "$GD" ]] && echo 0 || echo 1)" "$rc"
 done
 for n in testnet devnet mainnet; do
     rc=0; tn_docker_repo_ok "$n" "$GH $R" || rc=$?
@@ -640,5 +817,152 @@ rc=0; tn_docker_holds_digest "${R}@sha256:$(printf '%s' "$D64" | tr 0 e)" || rc=
 check_rc "holds digest: another digest refused" 1 "$rc"
 rc=0; tn_docker_holds_digest "${R}:v0.16.0-adiri" || rc=$?
 check_rc "holds digest: a tag is not a digest" 1 "$rc"
+
+# --- tn_docker_image_network_ok (docker shim) ------------------------------------------
+# docker run logs its argv to $REC/run.log and prints $REC/ver.<image> (the image
+# with / : @ as _), or exits 125 when there is none, as for an image Docker does
+# not hold. docker rm logs its argv to $REC/rm.log.
+cat > "$T/bin/docker" <<'SH'
+#!/bin/sh
+if [ "$1" = rm ]; then
+    printf '%s\n' "$*" >> "$REC/rm.log"
+    exit 0
+fi
+[ "$1" = run ] || exit 1
+printf '%s\n' "$*" >> "$REC/run.log"
+img=""
+prev=""
+for a in "$@"; do
+    [ "$a" = "--version" ] && img="$prev"
+    prev="$a"
+done
+f="$REC/ver.$(printf '%s' "$img" | tr '/:@' '___')"
+[ -f "$f" ] || exit 125
+cat "$f"
+SH
+chmod 0755 "$T/bin/docker"
+# ver IMAGE FEATURES... -- the canned --version of IMAGE: one Build Features line
+# per FEATURES argument; none at all with no argument.
+ver() {
+    local img="$1" f feats
+    shift
+    f="$REC/ver.$(printf '%s' "$img" | tr '/:@' '___')"
+    printf 'telcoin-network-cli Version: 0.17.0\nCommit SHA: abc1234\n' > "$f"
+    for feats in "$@"; do
+        printf 'Build Features: %s\n' "$feats" >> "$f"
+    done
+    printf 'Build Profile: maxperf\n' >> "$f"
+}
+inok() {  # inok NAME EXPECTED-RC NETWORK IMAGE -- the rc; the message in $T/err
+    local rc=0
+    tn_docker_image_network_ok "$3" "$4" 2>"$T/err" || rc=$?
+    check_rc "$1" "$2" "$rc"
+}
+# run_name -- the --name of the last docker run; run_argv -- its argv with that
+# name as NAME.
+run_name() { tail -n 1 "$REC/run.log" | sed -n 's/.* --name \([^ ]*\) .*/\1/p'; }
+run_argv() { tail -n 1 "$REC/run.log" | sed 's/ --name [^ ]* / --name NAME /'; }
+MI="${GM}@sha256:${D64}"
+TI="${GH}@sha256:${D64}"
+ver "$MI" ""
+: > "$REC/run.log"
+inok "features, mainnet: none listed, accepted" 0 mainnet "$MI"
+check "features: one docker run" "1" "$(wc -l < "$REC/run.log" | tr -d ' ')"
+check "features: run behind an init, named, with no network, no capabilities, the release binary as entrypoint" \
+    "run --rm --init --name NAME --pull=never --network none --cap-drop ALL --security-opt no-new-privileges --read-only --entrypoint /usr/local/bin/telcoin ${MI} --version" "$(run_argv)"
+check "features: the container name is tn-feature-check-<pid>-<n>" yes \
+    "$(run_name | grep -qE '^tn-feature-check-[0-9]+-[0-9]+$' && echo yes || echo no)"
+check "features, mainnet accepted: nothing said" "" "$(cat "$T/err")"
+ver "$MI" "adiri"
+inok "features, mainnet: adiri refused" 1 mainnet "$MI"
+check_has "features, mainnet: the refusal names the image, the features and the network" "1" \
+    "$(grep -cF "Image refused: ${MI} was built with the features adiri, and a mainnet image has none, so it is not a mainnet image." "$T/err")"
+ver "$MI" "faucet"
+inok "features, mainnet: faucet refused" 1 mainnet "$MI"
+ver "$MI" "adiri,faucet"
+inok "features, mainnet: adiri and faucet refused" 1 mainnet "$MI"
+check_has "features, mainnet: both features named" "1" "$(grep -cF "built with the features adiri, faucet, and a mainnet image has none" "$T/err")"
+ver "$MI" "metrics"
+inok "features, mainnet: any feature refused" 1 mainnet "$MI"
+ver "$TI" "adiri"
+inok "features, testnet: adiri accepted" 0 testnet "$TI"
+ver "$TI" "adiri,faucet"
+inok "features, testnet: adiri and faucet accepted" 0 testnet "$TI"
+ver "$TI" ""
+inok "features, testnet: none listed refused" 1 testnet "$TI"
+check_has "features, testnet: the refusal says what a testnet image has" "1" \
+    "$(grep -cF "Image refused: ${TI} was built with the features none, and a testnet image has adiri, and faucet at most, so it is not a testnet image." "$T/err")"
+ver "$TI" "faucet"
+inok "features, testnet: faucet without adiri refused" 1 testnet "$TI"
+ver "$TI" "adiri,metrics"
+inok "features, testnet: another feature beside adiri refused" 1 testnet "$TI"
+ver "$TI"
+inok "features: no Build Features line refused" 1 testnet "$TI"
+check_has "features: the missing line is said" "1" "$(grep -cF "Image refused: ${TI} prints 0 \"Build Features:\" lines with --version, not one" "$T/err")"
+ver "$MI" "" ""
+inok "features: two Build Features lines refused" 1 mainnet "$MI"
+check_has "features: the doubled line is said" "1" "$(grep -cF "prints 2 \"Build Features:\" lines" "$T/err")"
+inok "features: an image docker cannot run refused" 1 testnet "${GH}@sha256:$(printf '%s' "$D64" | tr 0 9)"
+check_has "features: the failed run is said, with docker's exit code" "1" "$(grep -cF "(docker run exited 125), so it is not used and nothing was changed" "$T/err")"
+: > "$REC/run.log"
+inok "features: devnet is not checked" 0 devnet "${R}@sha256:${D64}"
+check "features, devnet: docker never ran" "" "$(cat "$REC/run.log")"
+check_has "features, devnet: an info line says so" "1" "$(grep -cF "Devnet images are not checked for their build features" "$T/err")"
+inok "features: a network without a rule refused" 1 foo "$TI"
+inok "features: a tag refused before docker runs" 1 testnet "${GH}:v0.17.0-adiri"
+inok "features: a leading dash refused" 1 testnet "-${TI}"
+check "features: no docker run for the refusals before it" "" "$(cat "$REC/run.log")"
+# The run is limited to 60 s where timeout exists, with a KILL 5 s after the
+# TERM. A stand-in timeout on PATH logs its arguments and runs the command
+# without the options and the duration; while $REC/timeout.rc exists, a docker
+# run under it exits with the code that file holds instead (124: the run timed
+# out; 137: it was killed after the TERM). It is removed after these cases.
+cat > "$T/bin/timeout" <<'SH'
+#!/bin/sh
+printf '%s\n' "$*" >> "$REC/timeout.log"
+[ "$1" = -k ] && shift 2
+shift
+if [ -f "$REC/timeout.rc" ] && [ "$1 $2" = "docker run" ]; then
+    exit "$(cat "$REC/timeout.rc")"
+fi
+exec "$@"
+SH
+chmod 0755 "$T/bin/timeout"
+hash -r
+: > "$REC/timeout.log"; : > "$REC/run.log"; : > "$REC/rm.log"
+ver "$MI" ""
+inok "features, under timeout: a mainnet image accepted" 0 mainnet "$MI"
+check "features: the run goes through timeout -k 5 60" \
+    "-k 5 60 docker run --rm --init --name NAME --pull=never --network none --cap-drop ALL --security-opt no-new-privileges --read-only --entrypoint /usr/local/bin/telcoin ${MI} --version" \
+    "$(sed 's/ --name [^ ]* / --name NAME /' "$REC/timeout.log")"
+check "features, under timeout: a run that finished removes nothing" "" "$(cat "$REC/rm.log")"
+for trc in 124 137; do
+    printf '%s\n' "$trc" > "$REC/timeout.rc"
+    : > "$REC/timeout.log"; : > "$REC/run.log"; : > "$REC/rm.log"
+    inok "features: a run cut short by timeout (rc ${trc}) refused" 1 mainnet "$MI"
+    check_has "features, rc ${trc}: the refusal names the image, the limit and the exit code" "1" \
+        "$(grep -cF "Image refused: ${MI} did not finish --version within 60 seconds (docker run exited ${trc} under timeout), so its build features are not known. It is not used and nothing was changed; docker rm -f " "$T/err")"
+    # The stand-in never ran docker run, so the name comes from its log.
+    nm="$(sed -n '1s/.* --name \([^ ]*\) .*/\1/p' "$REC/timeout.log")"
+    check "features, rc ${trc}: the run, then docker rm -f of its container, both under timeout" \
+        "2 -k 5 30 docker rm -f ${nm}" "$(wc -l < "$REC/timeout.log" | tr -d ' ') $(sed -n 2p "$REC/timeout.log")"
+    check "features, rc ${trc}: docker rm -f got that name" "rm -f ${nm}" "$(cat "$REC/rm.log")"
+    check_has "features, rc ${trc}: the refusal names the removed container" "1" "$(grep -cF "docker rm -f ${nm} was run to remove its container" "$T/err")"
+done
+printf '125\n' > "$REC/timeout.rc"
+: > "$REC/timeout.log"; : > "$REC/rm.log"
+inok "features, under timeout: a run that fails otherwise (rc 125) refused" 1 mainnet "$MI"
+check "features, under timeout, rc 125: no container removed, the failed run said" "0 1" \
+    "$(wc -l < "$REC/rm.log" | tr -d ' ') $(grep -cF "(docker run exited 125), so it is not used and nothing was changed" "$T/err")"
+rm -f "$T/bin/timeout" "$REC/timeout.rc"
+hash -r
+unset trc nm
+# The progress-fn gets the refusal as a warn.
+say_rec() { printf '%s %s\n' "$1" "$2" >> "$REC/say.log"; }
+: > "$REC/say.log"
+ver "$MI" "adiri"
+rc=0; tn_docker_image_network_ok mainnet "$MI" say_rec 2>/dev/null || rc=$?
+check "features: the refusal goes to the progress-fn as a warn" "1 1" "$rc $(grep -c '^warn Image refused' "$REC/say.log")"
+unset -f ver inok say_rec run_name run_argv
 
 finish

@@ -1,0 +1,28 @@
+ok    J1 active + persistent
+ok    J2 active + not persistent
+ok    J3 active, persistent missing (older engine)
+ok    J4 p2p-list
+ok    J5 nft-missing
+ok    J6 not-applied
+ok    J7 unreadable
+ok    J8 unknown reason shown as is
+ok    J9 no field: no row
+ok    J10 bad numbers shown as ?
+ok    J10b not-applied with persistent:true (boot copy enabled, table gone)
+ok    J11 sources list
+ok    J12 sources empty
+ok    J13 sources null
+ok    J14 sources missing (older server)
+ok    J15 testnet link
+ok    J16 mainnet: no link
+ok    J17 missing field: no link
+ok    J18 http refused
+ok    J19 javascript: refused
+ok    J20 quote refused
+ok    J21 fwSources P2P ok
+ok    J22 fwSources P2P bad names P2P
+ok    J23 fwSources 17
+ok    J24 fwSources leading slash
+ok    J25 fwSources empty
+
+26 checks, 0 failures

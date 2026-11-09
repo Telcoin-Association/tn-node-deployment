@@ -1,0 +1,27 @@
+--- E12 cli: rc=143
+token file: NEW (640 root:telcoin-alloy)
+temp files: 
+restarts: 1
+output tail:
+
+>>> Detecting operating system...
+  [OK]  OS: ubuntu 24.04 (package manager: apt)
+
+>>> Rotating the ingest token
+--- E12 json: rc=143
+token file: NEW (640 root:telcoin-alloy)
+temp files: 
+restarts: 1
+output tail:
+>>> Detecting operating system...
+  [OK]  OS: ubuntu 24.04 (package manager: apt)
+
+>>> Rotating the ingest token
+{"event":"done","ok":false,"msg":"observability setup exited early (rc=0) -- see server logs / journalctl"}
+--- E13 cli: rc=143
+token file: old-e2e-token-0123456789abcdef
+temp files: .tn.inqV2G
+  .tn.inqV2G 600 root:telcoin-alloy holds-new-token=yes
+--- E13 json: rc=143
+token file: old-e2e-token-0123456789abcdef
+temp files: 

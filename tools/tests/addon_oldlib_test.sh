@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 # =============================================================================
-# tools/tests/addon_oldlib_test.sh -- firewall-setup.sh, setup-vpn.sh and
-# setup-observability.sh with a library older than they are: each stops with
-# exit 2 and one message naming update-scripts.sh before anything else (no ufw
-# call, no file written), and a --json run still ends with a done event. With
-# the current library the checks pass.
+# tools/tests/addon_oldlib_test.sh -- firewall-setup.sh, setup-vpn.sh,
+# setup-observability.sh and setup-alerts.sh with a library older than they are:
+# each stops with exit 2 and one message naming update-scripts.sh before anything
+# else (no ufw or systemctl call, no file written), and a --json run still ends
+# with a done event. With the current library the checks pass.
 #
 #   bash tools/tests/addon_oldlib_test.sh
 #   docker run --rm -v "$PWD:/w" -w /w bash:3.2 bash tools/tests/addon_oldlib_test.sh
 #
 # The old library is lib/common.sh, lib/fallback.sh and lib/observability.sh at
 # 037c810 (git show) when git and that commit are at hand; otherwise the current
-# files with addon_meta_get and obs_quorum_guard renamed away.
+# files with addon_meta_get and obs_quorum_guard renamed away. Either way
+# setup-alerts.sh finds a helper missing: the old common.sh does not source
+# lib/alerts.sh, and the renamed one lacks addon_meta_get.
 # =============================================================================
 
 set -u
@@ -29,7 +31,7 @@ done
 chmod +x "$T/bin/"*
 : > "$CALLS"
 
-# The old tree: the three scripts of this checkout beside an old lib/.
+# The old tree: the four scripts of this checkout beside an old lib/.
 cp -R "${TN_TEST_REPO}/lib/." "$T/old/lib/"
 old_from=""
 if command -v git >/dev/null 2>&1 \
@@ -43,7 +45,7 @@ else
     sed -e 's/^obs_quorum_guard()/obs_quorum_guard_gone()/' "${TN_TEST_REPO}/lib/observability.sh" > "$T/old/lib/observability.sh"
     old_from="renamed helpers"
 fi
-for s in firewall-setup.sh setup-vpn.sh setup-observability.sh; do
+for s in firewall-setup.sh setup-vpn.sh setup-observability.sh setup-alerts.sh; do
     cp "${TN_TEST_REPO}/${s}" "$T/old/${s}"
 done
 printf 'old library: %s\n' "$old_from"
@@ -69,6 +71,7 @@ OWNERSHIP_LAYOUT=2" "$(cat "$TN_ROOT_PREFIX/etc/telcoin/.node-meta")"
 
 old_run "firewall --enable" firewall-setup.sh --enable --ssh-from 203.0.113.0/24
 old_run "firewall --reset" firewall-setup.sh --reset --ssh-anywhere
+old_run "firewall --p2p-committee on" firewall-setup.sh --p2p-committee on
 old_run "firewall --json --enable" firewall-setup.sh --json --enable --ssh-from 203.0.113.0/24
 check "firewall --json: stdout is the done event" "yes" \
     "$(tail -n1 "$T/out" | grep -q '^{"event":"done","ok":false,.*update-scripts.sh' && echo yes)"
@@ -80,9 +83,12 @@ check "observability --json: stdout is the done event" "yes" \
     "$(tail -n1 "$T/out" | grep -q '^{"event":"done","ok":false,.*update-scripts.sh' && echo yes)"
 check "observability --json: one done event" "1" "$(grep -c '"event":"done"' "$T/out")"
 old_run "observability menu" setup-observability.sh
+old_run "alerts --json --status" setup-alerts.sh --json --status
+check "alerts --json: stdout is the done event only" "yes" \
+    "$(grep -c '' "$T/out" | grep -qx 1 && grep -q '^{"event":"done","ok":false,.*update-scripts.sh' "$T/out" && echo yes)"
 
 # The current library passes every check.
-for s in firewall-setup.sh setup-vpn.sh setup-observability.sh; do
+for s in firewall-setup.sh setup-vpn.sh setup-observability.sh setup-alerts.sh; do
     grep -v '^main "\$@"$' "${TN_TEST_REPO}/${s}" > "$T/new/${s}"
 done
 ln -s "${TN_TEST_REPO}/lib" "$T/new/lib"
@@ -92,5 +98,7 @@ check_rc "current lib: vpn_require_lib passes" 0 \
     "$(bash -c 'source "$1" >/dev/null 2>&1; vpn_require_lib >/dev/null 2>&1; echo $?' _ "$T/new/setup-vpn.sh")"
 check_rc "current lib: addons_require_lib passes" 0 \
     "$(bash -c 'source "$1" >/dev/null 2>&1; addons_require_lib >/dev/null 2>&1; echo $?' _ "$T/new/setup-observability.sh")"
+check_rc "current lib: alerts_require_lib passes" 0 \
+    "$(bash -c 'source "$1" >/dev/null 2>&1; alerts_require_lib >/dev/null 2>&1; echo $?' _ "$T/new/setup-alerts.sh")"
 
 finish

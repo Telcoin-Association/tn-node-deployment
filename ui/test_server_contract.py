@@ -376,7 +376,7 @@ class ServerTestCase(unittest.TestCase):
 
 FULL_SETUP = {
     "network": "testnet", "install_method": "docker",
-    "docker_image": "ghcr.io/telcoin-association/telcoin-network:v0.15.0-adiri",
+    "docker_image": "ghcr.io/telcoin-association/tn-testnet:v0.15.0-adiri",
     "passphrase_method": "loadcredential", "address": "0x" + "ab" * 20,
     "external_primary": "/ip4/203.0.113.10/udp/49590/quic-v1",
     "external_worker": "/ip4/203.0.113.10/udp/49594/quic-v1",
@@ -441,6 +441,9 @@ class CrossFileContractTest(ServerTestCase):
                                                    "state": state})
         c.post("/api/firewall/enable", json={})
         c.post("/api/firewall/enable", json={"ssh_from": "203.0.113.7/32, 2001:db8::/48"})
+        c.post("/api/firewall/enable", json={"ssh_from": "203.0.113.7/32",
+                                             "p2p_from": "198.51.100.0/24, 2001:db8::/32"})
+        c.post("/api/firewall/enable", json={"p2p_from": "198.51.100.0/24"})
         server._write_times.clear()     # the write rate limit would refuse the rest
         c.post("/api/setup/observer/keygen", json=FULL_SETUP, buffered=True)
         c.post("/api/setup/observer/finalize", json=FULL_SETUP, buffered=True)
@@ -1063,7 +1066,7 @@ class FirewallEnableTest(ServerTestCase):
                                  [["sudo", "-n", HELPER_PATH, "firewall-enable", want]])
 
     def test_no_sources_sends_none(self):
-        for body in ({}, {"ssh_from": ""}, {"ssh_from": "  "}):
+        for body in ({}, {"ssh_from": ""}, {"ssh_from": "  "}, {"ssh_from": None, "p2p_from": None}):
             with self.subTest(body=body):
                 self.post(body)
                 self.assertEqual(self.helper_calls(), [["sudo", "-n", HELPER_PATH, "firewall-enable"]])
@@ -1104,6 +1107,255 @@ class FirewallEnableTest(ServerTestCase):
         rules = helper_rules(split_transitional(sudoers_text())[0])
         self.assertIn("firewall-enable", rules)
         self.assertIn("firewall-enable *", rules)
+        for args in ([], ["203.0.113.7"], ["203.0.113.7", "198.51.100.0/24"], ["-", "198.51.100.0/24"]):
+            with self.subTest(args=args):
+                self.assertTrue(sudo_allows(["sudo", "-n", HELPER_PATH, "firewall-enable"] + args, rules))
+
+    def test_a_p2p_list_comes_after_the_ssh_list(self):
+        for body, want in (
+                ({"ssh_from": "203.0.113.7", "p2p_from": "198.51.100.0/24, 2001:db8::/32"},
+                 ["203.0.113.7", "198.51.100.0/24,2001:db8::/32"]),
+                ({"p2p_from": "198.51.100.7"}, ["-", "198.51.100.7"]),
+                ({"ssh_from": " ", "p2p_from": "198.51.100.7\n198.51.100.8"},
+                 ["-", "198.51.100.7,198.51.100.8"]),
+                ({"ssh_from": "203.0.113.7", "p2p_from": ""}, ["203.0.113.7"]),
+                ({"ssh_from": "203.0.113.7", "p2p_from": None}, ["203.0.113.7"]),
+                ({"p2p_from": "  "}, [])):
+            with self.subTest(body=body):
+                self.assertTrue(self.post(body).get_json()["ok"])
+                self.assertEqual(self.helper_calls(),
+                                 [["sudo", "-n", HELPER_PATH, "firewall-enable"] + want])
+
+    def test_bad_p2p_sources_never_reach_the_helper(self):
+        bad = ["0.0.0.0/0", "0.0.0.0", "::/0", "::", "10.0.0.0/7", "010.0.0.1", "10.0.0.256",
+               "10.0.0.1/33", "2001:db8::/129", "/etc/passwd", "/10.0.0.0/8", "-",
+               "fe80::1%eth0", "10.0.0.1;id", "node.example.org",
+               ",".join("10.0.0.%d" % i for i in range(1, 18))]
+        for raw in bad + [["10.0.0.1"], 7]:
+            with self.subTest(raw=raw):
+                resp = self.post({"ssh_from": "203.0.113.7", "p2p_from": raw})
+                self.assertEqual(resp.status_code, 400)
+                self.assertFalse(resp.get_json()["ok"])
+                self.assertEqual(self.helper_calls(), [])
+        self.assertEqual(self.post({"p2p_from": ["10.0.0.1"]}).get_json()["error"],
+                         "p2p_from must be text")
+        self.assertEqual(self.post({"p2p_from": "0.0.0.0/0"}).get_json()["error"],
+                         "P2P sources: not an address or a CIDR of /8 or narrower: 0.0.0.0/0")
+        self.assertEqual(self.post({"p2p_from": ",".join("10.0.0.%d" % i for i in range(1, 18))})
+                         .get_json()["error"], "at most 16 P2P sources")
+        self.assertEqual(self.post({"ssh_from": "10.0.0.0/7"}).get_json()["error"],
+                         "SSH sources: not an address or a CIDR of /8 or narrower: 10.0.0.0/7")
+        self.assertEqual(server.p2p_source_list(",".join("10.0.0.%d" % i for i in range(1, 17)))[1], None)
+
+    def test_a_list_that_is_not_text_is_refused_even_when_falsy(self):
+        for field in ("ssh_from", "p2p_from"):
+            for raw in (0, False, [], {}, 0.0, 7, True, ["10.0.0.1"]):
+                with self.subTest(field=field, raw=raw):
+                    resp = self.post({field: raw})
+                    self.assertEqual(resp.status_code, 400)
+                    self.assertEqual(resp.get_json(), {"ok": False, "error": field + " must be text"})
+                    self.assertEqual(self.helper_calls(), [])
+
+
+class FirewallStatusTest(ServerTestCase):
+    """/api/firewall: the engine's status as it prints it (p2p_new_flow_limit
+    and p2p_committee included) and `p2p_sources`, the P2P list .node-meta
+    keeps."""
+
+    LIMIT_ON = {"active": True, "rate": 20, "burst": 40, "reason": None, "persistent": True}
+    LIMIT_OFF = {"active": False, "rate": None, "burst": None, "reason": "p2p-list",
+                 "persistent": False}
+    LIMIT_COMMITTEE = {"active": False, "rate": None, "burst": None, "reason": "committee",
+                       "persistent": False, "persistent_reason": "boot-file-missing"}
+    COMMITTEE_ON = {"enabled": True, "persistent": True, "timer": True, "reason": None,
+                    "loaded": True, "epoch": 42, "allowed_v4": 10, "allowed_v6": 2, "static": 3,
+                    "floor": 1, "keys": 7, "dns_skipped": 0, "last_good": 1762300000,
+                    "age_secs": 120, "stale": False, "stale_since": None, "stale_reason": None,
+                    "counters": {"accepted": 1234, "dropped": 56}}
+    COMMITTEE_OFF = {"enabled": False, "persistent": False, "timer": False, "reason": "off"}
+    # the line firewall-setup.sh --json --status prints with committee mode on,
+    # byte for byte as tools/tests/p2p_committee_mode_test.sh produces it: the
+    # engine's four p2p_committee keys, then the tool's status line spliced into
+    # the same object by printf.
+    ENGINE_ON_LINE = (
+        '{"installed":true,"active":true,"default_incoming":"unknown","ssh_port":"22",'
+        '"kuma":"closed","kuma_extra":[],"caddy_managed":false,'
+        '"desired":[{"spec":"22/tcp","label":"SSH","source":"anywhere","ok":true},'
+        '{"spec":"49590/udp","label":"Node P2P (primary)","source":"committee allowlist","ok":true},'
+        '{"spec":"49594/udp","label":"Node P2P (worker)","source":"committee allowlist","ok":true}],'
+        '"unexpected":[],"ports":{"49590/udp":true,"49594/udp":true,"43174/tcp":false},'
+        '"p2p_ports":[{"port":49590,"proto":"udp","label":"primary","allowed":true},'
+        '{"port":49594,"proto":"udp","label":"worker-0","allowed":true}],'
+        '"p2p_new_flow_limit":{"active":false,"rate":null,"burst":null,"reason":"committee",'
+        '"persistent":false,"persistent_reason":"boot-file-missing"},'
+        '"p2p_committee":{"enabled":true,"persistent":true,"timer":true,"reason":null,'
+        '"loaded":true,"epoch":42,"allowed_v4":10,"allowed_v6":2,"static":3,"floor":1,"keys":7,'
+        '"dns_skipped":0,"last_good":1762300000,"age_secs":120,"stale":false,"stale_since":null,'
+        '"stale_reason":null,"counters":{"accepted":1234,"dropped":56}}}')
+
+    def status(self, meta, limit=None, committee=None):
+        reply = {"installed": True, "active": True, "ssh_port": "22"}
+        if limit is not None:
+            reply["p2p_new_flow_limit"] = limit
+        if committee is not None:
+            reply["p2p_committee"] = committee
+        self.helper_replies["firewall-status"] = (0, json.dumps(reply), "")
+        self.helper_replies["meta-cat"] = (0, meta, "")
+        server.clear_meta_cache()
+        return self.client.get("/api/firewall").get_json()
+
+    def test_the_kept_p2p_list_is_reported(self):
+        for meta, want in (("NETWORK=testnet\nP2P_ALLOW_FROM=198.51.100.0/24,2001:db8::/32\n",
+                            ["198.51.100.0/24", "2001:db8::/32"]),
+                           ("NETWORK=testnet\nP2P_ALLOW_FROM=10.0.0.0/8\r\nRPC_PORT=8545\n",
+                            ["10.0.0.0/8"]),
+                           ("NETWORK=testnet\n", []),
+                           ("NETWORK=testnet\nP2P_ALLOW_FROM=\n", []),
+                           ("# P2P_ALLOW_FROM=10.0.0.0/8\n", []),
+                           ("", [])):
+            with self.subTest(meta=meta):
+                body = self.status(meta)
+                self.assertEqual(body["p2p_sources"], want)
+                self.assertNotIn("p2p_sources_note", body)
+
+    def test_an_unreadable_meta_is_unknown_not_empty(self):
+        self.helper_replies["firewall-status"] = (0, json.dumps({"installed": True, "active": True}), "")
+        self.helper_replies["meta-cat"] = (1, "", "sudo: a password is required")
+        server.clear_meta_cache()
+        body = self.client.get("/api/firewall").get_json()
+        self.assertIsNone(body["p2p_sources"])
+        self.assertNotIn("p2p_sources_note", body)
+
+    def test_a_doubled_p2p_list_is_not_shown_and_says_why(self):
+        for meta in ("P2P_ALLOW_FROM=10.0.0.0/8\nNETWORK=testnet\nP2P_ALLOW_FROM=198.51.100.0/24\n",
+                     "P2P_ALLOW_FROM=10.0.0.0/8\nP2P_ALLOW_FROM=10.0.0.0/8\n",
+                     "P2P_ALLOW_FROM=\nP2P_ALLOW_FROM=10.0.0.0/8\n"):
+            with self.subTest(meta=meta):
+                body = self.status(meta)
+                self.assertIsNone(body["p2p_sources"])
+                self.assertEqual(body["p2p_sources_note"],
+                                 "P2P_ALLOW_FROM is set more than once in .node-meta; "
+                                 "remove the extra lines on the server")
+
+    def test_read_meta_is_unchanged_by_the_text_it_now_keeps(self):
+        self.helper_replies["meta-cat"] = (0, "NETWORK=testnet\n RPC_PORT = 9545 \n#X=1\n", "")
+        server.clear_meta_cache()
+        self.assertEqual(server.read_meta(), {"NETWORK": "testnet", "RPC_PORT": "9545"})
+        self.assertEqual(server.read_meta("validator"), {"NETWORK": "testnet", "RPC_PORT": "9545"})
+        self.assertEqual(server.read_meta("bogus"), {})
+        self.assertEqual(len([c for c in self.helper_calls() if c[3] == "meta-cat"]), 1, "cached")
+
+    def test_the_new_flow_limit_passes_through_unchanged(self):
+        for limit in (self.LIMIT_ON, self.LIMIT_OFF):
+            with self.subTest(limit=limit):
+                body = self.status("NETWORK=testnet\n", limit)
+                self.assertEqual(body["p2p_new_flow_limit"], limit)
+        self.assertNotIn("p2p_new_flow_limit", self.status("NETWORK=testnet\n"))
+
+    def test_the_committee_allowlist_passes_through_unchanged(self):
+        for committee in (self.COMMITTEE_ON, self.COMMITTEE_OFF,
+                          {"enabled": None, "persistent": True, "timer": True, "reason": "unreadable"},
+                          {"enabled": True, "persistent": True, "timer": True, "reason": "tool-missing"},
+                          {"enabled": True, "persistent": False, "timer": False, "reason": "tool-error"}):
+            with self.subTest(committee=committee):
+                body = self.status("NETWORK=testnet\nP2P_ALLOW_FROM=198.51.100.0/24\n",
+                                   self.LIMIT_COMMITTEE, committee)
+                self.assertEqual(body["p2p_committee"], committee)
+                self.assertEqual(body["p2p_new_flow_limit"], self.LIMIT_COMMITTEE)
+                self.assertEqual(body["p2p_sources"], ["198.51.100.0/24"])
+        self.assertNotIn("p2p_committee", self.status("NETWORK=testnet\n"))
+
+    def test_the_spliced_engine_line_parses(self):
+        self.helper_replies["firewall-status"] = (0, self.ENGINE_ON_LINE + "\n", "")
+        self.helper_replies["meta-cat"] = (0, "NETWORK=testnet\n", "")
+        server.clear_meta_cache()
+        body = self.client.get("/api/firewall").get_json()
+        self.assertNotIn("error", body)
+        self.assertEqual(body["p2p_committee"], self.COMMITTEE_ON)
+        self.assertEqual(body["p2p_new_flow_limit"], self.LIMIT_COMMITTEE)
+        self.assertEqual(body["p2p_sources"], [])
+        self.assertEqual(set(body) - {"p2p_sources"}, set(json.loads(self.ENGINE_ON_LINE)))
+
+    def test_an_enable_drops_the_cached_meta(self):
+        self.status("P2P_ALLOW_FROM=10.0.0.0/8\n")
+        self.helper_replies["meta-cat"] = (0, "P2P_ALLOW_FROM=198.51.100.0/24\n", "")
+        server._write_times.clear()
+        self.client.post("/api/firewall/enable", json={"p2p_from": "198.51.100.0/24"})
+        self.assertEqual(self.client.get("/api/firewall").get_json()["p2p_sources"],
+                         ["198.51.100.0/24"])
+
+    def test_an_unavailable_engine_still_degrades(self):
+        self.helper_replies["firewall-status"] = (1, "", "sudo: a password is required")
+        body = self.client.get("/api/firewall").get_json()
+        self.assertFalse(body["installed"])
+        self.assertEqual(body["error"], "sudo: a password is required")
+
+
+class UiUnitTest(unittest.TestCase):
+    """ui/telcoin-ui.service: no core dumps, and no NoNewPrivileges (sudo needs
+    its setuid transition)."""
+
+    def test_core_dumps_are_off_and_sudo_still_works(self):
+        lines = read(os.path.join(HERE, "telcoin-ui.service")).splitlines()
+        directives = [ln for ln in lines if ln and not ln.startswith("#")]
+        self.assertEqual([ln for ln in directives if ln.startswith("LimitCORE=")], ["LimitCORE=0"])
+        self.assertFalse([ln for ln in directives if ln.startswith("NoNewPrivileges")])
+        self.assertTrue(any("NoNewPrivileges is intentionally NOT set" in ln for ln in lines))
+        service = lines[lines.index("[Service]"):lines.index("[Install]")]
+        self.assertIn("LimitCORE=0", service)
+
+
+class NetworkStatusLinkTest(ServerTestCase):
+    """/api/network/status names the network's public status page in
+    `status_page`: testnet's page, nothing for mainnet (no page yet), devnet
+    and an unknown slug, whether the status data is fresh, cached or
+    unreachable."""
+
+    TESTNET_PAGE = "https://status.adiri.telcoin.network/"
+
+    def setUp(self):
+        super().setUp()
+        server._network_cache.clear()
+        self.addCleanup(server._network_cache.clear)
+        self.kuma = {"config": {"title": "Status"}}
+        self.patch(server, "_http_get_json", lambda url: self.kuma)
+
+    def status(self, slug):
+        return self.client.get("/api/network/status?slug=" + slug).get_json()
+
+    def test_each_network_gets_its_own_link(self):
+        for slug, want in (("testnet", self.TESTNET_PAGE), ("mainnet", ""), ("devnet", "")):
+            with self.subTest(slug=slug):
+                body = self.status(slug)
+                self.assertTrue(body["available"])
+                self.assertEqual(body["status_page"], want)
+                self.assertEqual(self.status(slug)["status_page"], want, "the cached answer too")
+
+    def test_an_unreachable_status_page_keeps_the_link(self):
+        self.kuma = None
+        for slug, want in (("testnet", self.TESTNET_PAGE), ("mainnet", ""), ("devnet", "")):
+            with self.subTest(slug=slug):
+                body = self.status(slug)
+                self.assertFalse(body["available"])
+                self.assertEqual(body["status_page"], want)
+
+    def test_an_unknown_network_has_no_link(self):
+        body = self.status("adiri-staging")
+        self.assertFalse(body["configured"])
+        self.assertEqual(body["status_page"], "")
+
+    def test_only_known_networks_have_a_link_and_each_is_https(self):
+        self.assertEqual(server.status_page_link("testnet"), self.TESTNET_PAGE)
+        self.assertLessEqual(set(server.STATUS_PAGE_LINKS), server.KNOWN_SLUGS)
+        self.assertNotIn("mainnet", server.STATUS_PAGE_LINKS)
+        self.assertNotIn("devnet", server.STATUS_PAGE_LINKS)
+        for url in server.STATUS_PAGE_LINKS.values():
+            self.assertRegex(url, r"^https://[^\s\"'<>]+$")
+
+    def test_the_adiri_page_line_carries_the_network_gated_marker(self):
+        lines = [ln for ln in read(SERVER_PY).splitlines() if "status.adiri.telcoin.network" in ln]
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("# network-gated: status page per network", lines[0])
 
 
 class RpcExposureTest(ServerTestCase):

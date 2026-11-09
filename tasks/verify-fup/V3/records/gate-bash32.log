@@ -1,0 +1,693 @@
+
+== tools/tests/obs_test.sh (bash 3.2.57(1)-release)
+ok    testnet: the adiri hub
+ok    mainnet: empty
+ok    mainnet with an override: still empty
+ok    mainnet metrics: empty
+ok    network unset: empty
+ok    devnet without a URL: empty
+ok    devnet override kept
+ok    obs_enable refuses on mainnet
+ok    zip 404: refused
+ok    zip 404: nothing installed
+ok    SHA256SUMS 404: refused
+ok    SHA256SUMS 404: nothing installed
+ok    SHA256SUMS 404: said
+ok    checksum mismatch: refused
+ok    mismatch: nothing installed
+ok    no line for this asset: refused
+ok    no line: nothing installed
+ok    verified zip: installed to /usr/local/bin/alloy
+ok    wrong Grafana key refused
+ok    wrong Grafana key: nothing written
+ok    pinned Grafana key installed
+ok    pinned Grafana key written 0644
+ok    constant: Grafana fingerprint checked 2026-10-15
+ok    unit has: User=telcoin-alloy
+ok    unit has: Group=telcoin-alloy
+ok    unit has: SupplementaryGroups=telcoin-log
+ok    unit has: ProtectSystem=strict
+ok    unit has: ReadWritePaths=/var/lib/telcoin-alloy
+ok    unit has: StateDirectory=telcoin-alloy
+ok    unit has: InaccessiblePaths=-/var/lib/telcoin -/etc/telcoin/bls-passphrase.cred -/etc/telcoin/bls-passphrase -/srv/tn-data
+ok    unit has: PrivateDevices=yes
+ok    unit has: NoNewPrivileges=yes
+ok    unit has: CapabilityBoundingSet=
+ok    unit has: ProtectProc=invisible
+ok    unit has: RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ok    unit has: EnvironmentFile=/etc/telcoin/alloy/telcoin-alloy.env
+ok    unit has: LoadCredential=ingest-token:/etc/telcoin/alloy/ingest-token
+ok    unit has: LimitCORE=0
+ok    unit never runs as the node user
+ok    unit: the stale credential store is gone
+ok    unit: no token in the unit text
+ok    no telcoin-log group: no SupplementaryGroups line
+SKIP  systemd-analyze verify: native unit (no systemd-analyze here)
+ok    sidecar: the token file mounted read-only at the credentials path
+ok    sidecar: --group-add with the telcoin-alloy gid
+ok    sidecar: the container writes no core dump
+ok    sidecar unit: LimitCORE=0
+ok    sidecar: still the env file for the labels
+ok    sidecar: no token variable
+ok    sidecar: no -e environment flag
+SKIP  systemd-analyze verify: docker sidecar unit (no systemd-analyze or /usr/bin/docker here)
+ok    vendored config: bearer_token_file in both endpoints
+ok    vendored config: min_version TLS13 in both endpoints
+ok    vendored config: the logs server name from OBS_PUSH_HOST
+ok    vendored config: the metrics server name from OBS_METRICS_PUSH_HOST
+ok    vendored config: two tls_config blocks
+ok    vendored config: no token variable in a River line
+ok    vendored config: no bearer_token from the environment
+ok    embedded fallback: bearer_token_file in both endpoints
+ok    embedded fallback: min_version TLS13 in both endpoints
+ok    embedded fallback: the logs server name from OBS_PUSH_HOST
+ok    embedded fallback: the metrics server name from OBS_METRICS_PUSH_HOST
+ok    embedded fallback: two tls_config blocks
+ok    embedded fallback: no token variable in a River line
+ok    embedded fallback: no bearer_token from the environment
+ok    logs only: one tls_config, the logs one
+ok    embedded fallback: the same River statements as observability/config.alloy
+ok    sync note: the vendored blocks equal upstream byte for byte
+ok    push host: plain URL
+ok    push host: user and port dropped
+ok    push host: IPv6 literal
+ok    push host: empty URL
+ok    binary flags use /var/log/telcoin/node
+ok    docker flags unchanged
+ok    NODE_LOG_DIR from .node-meta
+ok    native config.alloy tails the node log dir
+ok    native config.alloy has no old path
+ok    docker config.alloy keeps the vendored path
+ok    node log dir created
+ok    node log dir printed
+ok    install -d as the service user, group telcoin-log, 2750
+ok    no telcoin-log group: refused
+ok    duplicated NODE_LOG_DIR: refused
+ok    relative NODE_LOG_DIR: refused
+ok    no recursive or service-user chown left in the lib
+ok    duplicated ENABLE_METRICS stops obs_disable_logs
+ok    quorum risk: no restart
+ok    guard rc 2 (unreadable where it counts): no restart
+ok    guard passes
+ok    guard rc 1 + TN_ALLOW_QUORUM_RISK=1: restart
+ok    guard rc 2 + TN_ALLOW_QUORUM_RISK=1: restart
+ok    real guard: testnet, committee unreadable: restart
+ok    real guard: mainnet voting node, committee unreadable: refused
+ok    real guard: the refusal is said
+ok    real guard: mainnet with TN_ALLOW_QUORUM_RISK=1: restart
+ok    real guard: unknown network, committee unreadable: refused
+ok    real guard: mainnet, mode unreadable, staked: refused
+ok    real guard: mainnet, mode unreadable, not staked: restart
+ok    restart window: rc 0
+ok    restart window: guard, wait, guard
+ok    restart window: guard refuses after the wait, rc 1
+ok    restart window: the second guard ran after the wait
+ok    restart window: guard refuses, rc 1
+ok    restart window: no wait after a refusal
+ok    restart window: guard rc 2, rc 1
+ok    restart window: a failed wait, rc 1
+ok    restart window without the wait helper: restart after the guard
+ok    restart window without the wait helper: the guard still ran
+ok    restart window without the wait helper: warned
+ok    restart window without the wait helper: guard refusal still stops it
+ok    ufw inactive: health check refused
+ok    ufw inactive: said
+ok    ufw missing: health check refused
+ok    ufw active: health check allowed
+ok    ufw inactive: --healthcheck not added
+ok    ufw inactive: refused by the firewall check
+ok    menu session lock rc 0
+ok    menu session lock: no ownership migration
+ok    menu disable: ownership migration first
+ok    menu disable: a refused migration changes nothing
+ok    duplicated INSTALL_METHOD stops setup-observability
+ok    --token-stdin rc 0
+ok    --token-stdin: token read from stdin
+ok    --token-stdin: no argv warning
+ok    --token-stdin: CR dropped
+ok    --token rc 0
+ok    --token: still used
+ok    --token: warns that it is on the command line
+ok    --token with --token-stdin refused
+ok    --token with --token-stdin: done event says why
+ok    --token-stdin with nothing on stdin refused
+ok    --token-stdin without --json refused
+ok    --token-stdin without --json: said
+ok    unit without the log dir: re-rendered, reloaded, restarted
+ok    unit already carries the log dir: nothing to do
+ok    re-render refused: no restart, rc 1
+ok    a unit without the group: not ready
+ok    a different dir does not count
+ok    native metrics disable: rc 0
+ok    native metrics disable: __path__ at the node log dir
+ok    native metrics disable: no vendored __path__
+ok    native metrics disable: the file the enable renders for logs only
+ok    native metrics disable: root:telcoin-alloy
+ok    native metrics disable: mode 0640
+ok    native metrics disable: recorded
+ok    native metrics disable: logs pipeline kept
+ok    native metrics disable: metrics pipeline gone
+ok    native metrics disable: restarted once
+ok    settle window: 5 seconds
+ok    healthy restart: is-active read OBS_ALLOY_SETTLE_SECS times
+ok    native metrics disable: said
+ok    native logs disable: rc 0
+ok    native logs disable: root:telcoin-alloy
+ok    native logs disable: the file the enable renders for metrics only
+ok    native logs disable: logs pipeline gone
+ok    native logs disable: metrics pipeline kept
+ok    native logs disable: recorded
+ok    docker metrics disable: rc 0
+ok    docker metrics disable: root:root
+ok    docker metrics disable: vendored __path__
+ok    NODE_LOG_DIR global: rc 0
+ok    the NODE_LOG_DIR global wins over .node-meta
+ok    Alloy in a restart loop: rc 1
+ok    Alloy in a restart loop: said
+ok    Alloy in a restart loop: stops at the first read
+ok    Alloy in a restart loop: the choice is still recorded
+ok    Alloy in a restart loop: says where the choice stands
+ok    Alloy in a restart loop: no success line
+ok    Alloy down after two reads: rc 1
+ok    Alloy down after two reads: a third read caught it
+ok    restart fails: rc 1
+ok    restart fails: said
+ok    restart fails: no is-active read
+ok    chown fails: rc 1
+ok    chown fails: said
+ok    chown fails: the choice is not recorded
+ok    chown fails: no restart
+ok    duplicated INSTALL_METHOD: rc 1
+ok    duplicated INSTALL_METHOD: no config written
+ok    duplicated INSTALL_METHOD: no chown, no systemctl
+ok    duplicated INSTALL_METHOD: nothing recorded
+ok    duplicated NODE_LOG_DIR: rc 1
+ok    duplicated NODE_LOG_DIR: no config written
+ok    duplicated NODE_LOG_DIR: nothing recorded
+ok    native enable: rc 0
+ok    native enable: the same file as the metrics disable leaves
+ok    native enable: root:telcoin-alloy
+ok    native enable: is-active read OBS_ALLOY_SETTLE_SECS times
+ok    native enable: running line
+ok    native enable: recorded
+ok    native enable, Alloy does not stay up: rc 1
+ok    native enable, Alloy does not stay up: said
+ok    native enable, Alloy does not stay up: no running line
+ok    native enable, Alloy does not stay up: not recorded as enabled
+ok    docker enable: rc 0
+ok    docker enable: the vendored file, byte for byte
+ok    docker enable: root:root
+ok    menu: a metrics disable that did not finish is said
+ok    menu: a log disable that did not finish is said
+ok    json: Alloy down: rc 1
+ok    json: Alloy down: an error event
+ok    json: Alloy down: done ok:false
+ok    json: Alloy down: no metrics:disabled marker
+ok    json: Alloy up: rc 0
+ok    json: Alloy up: the marker is in done
+ok    token file written
+ok    token file: root:telcoin-alloy 0640 through tn_write_root_file
+ok    token file: the token on one line
+ok    token file: one line
+ok    token file write: the token is not printed
+ok    token file write fails: rc 1
+ok    token file write fails: said
+ok    native env file written
+ok    env file: root 0600 through tn_write_root_file
+ok    env file: no OBS_INGEST_TOKEN
+ok    env file: the logs push host
+ok    env file: the metrics push host
+ok    env file: the logs push URL
+ok    native env file: no CREDENTIALS_DIRECTORY (systemd sets it)
+ok    docker env file written
+ok    docker env file: CREDENTIALS_DIRECTORY at the mount
+ok    env file: an override's host
+ok    metrics off: no metrics host
+ok    legacy env: migrated
+ok    legacy env: its token moved to the token file
+ok    legacy env: written root:telcoin-alloy 0640
+ok    legacy env: the line is gone
+ok    legacy env: said once
+ok    legacy env: the token is not printed
+ok    legacy env beside a token file: the token file is kept
+ok    legacy env beside a token file: the line is gone
+ok    legacy env, token file write fails: rc 1
+ok    legacy env, token file write fails: the env file keeps the token
+ok    existing token: none
+ok    existing token: the legacy env line
+ok    existing token: the token file wins
+ok    existing token: an empty token file falls back to the env line
+ok    native unit written
+ok    native unit: root 0644
+ok    native unit: LoadCredential= of the token file
+ok    native unit: LimitCORE=0
+ok    native unit: daemon-reload
+ok    docker unit written
+ok    docker unit: the token file mounted
+ok    docker unit: the gid of telcoin-alloy
+ok    docker unit: logs from the data dir
+ok    docker unit without the telcoin-alloy group: rc 1
+ok    docker unit without the group: said
+ok    docker unit without the group: no unit
+ok    docker enable: rc 0
+ok    docker enable: the trimmed token in the token file
+ok    docker enable: the sidecar unit mounts it
+ok    docker enable: no token in the env file
+ok    docker enable: no token in the unit
+ok    docker enable: the token is not printed
+ok    legacy host, metrics disable: rc 0
+ok    legacy host, metrics disable: the token moved to the token file
+ok    legacy host, metrics disable: no token line left
+ok    legacy host, metrics disable: the unit reads the token file
+ok    legacy host, metrics disable: config.alloy reads it
+ok    obs_disable: rc 0
+ok    obs_disable: the token file is gone
+ok    obs_disable: an env file without the token is kept
+ok    obs_disable: said
+ok    obs_disable: the sidecar container removed
+ok    obs_disable: an env file that holds the token is gone
+ok    status: token file present (0640 root:telcoin-alloy)
+ok    status: never the token
+ok    status: a wrong mode or owner is said
+ok    status: a token still in the env file is said
+ok    status: never the legacy token
+ok    status: no token file is said
+SKIP  status without access to the Alloy dir: not checked, said (root can enter any directory)
+ok    obs_status: the token line under the unit state
+ok    obs_status: never the token
+ok    rotate: rc 0
+ok    rotate: the new token in the token file
+ok    rotate: written root:telcoin-alloy 0640
+ok    rotate: Alloy restarted once
+ok    rotate: watched OBS_ALLOY_SETTLE_SECS reads
+ok    rotate: nothing but Alloy is restarted
+ok    rotate: the unit re-rendered with LoadCredential=
+ok    rotate: config.alloy re-rendered
+ok    rotate: said
+ok    rotate: the token is not printed
+ok    rotate: no token in the env file
+ok    rotate: no token in the unit
+ok    rotate on the env-file token: rc 0
+ok    rotate on the env-file token: the new token in the token file
+ok    rotate on the env-file token: the line is gone
+ok    rotate on the env-file token: the move is said
+ok    rotate, restart fails: rc 1
+ok    rotate, restart fails: the previous token is back
+ok    rotate, restart fails: the env file is back
+ok    rotate, restart fails: config.alloy is back
+ok    rotate, restart fails: the unit is back
+ok    rotate, restart fails: the token file back with the mode and group it had
+ok    rotate, restart fails: Alloy restarted again
+ok    rotate, restart fails: the rollback is said
+ok    rotate, restart fails: no success line
+ok    rotate, Alloy does not stay up on either token: rc 1
+ok    rotate, Alloy does not stay up on either token: the previous token is back
+ok    rotate, Alloy does not stay up on either token: said
+ok    rotate on the env-file token, restart fails: rc 1
+ok    rotate on the env-file token, restart fails: no token file left
+ok    rotate on the env-file token, restart fails: the env file holds the old token again
+ok    rotate, the unit write fails: rc 1
+ok    rotate, the unit write fails: no restart
+ok    rotate, the unit write fails: the previous token is back
+ok    rotate, the unit write fails: said
+ok    rotate with both pipelines off: refused
+ok    rotate with both pipelines off: nothing written
+ok    rotate with both pipelines off: said
+ok    rotate without the unit: refused
+ok    rotate without the unit: the token file is untouched
+ok    docker rotate: rc 0
+ok    docker rotate: the sidecar unit mounts the token file
+ok    docker rotate: CREDENTIALS_DIRECTORY in the env file
+ok    menu rotate: the new token in the token file
+ok    menu rotate: said
+ok    menu rotate, nothing entered: the token file is untouched
+ok    menu rotate, nothing entered: said
+ok    --rotate-token --token-stdin: rc 0
+ok    --rotate-token --token-stdin: the new token in the token file
+ok    --rotate-token --token-stdin: the token is not printed
+ok    --rotate-token without a token or a terminal: rc 1
+ok    --rotate-token without a token or a terminal: said
+ok    --rotate-token without a token or a terminal: the token file is untouched
+ok    --rotate-token with TN_OBS_TOKEN: rc 0
+ok    --rotate-token with TN_OBS_TOKEN: rotated
+ok    --rotate-token with an enable: refused
+ok    --rotate-token with an enable: said
+ok    --rotate-token with an enable: the token file is untouched
+ok    json rotate: rc 0
+ok    json rotate: done ok:true with token:rotated
+ok    json rotate: only JSON on stdout
+ok    json rotate: the new token in the token file
+ok    json rotate: the token is in no event
+ok    json rotate: the token is not in the log
+ok    json rotate, restart fails: rc 1
+ok    json rotate, restart fails: the error says it was rolled back
+ok    json rotate, restart fails: done ok:false
+ok    json rotate, restart fails: no token:rotated
+ok    json rotate, restart fails: the previous token is back
+ok    json rotate without a token: rc 1
+ok    json rotate without a token: said
+ok    json rotate without a token: done ok:false
+ok    json rotate without a token: the token file is untouched
+
+345 checks, 0 failures, 3 skipped
+== tools/tests/obs_test.sh: exit 0
+
+== tools/tests/remove_test.sh (bash 3.2.57(1)-release)
+ok    unit: gone
+ok    unit .service.bak: gone
+ok    unit .bak: gone
+ok    drop-in dir: gone
+ok    backup-named symlink: gone
+ok    symlink target outside the tree: kept
+ok    another unit's backup: kept
+ok    another unit: kept
+ok    unit .service.bak shredded
+ok    unit .bak shredded
+ok    symlink never shredded
+ok    systemctl stop
+ok    systemctl disable
+ok    systemctl daemon-reload
+ok    drop-in symlink: gone
+ok    drop-in symlink target: kept
+ok    failing shred still deletes: gone
+ok    failing shred was tried
+ok    _rm_shred unlinks a symlink: gone
+ok    _rm_shred leaves the link target: kept
+ok    _rm_shred leaves a directory: kept
+ok    bls-passphrase.cred shredded
+ok    bls-passphrase shredded
+ok    bls-tpm.pub shredded
+ok    bls-tpm.priv shredded
+ok    node key shredded
+ok    nested node key shredded
+ok    temp copy in the config dir shredded
+ok    .node-meta shredded
+ok    config dir: gone
+ok    node-keys dir: gone
+ok    chain data (not the keys prompt's business): kept
+ok    shred note printed once
+ok    keys kept without DELETE: kept
+ok    passphrase kept without DELETE: kept
+ok    nothing shredded without DELETE
+ok    legacy passphrase shredded
+ok    legacy key shredded
+ok    top-level credential shredded
+ok    legacy config dir: gone
+ok    data dir: gone
+ok    chain-data removal shreds node keys
+ok    chain-data removal does not shred the db
+ok    private tree: decoy behind the newline name intact
+ok    private tree: symlink target intact
+ok    private tree: data dir: gone
+ok    private tree: key shredded
+ok    private tree: nested key shredded
+ok    private tree: no account switch
+ok    private tree: the symlink is never handed to shred
+ok    service-owned tree: find runs as the service account
+ok    service-owned tree: key shredded
+ok    service-owned tree: decoy behind the newline name intact
+ok    service-owned tree: symlink target intact
+ok    service-owned tree: data dir: gone
+ok    account gone: nothing shredded
+ok    account gone: no account switch
+ok    account gone: note printed
+ok    account gone: decoy behind the newline name intact
+ok    account gone: symlink target intact
+ok    account gone: data dir: gone
+ok    json keys (service-owned tree) rc 0
+ok    json service-owned tree: decoy behind the newline name intact
+ok    json service-owned tree: symlink target intact
+ok    json: keys shredded before the account is removed
+ok    tn-start: gone
+ok    tn-start-docker: gone
+ok    empty libexec dir: gone
+ok    node.env: gone
+ok    backups dir: gone
+ok    logrotate file: gone
+ok    journald drop-in: gone
+ok    lock dir stays: kept
+ok    lock file stays: kept
+ok    says /run/telcoin stays
+ok    release staging dir: gone
+ok    build account home: gone
+ok    no userdel under a fixture root
+ok    needrestart rule: gone
+ok    apt rule: gone
+ok    other needrestart rule: kept
+ok    other apt rule: kept
+ok    /etc/telcoin/other.txt: kept
+ok    passphrase (not a host file): kept
+ok    other logrotate file: kept
+ok    other journald drop-in: kept
+ok    backup symlink target: kept
+ok    backup shredded
+ok    unit backup shredded
+ok    backup symlink never shredded
+ok    libexec dir holding another file: kept
+ok    tn-start beside another file: gone
+ok    host files kept while another node remains: kept
+ok    backups kept while another node remains: kept
+ok    host files removed with the last node: gone
+ok    backups removed with the last node: gone
+ok    /etc/telcoin left empty: gone
+ok    symlinked libexec: file behind it: kept
+ok    symlinked libexec: the link: kept
+ok    symlinked libexec: warned
+ok    only a symlinked libexec left: rc 1
+ok    only a symlinked libexec left: no node installed
+ok    old backup telcoin.service.bak: gone
+ok    old backup telcoin.service.bak shredded
+ok    old backup telcoin.bak: gone
+ok    old backup telcoin.bak shredded
+ok    old backup telcoin-validator.service.bak.1: gone
+ok    old backup telcoin-validator.service.bak.1 shredded
+ok    old backup telcoin-observer.bak.2: gone
+ok    old backup telcoin-observer.bak.2 shredded
+ok    old backup telcoin-observer.service.bak: gone
+ok    old backup telcoin-observer.service.bak shredded
+ok    drop-in dir of a legacy name with no unit: gone
+ok    an installed unit's backup: kept
+ok    an installed unit's drop-in dir: kept
+ok    the installed unit: kept
+ok    lock holder ready
+ok    json while another run holds the lock: rc 1
+ok    json names the lock
+ok    json while locked: nothing removed
+ok    json while locked: no call
+ok    menu while locked: nothing removed
+ok    menu while locked: said why
+ok    leftovers while locked: rc 1
+ok    leftovers while locked: nothing removed
+ok    lock inode read
+ok    json keys with the lock in /run/telcoin: rc 0
+ok    lock inode unchanged by a removal
+ok    json: lock dir stays: kept
+ok    json: lock file stays: kept
+ok    json: says /run/telcoin stays
+ok    json: the library EXIT trap releases the lock
+ok    json: no mkdir lock left behind: gone
+ok    json: the lock is free after the run
+ok    json: config temp copy shredded
+ok    telcoin-log removed
+ok    declined service group kept
+ok    kept user: telcoin-log question asked
+ok    kept user, declined: telcoin-log kept
+ok    kept user: no userdel
+ok    kept user, accepted: telcoin-log removed
+ok    user removed: no telcoin-log question
+ok    user removed: telcoin-log removed
+ok    telcoin-log with another member kept
+ok    kept group recorded
+ok    kept group reported
+ok    telcoin-log kept while another node remains
+ok    kept group recorded (other node)
+ok    absent telcoin-log rc 0
+ok    absent telcoin-log: no groupdel
+ok    dup HOST_SERVICE_USER: unit blocked
+ok    dup HOST_SERVICE_USER: error names the key
+ok    dup HOST_SERVICE_USER: remove_node_unit refused
+ok    dup HOST_SERVICE_USER: nothing deleted (interactive)
+ok    dup HOST_SERVICE_USER: no systemctl call
+ok    dup HOST_SERVICE_USER: json_remove rc 1
+ok    dup HOST_SERVICE_USER: json error names the key
+ok    dup HOST_SERVICE_USER: nothing deleted (json)
+ok    dup HOST_SERVICE_USER: json made no call
+ok    dup HOST_SERVICE_USER: json shredded nothing
+ok    dup HOST_SERVICE_GROUP: unit blocked
+ok    dup HOST_SERVICE_GROUP: error names the key
+ok    dup HOST_SERVICE_GROUP: remove_node_unit refused
+ok    dup HOST_SERVICE_GROUP: nothing deleted (interactive)
+ok    dup HOST_SERVICE_GROUP: no systemctl call
+ok    dup HOST_SERVICE_GROUP: json_remove rc 1
+ok    dup HOST_SERVICE_GROUP: json error names the key
+ok    dup HOST_SERVICE_GROUP: nothing deleted (json)
+ok    dup HOST_SERVICE_GROUP: json made no call
+ok    dup HOST_SERVICE_GROUP: json shredded nothing
+ok    dup INSTALL_METHOD: unit blocked
+ok    dup INSTALL_METHOD: error names the key
+ok    dup INSTALL_METHOD: remove_node_unit refused
+ok    dup INSTALL_METHOD: nothing deleted (interactive)
+ok    dup INSTALL_METHOD: no systemctl call
+ok    dup INSTALL_METHOD: json_remove rc 1
+ok    dup INSTALL_METHOD: json error names the key
+ok    dup INSTALL_METHOD: nothing deleted (json)
+ok    dup INSTALL_METHOD: json made no call
+ok    dup INSTALL_METHOD: json shredded nothing
+ok    dup DATA_DIR: unit blocked
+ok    dup DATA_DIR: error names the key
+ok    dup DATA_DIR: remove_node_unit refused
+ok    dup DATA_DIR: nothing deleted (interactive)
+ok    dup DATA_DIR: no systemctl call
+ok    dup DATA_DIR: json_remove rc 1
+ok    dup DATA_DIR: json error names the key
+ok    dup DATA_DIR: nothing deleted (json)
+ok    dup DATA_DIR: json made no call
+ok    dup DATA_DIR: json shredded nothing
+ok    dup DATA_DIR: detect_data_dir rc 2
+ok    dup DATA_DIR: detect_data_dir prints no path
+ok    json keys rc 0 under set -e
+ok    json done event
+ok    json /etc/systemd/system/telcoin.service: gone
+ok    json /etc/systemd/system/telcoin.service.bak.20240101: gone
+ok    json /etc/systemd/system/telcoin.bak.1: gone
+ok    json /etc/systemd/system/telcoin.service.d: gone
+ok    json /etc/systemd/system/telcoin.service.bak.link: gone
+ok    json /etc/telcoin: gone
+ok    json /var/lib/telcoin: gone
+ok    json /usr/local/libexec/telcoin: gone
+ok    json /var/backups/telcoin: gone
+ok    json /etc/logrotate.d/telcoin: gone
+ok    json /etc/systemd/journald.conf.d/50-telcoin.conf: gone
+ok    json: /run/telcoin stays: kept
+ok    json: symlink target outside the tree: kept
+ok    json: backup symlink target: kept
+ok    json: another unit's backup: kept
+ok    json: other logrotate file: kept
+ok    json: other journald drop-in: kept
+ok    json shredded /etc/systemd/system/telcoin.service.bak.20240101
+ok    json shredded /etc/telcoin/bls-passphrase.cred
+ok    json shredded /etc/telcoin/bls-passphrase
+ok    json shredded /etc/telcoin/bls-tpm.pub
+ok    json shredded /etc/telcoin/bls-tpm.priv
+ok    json shredded /var/lib/telcoin/node-keys/bls.key
+ok    json shredded /var/backups/telcoin/bls-passphrase.Ef34Gh
+ok    json telcoin-log removed
+ok    json reports the log group
+ok    resume json keys: rc 0
+ok    resume json keys: done event
+ok    resume json keys: no error event
+ok    resume json keys /etc/systemd/system/telcoin.service.bak.20240101: gone
+ok    resume json keys /etc/systemd/system/telcoin.bak.1: gone
+ok    resume json keys /etc/systemd/system/telcoin.service.d: gone
+ok    resume json keys /etc/telcoin: gone
+ok    resume json keys /var/lib/telcoin: gone
+ok    resume json keys /usr/local/libexec/telcoin: gone
+ok    resume json keys /var/backups/telcoin: gone
+ok    resume json keys /etc/logrotate.d/telcoin: gone
+ok    resume json keys /etc/systemd/journald.conf.d/50-telcoin.conf: gone
+ok    resume json keys shredded /etc/systemd/system/telcoin.service.bak.20240101
+ok    resume json keys shredded /etc/telcoin/bls-passphrase.cred
+ok    resume json keys shredded /var/lib/telcoin/node-keys/bls.key
+ok    resume json keys shredded /var/backups/telcoin/bls-passphrase.Ef34Gh
+ok    resume json keys: another unit's backup: kept
+ok    resume json keys: symlink target outside the tree: kept
+ok    nothing left: rc 1
+ok    nothing left: no node installed
+ok    nothing left: no call
+ok    scripts and backups left: rc 0
+ok    scripts and backups left: start scripts: gone
+ok    scripts and backups left: backups: gone
+ok    resume json service: rc 0
+ok    resume json service: done event
+ok    resume json service: unit backup: gone
+ok    resume json service: node key: kept
+ok    resume json service: passphrase: kept
+ok    leftovers: rc 0
+ok    leftovers: listed /var/lib/telcoin
+ok    leftovers: listed /srv/tn-data
+ok    leftovers: listed /etc/telcoin
+ok    leftovers: listed /usr/local/libexec/telcoin/tn-start
+ok    leftovers: listed /usr/local/libexec/telcoin/tn-start-docker
+ok    leftovers: listed /var/backups/telcoin
+ok    leftovers: listed unit backups and drop-ins in /etc/systemd/system
+ok    leftovers /var/lib/telcoin: gone
+ok    leftovers /srv/tn-data: gone
+ok    leftovers /etc/telcoin: gone
+ok    leftovers /usr/local/libexec/telcoin: gone
+ok    leftovers /var/backups/telcoin: gone
+ok    leftovers /etc/systemd/system/telcoin.service.bak.20240101: gone
+ok    leftovers /etc/systemd/system/telcoin.service.d: gone
+ok    leftovers /etc/logrotate.d/telcoin: gone
+ok    leftovers /etc/systemd/journald.conf.d/50-telcoin.conf: gone
+ok    leftovers shredded /var/lib/telcoin/node-keys/bls.key
+ok    leftovers shredded /var/lib/telcoin/validator/node-keys/bls.key
+ok    leftovers shredded /srv/tn-data/node-keys/bls.key
+ok    leftovers shredded /etc/telcoin/bls-passphrase.cred
+ok    leftovers shredded /etc/telcoin/bls-passphrase
+ok    leftovers shredded /etc/telcoin/.node-meta
+ok    leftovers shredded /var/backups/telcoin/bls-passphrase.Ef34Gh
+ok    leftovers shredded /etc/systemd/system/telcoin.service.bak.20240101
+ok    leftovers: chain db not shredded
+ok    leftovers: a file beside the custom data dir: kept
+ok    leftovers: another unit's backup: kept
+ok    leftovers: backup symlink target: kept
+ok    leftovers declined: rc 0
+ok    leftovers declined: nothing removed
+ok    leftovers with a duplicated key: rc 1
+ok    leftovers with a duplicated key: nothing removed
+ok    no leftovers: rc 3
+ok    menu leftovers: exits 0
+ok    menu leftovers: config tree: gone
+ok    menu leftovers: custom data dir: gone
+ok    menu leftovers: start scripts: gone
+ok    menu leftovers: scan declined
+ok    json service rc 0
+ok    json service: unit backup: gone
+ok    json service: passphrase: kept
+ok    json service: start script: kept
+ok    json service: backups: kept
+ok    json service: no groupdel
+ok    build account, userdel rc 1: processes stopped, then userdel
+ok    userdel failed: no OK
+ok    userdel failed: a warning with the manual step
+ok    build account, userdel rc 0: processes stopped, then userdel
+ok    userdel succeeded: OK
+ok    no build account: nothing done
+ok    shred note: the destruction sentence, once
+ok    shred note: the best-effort sentence still once
+ok    shred note: several files were shredded in that run
+ok    shred note: the later file was shredded
+ok    shred note: not repeated later in the run
+ok    add-on teardown: rc 0
+ok    add-on teardown: the token file shredded
+ok    add-on teardown: the env file (may hold an older token) shredded
+ok    add-on teardown: config.alloy is removed, not shredded
+ok    add-on teardown: the token file: gone
+ok    add-on teardown: the Alloy config dir: gone
+ok    add-on teardown: the Alloy unit: gone
+ok    add-on teardown: the token is not printed
+
+313 checks, 0 failures, 0 skipped
+== tools/tests/remove_test.sh: exit 0
+
+== tools/tests/root_write_pipe_test.sh (bash 3.2.57(1)-release)
+ok    fixture: pipes flagged, here-strings and || not
+ok    no pipe into a root writer in the shipped scripts
+
+2 checks, 0 failures, 0 skipped
+== tools/tests/root_write_pipe_test.sh: exit 0
+
+== tools/tests/passphrase_print_test.sh (bash 3.2.57(1)-release)
+ok    rule: every bad line flagged
+ok    rule: no good line flagged
+ok    tree: scripts found
+ok    tree: no script prints a passphrase variable
+
+4 checks, 0 failures, 0 skipped
+== tools/tests/passphrase_print_test.sh: exit 0
+
+tools/tests/obs_test.sh              exit 0
+tools/tests/remove_test.sh           exit 0
+tools/tests/root_write_pipe_test.sh  exit 0
+tools/tests/passphrase_print_test.sh exit 0
+4 test file(s), 0 failed (bash 3.2.57(1)-release)

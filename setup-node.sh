@@ -15,6 +15,7 @@
 # advertise both in node-info.yaml (worker.rpc), from the first install. reth stays on
 # 127.0.0.1; Caddy (install-caddy.sh, in this repo) is the only public edge.
 #   --rpc-domain <hostname>  Public RPC on this DNS name (implies public). Use the node's
+# network-gated: example hostname in the testnet domain, in the help text
 #                            own public name, e.g. node7.adiri.telcoin.network; the
 #                            dashboard, if enabled later, needs a different one
 #                            (dashboard.<your-node-domain>). Point its A record at this
@@ -61,6 +62,7 @@
 #                            lib/release-keys, the tarball and the release's chain-config
 #                            hashes checked, the binary's --version checked before root
 #                            installs it.
+# network-gated: the testnet tag form, beside the mainnet one
 #   --release-tag <tag>      The release to install or build: vX.Y.Z-adiri on testnet,
 #                            vX.Y.Z on mainnet (--build-ref is the older name). Source
 #                            builds take release tags only, never a branch or a commit;
@@ -70,11 +72,18 @@
 #                            and untracked files in /opt/telcoin-source instead of stopping.
 # Source builds run as the unprivileged tn-build account with its own Rust toolchain
 # (rustup-init pinned by version and sha256); root only installs the result. Docker
-# images run by digest from the network's repository.
+# images run by digest from the network's repository. In a --json finalize run of a
+# Docker install, --release-tag <tag> (that release's image, by the digest the signed
+# release names) or --docker-image <repository>@sha256:<digest> naming another image
+# than the one keygen recorded replaces it: once every other finalize input has been
+# checked, it is checked and pulled as keygen's would be, and recorded in .node-meta
+# before the config, the unit and the container. On mainnet a new image is named by
+# --release-tag only (a digest alone is taken only for a release this node recorded).
 #
 # NODE FLAGS (optional). Setup asks the installed release whether it knows each flag
 # given, and stops when it does not.
 #   --bootstrap-peers <file> The peers the node dials at start, replacing the genesis
+# network-gated: release named in the testnet tag form; require_node_flag asks the release on any network
 #                            bootstrap servers (v0.15.0-adiri and later). The file holds
 #                            a YAML or JSON map keyed by BLS public key; each entry is a
 #                            node's primary and workers, as under p2p_info in its
@@ -85,15 +94,43 @@
 #                            --bootstrap-peers "$(cat /etc/telcoin/bootstrap-peers.yaml)",
 #                            so the file is read again at every start.
 #   --enable-state-export    Export each epoch's final execution state under
+# network-gated: release named in the testnet tag form; require_node_flag asks the release on any network
 #                            <datadir>/consensus-db/state_exports/epoch-N/ (v0.13.0-adiri
 #                            and later). Each export is a full copy of the state, and
 #                            without --state-export-keep none is ever deleted.
 #   --state-export-keep <n>  Keep only the newest n exports, 1 to 999999; 2 or more keeps
 #                            the previous export while the next one is written. Turns on
+# network-gated: release named in the testnet tag form; require_node_flag asks the release on any network
 #                            --enable-state-export as well (v0.15.0-adiri and later).
+#   --admission open|grace|closed  The node's connection admission mode, written into the
+#                            data dir's network-config (admission.mode Open, Grace or
+#                            Closed) with trusted_nodes from --trusted-nodes and
+#                            committee_peers from the --bootstrap-peers map (each left
+#                            out when its flag is). Closed admits only the previous,
+#                            current and next committees, the trusted nodes and the
+#                            bootstrap peers; Grace enforces nothing beyond Open and
+#                            differs only in the status the node reports. Needs a node
+#                            release 0.17.0 or later: setup stops on an older one. Without
+#                            --admission, and with no earlier choice recorded (see
+#                            below), setup leaves the admission settings of
+#                            network-config alone on every network, mainnet validators
+#                            included. Mainnet validators are expected to run
+#                            --admission closed --trusted-nodes <hubs>; on mainnet,
+#                            closed without a trusted nodes map gets a warning.
+#   --trusted-nodes <file>   The trusted hubs, given with --admission or over a recorded
+#                            mode (see below): a YAML map keyed by BLS public key, each
+#                            entry the node's primary {network_address, network_key}
+#                            and its workers by id ({<id>: {network_address,
+#                            network_key}}). At most 64 KiB, and readable by other users
+#                            (chmod 644). Setup installs it, world-readable, as
+#                            /etc/telcoin/trusted-nodes.yaml and writes it into
+#                            network-config under trusted_nodes.
 # In a --json finalize run, a flag left out is read back from what keygen recorded in
 # .node-meta: BOOTSTRAP_PEERS_FILE for --bootstrap-peers, STATE_EXPORT for the two state
-# export flags.
+# export flags, ADMISSION_MODE for --admission and TRUSTED_NODES_FILE for
+# --trusted-nodes. An interactive run over an earlier install reads the last two back
+# the same way, and with an admission mode BOOTSTRAP_PEERS_FILE too (committee_peers
+# comes from that map), so a re-run keeps the admission settings it does not name.
 #
 # BLS KEY PASSPHRASE (key generation). Interactive setup asks for it twice. A --json
 # keygen takes it from standard input (--passphrase-stdin) or, as before, from the
@@ -117,7 +154,28 @@
 #                            by +, e.g. 7). A firmware or Secure Boot change to them stops
 #                            the node from starting until edit-config.sh --reseal runs.
 #   --audit                  Print a summary of the host's hardening (disk encryption,
-#                            core dumps, ptrace scope, passphrase storage) and exit.
+#                            core dumps, ptrace scope, passphrase storage, host baseline)
+#                            and exit.
+#   --host-baseline          Once the node is installed, install auditd and aide (apt,
+#                            no recommended packages), load audit rules that watch the
+#                            node keys, /etc/telcoin and the node unit
+#                            (/etc/audit/rules.d/telcoin-node.rules), and make an AIDE
+#                            baseline of the node's files with its own config and
+#                            database (/etc/aide/telcoin-node.conf,
+#                            /var/lib/aide/telcoin-node.db). .node-meta records
+#                            HOST_BASELINE=true; update-node.sh and edit-config.sh make
+#                            the baseline again after a change they apply, and
+#                            remove-node.sh removes it. Off by default and never asked.
+#                            In a --json run it takes effect at finalize. On a host
+#                            whose node is already installed, --host-baseline alone
+#                            makes (or makes again) the baseline and changes nothing else.
+#
+# PRIVATE ALERTS (optional, every network). Interactive setup asks whether this host
+# should push a heartbeat to a monitor you own (an Uptime Kuma push URL, a healthchecks.io
+# ping URL or a JSON webhook). Once the node runs, setup starts setup-alerts.sh --enable,
+# which asks for the URLs and sends a test heartbeat; .node-meta records ENABLE_ALERTS
+# (true, or pending until that is done). A --json run never asks: enable them afterwards
+# with setup-alerts.sh --json --enable --targets-stdin.
 #
 # LOGS AND RESTARTS
 #   --log-target journal|file  Where the node logs: the systemd journal (default on
@@ -146,9 +204,11 @@ source "${SCRIPT_DIR}/lib/common.sh"
 if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/dev/null 2>&1 \
     || ! tn_require_fns tn_migrate_ownership tn_passphrase_ok tn_update_lock_path \
         tn_write_root_file tn_write_start_script tn_write_node_unit tn_write_node_env \
-        tn_committee_down_guard tn_service_user_ok tn_service_user_can_run \
+        tn_committee_down_guard tn_service_user_ok tn_service_user_can_run tn_host_baseline_install \
         tn_docker_release_tag_for tn_release_stage tn_source_build tn_install_logrotate \
-        tn_os_floor_check tn_docker_network_ok tn_release_tag_grammar >/dev/null; then
+        tn_os_floor_check tn_docker_network_ok tn_release_tag_grammar tn_mainnet_enabled \
+        tn_docker_pull_repo_ok tn_docker_pull_repos_for tn_docker_image_network_ok \
+        tn_network_config_render tn_node_supports_admission >/dev/null; then
     _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this setup-node.sh: run update-scripts.sh and try again."
     case " $* " in
         *" --json "*) printf '{"event":"error","msg":"%s"}\n{"event":"done","ok":false,"msg":"%s"}\n' "$_tn_old" "$_tn_old" ;;
@@ -158,7 +218,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
 fi
 unset _tn_old
 
-readonly SCRIPT_VERSION="2.0.1"
+readonly SCRIPT_VERSION="2.1.0"
 readonly SERVICE_NAME="telcoin"
 # The node's role is decided on-chain from committee membership, and the dashboard's
 # validator view follows the on-chain stake status (ConsensusRegistry getValidator).
@@ -198,6 +258,10 @@ BOOTSTRAP_PEERS_SRC=""      # --bootstrap-peers FILE: the peers map to install (
 STATE_EXPORT_ENABLE=false   # --enable-state-export
 STATE_EXPORT_KEEP=""        # --state-export-keep N
 STATE_EXPORT=""             # off | unlimited | N (keep the newest N); '' = no flag given
+# The node admission settings of network-config (--admission, --trusted-nodes), checked
+# by init_node_extra_flags and written by setup_admission_config.
+ADMISSION_MODE=""           # open | grace | closed; '' = no flag given
+TRUSTED_NODES_SRC=""        # --trusted-nodes FILE: the trusted hubs map to install ('' = none)
 NODE_EXTRA_FLAGS=""
 NODE_EXTRA_FLAGS_SPEC=""    # the runner spec prepare_node_extra_flags last checked
 NODE_FLAG_WARNINGS=()       # notes on the node flags, printed by node_flag_warnings
@@ -236,6 +300,8 @@ CREDENTIAL_KEY=""           # host+tpm2 | host (the credential's systemd-creds k
 ALLOW_NO_TPM=false          # --allow-no-tpm
 BIND_PCRS=""                # --bind-pcrs
 AUDIT_ONLY=false            # --audit
+HOST_BASELINE=false         # --host-baseline
+HOST_BASELINE_STATE=""      # installed | failed, set by step_host_baseline ('' = not asked)
 LOG_TARGET=""                        # journal | file (--log-target; empty: by network)
 # The BLS key passphrase lives in TN_SETUP_PASS, a plain shell variable: the top of
 # this file fills it from TN_BLS_PASSPHRASE (then unset), main from --passphrase-stdin,
@@ -254,6 +320,9 @@ ENABLE_VPN="false"          # true | pending | false
 VPN_OVERLAY_IP=""
 VPN_NODE_PUBKEY=""
 REGION=""
+# Private alerts (setup-alerts.sh), offered on every network: prompt_alerts records
+# pending, step_alerts runs setup-alerts.sh once the node runs, .node-meta keeps the value.
+ENABLE_ALERTS="false"       # true | pending | false
 
 # =============================================================================
 # STEPS
@@ -357,7 +426,6 @@ step_preflight() {
             json_event log "WARNING: hardware below the minimum for: ${TN_HW_GAPS} (setup continues)"
         fi
     fi
-    check_internet
     # Core node ports + the ports the optional features use (Caddy dashboard 80/443,
     # WireGuard VPN 51820, health monitor 43174) so conflicts surface up front.
     check_ports \
@@ -378,11 +446,14 @@ step_preflight() {
         fi
     done
 
+    # network-gated: documents the testnet build feature (tn_cargo_features_for)
     # Select network first so NETWORK is set before source build (needed for --features adiri).
     # In JSON mode network/method/passphrase are already set from flags by the orchestrator.
     echo ""
     print_step "Selecting network..."
     json_mode || select_network
+    # After the network is chosen: check_internet probes that network's own RPC.
+    check_internet
 
     # The systemd floor: 247 everywhere (LoadCredential=), 255 on mainnet
     # (TN_MAINNET_MIN_SYSTEMD: the encrypted credential; Ubuntu 24.04). Below 250
@@ -405,6 +476,14 @@ step_preflight() {
             print_warn "Region label kept as ${REGION} (letters, digits, _ and - only)."
         fi
     fi
+    # Private alerts, on every network. A re-run keeps the value an earlier run or
+    # setup-alerts.sh recorded (true or pending), so it never turns live alerts off.
+    local alerts_meta=""
+    setup_meta_read alerts_meta ENABLE_ALERTS "${CONFIG_DIR}/.node-meta"
+    case "$alerts_meta" in
+        true|pending) ENABLE_ALERTS="$alerts_meta" ;;
+    esac
+    json_mode || prompt_alerts
 
     echo ""
     print_step "Selecting install method..."
@@ -465,12 +544,12 @@ setup_passphrase_method() {
             [[ "$supported" == "true" ]] && PASSPHRASE_METHOD=credential
             ;;
         credential)
-            [[ "$supported" == "true" ]] || setup_fail "--passphrase-method credential needs systemd ${TN_CRED_MIN_SYSTEMD} or later with systemd-creds (Ubuntu 24.04)."
+            [[ "$supported" == "true" ]] || setup_fail "--passphrase-method credential needs systemd ${TN_CRED_MIN_SYSTEMD} or later with systemd-creds (Ubuntu 24.04 ships 255)."
             ;;
     esac
     if [[ "$PASSPHRASE_METHOD" == "stdin" ]]; then
         if [[ "$NETWORK" != "testnet" && "$NETWORK" != "devnet" ]]; then
-            setup_fail "On ${NETWORK} the BLS passphrase is kept only as an encrypted credential (systemd ${TN_CRED_MIN_SYSTEMD} or later, Ubuntu 24.04)."
+            setup_fail "On ${NETWORK} the BLS passphrase is kept only as an encrypted credential (systemd ${TN_CRED_MIN_SYSTEMD} or later; Ubuntu 24.04 ships 255)."
         fi
         if [[ -n "$BIND_PCRS" ]]; then
             setup_fail "--bind-pcrs needs the encrypted credential, which this host cannot make (systemd ${TN_CRED_MIN_SYSTEMD} or later)."
@@ -572,14 +651,20 @@ _setup_tag_example() {
 }
 
 # _setup_image_example -- an image by digest of NETWORK's form, for messages: on
-# devnet its repository with a <digest> placeholder (devnet images are pinned by
-# digest and none is a default here), elsewhere DEFAULT_DOCKER_IMAGE.
+# devnet and mainnet the network's repository with a <digest> placeholder (devnet
+# images are pinned by digest and none is a default here; on mainnet the default
+# image is a testnet one, which a mainnet message must not suggest), elsewhere
+# DEFAULT_DOCKER_IMAGE.
 _setup_image_example() {
-    if [[ "$NETWORK" == "devnet" ]]; then
-        printf '%s@sha256:<digest>' "$TN_DEVNET_IMAGE_REPO"
-    else
-        printf '%s' "$DEFAULT_DOCKER_IMAGE"
-    fi
+    local repo
+    case "$NETWORK" in
+        devnet) printf '%s@sha256:<digest>' "$TN_DEVNET_IMAGE_REPO" ;;
+        mainnet)
+            repo="$(tn_docker_repo_for mainnet 2>/dev/null)" || repo="<repository>"
+            printf '%s@sha256:<digest>' "$repo"
+            ;;
+        *) printf '%s' "$DEFAULT_DOCKER_IMAGE" ;;
+    esac
 }
 
 # _setup_install_staged STAGED TAG -- install the staged node binary (tn_stage_binary)
@@ -898,12 +983,22 @@ print(json.dumps(d, indent=2))
 }
 
 # Docker installs: the engine from Docker's apt repository (fingerprint-pinned key),
-# live-restore on, and the node's image by digest: <repository>@sha256:<digest> in the
-# network's repositories (tn_docker_repo_ok). --docker-image takes a digest reference;
+# live-restore on, and the node's image by digest: <repository>@sha256:<digest> in a
+# repository a new pull for the network takes (tn_docker_pull_repo_ok; never the old
+# single ghcr.io package, which holds no release). --docker-image takes a digest reference;
 # --release-tag takes the release's image digest (tn_docker_image_for_tag: from the
 # signed release, else on testnet from the registry); without either, the newest
 # release image by digest (latest_docker_image). Never a tag, never latest. Devnet
 # has no signed releases: there --docker-image is required and --release-tag refused.
+# _setup_mainnet_digest_ok IMAGE -- rc 0 unless NETWORK is mainnet and IMAGE is a
+# digest reference that tn_docker_resolve_ref refuses (a digest no mainnet release
+# this node installed names; the reason goes to stderr). A release tag, and every
+# image on another network, is rc 0 here: the callers resolve those themselves.
+_setup_mainnet_digest_ok() {
+    [[ "$NETWORK" == "mainnet" && "${1:-}" == *@sha256:* ]] || return 0
+    tn_docker_resolve_ref "$NETWORK" "$1" >/dev/null
+}
+
 _preflight_docker() {
     print_step "Setting up Docker..."
 
@@ -940,6 +1035,11 @@ _preflight_docker() {
     echo ""
 
     if [[ -n "$DOCKER_IMAGE" ]]; then
+        # On mainnet a digest alone is taken only for a mainnet release this node
+        # has installed (tn_docker_resolve_ref): the image comes from the signed
+        # release, so a digest no mainnet release names never runs here.
+        _setup_mainnet_digest_ok "$DOCKER_IMAGE" \
+            || setup_fail "Image refused (see above): on mainnet give the release tag with --release-tag, so the image comes from the signed release. Nothing on this host was changed."
         # By digest alone: the release that digest belongs to (.node-meta's record,
         # else the registry's release tags), if found, is held to the oldest
         # supported release; otherwise that check only warns.
@@ -957,8 +1057,14 @@ _preflight_docker() {
         local default_image typed=""
         default_image="$(latest_docker_image "$NETWORK")" || default_image=""
         while true; do
-            read -r -p "  Docker image: a release tag, ${repo}@sha256:<digest>, or Enter for
-  [${default_image:-none}]: " input
+            # At the end of input there is nothing more to ask: stop, rather than
+            # take the default no one confirmed or ask again for ever. A last line
+            # without a newline still counts (read fails but fills input).
+            if ! read -r -p "  Docker image: a release tag, ${repo}@sha256:<digest>, or Enter for
+  [${default_image:-none}]: " input && [[ -z "$input" ]]; then
+                echo ""
+                setup_fail "The input ended at the Docker image prompt, so no usable image was given and the Docker install stops. Nothing was pulled and no container was started."
+            fi
             tag=""
             if [[ -z "$input" ]]; then
                 DOCKER_IMAGE="$default_image"
@@ -969,7 +1075,11 @@ _preflight_docker() {
                 DOCKER_IMAGE="$input"
                 typed="$input"
             fi
-            [[ -n "$DOCKER_IMAGE" ]] && validate_docker_image "$DOCKER_IMAGE" "$NETWORK" && break
+            # A typed digest meets the mainnet rule; an image resolved from a release
+            # tag, or the newest release's, already comes from a signed release.
+            [[ -n "$DOCKER_IMAGE" ]] && validate_docker_image "$DOCKER_IMAGE" "$NETWORK" \
+                && tn_docker_pull_repo_ok "$NETWORK" "${DOCKER_IMAGE%%@*}" \
+                && { [[ -z "$typed" ]] || _setup_mainnet_digest_ok "$DOCKER_IMAGE"; } && break
             typed=""
             print_warn "Not usable: ${input:-${default_image:-(none)}}. Give a ${NETWORK} release tag such as $(_setup_tag_example), or the image by digest, such as $(_setup_image_example)."
         done
@@ -979,7 +1089,8 @@ _preflight_docker() {
             check_release_floor "$typed"
         fi
     fi
-    if ! validate_docker_image "$DOCKER_IMAGE" "$NETWORK"; then
+    if ! validate_docker_image "$DOCKER_IMAGE" "$NETWORK" \
+        || ! tn_docker_pull_repo_ok "$NETWORK" "${DOCKER_IMAGE%%@*}"; then
         setup_fail "Refusing the image ${DOCKER_IMAGE}: setup runs only ${repo}@sha256:<digest>."
     fi
     # The release tag goes into .node-meta beside the digest, so update-node.sh
@@ -1000,6 +1111,11 @@ _preflight_docker() {
         setup_fail "Docker does not hold ${DOCKER_IMAGE} under that digest after the pull (digest mismatch); the image was not used."
     fi
     print_ok "Docker image pulled: ${DOCKER_IMAGE}"
+    # The image's binary must be built for this network (its Build Features line)
+    # before any container of it starts or .node-meta names it.
+    if ! tn_docker_image_network_ok "$NETWORK" "$DOCKER_IMAGE" setup_progress; then
+        setup_fail "Refusing the image ${DOCKER_IMAGE}: it is not a ${NETWORK} image (see above). No container was started and .node-meta was not written."
+    fi
 
     BINARY_PATH="docker"
 }
@@ -1178,8 +1294,10 @@ prompt_public_rpc() {
 
     echo ""
     print_info "Public RPC needs a DNS name for THIS node. Use the node's own public name"
+    # network-gated: example hostname in a prompt shown on every network; the operator types their own
     print_info "for the RPC endpoint, e.g. node7.adiri.telcoin.network."
     print_info "The Node Manager dashboard, if you enable it later, needs a DIFFERENT hostname:"
+    # network-gated: example hostname in a prompt shown on every network
     print_info "dashboard.<your-node-domain> (e.g. dashboard.node7.adiri.telcoin.network) --"
     print_info "one name cannot serve both."
     print_info "Before setup finishes, point the name's DNS A record at this server's INBOUND"
@@ -1197,6 +1315,7 @@ prompt_public_rpc() {
             return 0
         fi
         validate_rpc_domain "$input" && break
+        # network-gated: example hostname in a message shown on every network
         print_warn "Not a bare hostname: ${input}. Enter just the name, e.g. node7.adiri.telcoin.network (no https://, no path, no IP address)."
     done
     PUBLIC_RPC_DOMAIN="$input"
@@ -1259,6 +1378,7 @@ init_public_rpc_flags() {
             err="--no-public-rpc conflicts with --rpc-domain / --rpc-public -- pick one."
         fi
     elif [[ -n "$PUBLIC_RPC_DOMAIN" ]] && ! validate_rpc_domain "$PUBLIC_RPC_DOMAIN"; then
+        # network-gated: example hostname in a message shown on every network
         err="invalid --rpc-domain ${PUBLIC_RPC_DOMAIN} -- give a bare hostname such as node7.adiri.telcoin.network (no https://, no path, no IP address)."
     elif [[ "$RPC_DOMAIN_GIVEN" == "true" && -z "$PUBLIC_RPC_DOMAIN" ]]; then
         RPC_PRIVATE_NOTE="no public RPC domain given (--rpc-domain was empty)"
@@ -1279,6 +1399,7 @@ init_public_rpc_flags() {
         esac
         [[ -n "$url" ]] || continue
         if ! validate_rpc_url "$url" "$kind"; then
+            # network-gated: example hostname in a message shown on every network
             setup_fail "invalid ${flag} ${url} -- give a ${kind}:// or ${kind}s:// URL with a host name or IP address, such as ${kind}s://node7.adiri.telcoin.network/ (no spaces, quotes or user@ part)."
         fi
         if rpc_url_is_private "$url"; then
@@ -1352,10 +1473,34 @@ init_install_flags() {
 # release knows each flag, and whether it accepts the peers map, is asked later by
 # prepare_node_extra_flags, once the binary or image is known. Warnings wait in
 # NODE_FLAG_WARNINGS: --json prints them here, interactive setup after the welcome screen.
+# --admission takes open, grace or closed (or the node's own Open, Grace, Closed), kept
+# in lower case; --trusted-nodes names a file as --bootstrap-peers does and comes with
+# --admission, except where the run can take a recorded mode (admission_read_back): a
+# --json finalize takes keygen's, an interactive run an earlier install's, and the pair
+# is checked after that read-back. A --release-tag known here is held to
+# MIN_ADMISSION_VERSION in this preflight, before a build or a download;
+# prepare_node_extra_flags asks again about the release the run installs.
 init_node_extra_flags() {
-    local msg=""
+    local msg="" rc=0
     if [[ -n "$BOOTSTRAP_PEERS_SRC" ]]; then
         msg="$(peers_file_ok "$BOOTSTRAP_PEERS_SRC")" || setup_fail "--bootstrap-peers: ${msg}."
+    fi
+    case "$ADMISSION_MODE" in
+        "") ;;
+        open|Open) ADMISSION_MODE=open ;;
+        grace|Grace) ADMISSION_MODE=grace ;;
+        closed|Closed) ADMISSION_MODE=closed ;;
+        *) setup_fail "--admission takes open, grace or closed, not ${ADMISSION_MODE}." ;;
+    esac
+    if [[ -n "$ADMISSION_MODE" && -n "$RELEASE_TAG" ]]; then
+        tn_node_supports_admission "$RELEASE_TAG" || rc=$?
+        [[ $rc -ne 1 ]] || admission_release_refused "$RELEASE_TAG"
+    fi
+    if [[ -n "$TRUSTED_NODES_SRC" ]]; then
+        msg="$(trusted_nodes_file_ok "$TRUSTED_NODES_SRC")" || setup_fail "--trusted-nodes: ${msg}."
+        if [[ -z "$ADMISSION_MODE" ]] && json_mode && [[ "$JSON_PHASE" != "finalize" ]]; then
+            setup_fail "--trusted-nodes needs --admission open, grace or closed: the trusted nodes go into network-config together with the admission mode."
+        fi
     fi
     if [[ -n "$STATE_EXPORT_KEEP" ]]; then
         if [[ ! "$STATE_EXPORT_KEEP" =~ ^[1-9][0-9]{0,5}$ ]]; then
@@ -1392,7 +1537,22 @@ node_flag_warnings() {
 # on the command line of the node binary, where other local users can see it. Otherwise
 # 1, with the reason on stdout.
 peers_file_ok() {
-    local f="$1" size="" mode=""
+    _setup_map_file_ok "$1" peers "the installed copy is world-readable (0644) and the check passes the map on the command line of the node binary, where other users can see it"
+}
+
+# 0 when FILE can hold a trusted nodes map, by the rules of a peers map: the map never
+# reaches a command line, but it does not stay private either (the installed copy is
+# 0644, so the service user can read it), and a list of hubs never comes near 64 KiB.
+# Otherwise 1, with the reason on stdout.
+trusted_nodes_file_ok() {
+    _setup_map_file_ok "$1" "trusted nodes" "the installed copy is world-readable (0644)"
+}
+
+# _setup_map_file_ok FILE KIND WHY -- the checks of peers_file_ok and
+# trusted_nodes_file_ok. KIND names the map in the refusals ("a KIND file", "a KIND
+# map"); WHY ends the refusal of a file that other users cannot read.
+_setup_map_file_ok() {
+    local f="$1" kind="$2" why="$3" size="" mode=""
     if [[ ! -e "$f" ]]; then
         printf '%s does not exist' "$f"
         return 1
@@ -1415,7 +1575,7 @@ peers_file_ok() {
         return 1
     fi
     if (( (8#$mode & 8#044) != 8#044 )); then
-        printf '%s is mode %s: other users cannot read it. Setup accepts only a peers file that others can already read, because the installed copy is world-readable (0644) and the check passes the map on the command line of the node binary, where other users can see it. Run chmod 644 %s first' "$f" "$mode" "$f"
+        printf '%s is mode %s: other users cannot read it. Setup accepts only a %s file that others can already read, because %s. Run chmod 644 %s first' "$f" "$mode" "$kind" "$why" "$f"
         return 1
     fi
     size="$(wc -c < "$f" 2>/dev/null)" || size=""
@@ -1425,7 +1585,7 @@ peers_file_ok() {
         return 1
     fi
     if [[ "$size" -gt 65536 ]]; then
-        printf '%s is %s bytes; a peers map may have at most 65536 (64 KiB)' "$f" "$size"
+        printf '%s is %s bytes; a %s map may have at most 65536 (64 KiB)' "$f" "$size" "$kind"
         return 1
     fi
     return 0
@@ -1436,14 +1596,8 @@ peers_file_ok() {
 # or absent: none) and STATE_EXPORT is off, unlimited or N (absent: off). A recorded value
 # that no longer holds stops the run before anything is written.
 finalize_node_extra_flags() {
-    local meta="${CONFIG_DIR}/.node-meta" v msg=""
-    if [[ -z "$BOOTSTRAP_PEERS_SRC" ]]; then
-        setup_meta_read v BOOTSTRAP_PEERS_FILE "$meta"
-        if [[ -n "$v" ]]; then
-            msg="$(peers_file_ok "$v")" || setup_fail "BOOTSTRAP_PEERS_FILE in ${meta}: ${msg}. Put the file back, or pass --bootstrap-peers FILE."
-            BOOTSTRAP_PEERS_SRC="$v"
-        fi
-    fi
+    local meta="${CONFIG_DIR}/.node-meta" v
+    peers_read_back
     if [[ -z "$STATE_EXPORT" ]]; then
         setup_meta_read v STATE_EXPORT "$meta"
         case "$v" in
@@ -1455,6 +1609,54 @@ finalize_node_extra_flags() {
                 ;;
         esac
         STATE_EXPORT="${v:-off}"
+    fi
+    admission_read_back
+    return 0
+}
+
+# --bootstrap-peers left out: BOOTSTRAP_PEERS_SRC from BOOTSTRAP_PEERS_FILE in .node-meta,
+# the installed peers map (empty or absent: none). A recorded map that no longer holds
+# stops the run before anything is written.
+peers_read_back() {
+    local meta="${CONFIG_DIR}/.node-meta" v msg=""
+    [[ -z "$BOOTSTRAP_PEERS_SRC" ]] || return 0
+    setup_meta_read v BOOTSTRAP_PEERS_FILE "$meta"
+    if [[ -n "$v" ]]; then
+        msg="$(peers_file_ok "$v")" || setup_fail "BOOTSTRAP_PEERS_FILE in ${meta}: ${msg}. Put the file back, or pass --bootstrap-peers FILE."
+        BOOTSTRAP_PEERS_SRC="$v"
+    fi
+    return 0
+}
+
+# The admission flags a run leaves out come from .node-meta: ADMISSION_MODE (open,
+# grace or closed; empty or absent: none) and TRUSTED_NODES_FILE (the installed trusted
+# nodes map; empty or absent: none). A --json finalize reads what keygen recorded
+# (finalize_node_extra_flags); an interactive run reads what an earlier install wrote
+# into network-config (prepare_node_extra_flags), so a re-run never drops it without a
+# word. With a mode, the bootstrap peers map is read back too (peers_read_back; a
+# finalize has done so already): committee_peers comes from it, so a re-run that keeps
+# the mode keeps the committee peers it was written with. A recorded value that no
+# longer holds, or a trusted nodes map with no mode, stops the run before anything is
+# written.
+admission_read_back() {
+    local meta="${CONFIG_DIR}/.node-meta" v msg=""
+    if [[ -z "$ADMISSION_MODE" ]]; then
+        setup_meta_read v ADMISSION_MODE "$meta"
+        case "$v" in
+            ""|open|grace|closed) ADMISSION_MODE="$v" ;;
+            *) setup_fail "ADMISSION_MODE=${v} in ${meta} is not open, grace or closed. Fix the line, or pass --admission." ;;
+        esac
+    fi
+    [[ -z "$ADMISSION_MODE" ]] || peers_read_back
+    if [[ -z "$TRUSTED_NODES_SRC" ]]; then
+        setup_meta_read v TRUSTED_NODES_FILE "$meta"
+        if [[ -n "$v" ]]; then
+            msg="$(trusted_nodes_file_ok "$v")" || setup_fail "TRUSTED_NODES_FILE in ${meta}: ${msg}. Put the file back, or pass --trusted-nodes FILE."
+            TRUSTED_NODES_SRC="$v"
+        fi
+    fi
+    if [[ -n "$TRUSTED_NODES_SRC" && -z "$ADMISSION_MODE" ]]; then
+        setup_fail "A trusted nodes map (${TRUSTED_NODES_SRC}) but no admission mode: pass --admission open, grace or closed."
     fi
     return 0
 }
@@ -1803,7 +2005,7 @@ init_node_inputs() {
     case "$PASSPHRASE_METHOD" in
         ""|credential|stdin) ;;
         loadcredential) PASSPHRASE_METHOD=stdin ;;
-        tpm) setup_fail "--passphrase-method tpm is no longer offered: the passphrase is kept as an encrypted systemd credential (credential) or, below systemd ${TN_CRED_MIN_SYSTEMD} on testnet, in a root-only file (stdin)." ;;
+        tpm) setup_fail "--passphrase-method tpm is no longer offered: the passphrase is kept as an encrypted systemd credential (credential) or, below systemd ${TN_CRED_MIN_SYSTEMD} on testnet and devnet, in a root-only file (stdin)." ;;
         *) setup_fail "unknown --passphrase-method ${PASSPHRASE_METHOD} (expected credential or stdin)" ;;
     esac
     if [[ -n "$BIND_PCRS" ]] && ! tn_pcrs_ok "$BIND_PCRS"; then
@@ -2222,31 +2424,49 @@ _setup_copied_configs_ok() {
 # as text: the host reads the file at each start, never during setup. Runs from
 # step_create_infrastructure, so keygen stops before it makes keys, and again before the
 # start wrapper is written (a --json finalize is a new process); a second run in one
-# process, for the same release, does nothing.
+# process, for the same release, does nothing. The admission settings go the same way:
+# an interactive run first reads back the ones it was not given (admission_read_back),
+# the release must read them (require_admission_release), the trusted nodes map is
+# installed root-owned 0644 as CONFIG_DIR/trusted-nodes.yaml, and .node-meta records
+# ADMISSION_MODE and TRUSTED_NODES_FILE; setup_admission_config writes them into
+# network-config. Mainnet validators are expected to run --admission closed
+# --trusted-nodes <hubs>, so closed without a trusted nodes map on mainnet warns.
 prepare_node_extra_flags() {
     local spec flags="" peers="${CONFIG_DIR}/bootstrap-peers.yaml" path_re='^/[A-Za-z0-9._/+-]+$' w
+    local trusted="${CONFIG_DIR}/trusted-nodes.yaml"
     spec="$(node_runner_spec)"
     if [[ "$NODE_EXTRA_FLAGS_SPEC" == "$spec" ]]; then
         return 0
     fi
     node_flag_warnings
+    json_mode || admission_read_back
+    if [[ -n "$ADMISSION_MODE" ]]; then
+        require_admission_release
+    fi
+    if [[ "$NETWORK" == "mainnet" && "$ADMISSION_MODE" == "closed" && -z "$TRUSTED_NODES_SRC" ]]; then
+        setup_warn "Admission closed without --trusted-nodes: the node admits only the previous, current and next committees and the bootstrap peers. Mainnet validators are expected to run --admission closed --trusted-nodes <hubs>."
+    fi
     if [[ -n "$BOOTSTRAP_PEERS_SRC" ]]; then
         # The path lands in the wrapper unquoted, inside "$(cat ...)". Only a config
         # directory chosen at the prompt can fail this; the default always passes.
         if [[ ! "$peers" =~ $path_re ]]; then
             setup_fail "The custom config directory ${CONFIG_DIR} cannot be used with --bootstrap-peers: the start wrapper reads the peers file through this path unquoted, so it may hold only letters, digits and . _ / + -. Choose another config directory, or leave --bootstrap-peers out."
         fi
+        # network-gated: first release with the flag, named in the testnet tag form for the refusal; require_node_flag asks the release
         require_node_flag "$spec" --bootstrap-peers v0.15.0-adiri
         flags="--bootstrap-peers \"\$(cat ${peers})\""
     fi
     case "${STATE_EXPORT:-off}" in
         off) ;;
         unlimited)
+            # network-gated: first release with the flag, named in the testnet tag form for the refusal; require_node_flag asks the release
             require_node_flag "$spec" --enable-state-export v0.13.0-adiri
             flags="${flags:+${flags} }--enable-state-export"
             ;;
         *)
+            # network-gated: first release with the flag, named in the testnet tag form for the refusal; require_node_flag asks the release
             require_node_flag "$spec" --enable-state-export v0.13.0-adiri
+            # network-gated: first release with the flag, named in the testnet tag form for the refusal; require_node_flag asks the release
             require_node_flag "$spec" --state-export-keep v0.15.0-adiri
             flags="${flags:+${flags} }--enable-state-export --state-export-keep ${STATE_EXPORT}"
             ;;
@@ -2256,6 +2476,7 @@ prepare_node_extra_flags() {
     if [[ "${ENABLE_PUBLIC_RPC:-false}" == "true" ]]; then
         for w in $(public_rpc_limit_flags); do
             if [[ "$w" == --* ]]; then
+                # network-gated: first release with the flag, named in the testnet tag form for the refusal; require_node_flag asks the release
                 require_node_flag "$spec" "$w" v0.13.0-adiri
             fi
         done
@@ -2266,8 +2487,13 @@ prepare_node_extra_flags() {
         install_bootstrap_peers "$spec" "$BOOTSTRAP_PEERS_SRC" "$peers"
         BOOTSTRAP_PEERS_SRC="$peers"
     fi
+    if [[ -n "$TRUSTED_NODES_SRC" ]]; then
+        install_trusted_nodes "$TRUSTED_NODES_SRC" "$trusted"
+        TRUSTED_NODES_SRC="$trusted"
+    fi
     NODE_EXTRA_FLAGS="$flags"
-    write_node_meta "BOOTSTRAP_PEERS_FILE=${BOOTSTRAP_PEERS_SRC:+${peers}}" "STATE_EXPORT=${STATE_EXPORT:-off}"
+    write_node_meta "BOOTSTRAP_PEERS_FILE=${BOOTSTRAP_PEERS_SRC:+${peers}}" "STATE_EXPORT=${STATE_EXPORT:-off}" \
+        "ADMISSION_MODE=${ADMISSION_MODE}" "TRUSTED_NODES_FILE=${TRUSTED_NODES_SRC:+${trusted}}"
     if [[ -n "$flags" ]]; then
         print_ok "Node flags: ${flags}"
         if json_mode; then
@@ -2374,6 +2600,84 @@ install_bootstrap_peers() {
     return 0
 }
 
+# The release this run installs, as tn_node_supports_admission judges it: RELEASE_TAG
+# when the run knows it; for a Docker install the release that names the image
+# (tn_docker_release_tag_for), else the image itself; otherwise the first line of the
+# version marker beside the binary. Empty when none of them is known.
+node_release_version() {
+    local v=""
+    if [[ -n "${RELEASE_TAG:-}" ]]; then
+        printf '%s\n' "$RELEASE_TAG"
+    elif [[ "${INSTALL_METHOD:-}" == "docker" ]]; then
+        v="$(tn_docker_release_tag_for "$NETWORK" "${DOCKER_IMAGE:-}" 2>/dev/null)" || v=""
+        printf '%s\n' "${v:-${DOCKER_IMAGE:-}}"
+    elif [[ -f "${BINARY_PATH:-}.version" ]]; then
+        head -n 1 "${BINARY_PATH}.version" 2>/dev/null || true
+    fi
+    return 0
+}
+
+# Stop setup: the release VERSION this run installs is older than MIN_ADMISSION_VERSION.
+admission_release_refused() {
+    setup_fail "--admission needs node release ${MIN_ADMISSION_VERSION} or later, and this run installs ${1}, which ignores the admission settings of network-config. Pick a newer release, or leave --admission and --trusted-nodes out."
+}
+
+# Stop setup when the release this run installs is older than MIN_ADMISSION_VERSION
+# (tn_node_supports_admission): it ignores the admission settings of network-config, so
+# the host would look configured while the node admits as it always did. A release that
+# cannot be told (a digest no release names, a binary without a version marker, a build
+# of a branch) warns and goes on: that is not an older release.
+require_admission_release() {
+    local ver rc=0
+    ver="$(node_release_version)"
+    tn_node_supports_admission "$ver" || rc=$?
+    case "$rc" in
+        0) ;;
+        1) admission_release_refused "$ver" ;;
+        *) setup_warn "Could not tell whether $(node_release_label) is release ${MIN_ADMISSION_VERSION} or later, which --admission needs (an older release ignores the admission settings); writing them anyway." ;;
+    esac
+    return 0
+}
+
+# Install the trusted nodes map SRC as DEST, root-owned 0644, with tn_write_root_file
+# (a temp file beside DEST, then one rename), so the service user can read it when
+# setup_admission_config writes it into network-config. SRC is checked again just
+# before it is read. SRC that is DEST already (a re-run, or a finalize that read
+# keygen's record back) stays as it is.
+install_trusted_nodes() {
+    local src="$1" dest="$2" msg=""
+    msg="$(trusted_nodes_file_ok "$src")" || setup_fail "--trusted-nodes: ${msg}."
+    if [[ "$src" == "$dest" ]]; then
+        return 0
+    fi
+    if ! tn_write_root_file "$dest" 0644 < "$src"; then
+        setup_fail "Could not install ${dest} (see the message above)."
+    fi
+    print_ok "Trusted nodes map installed: ${dest}"
+    return 0
+}
+
+# Write the admission settings into the data dir's network-config
+# (tn_network_config_render, as the service user): the mode, the installed trusted
+# nodes map under trusted_nodes, and the installed bootstrap peers map under
+# committee_peers; a map this run does not use is left out of the file. Runs after
+# prepare_node_extra_flags, which checked the release and installed both maps. No
+# admission mode: nothing is written, and network-config keeps what it holds.
+setup_admission_config() {
+    local trusted=none committee=none rc=0
+    [[ -n "$ADMISSION_MODE" ]] || return 0
+    [[ -z "$TRUSTED_NODES_SRC" ]] || trusted="${CONFIG_DIR}/trusted-nodes.yaml"
+    [[ -z "$BOOTSTRAP_PEERS_SRC" ]] || committee="${CONFIG_DIR}/bootstrap-peers.yaml"
+    tn_network_config_render "$DATA_DIR" "$ADMISSION_MODE" "$trusted" "$committee" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        setup_fail "The admission settings were not written to ${DATA_DIR}/network-config (see the message above), so setup stops before the node is started."
+    fi
+    if json_mode; then
+        json_event log "admission: ${ADMISSION_MODE}, trusted nodes ${trusted}, committee peers ${committee}"
+    fi
+    return 0
+}
+
 # Make the start script's directory (/usr/local/libexec/telcoin) a root:root 0755
 # directory, creating it when absent, and refuse a script path that is a symlink or a
 # directory. Stops setup otherwise.
@@ -2433,6 +2737,9 @@ step_create_service() {
     fi
 
     prepare_node_extra_flags
+    # here rather than in step_write_config: a --json finalize runs that step before
+    # prepare_node_extra_flags has installed the maps the settings name
+    setup_admission_config
 
     # Where the node logs: the journal (default on mainnet) or the two files in the
     # root-owned log dir. Recorded in .node-meta below, so every later rewrite of the
@@ -2523,6 +2830,7 @@ step_create_service() {
         "ENABLE_VPN=${ENABLE_VPN:-false}" \
         "VPN_OVERLAY_IP=${VPN_OVERLAY_IP:-}" \
         "VPN_NODE_PUBKEY=${VPN_NODE_PUBKEY:-}" \
+        "ENABLE_ALERTS=${ENABLE_ALERTS:-false}" \
         "PUBLIC_RPC_URL=${PUBLIC_RPC_URL:-}" \
         "PUBLIC_WS_URL=${PUBLIC_WS_URL:-}" \
         "LOG_TARGET=${LOG_TARGET}" \
@@ -2722,6 +3030,98 @@ step_public_rpc() {
     return 0
 }
 
+# prompt_alerts -- interactive setup, every network: offer private alerts, a heartbeat
+# this host pushes to a monitor the operator owns (setup-alerts.sh). Yes records
+# ENABLE_ALERTS=pending, no records false; step_alerts asks for the URLs once the node
+# runs. Asks nothing under TN_ASSUME_YES, without setup-alerts.sh beside this script, or
+# when private alerts are already on.
+prompt_alerts() {
+    [[ "${TN_ASSUME_YES:-false}" == "true" ]] && return 0
+    [[ -f "${SCRIPT_DIR}/setup-alerts.sh" ]] || return 0
+    [[ "$ENABLE_ALERTS" == "true" ]] && return 0
+    print_header "Private alerts (optional)"
+    print_info "A timer on this host pushes a heartbeat to a monitor you own, through an Uptime Kuma push URL, a healthchecks.io ping URL or a JSON webhook."
+    print_info "Each heartbeat says up or down with the reason (node mode, block and epoch); a webhook also gets this host's label and the network. Nothing else is sent."
+    print_info "No port opens on this host, and the Telcoin Association is not involved."
+    print_info "Setup asks for the monitor URLs once the node is running."
+    if confirm "Set up private alerts once the node is running?"; then
+        ENABLE_ALERTS="pending"
+    else
+        ENABLE_ALERTS="false"
+    fi
+    return 0
+}
+
+# step_alerts -- interactive setup, after the add-ons: when prompt_alerts recorded pending
+# and the node runs, run setup-alerts.sh --enable, which asks for the URLs, sends a test
+# heartbeat and takes the update lock itself (setup has released it). A node that is not
+# running, or an enable that did not finish, leaves private alerts pending with the
+# command that finishes them. It never stops or restarts the node.
+step_alerts() {
+    local rc=0
+    json_mode && return 0
+    [[ "$ENABLE_ALERTS" == "pending" ]] || return 0
+    print_header "Private alerts"
+    if [[ ! -f "${SCRIPT_DIR}/setup-alerts.sh" ]]; then
+        print_warn "setup-alerts.sh is missing (${SCRIPT_DIR}/setup-alerts.sh), so private alerts stay pending. Restore it with update-scripts.sh, then run: sudo bash setup-alerts.sh"
+        return 0
+    fi
+    if ! systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+        print_warn "The node is not running yet, so private alerts stay pending. Once it runs: sudo bash setup-alerts.sh"
+        return 0
+    fi
+    bash "${SCRIPT_DIR}/setup-alerts.sh" --enable 3>&- || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        ENABLE_ALERTS="true"
+        print_ok "Private alerts are on."
+    else
+        print_warn "Private alerts were not set up (setup-alerts.sh exit ${rc}, see above); they stay pending. To finish: sudo bash setup-alerts.sh"
+    fi
+    return 0
+}
+
+# step_host_baseline -- --host-baseline: install auditd and aide, the node's audit
+# rules and its AIDE baseline (tn_host_baseline_install) under the update lock. It
+# runs after public RPC and the add-ons, which write into /etc/telcoin too, so the
+# baseline holds their files. A failure is a warning and setup goes on: the node is
+# already installed. Sets HOST_BASELINE_STATE.
+step_host_baseline() {
+    [[ "$HOST_BASELINE" == "true" ]] || return 0
+    print_header "Host baseline -- auditd watches and an AIDE baseline"
+    if json_mode; then
+        json_event step "Installing the host baseline (auditd and AIDE)"
+    fi
+    setup_take_lock
+    if tn_host_baseline_install setup_progress; then
+        HOST_BASELINE_STATE=installed
+        print_ok "Host baseline in place (HOST_BASELINE=true in .node-meta)."
+    else
+        HOST_BASELINE_STATE=failed
+        setup_warn "The host baseline was not made (see above); the node runs without it. Try again with: sudo ./setup-node.sh --host-baseline"
+    fi
+    setup_release_lock
+    return 0
+}
+
+# setup_host_baseline_only -- setup-node.sh --host-baseline on a host whose node is
+# already installed: make the host baseline (again) and change nothing else. rc of
+# tn_host_baseline_install.
+setup_host_baseline_only() {
+    local rc=0
+    check_root
+    print_header "Host baseline -- auditd watches and an AIDE baseline"
+    print_info "A node is installed here, so --host-baseline makes the host baseline and changes nothing else. To run the whole setup again, leave --host-baseline out."
+    setup_take_lock
+    tn_host_baseline_install setup_progress || rc=$?
+    setup_release_lock
+    if [[ $rc -eq 0 ]]; then
+        print_ok "Host baseline in place (HOST_BASELINE=true in .node-meta)."
+    else
+        print_error "The host baseline was not made (see above). Nothing else on this host was changed."
+    fi
+    return "$rc"
+}
+
 step_final_summary() {
     # The P2P ports node-info.yaml advertises (keytool wrote them at keygen, one per
     # worker), or the configured ports when the file cannot be read.
@@ -2750,6 +3150,12 @@ step_final_summary() {
         unlimited) node_flags+=("State export=every epoch, none deleted") ;;
         *) node_flags+=("State export=every epoch, newest ${STATE_EXPORT} kept") ;;
     esac
+    if [[ -n "$ADMISSION_MODE" ]]; then
+        node_flags+=("Admission=${ADMISSION_MODE}")
+    fi
+    if [[ -n "$TRUSTED_NODES_SRC" ]]; then
+        node_flags+=("Trusted nodes=${TRUSTED_NODES_SRC}")
+    fi
 
     print_summary "Node Setup Complete" \
         "Network=${NETWORK} (Chain ID: ${CHAIN_ID})" \
@@ -2794,6 +3200,17 @@ step_final_summary() {
         print_info "Keep inbound TCP 80 + 443 open to this server (cloud firewall too): Caddy"
         print_info "uses them to obtain and renew the TLS certificate."
     fi
+    # Private alerts, when they were asked for (prompt_alerts) or are already on.
+    case "${ENABLE_ALERTS:-false}" in
+        true)
+            echo ""
+            print_ok "Private alerts: on"
+            ;;
+        pending)
+            echo ""
+            print_warn "Private alerts: pending. To finish: sudo bash setup-alerts.sh"
+            ;;
+    esac
     echo ""
     echo "  Useful commands:"
     echo ""
@@ -2931,10 +3348,14 @@ json_on_exit() {
 
 json_set_network() {
     case "${1:-testnet}" in
-        testnet|adiri)
+        testnet|adiri)  # network-gated: adiri is read as testnet
             NETWORK="testnet"; CHAIN_ID="$TESTNET_CHAIN_ID"; CHAIN_NAME="$TESTNET_CHAIN_NAME"
             RPC_URL="${TESTNET_RPC_URL:-}"; EXPLORER_URL="${TESTNET_EXPLORER:-}" ;;
         mainnet)
+            # Refused while this release does not offer mainnet (tn_mainnet_enabled);
+            # run_json_mode calls this first, before anything touches the box.
+            tn_mainnet_enabled \
+                || setup_fail "Mainnet is not enabled in this script release (lib/common.sh TN_MAINNET_ENABLED); nothing on this host was changed."
             NETWORK="mainnet"; CHAIN_ID="$MAINNET_CHAIN_ID"; CHAIN_NAME="$MAINNET_CHAIN_NAME"
             RPC_URL="${MAINNET_RPC_URL:-}"; EXPLORER_URL="${MAINNET_EXPLORER:-}" ;;
         devnet)
@@ -2984,9 +3405,17 @@ finalize_same_as_keygen() {
 # binary come from its flags or, for any the flags leave out, from what keygen recorded
 # in .node-meta; a flag that differs from the recorded value stops it. --data-dir is
 # compared only when it is not the default, which is what an absent flag leaves.
-# Stops when the node would have nothing to run, before anything is written.
+# Stops when the node would have nothing to run, before anything is written. The
+# docker image meets the rules keygen's preflight applied before any container of
+# it starts: a repository a new pull for the network takes (tn_docker_pull_repo_ok)
+# and a binary built for the network (tn_docker_image_network_ok, on the image
+# keygen pulled; it never pulls). A --release-tag, or a --docker-image that names
+# another image than the recorded one, replaces it (finalize_docker_override), so a
+# recorded image that fails those rules can be corrected without a new keygen; the
+# refusals say which of the two flags does that on the network
+# (_finalize_image_way_out).
 finalize_install_inputs() {
-    local meta="${CONFIG_DIR}/.node-meta" rec=""
+    local meta="${CONFIG_DIR}/.node-meta" rec="" repo way
     # The passphrase form keygen recorded wins over a flag: the stored file is that one.
     local pm=""
     setup_meta_read pm PASSPHRASE_METHOD "$meta"
@@ -3016,13 +3445,31 @@ finalize_install_inputs() {
     esac
     if [[ "$INSTALL_METHOD" == "docker" ]]; then
         setup_meta_read rec DOCKER_IMAGE "$meta"
-        finalize_same_as_keygen docker-image "$DOCKER_IMAGE" "$rec"
-        DOCKER_IMAGE="${DOCKER_IMAGE:-$rec}"
+        repo="$(tn_docker_repo_for "$NETWORK")" \
+            || setup_fail "No ${NETWORK} image repository is set (see above), so a Docker install is refused on ${NETWORK}."
+        # --release-tag names the release whose image runs (never given together
+        # with --docker-image: json_check_install_flags refuses that).
+        if [[ -n "$RELEASE_TAG" ]]; then
+            finalize_docker_override "$rec" --release-tag "$RELEASE_TAG"
+            return 0
+        fi
+        if [[ -n "$DOCKER_IMAGE" && "$DOCKER_IMAGE" != "$rec" ]]; then
+            finalize_docker_override "$rec" --docker-image "$DOCKER_IMAGE"
+            return 0
+        fi
+        DOCKER_IMAGE="$rec"
         if [[ -z "$DOCKER_IMAGE" ]]; then
             setup_fail "No docker image to run: pass --docker-image, or run --phase=keygen first (it records the image in ${meta})."
         fi
         if ! validate_docker_image "$DOCKER_IMAGE"; then
             setup_fail "DOCKER_IMAGE=${DOCKER_IMAGE} in ${meta} is not an image reference such as $(_setup_image_example); pass --docker-image."
+        fi
+        way="$(_finalize_image_way_out "$repo")"
+        if ! tn_docker_pull_repo_ok "$NETWORK" "${DOCKER_IMAGE%%@*}"; then
+            setup_fail "Refusing the image ${DOCKER_IMAGE}: setup runs only ${repo}@sha256:<digest>. No container was started; to replace it, ${way}."
+        fi
+        if ! tn_docker_image_network_ok "$NETWORK" "$DOCKER_IMAGE" setup_progress; then
+            setup_fail "Refusing the image ${DOCKER_IMAGE}: it is not a ${NETWORK} image (see above). No container was started; to replace it, ${way}."
         fi
         return 0
     fi
@@ -3041,10 +3488,71 @@ finalize_install_inputs() {
     return 0
 }
 
+# _finalize_image_way_out REPO -- the advice that ends a finalize refusal of the
+# recorded image: the finalize flags that replace it on NETWORK. Mainnet takes a new
+# image by release tag only (a digest alone passes only for a release this node
+# recorded), devnet by digest only (it has no signed releases), testnet by either.
+_finalize_image_way_out() {
+    case "$NETWORK" in
+        mainnet) printf 'run finalize again with --release-tag <tag> (a mainnet release, such as %s)' "$(_setup_tag_example)" ;;
+        devnet) printf 'run finalize again with --docker-image %s@sha256:<digest> (a devnet image)' "$1" ;;
+        *) printf 'run finalize again with --docker-image %s@sha256:<digest> or --release-tag <tag> (a %s image or release)' "$1" "$NETWORK" ;;
+    esac
+}
+
+# finalize_docker_override RECORDED FLAG REF -- finalize's --release-tag REF (FLAG),
+# or its --docker-image REF naming another image than RECORDED (the one keygen wrote
+# to .node-meta), replaces RECORDED: REF goes through keygen's preflight
+# (tn_docker_resolve_ref: the pull rule, a release tag resolved to the digest its
+# signed release names, and on mainnet the digest rule; for a digest given alone
+# its release, as keygen looks it up; the oldest supported release; the pull by
+# digest and its digest check; the build-feature check), then the image is recorded
+# in .node-meta, so the config, the unit and the container use it: RELEASE_TAG
+# removed, DOCKER_IMAGE and DOCKER_IMAGE_DIGEST written, then RELEASE_TAG written
+# when a release names the image. A refusal at any step stops before .node-meta is
+# written.
+finalize_docker_override() {
+    local rec="${1:-}" flag="${2:-}" ref="${3:-}" meta="${CONFIG_DIR}/.node-meta" what out img tag
+    what="the image ${ref}"
+    [[ "$flag" != "--release-tag" ]] || what="the image of release ${ref}"
+    setup_progress step "Replacing the recorded image ${rec:-(none)} with ${what}"
+    out="$(tn_docker_resolve_ref "$NETWORK" "$ref" setup_progress)" \
+        || setup_fail "Refusing ${what} given with ${flag} (see above). No container was started and .node-meta was not changed."
+    img="${out%% *}"
+    tag="${out#* }"
+    # A digest given alone: the release it belongs to, looked up as keygen's
+    # preflight does (.node-meta's record, else the registry's release tags), so
+    # the oldest supported release holds for it and RELEASE_TAG names it.
+    if [[ -z "$tag" ]]; then
+        tag="$(tn_docker_release_tag_for "$NETWORK" "$img" 2>/dev/null)" || tag=""
+        [[ -z "$tag" ]] || setup_progress info "The registry names ${img} as the image of release ${tag}."
+    fi
+    check_release_floor "${tag:-$img}"
+    print_step "Pulling Docker image: ${img}..."
+    if ! docker pull "$img" 9>&-; then
+        setup_fail "Failed to pull Docker image: ${img}. No container was started and .node-meta was not changed."
+    fi
+    if ! tn_docker_holds_digest "$img"; then
+        setup_fail "Docker does not hold ${img} under that digest after the pull (digest mismatch); the image was not used and .node-meta was not changed."
+    fi
+    if ! tn_docker_image_network_ok "$NETWORK" "$img" setup_progress; then
+        setup_fail "Refusing the image ${img}: it is not a ${NETWORK} image (see above). No container was started and .node-meta was not changed."
+    fi
+    DOCKER_IMAGE="$img"
+    RELEASE_TAG="$tag"
+    # The old release goes first and the new one last: a run stopped between these
+    # writes leaves the new digest with no release (unknown), never with the
+    # release of the image it replaces.
+    meta_unset RELEASE_TAG "$meta" || setup_fail "Could not remove RELEASE_TAG from ${meta}."
+    write_node_meta "DOCKER_IMAGE=${img}" "DOCKER_IMAGE_DIGEST=${img##*@}"
+    [[ -z "$tag" ]] || write_node_meta "RELEASE_TAG=${tag}"
+    setup_progress info "Recorded ${img} in ${meta}; finalize runs it."
+    return 0
+}
+
 json_phase_finalize() {
-    local v
+    local v hb=false
     json_refuse_installed finalize
-    finalize_install_inputs
     # The node binds to these; an empty one would start a node with no listener.
     for v in "$PRIMARY_LISTENER_MULTIADDR" "$WORKER_LISTENER_MULTIADDR"; do
         if [[ -z "$v" ]] || ! validate_multiaddr "$v"; then
@@ -3052,6 +3560,10 @@ json_phase_finalize() {
         fi
     done
     finalize_node_extra_flags
+    # Last before the config: a finalize image override (finalize_docker_override)
+    # pulls and rewrites .node-meta, so every other input check refuses first and
+    # leaves .node-meta as keygen wrote it.
+    finalize_install_inputs
     json_event step "Writing configuration"
     step_write_config
     json_event step "Creating service and starting node"
@@ -3062,7 +3574,11 @@ json_phase_finalize() {
         json_event step "Enabling public RPC for ${PUBLIC_RPC_DOMAIN}"
         step_public_rpc
     fi
-    json_done "{\"event\":\"done\",\"ok\":true,\"phase\":\"finalize\",\"node_type\":\"observer\",\"service\":\"${SERVICE_NAME}\",\"rpc_port\":\"${RPC_PORT}\",\"operator_guide\":\"$(json_escape "$TN_OPERATOR_GUIDE_URL")\",\"public_rpc\":$(public_rpc_json),\"msg\":\"${SERVICE_NAME} finalized and started -- following consensus as a full node; staking to validate is optional (see docs)\"}"
+    step_host_baseline
+    if [[ "$HOST_BASELINE_STATE" == "installed" ]]; then
+        hb=true
+    fi
+    json_done "{\"event\":\"done\",\"ok\":true,\"phase\":\"finalize\",\"node_type\":\"observer\",\"service\":\"${SERVICE_NAME}\",\"rpc_port\":\"${RPC_PORT}\",\"operator_guide\":\"$(json_escape "$TN_OPERATOR_GUIDE_URL")\",\"public_rpc\":$(public_rpc_json),\"host_baseline\":${hb},\"msg\":\"${SERVICE_NAME} finalized and started -- following consensus as a full node; staking to validate is optional (see docs)\"}"
 }
 
 # The public RPC this run set up, as finalize's done event carries it: "enabled" is
@@ -3128,9 +3644,10 @@ json_check_install_flags() {
         if [[ -n "$RELEASE_TAG" ]]; then
             setup_fail "Give --docker-image or --release-tag, not both."
         fi
-        if ! validate_docker_image "$DOCKER_IMAGE" "$NETWORK"; then
+        if ! validate_docker_image "$DOCKER_IMAGE" "$NETWORK" \
+            || ! tn_docker_pull_repo_ok "$NETWORK" "${DOCKER_IMAGE%%@*}"; then
             if [[ "$NETWORK" == "devnet" ]]; then
-                setup_fail "invalid --docker-image ${DOCKER_IMAGE} -- give a devnet image by digest (<repository>@sha256:<digest>, the repository one of: ${TN_DEVNET_IMAGE_REPOS:-}), such as $(_setup_image_example)"
+                setup_fail "invalid --docker-image ${DOCKER_IMAGE} -- give a devnet image by digest (<repository>@sha256:<digest>, the repository one of: $(tn_docker_pull_repos_for devnet 2>/dev/null)), such as $(_setup_image_example)"
             fi
             setup_fail "invalid --docker-image ${DOCKER_IMAGE} -- give this network's image by digest (<repository>@sha256:<digest>), such as $(_setup_image_example), or its release tag with --release-tag"
         fi
@@ -3251,7 +3768,7 @@ main() {
                 fi
                 ;;
             # An empty value is a mistake here too, not a way of saying "none".
-            --bootstrap-peers|--state-export-keep)
+            --bootstrap-peers|--state-export-keep|--admission|--trusted-nodes)
                 if [[ $# -lt 2 || -z "$2" || "$2" == -* ]]; then
                     setup_fail "$1 requires a value"
                 fi
@@ -3310,15 +3827,20 @@ main() {
             --bootstrap-peers)     BOOTSTRAP_PEERS_SRC="${2:-}"; shift 2 ;;
             --enable-state-export) STATE_EXPORT_ENABLE=true; shift ;;
             --state-export-keep)   STATE_EXPORT_KEEP="${2:-}"; shift 2 ;;
+            # The node admission settings, checked by init_node_extra_flags too.
+            --admission)           ADMISSION_MODE="${2:-}"; shift 2 ;;
+            --trusted-nodes)       TRUSTED_NODES_SRC="${2:-}"; shift 2 ;;
             --passphrase-stdin)    PASSPHRASE_STDIN=true; shift ;;
             --log-target)          LOG_TARGET="${2:-}"; shift 2 ;;
             --allow-quorum-risk)   TN_ALLOW_QUORUM_RISK=1; shift ;;
             --allow-no-tpm)        ALLOW_NO_TPM=true; shift ;;
             --bind-pcrs)           BIND_PCRS="${2:-}"; shift 2 ;;
             --audit)               AUDIT_ONLY=true; shift ;;
+            --host-baseline)       HOST_BASELINE=true; shift ;;
             -h|--help)
-                # The header block only: everything up to its closing rule.
-                awk 'NR == 1 { next } /^# =+$/ { if (++rules == 2) exit; next } { sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
+                # The header block only: everything up to its closing rule, without
+                # the network-gated: marker lines (tools/check-network-hits.sh).
+                awk 'NR == 1 { next } /^# =+$/ { if (++rules == 2) exit; next } /^#[ \t]*network-gated:/ { next } { sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
                 if json_mode; then
                     json_done '{"event":"done","ok":true,"msg":"usage printed on stderr"}'
                 fi
@@ -3332,6 +3854,12 @@ main() {
     if [[ "$AUDIT_ONLY" == "true" ]]; then
         TN_SETUP_PASS=""
         tn_host_audit
+        exit $?
+    fi
+    # --host-baseline over an installed node: the baseline alone, nothing else.
+    if [[ "$HOST_BASELINE" == "true" ]] && ! json_mode && tn_resolve_service >/dev/null 2>&1; then
+        TN_SETUP_PASS=""
+        setup_host_baseline_only
         exit $?
     fi
     case "${LOG_TARGET:-}" in
@@ -3361,6 +3889,8 @@ main() {
     setup_release_lock
     step_public_rpc
     step_testnet_addons
+    step_alerts
+    step_host_baseline
     step_final_summary
 }
 

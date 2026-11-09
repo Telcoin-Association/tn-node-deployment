@@ -63,7 +63,7 @@ TN_TEST_TMP="$(mktemp -d "${_tn_test_tmpdir%/}/tn_test.XXXXXX")" || {
 #
 #   stat [-L] -c FORMAT ARGS   runs stat [-L] -f FORMAT ARGS with the GNU
 #       directives mapped to BSD ones: %a %Lp, %U %Su, %G %Sg, %s %z, %n %N,
-#       %h %l, %y %Sm (%u %g %i are the same). %Lp holds the permission bits
+#       %h %l, %y %Sm, %Y %m (%u %g %i are the same). %Lp holds the permission bits
 #       only: setuid, setgid and sticky are not shown. Any other call passes
 #       through unchanged.
 #   mv -T|-fT ... DEST         runs mv without T; refused (rc 1) when DEST is
@@ -96,7 +96,7 @@ if ! "$(type -P stat)" -c %u / >/dev/null 2>&1; then
                 ;;
         esac
         fmt="$(printf '%s' "$fmt" | sed -e 's/%a/%Lp/g' -e 's/%U/%Su/g' -e 's/%G/%Sg/g' \
-            -e 's/%s/%z/g' -e 's/%n/%N/g' -e 's/%h/%l/g' -e 's/%y/%Sm/g')"
+            -e 's/%s/%z/g' -e 's/%n/%N/g' -e 's/%h/%l/g' -e 's/%y/%Sm/g' -e 's/%Y/%m/g')"
         "$real" ${lflag:+"$lflag"} -f "$fmt" "$@"
     }
     export -f stat
@@ -177,9 +177,11 @@ check() {
 }
 
 # check_has <name> <line> <text> -- <text> contains <line> as a whole line.
+# A here-string, not a pipe: the sourced library sets pipefail, and a printf
+# into a grep -q that has already matched fails on the closed pipe.
 check_has() {
     CHECKS=$((CHECKS + 1))
-    if printf '%s\n' "$3" | grep -qxF -- "$2"; then
+    if grep -qxF -- "$2" <<< "$3"; then
         printf 'ok    %s\n' "$1"
         return 0
     fi
@@ -192,7 +194,7 @@ check_has() {
 # check_lacks <name> <string> <text> -- <string> appears nowhere in <text>.
 check_lacks() {
     CHECKS=$((CHECKS + 1))
-    if ! printf '%s\n' "$3" | grep -qF -- "$2"; then
+    if ! grep -qF -- "$2" <<< "$3"; then
         printf 'ok    %s\n' "$1"
         return 0
     fi

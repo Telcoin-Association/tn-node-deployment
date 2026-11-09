@@ -1,0 +1,835 @@
+== KEYS: docker: spec, every action x every probe/verify mode (user root)
+ok    change [verify:ok]: no passphrase in any argv, environment or /proc capture
+ok    change [verify:ok]: no passphrase in the output
+ok    change [verify:ok]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    change [verify:ok]: keytool verify ran with the passphrase on stdin
+ok    change [verify:ok]: verify success logged
+ok    change [verify:ok]: _tn_cred_switch called once
+ok    change [verify:ok]: _tn_cred_switch got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    change [verify:wrong]: no passphrase in any argv, environment or /proc capture
+ok    change [verify:wrong]: no passphrase in the output
+ok    change [verify:wrong]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    change [verify:wrong]: keytool verify ran with the passphrase on stdin
+ok    change [verify:wrong]: refusal names the mismatch
+ok    change [verify:wrong]: credential, plaintext, unit, .node-meta, launch file unchanged (bytes, inode, mtime)
+ok    change [verify:wrong]: no writer and no downstream call
+ok    change [verify:wrong]: no write tool ran
+ok    change [verify:wrong]: no restart or stop
+ok    change [verify:wrong]: says the passphrase is unchanged
+ok    change [verify:runfail]: no passphrase in any argv, environment or /proc capture
+ok    change [verify:runfail]: no passphrase in the output
+ok    change [verify:runfail]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    change [verify:runfail]: keytool verify ran with the passphrase on stdin
+ok    change [verify:runfail]: refusal says verify could not run
+ok    change [verify:runfail]: credential, plaintext, unit, .node-meta, launch file unchanged (bytes, inode, mtime)
+ok    change [verify:runfail]: no writer and no downstream call
+ok    change [verify:runfail]: no write tool ran
+ok    change [verify:runfail]: no restart or stop
+ok    change [verify:runfail]: says the passphrase is unchanged
+ok    change [verify:runecho]: no passphrase in any argv, environment or /proc capture
+ok    change [verify:runecho]: no passphrase in the output
+ok    change [verify:runecho]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    change [verify:runecho]: keytool verify ran with the passphrase on stdin
+ok    change [verify:runecho]: refusal says verify could not run
+ok    change [verify:runecho]: credential, plaintext, unit, .node-meta, launch file unchanged (bytes, inode, mtime)
+ok    change [verify:runecho]: no writer and no downstream call
+ok    change [verify:runecho]: no write tool ran
+ok    change [verify:runecho]: no restart or stop
+ok    change [verify:runecho]: says the passphrase is unchanged
+ok    change [noverify:-]: no passphrase in any argv, environment or /proc capture
+ok    change [noverify:-]: no passphrase in the output
+ok    change [noverify:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    change [noverify:-]: keytool verify not run
+ok    change [noverify:-]: skip log line
+ok    change [noverify:-]: _tn_cred_switch called once
+ok    change [noverify:-]: _tn_cred_switch got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    change [exit4:-]: no passphrase in any argv, environment or /proc capture
+ok    change [exit4:-]: no passphrase in the output
+ok    change [exit4:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    change [exit4:-]: keytool verify not run
+ok    change [exit4:-]: probe failure warned
+ok    change [exit4:-]: _tn_cred_switch called once
+ok    change [exit4:-]: _tn_cred_switch got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    change [nostart:-]: no passphrase in any argv, environment or /proc capture
+ok    change [nostart:-]: no passphrase in the output
+ok    change [nostart:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    change [nostart:-]: keytool verify not run
+ok    change [nostart:-]: probe failure warned
+ok    change [nostart:-]: _tn_cred_switch called once
+ok    change [nostart:-]: _tn_cred_switch got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    change [notfound:-]: no passphrase in any argv, environment or /proc capture
+ok    change [notfound:-]: no passphrase in the output
+ok    change [notfound:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    change [notfound:-]: keytool verify not run
+ok    change [notfound:-]: probe failure warned
+ok    change [notfound:-]: _tn_cred_switch called once
+ok    change [notfound:-]: _tn_cred_switch got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    reseal (decrypted value) [verify:ok]: no passphrase in any argv, environment or /proc capture
+ok    reseal (decrypted value) [verify:ok]: no passphrase in the output
+ok    reseal (decrypted value) [verify:ok]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    reseal (decrypted value) [verify:ok]: keytool verify ran with the passphrase on stdin
+ok    reseal (decrypted value) [verify:ok]: verify success logged
+ok    reseal (decrypted value) [verify:ok]: _tn_cred_switch called once
+ok    reseal (decrypted value) [verify:ok]: _tn_cred_switch got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    reseal (decrypted value) [verify:wrong]: no passphrase in any argv, environment or /proc capture
+ok    reseal (decrypted value) [verify:wrong]: no passphrase in the output
+ok    reseal (decrypted value) [verify:wrong]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    reseal (decrypted value) [verify:wrong]: keytool verify ran with the passphrase on stdin
+ok    reseal (decrypted value) [verify:wrong]: refusal names the mismatch
+ok    reseal (decrypted value) [verify:wrong]: credential, plaintext, unit, .node-meta, launch file unchanged (bytes, inode, mtime)
+ok    reseal (decrypted value) [verify:wrong]: no writer and no downstream call
+ok    reseal (decrypted value) [verify:wrong]: no write tool ran
+ok    reseal (decrypted value) [verify:wrong]: no restart or stop
+ok    reseal (decrypted value) [verify:wrong]: rc 1
+ok    reseal (decrypted value) [verify:runfail]: no passphrase in any argv, environment or /proc capture
+ok    reseal (decrypted value) [verify:runfail]: no passphrase in the output
+ok    reseal (decrypted value) [verify:runfail]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    reseal (decrypted value) [verify:runfail]: keytool verify ran with the passphrase on stdin
+ok    reseal (decrypted value) [verify:runfail]: refusal says verify could not run
+ok    reseal (decrypted value) [verify:runfail]: credential, plaintext, unit, .node-meta, launch file unchanged (bytes, inode, mtime)
+ok    reseal (decrypted value) [verify:runfail]: no writer and no downstream call
+ok    reseal (decrypted value) [verify:runfail]: no write tool ran
+ok    reseal (decrypted value) [verify:runfail]: no restart or stop
+ok    reseal (decrypted value) [verify:runfail]: rc 1
+ok    reseal (decrypted value) [verify:runecho]: no passphrase in any argv, environment or /proc capture
+ok    reseal (decrypted value) [verify:runecho]: no passphrase in the output
+ok    reseal (decrypted value) [verify:runecho]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    reseal (decrypted value) [verify:runecho]: keytool verify ran with the passphrase on stdin
+ok    reseal (decrypted value) [verify:runecho]: refusal says verify could not run
+ok    reseal (decrypted value) [verify:runecho]: credential, plaintext, unit, .node-meta, launch file unchanged (bytes, inode, mtime)
+ok    reseal (decrypted value) [verify:runecho]: no writer and no downstream call
+ok    reseal (decrypted value) [verify:runecho]: no write tool ran
+ok    reseal (decrypted value) [verify:runecho]: no restart or stop
+ok    reseal (decrypted value) [verify:runecho]: rc 1
+ok    reseal (decrypted value) [noverify:-]: no passphrase in any argv, environment or /proc capture
+ok    reseal (decrypted value) [noverify:-]: no passphrase in the output
+ok    reseal (decrypted value) [noverify:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    reseal (decrypted value) [noverify:-]: keytool verify not run
+ok    reseal (decrypted value) [noverify:-]: skip log line
+ok    reseal (decrypted value) [noverify:-]: _tn_cred_switch called once
+ok    reseal (decrypted value) [noverify:-]: _tn_cred_switch got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    reseal (decrypted value) [exit4:-]: no passphrase in any argv, environment or /proc capture
+ok    reseal (decrypted value) [exit4:-]: no passphrase in the output
+ok    reseal (decrypted value) [exit4:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    reseal (decrypted value) [exit4:-]: keytool verify not run
+ok    reseal (decrypted value) [exit4:-]: probe failure warned
+ok    reseal (decrypted value) [exit4:-]: _tn_cred_switch called once
+ok    reseal (decrypted value) [exit4:-]: _tn_cred_switch got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    reseal (decrypted value) [nostart:-]: no passphrase in any argv, environment or /proc capture
+ok    reseal (decrypted value) [nostart:-]: no passphrase in the output
+ok    reseal (decrypted value) [nostart:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    reseal (decrypted value) [nostart:-]: keytool verify not run
+ok    reseal (decrypted value) [nostart:-]: probe failure warned
+ok    reseal (decrypted value) [nostart:-]: _tn_cred_switch called once
+ok    reseal (decrypted value) [nostart:-]: _tn_cred_switch got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    reseal (decrypted value) [notfound:-]: no passphrase in any argv, environment or /proc capture
+ok    reseal (decrypted value) [notfound:-]: no passphrase in the output
+ok    reseal (decrypted value) [notfound:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    reseal (decrypted value) [notfound:-]: keytool verify not run
+ok    reseal (decrypted value) [notfound:-]: probe failure warned
+ok    reseal (decrypted value) [notfound:-]: _tn_cred_switch called once
+ok    reseal (decrypted value) [notfound:-]: _tn_cred_switch got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    reseal (typed, cred does not decrypt) [verify:ok]: no passphrase in any argv, environment or /proc capture
+ok    reseal (typed, cred does not decrypt) [verify:ok]: no passphrase in the output
+ok    reseal (typed, cred does not decrypt) [verify:ok]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    reseal (typed, cred does not decrypt) [verify:ok]: keytool verify ran with the passphrase on stdin
+ok    reseal (typed, cred does not decrypt) [verify:ok]: verify success logged
+ok    reseal (typed, cred does not decrypt) [verify:ok]: _tn_cred_switch called once
+ok    reseal (typed, cred does not decrypt) [verify:ok]: _tn_cred_switch got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    reseal (typed, cred does not decrypt) [verify:wrong]: no passphrase in any argv, environment or /proc capture
+ok    reseal (typed, cred does not decrypt) [verify:wrong]: no passphrase in the output
+ok    reseal (typed, cred does not decrypt) [verify:wrong]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    reseal (typed, cred does not decrypt) [verify:wrong]: keytool verify ran with the passphrase on stdin
+ok    reseal (typed, cred does not decrypt) [verify:wrong]: refusal names the mismatch
+ok    reseal (typed, cred does not decrypt) [verify:wrong]: credential, plaintext, unit, .node-meta, launch file unchanged (bytes, inode, mtime)
+ok    reseal (typed, cred does not decrypt) [verify:wrong]: no writer and no downstream call
+ok    reseal (typed, cred does not decrypt) [verify:wrong]: no write tool ran
+ok    reseal (typed, cred does not decrypt) [verify:wrong]: no restart or stop
+ok    reseal (typed, cred does not decrypt) [noverify:-]: no passphrase in any argv, environment or /proc capture
+ok    reseal (typed, cred does not decrypt) [noverify:-]: no passphrase in the output
+ok    reseal (typed, cred does not decrypt) [noverify:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    reseal (typed, cred does not decrypt) [noverify:-]: keytool verify not run
+ok    reseal (typed, cred does not decrypt) [noverify:-]: skip log line
+ok    reseal (typed, cred does not decrypt) [noverify:-]: _tn_cred_switch called once
+ok    reseal (typed, cred does not decrypt) [noverify:-]: _tn_cred_switch got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    migrate (unit holds it) [verify:ok]: no passphrase in any argv, environment or /proc capture
+ok    migrate (unit holds it) [verify:ok]: no passphrase in the output
+ok    migrate (unit holds it) [verify:ok]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    migrate (unit holds it) [verify:ok]: keytool verify ran with the passphrase on stdin
+ok    migrate (unit holds it) [verify:ok]: verify success logged
+ok    migrate (unit holds it) [verify:ok]: tn_migrate_embedded_passphrase called once
+ok    migrate (unit holds it) [verify:ok]: tn_migrate_embedded_passphrase got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    migrate (unit holds it) [verify:wrong]: no passphrase in any argv, environment or /proc capture
+ok    migrate (unit holds it) [verify:wrong]: no passphrase in the output
+ok    migrate (unit holds it) [verify:wrong]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    migrate (unit holds it) [verify:wrong]: keytool verify ran with the passphrase on stdin
+ok    migrate (unit holds it) [verify:wrong]: refusal names the mismatch
+ok    migrate (unit holds it) [verify:wrong]: credential, plaintext, unit, .node-meta, launch file unchanged (bytes, inode, mtime)
+ok    migrate (unit holds it) [verify:wrong]: no writer and no downstream call
+ok    migrate (unit holds it) [verify:wrong]: no write tool ran
+ok    migrate (unit holds it) [verify:wrong]: no restart or stop
+ok    migrate (unit holds it) [verify:wrong]: rc 1
+ok    migrate (unit holds it) [verify:runfail]: no passphrase in any argv, environment or /proc capture
+ok    migrate (unit holds it) [verify:runfail]: no passphrase in the output
+ok    migrate (unit holds it) [verify:runfail]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    migrate (unit holds it) [verify:runfail]: keytool verify ran with the passphrase on stdin
+ok    migrate (unit holds it) [verify:runfail]: refusal says verify could not run
+ok    migrate (unit holds it) [verify:runfail]: credential, plaintext, unit, .node-meta, launch file unchanged (bytes, inode, mtime)
+ok    migrate (unit holds it) [verify:runfail]: no writer and no downstream call
+ok    migrate (unit holds it) [verify:runfail]: no write tool ran
+ok    migrate (unit holds it) [verify:runfail]: no restart or stop
+ok    migrate (unit holds it) [verify:runfail]: rc 1
+ok    migrate (unit holds it) [verify:runecho]: no passphrase in any argv, environment or /proc capture
+ok    migrate (unit holds it) [verify:runecho]: no passphrase in the output
+ok    migrate (unit holds it) [verify:runecho]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    migrate (unit holds it) [verify:runecho]: keytool verify ran with the passphrase on stdin
+ok    migrate (unit holds it) [verify:runecho]: refusal says verify could not run
+ok    migrate (unit holds it) [verify:runecho]: credential, plaintext, unit, .node-meta, launch file unchanged (bytes, inode, mtime)
+ok    migrate (unit holds it) [verify:runecho]: no writer and no downstream call
+ok    migrate (unit holds it) [verify:runecho]: no write tool ran
+ok    migrate (unit holds it) [verify:runecho]: no restart or stop
+ok    migrate (unit holds it) [verify:runecho]: rc 1
+ok    migrate (unit holds it) [noverify:-]: no passphrase in any argv, environment or /proc capture
+ok    migrate (unit holds it) [noverify:-]: no passphrase in the output
+ok    migrate (unit holds it) [noverify:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    migrate (unit holds it) [noverify:-]: keytool verify not run
+ok    migrate (unit holds it) [noverify:-]: skip log line
+ok    migrate (unit holds it) [noverify:-]: tn_migrate_embedded_passphrase called once
+ok    migrate (unit holds it) [noverify:-]: tn_migrate_embedded_passphrase got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    migrate (unit holds it) [exit4:-]: no passphrase in any argv, environment or /proc capture
+ok    migrate (unit holds it) [exit4:-]: no passphrase in the output
+ok    migrate (unit holds it) [exit4:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    migrate (unit holds it) [exit4:-]: keytool verify not run
+ok    migrate (unit holds it) [exit4:-]: probe failure warned
+ok    migrate (unit holds it) [exit4:-]: tn_migrate_embedded_passphrase called once
+ok    migrate (unit holds it) [exit4:-]: tn_migrate_embedded_passphrase got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    migrate (unit holds it) [nostart:-]: no passphrase in any argv, environment or /proc capture
+ok    migrate (unit holds it) [nostart:-]: no passphrase in the output
+ok    migrate (unit holds it) [nostart:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    migrate (unit holds it) [nostart:-]: keytool verify not run
+ok    migrate (unit holds it) [nostart:-]: probe failure warned
+ok    migrate (unit holds it) [nostart:-]: tn_migrate_embedded_passphrase called once
+ok    migrate (unit holds it) [nostart:-]: tn_migrate_embedded_passphrase got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    migrate (unit holds it) [notfound:-]: no passphrase in any argv, environment or /proc capture
+ok    migrate (unit holds it) [notfound:-]: no passphrase in the output
+ok    migrate (unit holds it) [notfound:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    migrate (unit holds it) [notfound:-]: keytool verify not run
+ok    migrate (unit holds it) [notfound:-]: probe failure warned
+ok    migrate (unit holds it) [notfound:-]: tn_migrate_embedded_passphrase called once
+ok    migrate (unit holds it) [notfound:-]: tn_migrate_embedded_passphrase got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    migrate (typed) [verify:ok]: no passphrase in any argv, environment or /proc capture
+ok    migrate (typed) [verify:ok]: no passphrase in the output
+ok    migrate (typed) [verify:ok]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    migrate (typed) [verify:ok]: keytool verify ran with the passphrase on stdin
+ok    migrate (typed) [verify:ok]: verify success logged
+ok    migrate (typed) [verify:ok]: tn_migrate_credential called once
+ok    migrate (typed) [verify:ok]: tn_migrate_credential got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    migrate (typed) [verify:wrong]: no passphrase in any argv, environment or /proc capture
+ok    migrate (typed) [verify:wrong]: no passphrase in the output
+ok    migrate (typed) [verify:wrong]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    migrate (typed) [verify:wrong]: keytool verify ran with the passphrase on stdin
+ok    migrate (typed) [verify:wrong]: refusal names the mismatch
+ok    migrate (typed) [verify:wrong]: credential, plaintext, unit, .node-meta, launch file unchanged (bytes, inode, mtime)
+ok    migrate (typed) [verify:wrong]: no writer and no downstream call
+ok    migrate (typed) [verify:wrong]: no write tool ran
+ok    migrate (typed) [verify:wrong]: no restart or stop
+ok    migrate (typed) [verify:wrong]: rc 1
+ok    migrate (typed) [verify:runfail]: no passphrase in any argv, environment or /proc capture
+ok    migrate (typed) [verify:runfail]: no passphrase in the output
+ok    migrate (typed) [verify:runfail]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    migrate (typed) [verify:runfail]: keytool verify ran with the passphrase on stdin
+ok    migrate (typed) [verify:runfail]: refusal says verify could not run
+ok    migrate (typed) [verify:runfail]: credential, plaintext, unit, .node-meta, launch file unchanged (bytes, inode, mtime)
+ok    migrate (typed) [verify:runfail]: no writer and no downstream call
+ok    migrate (typed) [verify:runfail]: no write tool ran
+ok    migrate (typed) [verify:runfail]: no restart or stop
+ok    migrate (typed) [verify:runfail]: rc 1
+ok    migrate (typed) [verify:runecho]: no passphrase in any argv, environment or /proc capture
+ok    migrate (typed) [verify:runecho]: no passphrase in the output
+ok    migrate (typed) [verify:runecho]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    migrate (typed) [verify:runecho]: keytool verify ran with the passphrase on stdin
+ok    migrate (typed) [verify:runecho]: refusal says verify could not run
+ok    migrate (typed) [verify:runecho]: credential, plaintext, unit, .node-meta, launch file unchanged (bytes, inode, mtime)
+ok    migrate (typed) [verify:runecho]: no writer and no downstream call
+ok    migrate (typed) [verify:runecho]: no write tool ran
+ok    migrate (typed) [verify:runecho]: no restart or stop
+ok    migrate (typed) [verify:runecho]: rc 1
+ok    migrate (typed) [noverify:-]: no passphrase in any argv, environment or /proc capture
+ok    migrate (typed) [noverify:-]: no passphrase in the output
+ok    migrate (typed) [noverify:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    migrate (typed) [noverify:-]: keytool verify not run
+ok    migrate (typed) [noverify:-]: skip log line
+ok    migrate (typed) [noverify:-]: tn_migrate_credential called once
+ok    migrate (typed) [noverify:-]: tn_migrate_credential got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    migrate (typed) [exit4:-]: no passphrase in any argv, environment or /proc capture
+ok    migrate (typed) [exit4:-]: no passphrase in the output
+ok    migrate (typed) [exit4:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    migrate (typed) [exit4:-]: keytool verify not run
+ok    migrate (typed) [exit4:-]: probe failure warned
+ok    migrate (typed) [exit4:-]: tn_migrate_credential called once
+ok    migrate (typed) [exit4:-]: tn_migrate_credential got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    migrate (typed) [nostart:-]: no passphrase in any argv, environment or /proc capture
+ok    migrate (typed) [nostart:-]: no passphrase in the output
+ok    migrate (typed) [nostart:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    migrate (typed) [nostart:-]: keytool verify not run
+ok    migrate (typed) [nostart:-]: probe failure warned
+ok    migrate (typed) [nostart:-]: tn_migrate_credential called once
+ok    migrate (typed) [nostart:-]: tn_migrate_credential got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    migrate (typed) [notfound:-]: no passphrase in any argv, environment or /proc capture
+ok    migrate (typed) [notfound:-]: no passphrase in the output
+ok    migrate (typed) [notfound:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    migrate (typed) [notfound:-]: keytool verify not run
+ok    migrate (typed) [notfound:-]: probe failure warned
+ok    migrate (typed) [notfound:-]: tn_migrate_credential called once
+ok    migrate (typed) [notfound:-]: tn_migrate_credential got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    migrate (plaintext file) [verify:ok]: no passphrase in any argv, environment or /proc capture
+ok    migrate (plaintext file) [verify:ok]: no passphrase in the output
+ok    migrate (plaintext file) [verify:ok]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    migrate (plaintext file) [verify:ok]: keytool verify ran with the passphrase on stdin
+ok    migrate (plaintext file) [verify:ok]: verify success logged
+ok    migrate (plaintext file) [verify:ok]: tn_migrate_credential called once
+ok    migrate (plaintext file) [verify:ok]: tn_migrate_credential got TN_CRED_PASS=empty, TN_KEYTOOL_PASS unset
+ok    migrate (plaintext file) [verify:wrong]: no passphrase in any argv, environment or /proc capture
+ok    migrate (plaintext file) [verify:wrong]: no passphrase in the output
+ok    migrate (plaintext file) [verify:wrong]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    migrate (plaintext file) [verify:wrong]: keytool verify ran with the passphrase on stdin
+ok    migrate (plaintext file) [verify:wrong]: refusal names the mismatch
+ok    migrate (plaintext file) [verify:wrong]: credential, plaintext, unit, .node-meta, launch file unchanged (bytes, inode, mtime)
+ok    migrate (plaintext file) [verify:wrong]: no writer and no downstream call
+ok    migrate (plaintext file) [verify:wrong]: no write tool ran
+ok    migrate (plaintext file) [verify:wrong]: no restart or stop
+ok    migrate (plaintext file) [verify:wrong]: rc 1
+ok    migrate (plaintext file) [verify:runfail]: no passphrase in any argv, environment or /proc capture
+ok    migrate (plaintext file) [verify:runfail]: no passphrase in the output
+ok    migrate (plaintext file) [verify:runfail]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    migrate (plaintext file) [verify:runfail]: keytool verify ran with the passphrase on stdin
+ok    migrate (plaintext file) [verify:runfail]: refusal says verify could not run
+ok    migrate (plaintext file) [verify:runfail]: credential, plaintext, unit, .node-meta, launch file unchanged (bytes, inode, mtime)
+ok    migrate (plaintext file) [verify:runfail]: no writer and no downstream call
+ok    migrate (plaintext file) [verify:runfail]: no write tool ran
+ok    migrate (plaintext file) [verify:runfail]: no restart or stop
+ok    migrate (plaintext file) [verify:runfail]: rc 1
+ok    migrate (plaintext file) [verify:runecho]: no passphrase in any argv, environment or /proc capture
+ok    migrate (plaintext file) [verify:runecho]: no passphrase in the output
+ok    migrate (plaintext file) [verify:runecho]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    migrate (plaintext file) [verify:runecho]: keytool verify ran with the passphrase on stdin
+ok    migrate (plaintext file) [verify:runecho]: refusal says verify could not run
+ok    migrate (plaintext file) [verify:runecho]: credential, plaintext, unit, .node-meta, launch file unchanged (bytes, inode, mtime)
+ok    migrate (plaintext file) [verify:runecho]: no writer and no downstream call
+ok    migrate (plaintext file) [verify:runecho]: no write tool ran
+ok    migrate (plaintext file) [verify:runecho]: no restart or stop
+ok    migrate (plaintext file) [verify:runecho]: rc 1
+ok    migrate (plaintext file) [noverify:-]: no passphrase in any argv, environment or /proc capture
+ok    migrate (plaintext file) [noverify:-]: no passphrase in the output
+ok    migrate (plaintext file) [noverify:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    migrate (plaintext file) [noverify:-]: keytool verify not run
+ok    migrate (plaintext file) [noverify:-]: skip log line
+ok    migrate (plaintext file) [noverify:-]: tn_migrate_credential called once
+ok    migrate (plaintext file) [noverify:-]: tn_migrate_credential got TN_CRED_PASS=empty, TN_KEYTOOL_PASS unset
+ok    migrate (plaintext file) [exit4:-]: no passphrase in any argv, environment or /proc capture
+ok    migrate (plaintext file) [exit4:-]: no passphrase in the output
+ok    migrate (plaintext file) [exit4:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    migrate (plaintext file) [exit4:-]: keytool verify not run
+ok    migrate (plaintext file) [exit4:-]: probe failure warned
+ok    migrate (plaintext file) [exit4:-]: tn_migrate_credential called once
+ok    migrate (plaintext file) [exit4:-]: tn_migrate_credential got TN_CRED_PASS=empty, TN_KEYTOOL_PASS unset
+ok    migrate (plaintext file) [nostart:-]: no passphrase in any argv, environment or /proc capture
+ok    migrate (plaintext file) [nostart:-]: no passphrase in the output
+ok    migrate (plaintext file) [nostart:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    migrate (plaintext file) [nostart:-]: keytool verify not run
+ok    migrate (plaintext file) [nostart:-]: probe failure warned
+ok    migrate (plaintext file) [nostart:-]: tn_migrate_credential called once
+ok    migrate (plaintext file) [nostart:-]: tn_migrate_credential got TN_CRED_PASS=empty, TN_KEYTOOL_PASS unset
+ok    migrate (plaintext file) [notfound:-]: no passphrase in any argv, environment or /proc capture
+ok    migrate (plaintext file) [notfound:-]: no passphrase in the output
+ok    migrate (plaintext file) [notfound:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    migrate (plaintext file) [notfound:-]: keytool verify not run
+ok    migrate (plaintext file) [notfound:-]: probe failure warned
+ok    migrate (plaintext file) [notfound:-]: tn_migrate_credential called once
+ok    migrate (plaintext file) [notfound:-]: tn_migrate_credential got TN_CRED_PASS=empty, TN_KEYTOOL_PASS unset
+ok    menu: change [verify:ok]: no passphrase in any argv, environment or /proc capture
+ok    menu: change [verify:ok]: no passphrase in the output
+ok    menu: change [verify:ok]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    menu: change [verify:ok]: keytool verify ran with the passphrase on stdin
+ok    menu: change [verify:ok]: verify success logged
+ok    menu: change [verify:ok]: _tn_cred_switch called once
+ok    menu: change [verify:ok]: _tn_cred_switch got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    menu: change [verify:wrong]: no passphrase in any argv, environment or /proc capture
+ok    menu: change [verify:wrong]: no passphrase in the output
+ok    menu: change [verify:wrong]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    menu: change [verify:wrong]: keytool verify ran with the passphrase on stdin
+ok    menu: change [verify:wrong]: refusal names the mismatch
+ok    menu: change [verify:wrong]: credential, plaintext, unit, .node-meta, launch file unchanged (bytes, inode, mtime)
+ok    menu: change [verify:wrong]: no writer and no downstream call
+ok    menu: change [verify:wrong]: no write tool ran
+ok    menu: change [verify:wrong]: no restart or stop
+ok    menu: change [verify:wrong]: says the passphrase is unchanged
+ok    menu: change [verify:runfail]: no passphrase in any argv, environment or /proc capture
+ok    menu: change [verify:runfail]: no passphrase in the output
+ok    menu: change [verify:runfail]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    menu: change [verify:runfail]: keytool verify ran with the passphrase on stdin
+ok    menu: change [verify:runfail]: refusal says verify could not run
+ok    menu: change [verify:runfail]: credential, plaintext, unit, .node-meta, launch file unchanged (bytes, inode, mtime)
+ok    menu: change [verify:runfail]: no writer and no downstream call
+ok    menu: change [verify:runfail]: no write tool ran
+ok    menu: change [verify:runfail]: no restart or stop
+ok    menu: change [verify:runfail]: says the passphrase is unchanged
+ok    menu: change [verify:runecho]: no passphrase in any argv, environment or /proc capture
+ok    menu: change [verify:runecho]: no passphrase in the output
+ok    menu: change [verify:runecho]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    menu: change [verify:runecho]: keytool verify ran with the passphrase on stdin
+ok    menu: change [verify:runecho]: refusal says verify could not run
+ok    menu: change [verify:runecho]: credential, plaintext, unit, .node-meta, launch file unchanged (bytes, inode, mtime)
+ok    menu: change [verify:runecho]: no writer and no downstream call
+ok    menu: change [verify:runecho]: no write tool ran
+ok    menu: change [verify:runecho]: no restart or stop
+ok    menu: change [verify:runecho]: says the passphrase is unchanged
+ok    menu: change [noverify:-]: no passphrase in any argv, environment or /proc capture
+ok    menu: change [noverify:-]: no passphrase in the output
+ok    menu: change [noverify:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    menu: change [noverify:-]: keytool verify not run
+ok    menu: change [noverify:-]: skip log line
+ok    menu: change [noverify:-]: _tn_cred_switch called once
+ok    menu: change [noverify:-]: _tn_cred_switch got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    menu: change [exit4:-]: no passphrase in any argv, environment or /proc capture
+ok    menu: change [exit4:-]: no passphrase in the output
+ok    menu: change [exit4:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    menu: change [exit4:-]: keytool verify not run
+ok    menu: change [exit4:-]: probe failure warned
+ok    menu: change [exit4:-]: _tn_cred_switch called once
+ok    menu: change [exit4:-]: _tn_cred_switch got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    menu: change [nostart:-]: no passphrase in any argv, environment or /proc capture
+ok    menu: change [nostart:-]: no passphrase in the output
+ok    menu: change [nostart:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    menu: change [nostart:-]: keytool verify not run
+ok    menu: change [nostart:-]: probe failure warned
+ok    menu: change [nostart:-]: _tn_cred_switch called once
+ok    menu: change [nostart:-]: _tn_cred_switch got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    menu: change [notfound:-]: no passphrase in any argv, environment or /proc capture
+ok    menu: change [notfound:-]: no passphrase in the output
+ok    menu: change [notfound:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    menu: change [notfound:-]: keytool verify not run
+ok    menu: change [notfound:-]: probe failure warned
+ok    menu: change [notfound:-]: _tn_cred_switch called once
+ok    menu: change [notfound:-]: _tn_cred_switch got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    menu: reseal [verify:ok]: no passphrase in any argv, environment or /proc capture
+ok    menu: reseal [verify:ok]: no passphrase in the output
+ok    menu: reseal [verify:ok]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    menu: reseal [verify:ok]: keytool verify ran with the passphrase on stdin
+ok    menu: reseal [verify:ok]: verify success logged
+ok    menu: reseal [verify:ok]: _tn_cred_switch called once
+ok    menu: reseal [verify:ok]: _tn_cred_switch got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    menu: reseal [verify:wrong]: no passphrase in any argv, environment or /proc capture
+ok    menu: reseal [verify:wrong]: no passphrase in the output
+ok    menu: reseal [verify:wrong]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    menu: reseal [verify:wrong]: keytool verify ran with the passphrase on stdin
+ok    menu: reseal [verify:wrong]: refusal names the mismatch
+ok    menu: reseal [verify:wrong]: credential, plaintext, unit, .node-meta, launch file unchanged (bytes, inode, mtime)
+ok    menu: reseal [verify:wrong]: no writer and no downstream call
+ok    menu: reseal [verify:wrong]: no write tool ran
+ok    menu: reseal [verify:wrong]: no restart or stop
+ok    menu: reseal [verify:runfail]: no passphrase in any argv, environment or /proc capture
+ok    menu: reseal [verify:runfail]: no passphrase in the output
+ok    menu: reseal [verify:runfail]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    menu: reseal [verify:runfail]: keytool verify ran with the passphrase on stdin
+ok    menu: reseal [verify:runfail]: refusal says verify could not run
+ok    menu: reseal [verify:runfail]: credential, plaintext, unit, .node-meta, launch file unchanged (bytes, inode, mtime)
+ok    menu: reseal [verify:runfail]: no writer and no downstream call
+ok    menu: reseal [verify:runfail]: no write tool ran
+ok    menu: reseal [verify:runfail]: no restart or stop
+ok    menu: reseal [verify:runecho]: no passphrase in any argv, environment or /proc capture
+ok    menu: reseal [verify:runecho]: no passphrase in the output
+ok    menu: reseal [verify:runecho]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    menu: reseal [verify:runecho]: keytool verify ran with the passphrase on stdin
+ok    menu: reseal [verify:runecho]: refusal says verify could not run
+ok    menu: reseal [verify:runecho]: credential, plaintext, unit, .node-meta, launch file unchanged (bytes, inode, mtime)
+ok    menu: reseal [verify:runecho]: no writer and no downstream call
+ok    menu: reseal [verify:runecho]: no write tool ran
+ok    menu: reseal [verify:runecho]: no restart or stop
+ok    menu: reseal [noverify:-]: no passphrase in any argv, environment or /proc capture
+ok    menu: reseal [noverify:-]: no passphrase in the output
+ok    menu: reseal [noverify:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    menu: reseal [noverify:-]: keytool verify not run
+ok    menu: reseal [noverify:-]: skip log line
+ok    menu: reseal [noverify:-]: _tn_cred_switch called once
+ok    menu: reseal [noverify:-]: _tn_cred_switch got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    menu: reseal [exit4:-]: no passphrase in any argv, environment or /proc capture
+ok    menu: reseal [exit4:-]: no passphrase in the output
+ok    menu: reseal [exit4:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    menu: reseal [exit4:-]: keytool verify not run
+ok    menu: reseal [exit4:-]: probe failure warned
+ok    menu: reseal [exit4:-]: _tn_cred_switch called once
+ok    menu: reseal [exit4:-]: _tn_cred_switch got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    menu: reseal [nostart:-]: no passphrase in any argv, environment or /proc capture
+ok    menu: reseal [nostart:-]: no passphrase in the output
+ok    menu: reseal [nostart:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    menu: reseal [nostart:-]: keytool verify not run
+ok    menu: reseal [nostart:-]: probe failure warned
+ok    menu: reseal [nostart:-]: _tn_cred_switch called once
+ok    menu: reseal [nostart:-]: _tn_cred_switch got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    menu: reseal [notfound:-]: no passphrase in any argv, environment or /proc capture
+ok    menu: reseal [notfound:-]: no passphrase in the output
+ok    menu: reseal [notfound:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    menu: reseal [notfound:-]: keytool verify not run
+ok    menu: reseal [notfound:-]: probe failure warned
+ok    menu: reseal [notfound:-]: _tn_cred_switch called once
+ok    menu: reseal [notfound:-]: _tn_cred_switch got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    menu: move the plaintext file [verify:ok]: no passphrase in any argv, environment or /proc capture
+ok    menu: move the plaintext file [verify:ok]: no passphrase in the output
+ok    menu: move the plaintext file [verify:ok]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    menu: move the plaintext file [verify:ok]: keytool verify ran with the passphrase on stdin
+ok    menu: move the plaintext file [verify:ok]: verify success logged
+ok    menu: move the plaintext file [verify:ok]: tn_migrate_credential called once
+ok    menu: move the plaintext file [verify:ok]: tn_migrate_credential got TN_CRED_PASS=empty, TN_KEYTOOL_PASS unset
+ok    menu: move the plaintext file [verify:wrong]: no passphrase in any argv, environment or /proc capture
+ok    menu: move the plaintext file [verify:wrong]: no passphrase in the output
+ok    menu: move the plaintext file [verify:wrong]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    menu: move the plaintext file [verify:wrong]: keytool verify ran with the passphrase on stdin
+ok    menu: move the plaintext file [verify:wrong]: refusal names the mismatch
+ok    menu: move the plaintext file [verify:wrong]: credential, plaintext, unit, .node-meta, launch file unchanged (bytes, inode, mtime)
+ok    menu: move the plaintext file [verify:wrong]: no writer and no downstream call
+ok    menu: move the plaintext file [verify:wrong]: no write tool ran
+ok    menu: move the plaintext file [verify:wrong]: no restart or stop
+ok    menu: move the plaintext file [verify:runfail]: no passphrase in any argv, environment or /proc capture
+ok    menu: move the plaintext file [verify:runfail]: no passphrase in the output
+ok    menu: move the plaintext file [verify:runfail]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    menu: move the plaintext file [verify:runfail]: keytool verify ran with the passphrase on stdin
+ok    menu: move the plaintext file [verify:runfail]: refusal says verify could not run
+ok    menu: move the plaintext file [verify:runfail]: credential, plaintext, unit, .node-meta, launch file unchanged (bytes, inode, mtime)
+ok    menu: move the plaintext file [verify:runfail]: no writer and no downstream call
+ok    menu: move the plaintext file [verify:runfail]: no write tool ran
+ok    menu: move the plaintext file [verify:runfail]: no restart or stop
+ok    menu: move the plaintext file [verify:runecho]: no passphrase in any argv, environment or /proc capture
+ok    menu: move the plaintext file [verify:runecho]: no passphrase in the output
+ok    menu: move the plaintext file [verify:runecho]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    menu: move the plaintext file [verify:runecho]: keytool verify ran with the passphrase on stdin
+ok    menu: move the plaintext file [verify:runecho]: refusal says verify could not run
+ok    menu: move the plaintext file [verify:runecho]: credential, plaintext, unit, .node-meta, launch file unchanged (bytes, inode, mtime)
+ok    menu: move the plaintext file [verify:runecho]: no writer and no downstream call
+ok    menu: move the plaintext file [verify:runecho]: no write tool ran
+ok    menu: move the plaintext file [verify:runecho]: no restart or stop
+ok    menu: move the plaintext file [noverify:-]: no passphrase in any argv, environment or /proc capture
+ok    menu: move the plaintext file [noverify:-]: no passphrase in the output
+ok    menu: move the plaintext file [noverify:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    menu: move the plaintext file [noverify:-]: keytool verify not run
+ok    menu: move the plaintext file [noverify:-]: skip log line
+ok    menu: move the plaintext file [noverify:-]: tn_migrate_credential called once
+ok    menu: move the plaintext file [noverify:-]: tn_migrate_credential got TN_CRED_PASS=empty, TN_KEYTOOL_PASS unset
+ok    menu: move the plaintext file [exit4:-]: no passphrase in any argv, environment or /proc capture
+ok    menu: move the plaintext file [exit4:-]: no passphrase in the output
+ok    menu: move the plaintext file [exit4:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    menu: move the plaintext file [exit4:-]: keytool verify not run
+ok    menu: move the plaintext file [exit4:-]: probe failure warned
+ok    menu: move the plaintext file [exit4:-]: tn_migrate_credential called once
+ok    menu: move the plaintext file [exit4:-]: tn_migrate_credential got TN_CRED_PASS=empty, TN_KEYTOOL_PASS unset
+ok    menu: move the plaintext file [nostart:-]: no passphrase in any argv, environment or /proc capture
+ok    menu: move the plaintext file [nostart:-]: no passphrase in the output
+ok    menu: move the plaintext file [nostart:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    menu: move the plaintext file [nostart:-]: keytool verify not run
+ok    menu: move the plaintext file [nostart:-]: probe failure warned
+ok    menu: move the plaintext file [nostart:-]: tn_migrate_credential called once
+ok    menu: move the plaintext file [nostart:-]: tn_migrate_credential got TN_CRED_PASS=empty, TN_KEYTOOL_PASS unset
+ok    menu: move the plaintext file [notfound:-]: no passphrase in any argv, environment or /proc capture
+ok    menu: move the plaintext file [notfound:-]: no passphrase in the output
+ok    menu: move the plaintext file [notfound:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    menu: move the plaintext file [notfound:-]: keytool verify not run
+ok    menu: move the plaintext file [notfound:-]: probe failure warned
+ok    menu: move the plaintext file [notfound:-]: tn_migrate_credential called once
+ok    menu: move the plaintext file [notfound:-]: tn_migrate_credential got TN_CRED_PASS=empty, TN_KEYTOOL_PASS unset
+ok    menu: legacy unit move [verify:ok]: no passphrase in any argv, environment or /proc capture
+ok    menu: legacy unit move [verify:ok]: no passphrase in the output
+ok    menu: legacy unit move [verify:ok]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    menu: legacy unit move [verify:ok]: keytool verify ran with the passphrase on stdin
+ok    menu: legacy unit move [verify:ok]: verify success logged
+ok    menu: legacy unit move [verify:ok]: tn_migrate_embedded_passphrase called once
+ok    menu: legacy unit move [verify:ok]: tn_migrate_embedded_passphrase got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    menu: legacy unit move [verify:wrong]: no passphrase in any argv, environment or /proc capture
+ok    menu: legacy unit move [verify:wrong]: no passphrase in the output
+ok    menu: legacy unit move [verify:wrong]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    menu: legacy unit move [verify:wrong]: keytool verify ran with the passphrase on stdin
+ok    menu: legacy unit move [verify:wrong]: refusal names the mismatch
+ok    menu: legacy unit move [verify:wrong]: credential, plaintext, unit, .node-meta, launch file unchanged (bytes, inode, mtime)
+ok    menu: legacy unit move [verify:wrong]: no writer and no downstream call
+ok    menu: legacy unit move [verify:wrong]: no write tool ran
+ok    menu: legacy unit move [verify:wrong]: no restart or stop
+ok    menu: legacy unit move [verify:runfail]: no passphrase in any argv, environment or /proc capture
+ok    menu: legacy unit move [verify:runfail]: no passphrase in the output
+ok    menu: legacy unit move [verify:runfail]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    menu: legacy unit move [verify:runfail]: keytool verify ran with the passphrase on stdin
+ok    menu: legacy unit move [verify:runfail]: refusal says verify could not run
+ok    menu: legacy unit move [verify:runfail]: credential, plaintext, unit, .node-meta, launch file unchanged (bytes, inode, mtime)
+ok    menu: legacy unit move [verify:runfail]: no writer and no downstream call
+ok    menu: legacy unit move [verify:runfail]: no write tool ran
+ok    menu: legacy unit move [verify:runfail]: no restart or stop
+ok    menu: legacy unit move [verify:runecho]: no passphrase in any argv, environment or /proc capture
+ok    menu: legacy unit move [verify:runecho]: no passphrase in the output
+ok    menu: legacy unit move [verify:runecho]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    menu: legacy unit move [verify:runecho]: keytool verify ran with the passphrase on stdin
+ok    menu: legacy unit move [verify:runecho]: refusal says verify could not run
+ok    menu: legacy unit move [verify:runecho]: credential, plaintext, unit, .node-meta, launch file unchanged (bytes, inode, mtime)
+ok    menu: legacy unit move [verify:runecho]: no writer and no downstream call
+ok    menu: legacy unit move [verify:runecho]: no write tool ran
+ok    menu: legacy unit move [verify:runecho]: no restart or stop
+ok    menu: legacy unit move [noverify:-]: no passphrase in any argv, environment or /proc capture
+ok    menu: legacy unit move [noverify:-]: no passphrase in the output
+ok    menu: legacy unit move [noverify:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    menu: legacy unit move [noverify:-]: keytool verify not run
+ok    menu: legacy unit move [noverify:-]: skip log line
+ok    menu: legacy unit move [noverify:-]: tn_migrate_embedded_passphrase called once
+ok    menu: legacy unit move [noverify:-]: tn_migrate_embedded_passphrase got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    menu: legacy unit move [exit4:-]: no passphrase in any argv, environment or /proc capture
+ok    menu: legacy unit move [exit4:-]: no passphrase in the output
+ok    menu: legacy unit move [exit4:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    menu: legacy unit move [exit4:-]: keytool verify not run
+ok    menu: legacy unit move [exit4:-]: probe failure warned
+ok    menu: legacy unit move [exit4:-]: tn_migrate_embedded_passphrase called once
+ok    menu: legacy unit move [exit4:-]: tn_migrate_embedded_passphrase got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    menu: legacy unit move [nostart:-]: no passphrase in any argv, environment or /proc capture
+ok    menu: legacy unit move [nostart:-]: no passphrase in the output
+ok    menu: legacy unit move [nostart:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    menu: legacy unit move [nostart:-]: keytool verify not run
+ok    menu: legacy unit move [nostart:-]: probe failure warned
+ok    menu: legacy unit move [nostart:-]: tn_migrate_embedded_passphrase called once
+ok    menu: legacy unit move [nostart:-]: tn_migrate_embedded_passphrase got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    menu: legacy unit move [notfound:-]: no passphrase in any argv, environment or /proc capture
+ok    menu: legacy unit move [notfound:-]: no passphrase in the output
+ok    menu: legacy unit move [notfound:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    menu: legacy unit move [notfound:-]: keytool verify not run
+ok    menu: legacy unit move [notfound:-]: probe failure warned
+ok    menu: legacy unit move [notfound:-]: tn_migrate_embedded_passphrase called once
+ok    menu: legacy unit move [notfound:-]: tn_migrate_embedded_passphrase got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    main --json --migrate-credential (plaintext) [verify:ok]: no passphrase in any argv, environment or /proc capture
+ok    main --json --migrate-credential (plaintext) [verify:ok]: no passphrase in the output
+ok    main --json --migrate-credential (plaintext) [verify:ok]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    main --json --migrate-credential (plaintext) [verify:ok]: keytool verify ran with the passphrase on stdin
+ok    main --json --migrate-credential (plaintext) [verify:ok]: verify success logged
+ok    main --json --migrate-credential (plaintext) [verify:ok]: tn_migrate_credential called once
+ok    main --json --migrate-credential (plaintext) [verify:ok]: tn_migrate_credential got TN_CRED_PASS=empty, TN_KEYTOOL_PASS unset
+ok    main --json --migrate-credential (plaintext) [verify:wrong]: no passphrase in any argv, environment or /proc capture
+ok    main --json --migrate-credential (plaintext) [verify:wrong]: no passphrase in the output
+ok    main --json --migrate-credential (plaintext) [verify:wrong]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    main --json --migrate-credential (plaintext) [verify:wrong]: keytool verify ran with the passphrase on stdin
+ok    main --json --migrate-credential (plaintext) [verify:wrong]: refusal names the mismatch
+ok    main --json --migrate-credential (plaintext) [verify:wrong]: credential, plaintext, unit, .node-meta, launch file unchanged (bytes, inode, mtime)
+ok    main --json --migrate-credential (plaintext) [verify:wrong]: no writer and no downstream call
+ok    main --json --migrate-credential (plaintext) [verify:wrong]: no write tool ran
+ok    main --json --migrate-credential (plaintext) [verify:wrong]: no restart or stop
+ok    main --json --migrate-credential (plaintext) [verify:runfail]: no passphrase in any argv, environment or /proc capture
+ok    main --json --migrate-credential (plaintext) [verify:runfail]: no passphrase in the output
+ok    main --json --migrate-credential (plaintext) [verify:runfail]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    main --json --migrate-credential (plaintext) [verify:runfail]: keytool verify ran with the passphrase on stdin
+ok    main --json --migrate-credential (plaintext) [verify:runfail]: refusal says verify could not run
+ok    main --json --migrate-credential (plaintext) [verify:runfail]: credential, plaintext, unit, .node-meta, launch file unchanged (bytes, inode, mtime)
+ok    main --json --migrate-credential (plaintext) [verify:runfail]: no writer and no downstream call
+ok    main --json --migrate-credential (plaintext) [verify:runfail]: no write tool ran
+ok    main --json --migrate-credential (plaintext) [verify:runfail]: no restart or stop
+ok    main --json --migrate-credential (plaintext) [verify:runecho]: no passphrase in any argv, environment or /proc capture
+ok    main --json --migrate-credential (plaintext) [verify:runecho]: no passphrase in the output
+ok    main --json --migrate-credential (plaintext) [verify:runecho]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    main --json --migrate-credential (plaintext) [verify:runecho]: keytool verify ran with the passphrase on stdin
+ok    main --json --migrate-credential (plaintext) [verify:runecho]: refusal says verify could not run
+ok    main --json --migrate-credential (plaintext) [verify:runecho]: credential, plaintext, unit, .node-meta, launch file unchanged (bytes, inode, mtime)
+ok    main --json --migrate-credential (plaintext) [verify:runecho]: no writer and no downstream call
+ok    main --json --migrate-credential (plaintext) [verify:runecho]: no write tool ran
+ok    main --json --migrate-credential (plaintext) [verify:runecho]: no restart or stop
+ok    main --json --migrate-credential (plaintext) [noverify:-]: no passphrase in any argv, environment or /proc capture
+ok    main --json --migrate-credential (plaintext) [noverify:-]: no passphrase in the output
+ok    main --json --migrate-credential (plaintext) [noverify:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    main --json --migrate-credential (plaintext) [noverify:-]: keytool verify not run
+ok    main --json --migrate-credential (plaintext) [noverify:-]: skip log line
+ok    main --json --migrate-credential (plaintext) [noverify:-]: tn_migrate_credential called once
+ok    main --json --migrate-credential (plaintext) [noverify:-]: tn_migrate_credential got TN_CRED_PASS=empty, TN_KEYTOOL_PASS unset
+ok    main --json --migrate-credential (plaintext) [exit4:-]: no passphrase in any argv, environment or /proc capture
+ok    main --json --migrate-credential (plaintext) [exit4:-]: no passphrase in the output
+ok    main --json --migrate-credential (plaintext) [exit4:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    main --json --migrate-credential (plaintext) [exit4:-]: keytool verify not run
+ok    main --json --migrate-credential (plaintext) [exit4:-]: probe failure warned
+ok    main --json --migrate-credential (plaintext) [exit4:-]: tn_migrate_credential called once
+ok    main --json --migrate-credential (plaintext) [exit4:-]: tn_migrate_credential got TN_CRED_PASS=empty, TN_KEYTOOL_PASS unset
+ok    main --json --migrate-credential (plaintext) [nostart:-]: no passphrase in any argv, environment or /proc capture
+ok    main --json --migrate-credential (plaintext) [nostart:-]: no passphrase in the output
+ok    main --json --migrate-credential (plaintext) [nostart:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    main --json --migrate-credential (plaintext) [nostart:-]: keytool verify not run
+ok    main --json --migrate-credential (plaintext) [nostart:-]: probe failure warned
+ok    main --json --migrate-credential (plaintext) [nostart:-]: tn_migrate_credential called once
+ok    main --json --migrate-credential (plaintext) [nostart:-]: tn_migrate_credential got TN_CRED_PASS=empty, TN_KEYTOOL_PASS unset
+ok    main --json --migrate-credential (plaintext) [notfound:-]: no passphrase in any argv, environment or /proc capture
+ok    main --json --migrate-credential (plaintext) [notfound:-]: no passphrase in the output
+ok    main --json --migrate-credential (plaintext) [notfound:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    main --json --migrate-credential (plaintext) [notfound:-]: keytool verify not run
+ok    main --json --migrate-credential (plaintext) [notfound:-]: probe failure warned
+ok    main --json --migrate-credential (plaintext) [notfound:-]: tn_migrate_credential called once
+ok    main --json --migrate-credential (plaintext) [notfound:-]: tn_migrate_credential got TN_CRED_PASS=empty, TN_KEYTOOL_PASS unset
+ok    main --reseal [verify:ok]: no passphrase in any argv, environment or /proc capture
+ok    main --reseal [verify:ok]: no passphrase in the output
+ok    main --reseal [verify:ok]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    main --reseal [verify:ok]: keytool verify ran with the passphrase on stdin
+ok    main --reseal [verify:ok]: verify success logged
+ok    main --reseal [verify:ok]: _tn_cred_switch called once
+ok    main --reseal [verify:ok]: _tn_cred_switch got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    main --reseal [verify:wrong]: no passphrase in any argv, environment or /proc capture
+ok    main --reseal [verify:wrong]: no passphrase in the output
+ok    main --reseal [verify:wrong]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    main --reseal [verify:wrong]: keytool verify ran with the passphrase on stdin
+ok    main --reseal [verify:wrong]: refusal names the mismatch
+ok    main --reseal [verify:wrong]: credential, plaintext, unit, .node-meta, launch file unchanged (bytes, inode, mtime)
+ok    main --reseal [verify:wrong]: no writer and no downstream call
+ok    main --reseal [verify:wrong]: no write tool ran
+ok    main --reseal [verify:wrong]: no restart or stop
+ok    main --reseal [verify:runfail]: no passphrase in any argv, environment or /proc capture
+ok    main --reseal [verify:runfail]: no passphrase in the output
+ok    main --reseal [verify:runfail]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    main --reseal [verify:runfail]: keytool verify ran with the passphrase on stdin
+ok    main --reseal [verify:runfail]: refusal says verify could not run
+ok    main --reseal [verify:runfail]: credential, plaintext, unit, .node-meta, launch file unchanged (bytes, inode, mtime)
+ok    main --reseal [verify:runfail]: no writer and no downstream call
+ok    main --reseal [verify:runfail]: no write tool ran
+ok    main --reseal [verify:runfail]: no restart or stop
+ok    main --reseal [verify:runecho]: no passphrase in any argv, environment or /proc capture
+ok    main --reseal [verify:runecho]: no passphrase in the output
+ok    main --reseal [verify:runecho]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    main --reseal [verify:runecho]: keytool verify ran with the passphrase on stdin
+ok    main --reseal [verify:runecho]: refusal says verify could not run
+ok    main --reseal [verify:runecho]: credential, plaintext, unit, .node-meta, launch file unchanged (bytes, inode, mtime)
+ok    main --reseal [verify:runecho]: no writer and no downstream call
+ok    main --reseal [verify:runecho]: no write tool ran
+ok    main --reseal [verify:runecho]: no restart or stop
+ok    main --reseal [noverify:-]: no passphrase in any argv, environment or /proc capture
+ok    main --reseal [noverify:-]: no passphrase in the output
+ok    main --reseal [noverify:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    main --reseal [noverify:-]: keytool verify not run
+ok    main --reseal [noverify:-]: skip log line
+ok    main --reseal [noverify:-]: _tn_cred_switch called once
+ok    main --reseal [noverify:-]: _tn_cred_switch got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    main --reseal [exit4:-]: no passphrase in any argv, environment or /proc capture
+ok    main --reseal [exit4:-]: no passphrase in the output
+ok    main --reseal [exit4:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    main --reseal [exit4:-]: keytool verify not run
+ok    main --reseal [exit4:-]: probe failure warned
+ok    main --reseal [exit4:-]: _tn_cred_switch called once
+ok    main --reseal [exit4:-]: _tn_cred_switch got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    main --reseal [nostart:-]: no passphrase in any argv, environment or /proc capture
+ok    main --reseal [nostart:-]: no passphrase in the output
+ok    main --reseal [nostart:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    main --reseal [nostart:-]: keytool verify not run
+ok    main --reseal [nostart:-]: probe failure warned
+ok    main --reseal [nostart:-]: _tn_cred_switch called once
+ok    main --reseal [nostart:-]: _tn_cred_switch got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    main --reseal [notfound:-]: no passphrase in any argv, environment or /proc capture
+ok    main --reseal [notfound:-]: no passphrase in the output
+ok    main --reseal [notfound:-]: TN_KEYTOOL_PASS unset and TN_CRED_PASS empty afterwards
+ok    main --reseal [notfound:-]: keytool verify not run
+ok    main --reseal [notfound:-]: probe failure warned
+ok    main --reseal [notfound:-]: _tn_cred_switch called once
+ok    main --reseal [notfound:-]: _tn_cred_switch got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    main --json refused: done ok false
+ok    main --json refused: exit 1
+ok    reseal verified, downstream rc 2: rollback report
+ok    reseal verified, downstream rc 2: rc 2
+ok    reseal verified, downstream rc 2: no baseline refresh after a rollback
+ok    reseal verified, downstream rc 3: failed rollback report
+ok    reseal verified, downstream rc 3: rc 3
+ok    reseal verified, downstream rc 3: no baseline refresh after a rollback
+ok    reseal verified, downstream rc 0: baseline refresh after the move (c4322d4)
+ok    reseal refused by verify: no baseline refresh after a refused verify
+ok    binary spec: change [verify:ok]: no passphrase in the binary's argv or environment
+ok    binary spec: change [verify:ok]: no passphrase in the output
+ok    binary spec: change [verify:ok]: TN_KEYTOOL_PASS unset afterwards
+ok    binary spec: change [verify:ok]: binary ran keytool verify
+ok    binary spec: change [verify:ok]: setpriv dropped to the service user
+ok    binary spec: change [verify:ok]: _tn_cred_switch called once
+ok    binary spec: change [verify:ok]: _tn_cred_switch got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    binary spec: change [verify:wrong]: no passphrase in the binary's argv or environment
+ok    binary spec: change [verify:wrong]: no passphrase in the output
+ok    binary spec: change [verify:wrong]: TN_KEYTOOL_PASS unset afterwards
+ok    binary spec: change [verify:wrong]: binary ran keytool verify
+ok    binary spec: change [verify:wrong]: setpriv dropped to the service user
+ok    binary spec: change [verify:wrong]: credential, plaintext, unit, .node-meta, launch file unchanged (bytes, inode, mtime)
+ok    binary spec: change [verify:wrong]: no writer and no downstream call
+ok    binary spec: change [verify:wrong]: no write tool ran
+ok    binary spec: change [verify:wrong]: no restart or stop
+ok    binary spec: change [verify:wrong]: refusal
+ok    binary spec: change [noverify:-]: no passphrase in the binary's argv or environment
+ok    binary spec: change [noverify:-]: no passphrase in the output
+ok    binary spec: change [noverify:-]: TN_KEYTOOL_PASS unset afterwards
+ok    binary spec: change [noverify:-]: verify not run
+ok    binary spec: change [noverify:-]: _tn_cred_switch called once
+ok    binary spec: change [noverify:-]: _tn_cred_switch got TN_CRED_PASS=match, TN_KEYTOOL_PASS unset
+ok    differential change, downstream rc 0, keytool verify: same downstream calls as 0a9db45
+ok    differential change, downstream rc 0, keytool verify: same rc as 0a9db45
+ok    differential change, downstream rc 0, keytool verify: same report as 0a9db45
+ok    differential reseal, downstream rc 0, keytool verify: same downstream calls as 0a9db45
+ok    differential reseal, downstream rc 0, keytool verify: same rc as 0a9db45
+ok    differential reseal, downstream rc 0, keytool verify: same report as 0a9db45
+ok    differential migrate (unit), downstream rc 0, keytool verify: same downstream calls as 0a9db45
+ok    differential migrate (unit), downstream rc 0, keytool verify: same rc as 0a9db45
+ok    differential migrate (unit), downstream rc 0, keytool verify: same report as 0a9db45
+ok    differential migrate (typed), downstream rc 0, keytool verify: same downstream calls as 0a9db45
+ok    differential migrate (typed), downstream rc 0, keytool verify: same rc as 0a9db45
+ok    differential migrate (typed), downstream rc 0, keytool verify: same report as 0a9db45
+ok    differential change, downstream rc 2, keytool verify: same downstream calls as 0a9db45
+ok    differential change, downstream rc 2, keytool verify: same rc as 0a9db45
+ok    differential change, downstream rc 2, keytool verify: same report as 0a9db45
+ok    differential reseal, downstream rc 2, keytool verify: same downstream calls as 0a9db45
+ok    differential reseal, downstream rc 2, keytool verify: same rc as 0a9db45
+ok    differential reseal, downstream rc 2, keytool verify: same report as 0a9db45
+ok    differential migrate (unit), downstream rc 2, keytool verify: same downstream calls as 0a9db45
+ok    differential migrate (unit), downstream rc 2, keytool verify: same rc as 0a9db45
+ok    differential migrate (unit), downstream rc 2, keytool verify: same report as 0a9db45
+ok    differential migrate (typed), downstream rc 2, keytool verify: same downstream calls as 0a9db45
+ok    differential migrate (typed), downstream rc 2, keytool verify: same rc as 0a9db45
+ok    differential migrate (typed), downstream rc 2, keytool verify: same report as 0a9db45
+ok    differential change, downstream rc 3, keytool verify: same downstream calls as 0a9db45
+ok    differential change, downstream rc 3, keytool verify: same rc as 0a9db45
+ok    differential change, downstream rc 3, keytool verify: same report as 0a9db45
+ok    differential reseal, downstream rc 3, keytool verify: same downstream calls as 0a9db45
+ok    differential reseal, downstream rc 3, keytool verify: same rc as 0a9db45
+ok    differential reseal, downstream rc 3, keytool verify: same report as 0a9db45
+ok    differential migrate (unit), downstream rc 3, keytool verify: same downstream calls as 0a9db45
+ok    differential migrate (unit), downstream rc 3, keytool verify: same rc as 0a9db45
+ok    differential migrate (unit), downstream rc 3, keytool verify: same report as 0a9db45
+ok    differential migrate (typed), downstream rc 3, keytool verify: same downstream calls as 0a9db45
+ok    differential migrate (typed), downstream rc 3, keytool verify: same rc as 0a9db45
+ok    differential migrate (typed), downstream rc 3, keytool verify: same report as 0a9db45
+ok    differential change, downstream rc 0, keytool noverify: same downstream calls as 0a9db45
+ok    differential change, downstream rc 0, keytool noverify: same rc as 0a9db45
+ok    differential change, downstream rc 0, keytool noverify: same report as 0a9db45
+ok    differential reseal, downstream rc 0, keytool noverify: same downstream calls as 0a9db45
+ok    differential reseal, downstream rc 0, keytool noverify: same rc as 0a9db45
+ok    differential reseal, downstream rc 0, keytool noverify: same report as 0a9db45
+ok    differential migrate (unit), downstream rc 0, keytool noverify: same downstream calls as 0a9db45
+ok    differential migrate (unit), downstream rc 0, keytool noverify: same rc as 0a9db45
+ok    differential migrate (unit), downstream rc 0, keytool noverify: same report as 0a9db45
+ok    differential migrate (typed), downstream rc 0, keytool noverify: same downstream calls as 0a9db45
+ok    differential migrate (typed), downstream rc 0, keytool noverify: same rc as 0a9db45
+ok    differential migrate (typed), downstream rc 0, keytool noverify: same report as 0a9db45
+ok    differential change, downstream rc 2, keytool noverify: same downstream calls as 0a9db45
+ok    differential change, downstream rc 2, keytool noverify: same rc as 0a9db45
+ok    differential change, downstream rc 2, keytool noverify: same report as 0a9db45
+ok    differential reseal, downstream rc 2, keytool noverify: same downstream calls as 0a9db45
+ok    differential reseal, downstream rc 2, keytool noverify: same rc as 0a9db45
+ok    differential reseal, downstream rc 2, keytool noverify: same report as 0a9db45
+ok    differential migrate (unit), downstream rc 2, keytool noverify: same downstream calls as 0a9db45
+ok    differential migrate (unit), downstream rc 2, keytool noverify: same rc as 0a9db45
+ok    differential migrate (unit), downstream rc 2, keytool noverify: same report as 0a9db45
+ok    differential migrate (typed), downstream rc 2, keytool noverify: same downstream calls as 0a9db45
+ok    differential migrate (typed), downstream rc 2, keytool noverify: same rc as 0a9db45
+ok    differential migrate (typed), downstream rc 2, keytool noverify: same report as 0a9db45
+ok    differential change, downstream rc 3, keytool noverify: same downstream calls as 0a9db45
+ok    differential change, downstream rc 3, keytool noverify: same rc as 0a9db45
+ok    differential change, downstream rc 3, keytool noverify: same report as 0a9db45
+ok    differential reseal, downstream rc 3, keytool noverify: same downstream calls as 0a9db45
+ok    differential reseal, downstream rc 3, keytool noverify: same rc as 0a9db45
+ok    differential reseal, downstream rc 3, keytool noverify: same report as 0a9db45
+ok    differential migrate (unit), downstream rc 3, keytool noverify: same downstream calls as 0a9db45
+ok    differential migrate (unit), downstream rc 3, keytool noverify: same rc as 0a9db45
+ok    differential migrate (unit), downstream rc 3, keytool noverify: same report as 0a9db45
+ok    differential migrate (typed), downstream rc 3, keytool noverify: same downstream calls as 0a9db45
+ok    differential migrate (typed), downstream rc 3, keytool noverify: same rc as 0a9db45
+ok    differential migrate (typed), downstream rc 3, keytool noverify: same report as 0a9db45
+== KEYS: remove-node shred note
+ok    shred note: printed once in a run of three shreds
+ok    shred note: destruction sentence printed once
+ok    shred note: files gone
+
+831 checks, 0 failures, 0 skipped

@@ -1,0 +1,4 @@
+37c37
+< readonly TN_MAINNET_ENABLED=0
+---
+> readonly TN_MAINNET_ENABLED=1

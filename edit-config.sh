@@ -11,8 +11,9 @@
 # An edit is refused while update-node.sh is applying an update (the two share
 # the update lock). Before restarting a node that votes in the current
 # committee, the script waits for the epoch to close and settle when the
-# boundary is within five minutes, at most 30 minutes. A rollback restart
-# never waits.
+# boundary is within the restart margin (five minutes for the six-hour epochs of
+# mainnet and testnet; derived from the epoch length, up to 15 minutes), at most
+# TN_EPOCH_WAIT_MAX (30 minutes by default). A rollback restart never waits.
 #
 # USAGE:
 #   sudo bash edit-config.sh                          # interactive menu
@@ -48,7 +49,15 @@
 # --set restarts the node after the edit and checks that it stays up. If it
 # does not, every file the edit changed is put back and the node restarted.
 # When the value is already in place nothing is written and the node is not
-# restarted.
+# restarted; an admission edit may still add a key .node-meta lacks, which
+# needs no restart either. The menu puts an edit back the same way when the
+# node does not come back from the restart it offers.
+#
+# An edit that writes network-config (admission, trusted_nodes, and
+# bootstrap_peers with an admission mode set) is watched longer, because the
+# node reads that file only once it has started: for TN_EDIT_VERIFY_TIMEOUT
+# seconds (default 60) after the restart the service must stay active without
+# restarting by itself (systemd's NRestarts), checked every 5 seconds.
 #
 # Fields for --set:
 #   primary_listener=<multiaddr>      /ip4/<addr>/udp/<port>/quic-v1 or /ip6/...
@@ -67,20 +76,47 @@
 #                                     by BLS public key, at most 64 KiB. The
 #                                     node binary checks it, then it is
 #                                     installed as /etc/telcoin/bootstrap-peers.yaml.
+# network-gated: release named in the testnet tag form; edit_need_flag asks the installed release on any network
 #                                     Needs v0.15.0-adiri or later and a start
 #                                     wrapper (a node started straight from its
 #                                     systemd unit is refused). none removes
 #                                     the flag and the file.
 #   state_export=off|unlimited|N      write the execution state at each epoch
 #                                     boundary (--enable-state-export,
+# network-gated: release named in the testnet tag form; edit_need_flag asks the installed release on any network
 #                                     v0.13.0-adiri or later); N keeps only the
 #                                     last N epochs (1 to 999999,
+# network-gated: release named in the testnet tag form; edit_need_flag asks the installed release on any network
 #                                     --state-export-keep, v0.15.0-adiri or later)
 #   allow_private_forward_targets=true|false
 #                                     parameters.yaml: whether the node may
 #                                     forward transactions to committee RPC
 #                                     endpoints on private addresses. true is
 #                                     refused on testnet and mainnet.
+#   admission=open|grace|closed       the node's connection admission mode,
+#                                     written into <data dir>/network-config
+#                                     (admission.mode Open, Grace or Closed)
+#                                     with the trusted nodes below and the
+#                                     installed bootstrap peers map as
+#                                     committee_peers. Closed admits only the
+#                                     previous, current and next committees,
+#                                     the trusted nodes and the bootstrap
+#                                     peers; Grace enforces nothing beyond Open
+#                                     and differs only in the status the node
+#                                     reports. Needs node release 0.17.0 or
+#                                     later.
+#   trusted_nodes=<path>|none         the trusted hubs, with an admission mode
+#                                     set: an absolute path to a YAML map keyed
+#                                     by BLS public key, each entry the hub's
+#                                     primary {network_address, network_key}
+#                                     and its workers by id, at most 64 KiB.
+#                                     The node has no check for this map, so
+#                                     its shape is checked here and a node
+#                                     that does not come back healthy is
+#                                     rolled back. Installed as
+#                                     /etc/telcoin/trusted-nodes.yaml and
+#                                     written into network-config under
+#                                     trusted_nodes; none removes both.
 # =============================================================================
 # --help prints the block above only. Not advertised there: --observer and
 # --validator are still accepted and ignored, because the node's role is
@@ -96,7 +132,9 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
     || ! tn_require_fns tn_migrate_ownership tn_update_lock_path tn_write_start_script \
         tn_write_node_env tn_rerender_node_launch tn_committee_down_guard tn_backup_file \
         tn_restore_backup tn_migrate_credential _tn_cred_switch _tn_multiaddr_udp_port \
-        tn_docker_resolve_ref tn_docker_network_ok _tn_guard_network >/dev/null; then
+        tn_launch_runner tn_keytool_has tn_keytool _tn_cred_plain_ok _tn_passfile_trim_safe \
+        tn_docker_resolve_ref tn_docker_network_ok _tn_guard_network tn_docker_image_network_ok \
+        tn_network_config_render tn_node_supports_admission >/dev/null; then
     _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this edit-config.sh: run update-scripts.sh and try again."
     case " $* " in
         *" --json "*) printf '{"event":"error","msg":"%s"}\n{"event":"done","ok":false,"msg":"%s"}\n' "$_tn_old" "$_tn_old" ;;
@@ -106,7 +144,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
 fi
 unset _tn_old
 
-readonly SCRIPT_VERSION="2.0.1"
+readonly SCRIPT_VERSION="2.1.0"
 
 # The largest bootstrap peers file accepted. A map of a few dozen peers is a
 # few KiB, and the whole map travels as one command-line argument.
@@ -205,14 +243,18 @@ EDIT_PENDING=false
 EDIT_RESTARTED=false
 # The signal that ended the run (TERM, INT or HUP), for the messages.
 EDIT_SIGNAL=""
-# A staged peers file or parameters.yaml not yet moved into place; edit_on_exit
-# removes it.
+# A staged peers file, trusted nodes copy or parameters.yaml not yet moved into
+# place; edit_on_exit removes it.
 EDIT_TMP=""
 # true or false once the run has tried to put an edit back on its way out.
 EDIT_ROLLED_BACK=""
 
 # Output of edit_launch_spec: the runner spec of the node command.
 EDIT_SPEC=""
+# Output of edit_admission_recorded: ADMISSION_MODE and TRUSTED_NODES_FILE as
+# .node-meta records them (empty when absent).
+EDIT_ADM_MODE=""
+EDIT_ADM_TRUSTED=""
 
 # =============================================================================
 # HELPERS
@@ -857,24 +899,46 @@ edit_backup() {
     return 0
 }
 
-# edit_any_changed -- rc 0 when a file recorded by edit_backup now differs from
-# its backup, a new file now exists, or a recorded file is gone.
+# edit_bk_changed I -- rc 0 when the I-th file recorded by edit_backup now
+# differs from its backup, is new and now exists, or is gone.
+edit_bk_changed() {
+    local file="${EDIT_BK_FILES[$1]}" copy="${EDIT_BK_COPIES[$1]}"
+    if [[ -z "$copy" ]]; then
+        [[ -e "$file" ]]
+        return
+    fi
+    [[ ! -e "$file" ]] || ! cmp -s "$copy" "$file"
+}
+
+# edit_any_changed -- rc 0 when a file recorded by edit_backup changed
+# (edit_bk_changed).
 edit_any_changed() {
-    local i file copy
-    i=0
+    local i=0
     while [[ "$i" -lt "${#EDIT_BK_FILES[@]}" ]]; do
-        file="${EDIT_BK_FILES[$i]}"
-        copy="${EDIT_BK_COPIES[$i]}"
-        if [[ -z "$copy" ]]; then
-            if [[ -e "$file" ]]; then
-                return 0
-            fi
-        elif [[ ! -e "$file" ]] || ! cmp -s "$copy" "$file"; then
+        if edit_bk_changed "$i"; then
             return 0
         fi
         i=$((i + 1))
     done
     return 1
+}
+
+# edit_only_meta_changed -- rc 0 when .node-meta changed and no other recorded
+# file did. .node-meta is the record these scripts keep and the node never
+# reads, so such an edit is in place without a restart (an admission edit that
+# finds the node already set that way and only fills in a key setup-node
+# writes).
+edit_only_meta_changed() {
+    local i=0 meta rc=1
+    meta="$(node_meta_path 2>/dev/null)" || return 1
+    while [[ "$i" -lt "${#EDIT_BK_FILES[@]}" ]]; do
+        if edit_bk_changed "$i"; then
+            [[ "${EDIT_BK_FILES[$i]}" == "$meta" ]] || return 1
+            rc=0
+        fi
+        i=$((i + 1))
+    done
+    return "$rc"
 }
 
 # edit_restore_backups -- undo the current edit: put back every file
@@ -943,6 +1007,53 @@ edit_wait_say() {
         step) edit_step "${2:-}" ;;
         warn) edit_warn "${2:-}" ;;
         *)    edit_log "${2:-}" ;;
+    esac
+    return 0
+}
+
+# edit_baseline_refresh -- after an edit the restarted node runs with: make the
+# host baseline again (tn_host_baseline_refresh, a no-op without HOST_BASELINE=true
+# in .node-meta or with a lib/common.sh that lacks it). Its warnings are events in
+# --json mode, before the done event. Never fails.
+edit_baseline_refresh() {
+    if declare -F tn_host_baseline_refresh >/dev/null 2>&1; then
+        tn_host_baseline_refresh edit_wait_say
+    fi
+    return 0
+}
+
+# edit_committee_resync -- after an edit the restarted node runs with: bring the
+# P2P committee allowlist in step with it when the edit changed one of its inputs
+# (node.env, which holds the P2P listener addresses, or bootstrap-peers.yaml) or
+# recorded no backup (the chain-config refresh, which replaces the genesis
+# committee.yaml its floor falls back on), and P2P_COMMITTEE is on in .node-meta.
+# The sync is firewall-setup.sh --p2p-committee sync, run once this run has
+# released the update lock, because that run takes the lock itself. A no-op while
+# P2P_COMMITTEE is off. A failure is a warning, before the done event, naming the
+# command to run. Never fails.
+edit_committee_resync() {
+    local f mode rc=0 hit=false
+    [[ ${#EDIT_BK_FILES[@]} -gt 0 ]] || hit=true
+    for f in ${EDIT_BK_FILES[@]+"${EDIT_BK_FILES[@]}"}; do
+        case "${f##*/}" in
+            node.env|bootstrap-peers.yaml) hit=true ;;
+        esac
+    done
+    [[ "$hit" == "true" ]] || return 0
+    mode="$(meta_get P2P_COMMITTEE 2>/dev/null)" || rc=$?
+    if [[ "$rc" -eq 2 ]]; then
+        edit_warn "P2P_COMMITTEE is set more than once in .node-meta, so the P2P committee allowlist was not synced with this edit; remove the extra lines, then run: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee sync"
+        return 0
+    fi
+    [[ "$mode" == "on" ]] || return 0
+    edit_unlock
+    edit_step "Syncing the P2P committee allowlist with the edit"
+    rc=0
+    bash "${SCRIPT_DIR}/firewall-setup.sh" --p2p-committee sync < /dev/null 3>&- || rc=$?
+    case "$rc" in
+        0) ;;
+        3) edit_warn "The P2P committee allowlist keeps its last-good set for now (the node may not answer yet after its restart); telcoin-p2p-allow-sync.timer syncs it again within 5 minutes." ;;
+        *) edit_warn "The P2P committee allowlist was not synced with this edit (firewall-setup.sh exit ${rc}); run: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee sync" ;;
     esac
     return 0
 }
@@ -1089,7 +1200,23 @@ set_metrics() {
 # the command line of the node binary, where other local users can see it.
 # Otherwise rc 1, with the reason on stdout. Mirrors setup-node.sh.
 peers_file_ok() {
-    local f="$1" mode size
+    _edit_map_file_ok "$1" peers "bootstrap peers" "the installed copy is world-readable (0644) and the check passes the map on the command line of the node binary, where other users can see it"
+}
+
+# trusted_nodes_file_ok FILE -- rc 0 when FILE can be a trusted nodes map, by the
+# rules of a peers file: the map never reaches a command line, but it does not
+# stay private either (the installed copy is 0644, so the service user can read
+# it), and a list of hubs never comes near 64 KiB. Otherwise rc 1, with the
+# reason on stdout. Mirrors setup-node.sh.
+trusted_nodes_file_ok() {
+    _edit_map_file_ok "$1" "trusted nodes" "trusted nodes" "the installed copy is world-readable (0644)"
+}
+
+# _edit_map_file_ok FILE KIND NAME WHY -- the checks of peers_file_ok and
+# trusted_nodes_file_ok. KIND names the file in the refusal of one that other
+# users cannot read, WHY ends that refusal; NAME names it in the size refusal.
+_edit_map_file_ok() {
+    local f="$1" kind="$2" name="$3" why="$4" mode size
     if [[ ! -f "$f" || ! -r "$f" ]]; then
         printf '%s is not a readable regular file' "$f"
         return 1
@@ -1104,7 +1231,7 @@ peers_file_ok() {
         return 1
     fi
     if (( (8#$mode & 8#044) != 8#044 )); then
-        printf '%s is mode %s: other users cannot read it. edit-config accepts only a peers file that others can already read, because the installed copy is world-readable (0644) and the check passes the map on the command line of the node binary, where other users can see it. Run chmod 644 %s first' "$f" "$mode" "$f"
+        printf '%s is mode %s: other users cannot read it. edit-config accepts only a %s file that others can already read, because %s. Run chmod 644 %s first' "$f" "$mode" "$kind" "$why" "$f"
         return 1
     fi
     size="$(wc -c < "$f" 2>/dev/null | tr -d '[:space:]')"
@@ -1117,7 +1244,7 @@ peers_file_ok() {
         return 1
     fi
     if [[ "$size" -gt "$PEERS_MAX_BYTES" ]]; then
-        printf '%s is %s bytes; a bootstrap peers file can be at most 64 KiB' "$f" "$size"
+        printf '%s is %s bytes; a %s file can be at most 64 KiB' "$f" "$size" "$name"
         return 1
     fi
     return 0
@@ -1132,7 +1259,9 @@ peers_file_ok() {
 # each start. A systemd unit cannot run that $(cat ...), so a node started
 # straight from its unit is refused. none removes the flag and the file. The
 # parse check is the only time a run hands the map to a node binary, and it
-# comes after every check on the file.
+# comes after every check on the file. With an admission mode recorded, the
+# committee_peers entry of network-config follows the new map
+# (edit_admission_follow_peers).
 set_bootstrap_peers() {
     local value="$1" peers spec tmp msg rc
     peers="$(tn_resolve_config_dir)/bootstrap-peers.yaml"
@@ -1148,6 +1277,7 @@ set_bootstrap_peers() {
                 return 1
             fi
         fi
+        edit_admission_follow_peers || return 1
         return 0
     fi
     if [[ "$TARGET_LAUNCH_FILE" == *.service ]]; then
@@ -1215,6 +1345,7 @@ set_bootstrap_peers() {
     EDIT_TMP=""
     edit_backup "$TARGET_LAUNCH_FILE" || return 1
     edit_flag_change set --bootstrap-peers "\"\$(cat ${peers})\"" || return 1
+    edit_admission_follow_peers || return 1
     return 0
 }
 
@@ -1258,6 +1389,481 @@ set_state_export() {
             ;;
     esac
     return 0
+}
+
+# The node reads its admission settings from three top-level entries of
+# <data dir>/network-config (admission, trusted_nodes, committee_peers); no flag
+# carries them. tn_network_config_render writes the three together, so each edit
+# below renders the whole set again from what .node-meta records (ADMISSION_MODE,
+# TRUSTED_NODES_FILE) and the bootstrap peers map the node command loads.
+# network-config and .node-meta are recorded with edit_backup before they
+# change: a node that does not come back healthy, a refused restart or a stopped
+# run puts both back byte for byte, network-config read and written by the
+# service user (edit_backup_copy, edit_restore_one).
+
+# trusted_nodes_shape_ok FILE -- rc 0 when FILE has the shape of the node's
+# trusted nodes map in block YAML: top-level keys that are BLS public keys
+# (base58 of the 96-byte key, 131 or 132 characters, as node-info.yaml writes
+# them), each named once and holding primary and workers and nothing else (the
+# node refuses unknown fields there). primary has a network_address and a
+# network_key that are not empty; workers holds at least one worker id (a whole
+# number from 0 to 65535, each once), each a block with a network_address and a
+# network_key of its own. Comments, blank lines and a leading "---" may appear.
+# The node has no check flag for this map, so this is the whole check before
+# the restart; a map that passes and is still wrong stops the node, and the edit
+# is rolled back. Otherwise rc 1, with the reason on stdout.
+trusted_nodes_shape_ok() {
+    local out rc=0
+    # the awk text holds no single quote; sq carries one
+    out="$(awk -v sq="'" '
+        function short(k) { return (length(k) > 16) ? substr(k, 1, 16) "..." : k }
+        function fail(msg) { reason = msg; failed = 1; exit }
+        # what the current worker still lacks once it ends
+        function wlacks() {
+            if (wid == "") return ""
+            if (!waddr) return "worker " wid " of " short(key) " has no network_address"
+            if (!wnkey) return "worker " wid " of " short(key) " has no network_key"
+            return ""
+        }
+        # what the current entry still lacks once it ends
+        function lacks() {
+            if (key == "") return ""
+            w = wlacks()
+            if (w != "") return w
+            if (!prim) return "the entry " short(key) " has no primary"
+            if (!addr) return "the primary of " short(key) " has no network_address"
+            if (!nkey) return "the primary of " short(key) " has no network_key"
+            if (!work) return "the entry " short(key) " has no workers"
+            if (!nw) return "the workers of " short(key) " name no worker id"
+            return ""
+        }
+        # whether the value after the first colon is something other than null
+        function has_value(s) {
+            sub(/^[^:]*:[ \t]*/, "", s)
+            sub(/[ \t]+#.*$/, "", s)
+            sub(/[ \t]+$/, "", s)
+            return !(s == "" || s == "~" || s == "null" || s == "\"\"" || s == sq sq)
+        }
+        {
+            s = $0
+            if (s ~ /\r$/) fail("line " NR " ends in a carriage return; save the file with plain line ends")
+            if (s ~ /^[ \t]*$/ || s ~ /^[ \t]*#/) next
+            if (s ~ /^(---|[.][.][.])[ \t]*$/) {
+                if (seen) ended = 1
+                next
+            }
+            if (ended) fail("line " NR " starts a second YAML document; the file holds one map")
+            seen = 1
+            if (s ~ /^ *\t/) fail("line " NR " is indented with a tab; YAML indents with spaces")
+            match(s, /^ */)
+            ind = RLENGTH
+            if (ind == 0) {
+                m = lacks()
+                if (m != "") fail(m)
+                k = s
+                sub(/[ \t]+#.*$/, "", k)
+                sub(/[ \t]+$/, "", k)
+                if (k !~ /:$/) fail("line " NR " is not a BLS public key and a colon, with the entry indented below it")
+                k = substr(k, 1, length(k) - 1)
+                q = substr(k, 1, 1)
+                if ((q == "\"" || q == sq) && length(k) > 2 && substr(k, length(k), 1) == q)
+                    k = substr(k, 2, length(k) - 2)
+                if (k !~ /^[1-9A-HJ-NP-Za-km-z]+$/)
+                    fail("line " NR ": " short(k) " is not a BLS public key (base58, as in node-info.yaml)")
+                if (length(k) < 131 || length(k) > 132)
+                    fail("line " NR ": " short(k) " is not a BLS public key: it is " length(k) " characters long, and a key is 131 or 132 (96 bytes in base58, as in node-info.yaml)")
+                if (k in keys) fail("line " NR ": the BLS key " short(k) " is in the map twice")
+                keys[k] = 1
+                n++
+                key = k
+                fld = 0; pfld = 0; prim = 0; addr = 0; nkey = 0; work = 0; inprim = 0
+                inwork = 0; wfld = 0; nw = 0; wid = ""; split("", wids)
+                next
+            }
+            if (key == "") fail("line " NR " is indented, but no BLS public key comes before it")
+            if (fld == 0) fld = ind
+            if (ind < fld) fail("line " NR " is indented less than the lines above it in the entry " short(key))
+            if (ind == fld) {
+                m = wlacks()
+                if (m != "") fail(m)
+                wid = ""
+                c = substr(s, ind + 1)
+                f = c
+                sub(/[ \t]*:.*$/, "", f)
+                inprim = 0
+                inwork = 0
+                if (f == "primary") {
+                    if (prim) fail("line " NR ": the entry " short(key) " has primary twice")
+                    if (c !~ /^primary:[ \t]*(#.*)?$/)
+                        fail("line " NR ": write primary as a block, with network_address and network_key on their own lines below it")
+                    prim = 1
+                    inprim = 1
+                    pfld = 0
+                } else if (f == "workers") {
+                    if (work) fail("line " NR ": the entry " short(key) " has workers twice")
+                    if (c !~ /^workers:[ \t]*(#.*)?$/)
+                        fail("line " NR ": write workers as a block: each worker id on its own line below it, holding network_address and network_key")
+                    work = 1
+                    inwork = 1
+                } else {
+                    fail("line " NR ": " short(f) " is not a field of a trusted node; an entry holds primary and workers")
+                }
+                next
+            }
+            if (inprim) {
+                if (pfld == 0) pfld = ind
+                if (ind == pfld) {
+                    c = substr(s, ind + 1)
+                    if (c ~ /^network_address[ \t]*:/) {
+                        if (!has_value(c)) fail("line " NR ": the network_address of " short(key) " is empty")
+                        addr = 1
+                    } else if (c ~ /^network_key[ \t]*:/) {
+                        if (!has_value(c)) fail("line " NR ": the network_key of " short(key) " is empty")
+                        nkey = 1
+                    }
+                }
+            } else if (inwork) {
+                if (wfld == 0) wfld = ind
+                if (ind < wfld) fail("line " NR " is indented less than the worker ids above it in the entry " short(key))
+                if (ind == wfld) {
+                    m = wlacks()
+                    if (m != "") fail(m)
+                    c = substr(s, ind + 1)
+                    id = c
+                    sub(/[ \t]*:.*$/, "", id)
+                    if (id !~ /^[0-9]+$/ || id + 0 > 65535)
+                        fail("line " NR ": " short(id) " is not a worker id; the workers of " short(key) " are keyed by numbers from 0 to 65535")
+                    if (c !~ /^[0-9]+[ \t]*:[ \t]*(#.*)?$/)
+                        fail("line " NR ": write worker " id " of " short(key) " as a block, with network_address and network_key on their own lines below it")
+                    if ((id + 0) in wids) fail("line " NR ": the entry " short(key) " has worker " id " twice")
+                    wids[id + 0] = 1
+                    nw++
+                    wid = id; wefld = 0; waddr = 0; wnkey = 0
+                    next
+                }
+                if (wefld == 0) wefld = ind
+                if (ind == wefld) {
+                    c = substr(s, ind + 1)
+                    if (c ~ /^network_address[ \t]*:/) {
+                        if (!has_value(c)) fail("line " NR ": the network_address of worker " wid " of " short(key) " is empty")
+                        waddr = 1
+                    } else if (c ~ /^network_key[ \t]*:/) {
+                        if (!has_value(c)) fail("line " NR ": the network_key of worker " wid " of " short(key) " is empty")
+                        wnkey = 1
+                    }
+                }
+            }
+        }
+        END {
+            if (!failed) {
+                reason = lacks()
+                if (reason != "") failed = 1
+                else if (n == 0) { reason = "it holds no BLS public key entries"; failed = 1 }
+            }
+            if (failed) {
+                print reason
+                exit 1
+            }
+        }' "$1" 2>&1)" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        printf '%s' "${out:-could not read ${1}}"
+        return 1
+    fi
+    return 0
+}
+
+# edit_admission_recorded -- set EDIT_ADM_MODE and EDIT_ADM_TRUSTED to
+# ADMISSION_MODE and TRUSTED_NODES_FILE in .node-meta, as setup-node writes them
+# (empty when absent). rc 1, reported, when either is set more than once.
+edit_admission_recorded() {
+    local key v rc
+    EDIT_ADM_MODE=""
+    EDIT_ADM_TRUSTED=""
+    for key in ADMISSION_MODE TRUSTED_NODES_FILE; do
+        rc=0
+        v="$(meta_get "$key" 2>/dev/null)" || rc=$?
+        if [[ $rc -eq 2 ]]; then
+            edit_error "${key} is set more than once in .node-meta; remove the extra lines first"
+            return 1
+        fi
+        [[ $rc -eq 0 ]] || v=""
+        if [[ "$key" == ADMISSION_MODE ]]; then
+            EDIT_ADM_MODE="$v"
+        else
+            EDIT_ADM_TRUSTED="$v"
+        fi
+    done
+    return 0
+}
+
+# edit_recorded_mode_ok -- rc 0 when EDIT_ADM_MODE is empty or open, grace or
+# closed; otherwise rc 1, reported.
+edit_recorded_mode_ok() {
+    case "$EDIT_ADM_MODE" in
+        ""|open|grace|closed) return 0 ;;
+    esac
+    edit_error "ADMISSION_MODE=${EDIT_ADM_MODE} in .node-meta is not open, grace or closed; set admission first"
+    return 1
+}
+
+# edit_node_release -- the release the node command runs, as
+# tn_node_supports_admission judges it, from EDIT_SPEC: for a binary the first
+# line of the version marker beside it (telcoin-network.version, written by
+# setup-node and update-node), for a docker image the release .node-meta records
+# for its digest (tn_docker_recorded_tag), else the image itself. Empty when
+# neither is known.
+edit_node_release() {
+    local img bin marker v=""
+    case "$EDIT_SPEC" in
+        docker:*)
+            img="${EDIT_SPEC#docker:}"
+            v="$(tn_docker_recorded_tag "$img" 2>/dev/null)" || v="$img"
+            ;;
+        binary:*)
+            bin="${EDIT_SPEC#binary:}"
+            marker="${bin%/*}/telcoin-network.version"
+            if [[ -f "$marker" && ! -L "$marker" ]]; then
+                v="$(head -n 1 -- "$marker" 2>/dev/null)" || v=""
+            fi
+            ;;
+    esac
+    printf '%s\n' "$v"
+}
+
+# edit_admission_release_ok -- rc 0 when the installed release reads the
+# admission settings (tn_node_supports_admission: MIN_ADMISSION_VERSION or
+# later). An older one ignores them, so the host would look configured while the
+# node admits as it always did: rc 1, reported. A release that cannot be told (a
+# digest no release names, no version marker, a build of a branch) gets a
+# warning and passes, as in setup-node.
+edit_admission_release_ok() {
+    local ver rc=0
+    edit_launch_spec || return 1
+    ver="$(edit_node_release)"
+    tn_node_supports_admission "$ver" || rc=$?
+    case "$rc" in
+        0) ;;
+        1)
+            edit_error "the admission settings need node release ${MIN_ADMISSION_VERSION} or later, and this node runs ${ver}, which ignores them; update the node first"
+            return 1
+            ;;
+        *) edit_warn "could not tell whether the installed release (${ver:-unknown}) is ${MIN_ADMISSION_VERSION} or later, which the admission settings need (an older one ignores them); writing them anyway" ;;
+    esac
+    return 0
+}
+
+# edit_admission_render MODE TRUSTED -- write the admission settings into
+# network-config with tn_network_config_render (run as the service user): MODE,
+# TRUSTED (the installed trusted nodes map, or none) and, as committee_peers, the
+# installed bootstrap peers map when the node command loads one, else none. The
+# file is recorded with edit_backup first. The renderer leaves the file as it was
+# when it refuses or fails, and its reason becomes the edit's error.
+edit_admission_render() {
+    local mode="$1" trusted="$2" committee=none dd nc out line reason="" rc=0
+    dd="$(detect_data_dir)" || dd=""
+    dd="${dd%/}"
+    if [[ -z "$dd" || ! -d "$dd" ]]; then
+        edit_error "cannot find the node's data dir, which holds network-config"
+        return 1
+    fi
+    nc="${dd}/network-config"
+    if tn_launch_flag_get "$TARGET_LAUNCH_FILE" --bootstrap-peers >/dev/null 2>&1; then
+        committee="$(tn_resolve_config_dir)/bootstrap-peers.yaml"
+    fi
+    edit_backup "$nc" || return 1
+    out="$(tn_network_config_render "$dd" "$mode" "$trusted" "$committee" 2>&1)" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        # the renderer's own [ERROR] line says why
+        while IFS= read -r line; do
+            case "$line" in
+                *"[ERROR]"*) reason="${line#*\[ERROR\]}" ;;
+            esac
+        done <<< "$out"
+        reason="${reason#"$RESET"}"
+        reason="${reason# }"
+        edit_error "${reason:-the admission settings could not be written to ${nc}}"
+        return 1
+    fi
+    edit_log "Admission settings written to ${nc}: mode ${mode}, trusted nodes ${trusted}, committee peers ${committee}"
+    return 0
+}
+
+# edit_admission_meta KEY VALUE -- record KEY=VALUE in .node-meta (meta_set)
+# after edit_backup has recorded the file, so a rollback puts the record back
+# with network-config. A value already recorded is left alone, because meta_set
+# moves the line it writes to the end; an absent key is written, an empty value
+# too, so .node-meta names the key as setup-node writes it.
+edit_admission_meta() {
+    local key="$1" val="$2" meta cur rc=0
+    cur="$(meta_get "$key" 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 0 && "$cur" == "$val" ]]; then
+        return 0
+    fi
+    meta="$(node_meta_path 2>/dev/null)" || meta=""
+    if [[ -z "$meta" ]]; then
+        edit_error "no .node-meta to record ${key} in"
+        return 1
+    fi
+    edit_backup "$meta" || return 1
+    if ! meta_set "$key" "$val" "$meta"; then
+        edit_error "could not record ${key}=${val} in ${meta}"
+        return 1
+    fi
+    return 0
+}
+
+# edit_admission_record MODE TRUSTED -- record ADMISSION_MODE=MODE and
+# TRUSTED_NODES_FILE=TRUSTED (edit_admission_meta), both keys, as setup-node
+# writes them.
+edit_admission_record() {
+    edit_admission_meta ADMISSION_MODE "$1" || return 1
+    edit_admission_meta TRUSTED_NODES_FILE "$2"
+}
+
+# edit_admission_follow_peers -- after a bootstrap_peers edit, with an admission
+# mode recorded: write network-config again (edit_admission_render), so
+# committee_peers holds the map the node command now loads, or nothing. Without
+# a mode nothing is written. A record that cannot be used refuses the edit,
+# since network-config would keep the old committee peers.
+edit_admission_follow_peers() {
+    local trusted=none
+    edit_admission_recorded || return 1
+    edit_recorded_mode_ok || return 1
+    [[ -n "$EDIT_ADM_MODE" ]] || return 0
+    if [[ -n "$EDIT_ADM_TRUSTED" ]]; then
+        trusted="$EDIT_ADM_TRUSTED"
+    fi
+    edit_admission_render "$EDIT_ADM_MODE" "$trusted"
+}
+
+# edit_admission_closed_warn MODE TRUSTED -- on mainnet, warn when an edit leaves
+# the node in mode closed with no trusted nodes map (TRUSTED none), in the words
+# setup-node uses: it then admits only the committees and the bootstrap peers,
+# and mainnet validators are expected to run closed with their hubs. Always rc 0.
+edit_admission_closed_warn() {
+    [[ "$1" == closed && "$2" == none ]] || return 0
+    [[ "$(tn_detect_network 2>/dev/null)" == mainnet ]] || return 0
+    edit_warn "Admission closed without --trusted-nodes: the node admits only the previous, current and next committees and the bootstrap peers. Mainnet validators are expected to run --admission closed --trusted-nodes <hubs>. Set the hubs with trusted_nodes."
+    return 0
+}
+
+# set_admission VALUE -- open, grace or closed (the node's Open, Grace and Closed
+# are taken too): the admission mode in network-config, with the trusted nodes
+# map .node-meta records and the bootstrap peers map written beside it again,
+# and ADMISSION_MODE in .node-meta, in lower case as setup-node writes it (with
+# TRUSTED_NODES_FILE beside it when that key is absent: edit_admission_record). The
+# installed release must read the settings (edit_admission_release_ok).
+# Mode closed with no trusted nodes map warns on mainnet (edit_admission_closed_warn).
+set_admission() {
+    local value="$1" mode trusted=none
+    case "$value" in
+        open|Open) mode=open ;;
+        grace|Grace) mode=grace ;;
+        closed|Closed) mode=closed ;;
+        *)
+            edit_error "admission takes open, grace or closed, not ${value}"
+            return 1
+            ;;
+    esac
+    edit_admission_recorded || return 1
+    if [[ -n "$EDIT_ADM_TRUSTED" ]]; then
+        if [[ ! -f "$EDIT_ADM_TRUSTED" ]]; then
+            edit_error "TRUSTED_NODES_FILE in .node-meta names ${EDIT_ADM_TRUSTED}, which is missing; set trusted_nodes to the map again, or to none, first"
+            return 1
+        fi
+        trusted="$EDIT_ADM_TRUSTED"
+    fi
+    edit_admission_release_ok || return 1
+    edit_admission_render "$mode" "$trusted" || return 1
+    edit_admission_record "$mode" "$EDIT_ADM_TRUSTED" || return 1
+    edit_admission_closed_warn "$mode" "$trusted"
+}
+
+# edit_trusted_install SRC TMP DEST -- copy SRC into the root-only temp file TMP,
+# check the copy (its size, then trusted_nodes_shape_ok) and install it as DEST,
+# root 0644, through tn_write_root_file after edit_backup, unless DEST already
+# holds the same bytes. What is installed is what passed, and nothing is written
+# before it has. rc 1, reported, otherwise.
+edit_trusted_install() {
+    local src="$1" tmp="$2" dest="$3" size="" msg
+    if cat -- "$src" > "$tmp" 2>/dev/null; then
+        size="$(wc -c < "$tmp" 2>/dev/null | tr -d '[:space:]')"
+    fi
+    if [[ ! "$size" =~ ^[0-9]+$ ]] || [[ "$size" -eq 0 || "$size" -gt "$PEERS_MAX_BYTES" ]]; then
+        edit_error "${src} could not be read, or changed while it was being read. Check the file and try again."
+        return 1
+    fi
+    if ! msg="$(trusted_nodes_shape_ok "$tmp")"; then
+        edit_error "${src} is not a trusted nodes map: ${msg}. Each key is a hub's BLS public key, and each entry the hub's primary (network_address, network_key) and workers, as in its node-info.yaml."
+        return 1
+    fi
+    if [[ -f "$dest" && ! -L "$dest" ]] && cmp -s "$tmp" "$dest"; then
+        return 0
+    fi
+    edit_backup "$dest" || return 1
+    if ! tn_write_root_file "$dest" 0644 < "$tmp"; then
+        edit_error "could not install ${dest}"
+        return 1
+    fi
+    return 0
+}
+
+# set_trusted_nodes VALUE -- an absolute path to the trusted hubs map, or none.
+# A map needs an admission mode (set_admission first) and passes the checks of a
+# peers file (trusted_nodes_file_ok) and the shape check on a root-only copy
+# (edit_trusted_install), which is installed as <config dir>/trusted-nodes.yaml.
+# network-config is then written again with it under trusted_nodes, and
+# TRUSTED_NODES_FILE in .node-meta names it. none writes network-config without
+# trusted_nodes, removes the installed map and empties TRUSTED_NODES_FILE; with
+# no mode recorded these scripts never wrote network-config, so only the map and
+# its record go. Either way .node-meta holds both admission keys afterwards
+# (edit_admission_record). none on a node in mode closed warns on mainnet
+# (edit_admission_closed_warn).
+set_trusted_nodes() {
+    local value="$1" dest tmp msg rc=0
+    dest="$(tn_resolve_config_dir)/trusted-nodes.yaml"
+    if [[ "$value" != none && "$value" != /* ]]; then
+        edit_error "trusted_nodes takes an absolute path or none, not ${value}"
+        return 1
+    fi
+    edit_admission_recorded || return 1
+    edit_recorded_mode_ok || return 1
+    if [[ "$value" == none ]]; then
+        if [[ -n "$EDIT_ADM_MODE" ]]; then
+            edit_admission_render "$EDIT_ADM_MODE" none || return 1
+        fi
+        if [[ -e "$dest" || -L "$dest" ]]; then
+            edit_backup "$dest" || return 1
+            if ! rm -f -- "$dest"; then
+                edit_error "could not remove ${dest}"
+                return 1
+            fi
+        fi
+        edit_admission_record "$EDIT_ADM_MODE" "" || return 1
+        edit_admission_closed_warn "$EDIT_ADM_MODE" none
+        return 0
+    fi
+    if [[ -z "$EDIT_ADM_MODE" ]]; then
+        edit_error "trusted_nodes needs an admission mode, which goes into network-config with it: set admission to open, grace or closed first"
+        return 1
+    fi
+    if ! msg="$(trusted_nodes_file_ok "$value")"; then
+        edit_error "${msg}."
+        return 1
+    fi
+    edit_admission_release_ok || return 1
+    tmp="$(mktemp "${TMPDIR:-/tmp}/tn-trusted.XXXXXX" 2>/dev/null)" || tmp=""
+    if [[ -z "$tmp" ]]; then
+        edit_error "could not make a temp file to check ${value} in"
+        return 1
+    fi
+    EDIT_TMP="$tmp"
+    edit_trusted_install "$value" "$tmp" "$dest" || rc=$?
+    rm -f -- "$tmp"
+    EDIT_TMP=""
+    [[ $rc -eq 0 ]] || return 1
+    edit_admission_render "$EDIT_ADM_MODE" "$dest" || return 1
+    edit_admission_record "$EDIT_ADM_MODE" "$dest"
 }
 
 # params_forward_value FILE -- the value of the top-level key
@@ -1369,6 +1975,29 @@ set_private_forward_targets() {
     return 0
 }
 
+# edit_floor_check ARG NETWORK -- hold an image change to the oldest release these
+# scripts support on NETWORK (tn_ref_min_check), before the image is resolved or
+# pulled: a release tag, alone or as <repo>:<tag>, as given; a digest given alone
+# by the release .node-meta records for it (tn_docker_recorded_tag). Anything else
+# is not checked here: tn_docker_resolve_ref refuses what is not a release tag of
+# NETWORK, and warns that the check cannot be applied to a digest with no recorded
+# release. rc 1, with the reason (edit_error), when the release is older; a
+# warning when tn_ref_min_check cannot tell; rc 0 otherwise.
+edit_floor_check() {
+    local ref="${1:-}" msg="" rc=0
+    if [[ "$ref" == *@sha256:* ]]; then
+        ref="$(tn_docker_recorded_tag "$ref" 2>/dev/null)" || return 0
+    fi
+    tn_release_tag_ok "${2:-}" "${ref##*:}" || return 0
+    msg="$(tn_ref_min_check "$ref" "${2:-}")" || rc=$?
+    case "$rc" in
+        0) ;;
+        1) edit_error "${msg} The image is not changed."; return 1 ;;
+        *) edit_warn "$msg" ;;
+    esac
+    return 0
+}
+
 # set_docker_image IMAGE -- pull IMAGE and swap it into the launch file (Docker
 # installs only). Mirrors edit_docker_image. The same image is a no-op. The network
 # is _tn_guard_network's, so a devnet node (NETWORK=devnet in .node-meta) changes
@@ -1382,9 +2011,12 @@ set_docker_image() {
     fi
     # A release tag resolves to the release's digest; a digest reference must be
     # this network's repository. Tags are never written into the start script.
+    edit_floor_check "$value" "$net" || return 1
     if ! out="$(tn_docker_resolve_ref "$net" "$value" edit_wait_say)"; then
         if [[ "$net" == "devnet" ]]; then
             edit_error "image refused: ${value} (give a devnet image by digest: <repository>@sha256:<digest>; devnet has no signed releases)"
+        elif [[ "$net" == "mainnet" ]]; then
+            edit_error "image refused: ${value} (give a mainnet release tag; a digest alone is taken only for a mainnet release this node has installed)"
         else
             edit_error "image refused: ${value} (give a ${net} release tag, or this network's image by digest: <repository>@sha256:<digest>)"
         fi
@@ -1415,24 +2047,31 @@ set_docker_image() {
         edit_error "Docker does not hold ${new_image} under that digest after the pull (digest mismatch)"
         return 1
     fi
+    # Built for this network (its Build Features line) before the start script
+    # names it, the node restarts on it or .node-meta records it.
+    if ! tn_docker_image_network_ok "$net" "$new_image" edit_wait_say; then
+        edit_error "refusing ${new_image}: it is not a ${net} image (see above); the image is not changed"
+        return 1
+    fi
     swap_docker_image "$new_image" || return 1
     edit_record_image "$new_image" "$new_tag"
 }
 
 # edit_record_image IMAGE TAG -- after the start script runs IMAGE: .node-meta
-# DOCKER_IMAGE and DOCKER_IMAGE_DIGEST name it, RELEASE_TAG names TAG (removed when
-# TAG is empty: an image given by digest alone). A failed write warns. Only
-# informational: the start script stays what runs, and readers of RELEASE_TAG
-# check DOCKER_IMAGE_DIGEST against it first.
+# DOCKER_IMAGE and DOCKER_IMAGE_DIGEST name it, RELEASE_TAG names TAG (none when
+# TAG is empty: an image given by digest alone). The old RELEASE_TAG goes first and
+# TAG last, each write only once the one before it succeeded, so a failed or
+# interrupted write leaves the digest with no release (unknown), never with the
+# release of another image. A failed write warns. Only informational: the start
+# script stays what runs, and readers of RELEASE_TAG check DOCKER_IMAGE_DIGEST
+# against it first.
 edit_record_image() {
     local ok=true
-    meta_set DOCKER_IMAGE "${1:-}" >/dev/null 2>&1 || ok=false
-    meta_set DOCKER_IMAGE_DIGEST "${1##*@}" >/dev/null 2>&1 || ok=false
-    if [[ -n "${2:-}" ]]; then
-        meta_set RELEASE_TAG "$2" >/dev/null 2>&1 || ok=false
-    else
-        meta_unset RELEASE_TAG >/dev/null 2>&1 || ok=false
-    fi
+    meta_unset RELEASE_TAG >/dev/null 2>&1 \
+        && meta_set DOCKER_IMAGE "${1:-}" >/dev/null 2>&1 \
+        && meta_set DOCKER_IMAGE_DIGEST "${1##*@}" >/dev/null 2>&1 \
+        && { [[ -z "${2:-}" ]] || meta_set RELEASE_TAG "$2" >/dev/null 2>&1; } \
+        || ok=false
     if [[ "$ok" != "true" ]]; then
         edit_wait_say warn "Could not record the image in .node-meta (DOCKER_IMAGE, DOCKER_IMAGE_DIGEST, RELEASE_TAG)."
     fi
@@ -1444,6 +2083,7 @@ edit_field_known() {
     case "$1" in
         primary_listener|worker_listener|metrics|verbosity|docker_image) return 0 ;;
         bootstrap_peers|state_export|allow_private_forward_targets) return 0 ;;
+        admission|trusted_nodes) return 0 ;;
     esac
     return 1
 }
@@ -1528,6 +2168,10 @@ set_field() {
             set_state_export "$value" ;;
         allow_private_forward_targets)
             set_private_forward_targets "$value" ;;
+        admission)
+            set_admission "$value" ;;
+        trusted_nodes)
+            set_trusted_nodes "$value" ;;
         *)
             edit_error "field not editable: ${field}"
             return 1
@@ -1544,7 +2188,9 @@ set_field() {
 # The edit stops being pending (EDIT_PENDING) when the restart is issued or the
 # operator chooses to restart later; a run stopped before either, at the
 # prompt or during the wait, puts the files back (edit_on_exit), and so does a
-# refusal by the committee check.
+# refusal by the committee check. A node that does not come back from the
+# restart (edit_verify_up) has the edit put back and is restarted once more
+# without the wait (edit_rollback_restart), as --set does.
 apply_changes() {
     set +e  # Restart failure should not exit the script
     print_step "Applying changes..."
@@ -1575,11 +2221,21 @@ apply_changes() {
         EDIT_PENDING=false
         print_step "Restarting ${TARGET_SERVICE}..."
         systemctl restart "$TARGET_SERVICE" || true
-        sleep 3
-        if systemctl is-active --quiet "$TARGET_SERVICE"; then
+        if edit_verify_up; then
             print_ok "Node restarted successfully"
+            edit_baseline_refresh
+            edit_committee_resync
         else
-            print_error "Node failed to restart. Check logs:"
+            # An edit with recorded backups is put back, as --set does, so the
+            # node is not left failing on it; one without (a chain-config
+            # refresh) has nothing to put back.
+            if [[ ${#EDIT_BK_FILES[@]} -eq 0 ]]; then
+                print_error "Node failed to restart. Check logs:"
+            elif edit_rollback_restart; then
+                print_error "Node failed to restart with the edit, so the edit was put back and the node runs the previous configuration again. The logs say why:"
+            else
+                print_error "Node failed to restart, and again after the edit was put back. Check logs:"
+            fi
             print_info "  sudo tail -30 /var/log/telcoin/${TARGET_SERVICE}.log"
             print_info "  journalctl -u ${TARGET_SERVICE} --no-pager -n 30"
         fi
@@ -1593,7 +2249,7 @@ apply_changes() {
 # menu_apply FN VALUE LABEL -- save one edit from the menu with a field setter:
 # take the update lock, run FN VALUE, then offer the restart (apply_changes).
 # A failed setter has its partial changes put back; an edit that changed
-# nothing is not offered a restart.
+# nothing, or only .node-meta (edit_only_meta_changed), is not offered a restart.
 menu_apply() {
     local fn="$1" value="$2" label="$3" rc=0
     menu_lock || return 0
@@ -1614,13 +2270,100 @@ menu_apply() {
         read -r -p "  Press Enter to return to menu..." || true
         return 0
     fi
+    if edit_only_meta_changed; then
+        edit_drop_backups
+        edit_unlock
+        print_ok "${label} is already set that way for the node; only its record in .node-meta changed, which the node does not read, so no restart is needed."
+        echo ""
+        read -r -p "  Press Enter to return to menu..." || true
+        return 0
+    fi
     edit_report_backups
     print_ok "${label} saved"
     apply_changes
 }
 
+# edit_watch_secs -- how long edit_verify_up watches the node after its first
+# check: TN_EDIT_VERIFY_TIMEOUT seconds (a whole number; default 60) when the
+# edit recorded network-config, else 0. The node reads and checks that file only
+# once it has started (after its databases, the epoch state and the catch-up),
+# so a value it refuses stops it well after the first check.
+edit_watch_secs() {
+    local f secs=60
+    for f in ${EDIT_BK_FILES[@]+"${EDIT_BK_FILES[@]}"}; do
+        if [[ "${f##*/}" == network-config ]]; then
+            if [[ "${TN_EDIT_VERIFY_TIMEOUT:-}" =~ ^[0-9]+$ ]]; then
+                # 10#: a leading zero would otherwise be read as octal
+                secs="$(( 10#${TN_EDIT_VERIFY_TIMEOUT} ))"
+            fi
+            printf '%s\n' "$secs"
+            return 0
+        fi
+    done
+    printf '0\n'
+}
+
+# edit_nrestarts -- the restarts systemd has made of the service on its own
+# (NRestarts, counted from its last start by hand), or nothing when systemd does
+# not report a number.
+edit_nrestarts() {
+    local n
+    n="$(systemctl show -p NRestarts --value "$TARGET_SERVICE" 2>/dev/null)" || n=""
+    [[ "$n" =~ ^[0-9]+$ ]] || n=""
+    printf '%s\n' "$n"
+}
+
+# edit_verify_up -- called right after the restart that applies an edit: rc 0
+# when the service is active 3 seconds later and then, for edit_watch_secs
+# seconds, checked every 5 seconds, stays active without restarting by itself
+# (NRestarts no higher than just after the restart). rc 1, with a warning, at
+# the first check that fails. The unit restarts a node that exits, so a node
+# that refuses its configuration shows as inactive between two attempts or as a
+# higher NRestarts; without a number from systemd the state alone is checked.
+edit_verify_up() {
+    local window left step n0 n
+    window="$(edit_watch_secs)"
+    n0="$(edit_nrestarts)"
+    sleep 3
+    if ! systemctl is-active --quiet "$TARGET_SERVICE"; then
+        edit_warn "${TARGET_SERVICE} is not active 3s after the restart"
+        return 1
+    fi
+    [[ "$window" -gt 0 ]] || return 0
+    edit_step "Watching ${TARGET_SERVICE} for ${window}s: the node reads network-config only once it has started"
+    left="$window"
+    while [[ "$left" -gt 0 ]]; do
+        step=5
+        [[ "$left" -ge "$step" ]] || step="$left"
+        sleep "$step"
+        left=$((left - step))
+        if ! systemctl is-active --quiet "$TARGET_SERVICE"; then
+            edit_warn "${TARGET_SERVICE} is not active $((3 + window - left))s after the restart"
+            return 1
+        fi
+        n="$(edit_nrestarts)"
+        if [[ -n "$n0" && -n "$n" && "$n" -gt "$n0" ]]; then
+            edit_warn "${TARGET_SERVICE} restarted by itself within $((3 + window - left))s of the restart (NRestarts ${n0} to ${n}): it exited"
+            return 1
+        fi
+    done
+    return 0
+}
+
+# edit_rollback_restart -- the node did not come back from the restart that
+# applied the edit: put every file back (edit_restore_backups) and restart once
+# more, with no committee check and no epoch wait, since the node is already
+# down or failing. rc 0 when the service is active 3 seconds later.
+edit_rollback_restart() {
+    edit_step "Service did not come back healthy -- rolling back"
+    edit_restore_backups || true
+    systemctl restart "$TARGET_SERVICE" >&2 2>&1 || true
+    sleep 3
+    systemctl is-active --quiet "$TARGET_SERVICE"
+}
+
 # edit_restart -- the --set restart: reload systemd, wait for the epoch
-# boundary, restart, and report whether the service is active 3 seconds later.
+# boundary, restart, and report whether the node came back (edit_verify_up).
 # The edit stops being pending just before the restart is issued: a run stopped
 # during the wait puts the files back, one stopped during a slow restart keeps
 # the edit the restart is already applying.
@@ -1634,8 +2377,7 @@ edit_restart() {
     EDIT_RESTARTED=true
     edit_step "Restarting ${TARGET_SERVICE}"
     systemctl restart "$TARGET_SERVICE" >&2 2>&1 || true
-    sleep 3
-    systemctl is-active --quiet "$TARGET_SERVICE"
+    edit_verify_up
 }
 
 # =============================================================================
@@ -1672,6 +2414,38 @@ resolve_target() {
 # =============================================================================
 # DISPLAY CURRENT CONFIG
 # =============================================================================
+
+# admission_mode_text -- the admission mode network-config holds, for the
+# configuration screen and the menu: the mode line of its top-level admission
+# entry, read as the service user. "not set (the node default, Open)" when the
+# file or the entry is absent, "unknown (...)" when the file cannot be read.
+admission_mode_text() {
+    local dd nc text mode
+    dd="$(detect_data_dir 2>/dev/null)" || dd=""
+    nc="${dd%/}/network-config"
+    if [[ ! -e "$nc" ]]; then
+        printf 'not set (the node default, Open)\n'
+        return 0
+    fi
+    if ! text="$(tn_as_service_user cat -- "$nc" 2>/dev/null)"; then
+        printf 'unknown (cannot read %s)\n' "$nc"
+        return 0
+    fi
+    mode="$(awk -v sq="'" '
+        /^[^ \t#-]/ { inb = ($0 ~ /^admission:[ \t]*(#.*)?$/); next }
+        inb && /^[ \t]+mode[ \t]*:/ {
+            v = $0
+            sub(/^[^:]*:[ \t]*/, "", v)
+            sub(/[ \t]+#.*$/, "", v)
+            sub(/[ \t]+$/, "", v)
+            gsub(/"/, "", v)
+            gsub(sq, "", v)
+            print v
+            exit
+        }' <<< "$text" 2>/dev/null)" || mode=""
+    printf '%s\n' "${mode:-not set (the node default, Open)}"
+}
+
 
 show_current_config() {
     set +e  # Disable exit-on-error for config reading -- grep returning no match is fine
@@ -1759,6 +2533,11 @@ show_current_config() {
     else
         fwd_txt="unknown (no ${params})"
     fi
+    # The admission mode as network-config holds it; the trusted nodes map as
+    # .node-meta records it.
+    local adm_txt trusted_txt
+    adm_txt="$(admission_mode_text)"
+    trusted_txt="$(meta_get TRUSTED_NODES_FILE 2>/dev/null)" || trusted_txt=""
 
     # Service status
     local status
@@ -1786,6 +2565,8 @@ show_current_config() {
     printf "  %-28s %s\n" "Bootstrap peers:"       "$peers_txt"
     printf "  %-28s %s\n" "State export:"          "$export_txt"
     printf "  %-28s %s\n" "Private forward targets:" "$fwd_txt"
+    printf "  %-28s %s\n" "Admission mode:"        "$adm_txt"
+    printf "  %-28s %s\n" "Trusted nodes:"         "${trusted_txt:-none}"
     echo ""
     set -e  # Restore exit-on-error
 }
@@ -2040,10 +2821,11 @@ edit_cred_type_pass() {
 }
 
 # edit_cred_report RC WHAT -- report how a passphrase move (_tn_cred_switch and the
-# migrations) ended.
+# migrations) ended. rc 0 rewrote the unit, the start script and .node-meta, so the
+# host baseline is made again (edit_baseline_refresh, a no-op without the marker).
 edit_cred_report() {
     case "${1:-}" in
-        0) edit_ok "${2:-done}" ;;
+        0) edit_ok "${2:-done}"; edit_baseline_refresh ;;
         1) edit_error "nothing was changed (see above)" ;;
         2) edit_error "${TARGET_SERVICE} did not come back with the new passphrase delivery; its previous files are back and it runs on them" ;;
         *) edit_error "${TARGET_SERVICE} did not come back on its previous files either; see the backups named above and journalctl -u ${TARGET_SERVICE}" ;;
@@ -2065,12 +2847,102 @@ edit_cred_pcrs() {
     return 0
 }
 
+# edit_keytool_verify_run SPEC DATA_DIR -- the keytool verify command line, kept
+# in this one place because its shape is not final upstream (telcoin-network
+# #1730). tn_keytool runs it as the service user, adds the global --datadir and
+# --bls-passphrase-source stdin, and writes TN_KEYTOOL_PASS to its standard input.
+edit_keytool_verify_run() {
+    tn_keytool "$1" "$2" verify
+}
+
+# edit_keytool_verify WHAT [FILE] -- before a credential action writes anything,
+# prove that the passphrase it is about to keep opens the node's BLS key, with
+# keytool verify of the release that starts the node, when that release has it
+# (tn_keytool_has). The passphrase is TN_CRED_PASS or, with FILE, the one line of
+# that root-only plaintext file (what a migration reads; a file the migration
+# would refuse is left to it). It reaches keytool only on its standard input.
+# WHAT names it in the refusal ("The new passphrase"). rc 0 when the key opens,
+# or when no check can be made: keytool verify is not in this release (a log
+# line), or the release cannot be told or probed (a warning). rc 1 when keytool
+# verify ran and did not succeed: the reason is reported (never the passphrase),
+# TN_CRED_PASS is cleared and the caller writes nothing.
+edit_keytool_verify() {
+    local what="${1:-The passphrase}" file="${2:-}" spec dd out first rc=0 cr=$'\r'
+    spec="$(tn_launch_runner "$TARGET_LAUNCH_FILE" 2>/dev/null)" || spec=""
+    if [[ -z "$spec" ]]; then
+        edit_warn "Cannot tell which node release starts ${TARGET_SERVICE} from ${TARGET_LAUNCH_FILE:-its launch file}; keytool verify skipped"
+        return 0
+    fi
+    tn_keytool_has "$spec" verify || rc=$?
+    case "$rc" in
+        0) ;;
+        1)
+            edit_log "keytool verify is not in this release; skipped"
+            return 0
+            ;;
+        *)
+            edit_warn "Could not run the node binary of ${spec} to see whether it has keytool verify; skipped"
+            return 0
+            ;;
+    esac
+    # A plain shell variable (an inherited exported one is dropped first), so
+    # tn_keytool accepts it.
+    unset TN_KEYTOOL_PASS
+    if [[ -n "$file" ]]; then
+        if ! _tn_cred_plain_ok "$file" || ! _tn_passfile_trim_safe "$file"; then
+            return 0
+        fi
+        TN_KEYTOOL_PASS=""
+        IFS= read -r TN_KEYTOOL_PASS < "$file" || true
+        TN_KEYTOOL_PASS="${TN_KEYTOOL_PASS%"$cr"}"
+    else
+        TN_KEYTOOL_PASS="${TN_CRED_PASS:-}"
+    fi
+    if [[ -z "$TN_KEYTOOL_PASS" ]]; then
+        unset TN_KEYTOOL_PASS
+        return 0
+    fi
+    if ! dd="$(detect_data_dir)" || [[ -z "$dd" ]]; then
+        unset TN_KEYTOOL_PASS
+        TN_CRED_PASS=""
+        edit_error "keytool verify cannot run: the node data dir cannot be read from .node-meta (see above); nothing was changed"
+        return 1
+    fi
+    rc=0
+    out="$(edit_keytool_verify_run "$spec" "$dd" 2>&1)" || rc=$?
+    # Only the first line of keytool's output is ever shown, and not even that
+    # when it holds the passphrase.
+    first="$(printf '%s\n' "$out" | awk 'NF { print; exit }')"
+    [[ "$first" != *"$TN_KEYTOOL_PASS"* ]] || first=""
+    out=""
+    unset TN_KEYTOOL_PASS
+    case "$rc" in
+        0)
+            edit_log "keytool verify: the passphrase opens the BLS key in ${dd}"
+            return 0
+            ;;
+        4|125|126|127)
+            # tn_keytool or docker could not start it.
+            TN_CRED_PASS=""
+            edit_error "keytool verify could not run (exit ${rc}${first:+: ${first}}); nothing was changed. Fix the cause and try again."
+            return 1
+            ;;
+        *)
+            TN_CRED_PASS=""
+            edit_error "${what} does not open the BLS key in ${dd} (keytool verify, exit ${rc}); nothing was changed. Use the passphrase the key was created with."
+            return 1
+            ;;
+    esac
+}
+
 # edit_migrate_credential -- --migrate-credential and the menu: move the node to the
 # current unit and start script with its passphrase in the encrypted credential
 # (tn_migrate_credential), read from the root-only file or from a unit that holds
 # it (tn_migrate_embedded_passphrase); the passphrase is asked for when neither can
 # be read. Below systemd 250 a unit that holds it moves to the root-only file
-# (testnet only). Old copies are shredded once the node is back. rc as the helpers.
+# (testnet only). keytool verify checks the passphrase against the key first
+# (edit_keytool_verify). Old copies are shredded once the node is back. rc as the
+# helpers.
 edit_migrate_credential() {
     local conf rc=0
     conf="$(tn_resolve_config_dir)"
@@ -2082,12 +2954,20 @@ edit_migrate_credential() {
             edit_warn "the passphrase in ${TARGET_SERVICE_FILE} cannot be read back as one plain value; type it instead"
             edit_cred_type_pass || return 1
         fi
+        edit_keytool_verify "The passphrase" || return 1
         tn_migrate_embedded_passphrase "$TARGET_SERVICE_FILE" edit_wait_say || rc=$?
     else
         if [[ ! -f "${conf}/bls-passphrase" ]] \
             && ! [[ "$(meta_get PASSPHRASE_METHOD 2>/dev/null || true)" == "credential" && -f "${conf}/bls-passphrase.cred" ]]; then
             edit_warn "no stored passphrase to move (${conf}/bls-passphrase is missing); type it instead"
             edit_cred_type_pass || return 1
+        fi
+        # A typed passphrase, else the file the migration reads. With neither,
+        # the node already reads the encrypted credential and nothing is written.
+        if [[ -n "$TN_CRED_PASS" ]]; then
+            edit_keytool_verify "The passphrase" || return 1
+        elif [[ -f "${conf}/bls-passphrase" ]]; then
+            edit_keytool_verify "The passphrase in ${conf}/bls-passphrase" "${conf}/bls-passphrase" || return 1
         fi
         tn_migrate_credential edit_wait_say || rc=$?
     fi
@@ -2101,9 +2981,10 @@ edit_migrate_credential() {
 # key as it is now (the TPM when there is a usable one) and the PCR choice
 # (--bind-pcrs LIST, --bind-pcrs none, else the recorded one): after a TPM change, a
 # PCR policy change, or a move between host and host+tpm2. The value is decrypted
-# into a pipe, never a file; when it no longer decrypts here it is asked for. Then
-# the restart steps of a migration, with the old credential put back if the node
-# does not come up. rc as _tn_cred_switch.
+# into a pipe, never a file; when it no longer decrypts here it is asked for, and
+# keytool verify checks it against the key (edit_keytool_verify). Then the restart
+# steps of a migration, with the old credential put back if the node does not come
+# up. rc as _tn_cred_switch.
 edit_reseal() {
     local cred net key pcrs rc=0 restart=yes
     cred="$(tn_resolve_config_dir)/bls-passphrase.cred"
@@ -2131,6 +3012,7 @@ edit_reseal() {
         return 1
     fi
     pcrs="$(edit_cred_pcrs "$key")"
+    edit_keytool_verify "The passphrase" || return 1
     systemctl is-active --quiet "$TARGET_SERVICE" 2>/dev/null || restart=no
     _tn_cred_switch credential "$key" "$pcrs" edit_wait_say "$restart" || rc=$?
     TN_CRED_PASS=""
@@ -2194,7 +3076,8 @@ edit_bls_passphrase() {
 # encrypted credential where systemd-creds works, else in the root-only file, then
 # restart through the committee guard and the epoch wait; the old files come back if
 # the node does not unlock its key. Keys are not re-encrypted: they must already be
-# wrapped with the new passphrase.
+# wrapped with the new passphrase, which keytool verify checks before anything is
+# written (edit_keytool_verify).
 edit_change_passphrase() {
     print_warn "Changing the BLS passphrase updates the stored passphrase used"
     print_warn "to decrypt your keys at startup. This does NOT re-encrypt your"
@@ -2244,6 +3127,13 @@ edit_change_passphrase() {
             return 0
         fi
         pcrs="$(edit_cred_pcrs "$key")"
+    fi
+    # The key files are not re-encrypted, so the key must already open with the
+    # new passphrase; if it does not, the node cannot open its key at its next start.
+    if ! edit_keytool_verify "The new passphrase"; then
+        print_info "Passphrase unchanged."
+        edit_pause
+        return 0
     fi
     systemctl is-active --quiet "$TARGET_SERVICE" 2>/dev/null || restart=no
     _tn_cred_switch "$target" "$key" "$pcrs" edit_wait_say "$restart" || rc=$?
@@ -2364,6 +3254,9 @@ edit_docker_image() {
         # Devnet has no signed releases: an image is named by digest only.
         print_info "Enter the devnet image by digest, such as ${repo}@sha256:<digest>"
         print_info "(devnet has no signed releases, so no release tag names an image)."
+    elif [[ "$net" == "mainnet" ]]; then
+        print_info "Enter a mainnet release tag (such as v1.0.0) to run that release's image by"
+        print_info "digest. A digest alone is taken only for a mainnet release this node has installed."
     else
         print_info "Enter a ${net} release tag (such as ${DEFAULT_DOCKER_TAG}) to run that release's"
         print_info "image by digest, or the image itself as ${repo}@sha256:<digest>."
@@ -2379,10 +3272,17 @@ edit_docker_image() {
         read -r -p "  Press Enter to return to menu..."
         return
     fi
+    if ! edit_floor_check "$input" "$net"; then
+        echo ""
+        read -r -p "  Press Enter to return to menu..."
+        return
+    fi
     if ! out="$(tn_docker_resolve_ref "$net" "$input")"; then
         print_error "Image refused: ${input}"
         if [[ "$net" == "devnet" ]]; then
             print_info "Give the devnet image by digest: ${repo}@sha256:<digest>."
+        elif [[ "$net" == "mainnet" ]]; then
+            print_info "Give a mainnet release tag; a digest alone is taken only for a mainnet release this node has installed."
         else
             print_info "Give a ${net} release tag, or ${repo}@sha256:<digest>."
         fi
@@ -2407,6 +3307,12 @@ edit_docker_image() {
         return
     fi
     print_ok "Image pulled successfully"
+    if ! tn_docker_image_network_ok "$net" "$new_image"; then
+        print_error "Refusing ${new_image}: it is not a ${net} image (see above). The image is not changed."
+        echo ""
+        read -r -p "  Press Enter to return to menu..."
+        return
+    fi
 
     menu_lock || return 0
     backup_edit_targets || return 0
@@ -2438,6 +3344,7 @@ edit_bootstrap_peers() {
     print_info "A bootstrap peers file is a YAML or JSON map of peers keyed by BLS public"
     print_info "key, at most 64 KiB. The node dials them at start instead of the genesis"
     print_info "bootstrap servers. The node binary checks the file, then it is installed"
+    # network-gated: release named in the testnet tag form, shown on every network; edit_need_flag asks the installed release
     print_info "as ${peers}. Needs v0.15.0-adiri or later."
     echo ""
 
@@ -2467,7 +3374,9 @@ edit_state_export() {
     print_info "boundary to <data dir>/consensus-db/state_exports/epoch-N/."
     echo ""
     echo "  1) Off"
+    # network-gated: release named in the testnet tag form, shown on every network
     echo "  2) On, keep every epoch's export     (v0.13.0-adiri or later)"
+    # network-gated: release named in the testnet tag form, shown on every network
     echo "  3) On, keep only the last N epochs   (v0.15.0-adiri or later)"
     echo ""
 
@@ -2522,6 +3431,60 @@ edit_private_forward_targets() {
         esac
     done
     menu_apply set_private_forward_targets "$value" "allow_private_forward_targets"
+}
+
+edit_admission() {
+    print_header "Edit Admission Mode"
+
+    local choice value
+    print_info "Current: $(admission_mode_text)"
+    echo ""
+    print_info "The admission mode decides which peers the node takes connections from."
+    print_info "Closed admits only the previous, current and next committees, the trusted"
+    print_info "nodes and the bootstrap peers. Grace enforces nothing beyond Open and differs"
+    print_info "only in the status the node reports, for a rollout towards Closed. The"
+    print_info "setting lives in network-config and needs node release ${MIN_ADMISSION_VERSION} or later."
+    echo ""
+    echo "  1) Open"
+    echo "  2) Grace"
+    echo "  3) Closed"
+    echo ""
+
+    while true; do
+        read -r -p "  Enter choice [1/2/3]: " choice || true
+        case "$choice" in
+            1) value="open"; break ;;
+            2) value="grace"; break ;;
+            3) value="closed"; break ;;
+            "") print_info "Unchanged."; return 0 ;;
+            *) print_warn "Please enter 1, 2, or 3." ;;
+        esac
+    done
+    menu_apply set_admission "$value" "Admission mode"
+}
+
+edit_trusted_nodes() {
+    print_header "Edit Trusted Nodes"
+
+    local dest current input
+    dest="$(tn_resolve_config_dir)/trusted-nodes.yaml"
+    current="$(meta_get TRUSTED_NODES_FILE 2>/dev/null)" || current=""
+    print_info "Current: ${current:-none}"
+    echo ""
+    print_info "A trusted nodes file is a YAML map keyed by BLS public key, each entry a"
+    print_info "hub's primary (network_address, network_key) and its workers, at most 64 KiB."
+    print_info "Its shape is checked, then it is installed as ${dest} and"
+    print_info "written into network-config. Set the admission mode first."
+    echo ""
+
+    read -r -p "  Absolute path to the trusted nodes file, or none to remove (Enter to cancel): " input || true
+    if [[ -z "$input" ]]; then
+        print_info "Unchanged."
+        echo ""
+        read -r -p "  Press Enter to return to menu..." || true
+        return 0
+    fi
+    menu_apply set_trusted_nodes "$input" "Trusted nodes"
 }
 
 # Chain-config directory under the source checkout for a .node-meta NETWORK
@@ -2745,6 +3708,9 @@ restart_node() {
         sleep 3
         if systemctl is-active --quiet "$TARGET_SERVICE"; then
             print_ok "Node restarted successfully"
+            edit_baseline_refresh
+            # an edit saved with "restart later" reaches the node only now
+            edit_committee_resync
         else
             print_error "Node failed to restart. Check logs:"
             print_info "  journalctl -u ${TARGET_SERVICE} --no-pager -n 30"
@@ -2782,13 +3748,15 @@ main_menu() {
         echo "  8) Bootstrap peers         (a peers file instead of the genesis list)"
         echo "  9) State export            (off / every epoch / the last N epochs)"
         echo " 10) Private forward targets (private networks only)"
-        echo " 11) Refresh chain configs   (pull latest genesis/committee/parameters)"
-        echo " 12) Restart node"
-        echo " 13) Exit"
+        echo " 11) Admission mode          (open / grace / closed)"
+        echo " 12) Trusted nodes           (the hubs a closed node admits)"
+        echo " 13) Refresh chain configs   (pull latest genesis/committee/parameters)"
+        echo " 14) Restart node"
+        echo " 15) Exit"
         echo ""
 
         local choice
-        read -r -p "  Enter choice [1-13]: " choice
+        read -r -p "  Enter choice [1-15]: " choice
         case "$choice" in
             1)  edit_listener_addresses      ;;
             2)  edit_metrics                 ;;
@@ -2800,10 +3768,12 @@ main_menu() {
             8)  edit_bootstrap_peers         ;;
             9)  edit_state_export            ;;
             10) edit_private_forward_targets ;;
-            11) refresh_chain_configs        ;;
-            12) restart_node                 ;;
-            13) echo ""; print_info "Exiting."; exit 0 ;;
-            *) print_warn "Please enter 1-13." ;;
+            11) edit_admission               ;;
+            12) edit_trusted_nodes           ;;
+            13) refresh_chain_configs        ;;
+            14) restart_node                 ;;
+            15) echo ""; print_info "Exiting."; exit 0 ;;
+            *) print_warn "Please enter 1-15." ;;
         esac
     done
 }
@@ -2821,15 +3791,15 @@ main_menu() {
 #
 # Fields (the header lists their values): primary_listener worker_listener
 # metrics verbosity docker_image bootstrap_peers state_export
-# allow_private_forward_targets. Each value is validated here with the same
-# validators the menu uses.
+# allow_private_forward_targets admission trusted_nodes. Each value is
+# validated here with the same validators the menu uses.
 # =============================================================================
 
 # run_set -- validate, take the update lock, save the edit, wait for the epoch
 # boundary when the node is in the committee, restart, and check that the
 # service stays up. A failed restart puts every changed file back and restarts
 # once more, without waiting. An edit that changes nothing ends there, with no
-# restart.
+# restart, and so does one that changes only .node-meta (edit_only_meta_changed).
 run_set() {
     local field value rc err
     edit_require_root
@@ -2870,11 +3840,18 @@ run_set() {
         edit_done true "$field" "$value" "${field} is already ${value}; nothing changed and ${TARGET_SERVICE} was not restarted"
         return 0
     fi
+    if edit_only_meta_changed; then
+        edit_drop_backups
+        edit_done true "$field" "$value" "${field} is already ${value} for the node; only its record in .node-meta changed, which the node does not read, so ${TARGET_SERVICE} was not restarted"
+        return 0
+    fi
     edit_report_backups
 
     rc=0
     edit_restart || rc=$?
     if [[ $rc -eq 0 ]]; then
+        edit_baseline_refresh
+        edit_committee_resync
         edit_done true "$field" "$value" "applied and ${TARGET_SERVICE} healthy"
         return 0
     fi
@@ -2888,12 +3865,7 @@ run_set() {
         return 1
     fi
 
-    # No epoch wait here: the node is already down or failing.
-    edit_step "Service did not come back healthy -- rolling back"
-    edit_restore_backups || true
-    systemctl restart "$TARGET_SERVICE" >&2 2>&1 || true
-    sleep 3
-    if systemctl is-active --quiet "$TARGET_SERVICE"; then
+    if edit_rollback_restart; then
         edit_done false "$field" "" "restart failed; rolled back to the previous configuration" true
     else
         edit_done false "$field" "" "restart and rollback failed; inspect journalctl -u ${TARGET_SERVICE}" false
@@ -2961,9 +3933,10 @@ main() {
                 shift 2
                 ;;
             -h|--help)
-                # The header block only: everything up to its closing rule. Read
+                # The header block only: everything up to its closing rule, without
+                # the network-gated: marker lines (tools/check-network-hits.sh). Read
                 # from this file, not "$0", which names the caller when sourced.
-                awk 'NR == 1 { next } /^# =+$/ { if (++rules == 2) exit; next } { sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
+                awk 'NR == 1 { next } /^# =+$/ { if (++rules == 2) exit; next } /^#[ \t]*network-gated:/ { next } { sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
                 if [[ "$JSON_MODE" == "true" ]]; then
                     json_emit '{"event":"done","ok":true,"msg":"usage printed on stderr"}'
                 fi

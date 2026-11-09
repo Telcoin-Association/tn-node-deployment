@@ -1,0 +1,15 @@
+baseline: ci_pins_test.sh passes on the clean copy
+caught  rename job: hardening lints -> hardening lint  (FAIL  ci.yml: required check "hardening lints" names exactly one job)
+caught  two jobs with one display name  (FAIL  ci.yml: required check "shellcheck" names exactly one job)
+caught  drop the network hits step  (FAIL  hardening-lint runs the network-hits lint)
+caught  restore touch _site/.nojekyll  (FAIL  publish-installer: no .nojekyll)
+caught  continue-on-error on the network hits step  (FAIL  hardening-lint: every step blocks)
+caught  continue-on-error on the ui-tests job  (FAIL  ui-tests: every step blocks)
+caught  drop install_ui_test.sh from parse-macos  (FAIL  parse-macos runs ui/tests/install_ui_test.sh under /bin/bash)
+caught  re-add a unittest fallback  (FAIL  ui-tests: no unittest fallback)
+MISSED  PROBE network hits step neutered with || true
+MISSED  PROBE network hits step disabled with if: false
+MISSED  PROBE continue-on-error on fixture-tests (a required job not in the list)
+MISSED  PROBE checksums job disabled with if: false
+
+8 caught, 4 missed

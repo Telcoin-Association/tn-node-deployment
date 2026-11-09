@@ -6,19 +6,31 @@
 // d07d7706; an earlier copy of this file wrongly called the metrics blocks "dormant".)
 //
 // CANONICAL COPY. The log-shipping AND metrics blocks below are kept BYTE-IDENTICAL
-// to adiri-genesis/common/observability/node-agent/config.alloy (the core team's node
-// agent) so external-operator telemetry lands in the SAME Loki/Prometheus label schema
-// + dashboards. lib/observability.sh renders only the pipeline(s) the operator opted
-// into (ENABLE_OBSERVABILITY = logs, ENABLE_METRICS = metrics); when both are on it
-// deploys this file verbatim. If you edit the blocks, mirror the change in adiri-genesis
-// and keep the diff clean (the sync note in docs/testnet-addons.md explains how to verify).
+// to the core team's node agent, so external-operator telemetry lands in the SAME
+// Loki/Prometheus label schema + dashboards.
+// network-gated: names the upstream node agent config in the testnet repository, not an endpoint
+// Upstream: adiri-genesis/common/observability/node-agent/config.alloy.
+// lib/observability.sh renders only the pipeline(s) the operator opted into
+// (ENABLE_OBSERVABILITY = logs, ENABLE_METRICS = metrics); when both are on it
+// deploys this file verbatim.
+// network-gated: names the upstream repository, not an endpoint
+// If you edit the blocks, mirror the change in adiri-genesis and keep the diff
+// clean (the sync note in docs/testnet-addons.md explains how to verify).
 //
-// Node identity + push credentials come from the environment (the telcoin-alloy
+// Node identity and the push endpoints come from the environment (the telcoin-alloy
 // systemd unit's EnvironmentFile for native installs, or the container --env-file for
 // docker), so one config serves both runtimes:
 //   TN_NODE TN_REGION TN_VALIDATOR_ADDRESS TN_CHAIN TN_IMAGE_VERSION
-//   OBS_PUSH_URL OBS_INGEST_TOKEN                       (logs)
-//   TN_METRICS_ADDR OBS_METRICS_PUSH_URL                (metrics; OBS_INGEST_TOKEN shared)
+//   OBS_PUSH_URL OBS_PUSH_HOST                          (logs)
+//   TN_METRICS_ADDR OBS_METRICS_PUSH_URL OBS_METRICS_PUSH_HOST   (metrics)
+//   CREDENTIALS_DIRECTORY                               (both; set by systemd for native)
+// The ingest token is never in the environment: both endpoints read it from
+// $CREDENTIALS_DIRECTORY/ingest-token, which is /etc/telcoin/alloy/ingest-token
+// (root:telcoin-alloy 0640) handed over by LoadCredential= (native) or bind-mounted
+// read-only at /run/credentials/telcoin-alloy/ingest-token (docker). The *_PUSH_HOST
+// variables are the hub's TLS server name (the push URL's host); TLS 1.3 is required.
+//
+// Vendored from upstream main 18f8485 (PR #8 merged 2026-11-04).
 // =============================================================================
 
 // reth writes <log.file.directory>/telcoin-network-logs/reth.log, rotated to
@@ -73,8 +85,13 @@ loki.process "tn" {
 
 loki.write "central" {
 	endpoint {
-		url          = sys.env("OBS_PUSH_URL")
-		bearer_token = sys.env("OBS_INGEST_TOKEN")
+		url               = sys.env("OBS_PUSH_URL")
+		bearer_token_file = sys.env("CREDENTIALS_DIRECTORY") + "/ingest-token"
+
+		tls_config {
+			server_name = sys.env("OBS_PUSH_HOST")
+			min_version = "TLS13"
+		}
 	}
 
 	// --- Forward-compat hook (Wave 4: external-operator self-host) -----------
@@ -136,7 +153,12 @@ prometheus.relabel "tn" {
 
 prometheus.remote_write "central" {
 	endpoint {
-		url          = sys.env("OBS_METRICS_PUSH_URL")
-		bearer_token = sys.env("OBS_INGEST_TOKEN")
+		url               = sys.env("OBS_METRICS_PUSH_URL")
+		bearer_token_file = sys.env("CREDENTIALS_DIRECTORY") + "/ingest-token"
+
+		tls_config {
+			server_name = sys.env("OBS_METRICS_PUSH_HOST")
+			min_version = "TLS13"
+		}
 	}
 }

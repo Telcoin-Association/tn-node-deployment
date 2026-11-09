@@ -1,0 +1,3 @@
+3005,3006d3004
+<             tn_mainnet_enabled \
+<                 || setup_fail "Mainnet is not enabled in this script release (lib/common.sh TN_MAINNET_ENABLED); nothing on this host was changed."

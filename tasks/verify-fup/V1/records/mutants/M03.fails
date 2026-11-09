@@ -1,0 +1,4 @@
+FAIL  A3 json_set_network mainnet (shipped): rc 1
+FAIL  A3 shipped: the refusal message
+FAIL  A3 shipped: nothing set after the refusal
+FAIL  A3 e2e: error event carries the message

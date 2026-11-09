@@ -1,0 +1,10 @@
+--- NETWORK=mainnet, health port anywhere
+  ->  Uptime Kuma health monitoring -- TCP 43174
+  [WARN] TCP 43174 open to Anywhere -- consider restricting to 104.155.184.201/32 (menu: Manage node ports)
+
+
+--- NETWORK=mainnet, health port closed
+  ->  Uptime Kuma health monitoring -- TCP 43174
+
+  [ERROR] TCP 43174 is CLOSED -- health monitoring will fail
+

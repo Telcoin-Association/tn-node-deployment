@@ -1,0 +1,244 @@
+ok    token path
+ok    token path (production)
+ok    token write: rc 0
+ok    token write: through tn_write_root_file in this shell (no pipe subshell)
+ok    token write: DEST MODE GROUP
+ok    token write: stdin is a pipe (process substitution), not a here-string temp file
+ok    token file: one line, the token
+ok    token file: exactly one line
+ok    token file: mode 640 (as written)
+ok    token never in any argv
+ok    adversarial token 1: file holds it exactly
+ok    adversarial token 1: never in argv
+ok    adversarial token 2: file holds it exactly
+ok    adversarial token 2: never in argv
+ok    adversarial token 3: file holds it exactly
+ok    adversarial token 3: never in argv
+ok    adversarial token 4: file holds it exactly
+ok    adversarial token 4: never in argv
+ok    adversarial token 5: file holds it exactly
+ok    adversarial token 5: never in argv
+ok    trim: surrounding whitespace dropped
+ok    trim: only whitespace -> empty
+ok    warn: internal whitespace said
+ok    warn: never prints the token
+ok    env file: rc 0
+ok    env file: no OBS_INGEST_TOKEN
+ok    env file: OBS_PUSH_HOST
+ok    env file: OBS_METRICS_PUSH_HOST
+ok    env file: OBS_PUSH_URL
+ok    env file (native): no CREDENTIALS_DIRECTORY
+ok    env file: written 0600 via tn_write_root_file
+ok    env file logs-only: no metrics host
+ok    env file (docker): CREDENTIALS_DIRECTORY
+ok    env file (docker): no token
+ok    host: testnet URL
+ok    host: port + path
+ok    host: no path
+ok    host: port, no path
+ok    host: userinfo
+ok    host: IPv6 literal
+ok    host: query only
+ok    host: empty
+ok    devnet override with a port: effective URL keeps the port
+ok    devnet env: push host without the port
+ok    devnet env: metrics host without the port (URL without a path)
+ok    native unit: LoadCredential
+ok    native unit: LimitCORE=0
+ok    native unit: InaccessiblePaths names the .cred with a - prefix
+ok    native unit: no credstore
+ok    native unit: no token variable
+ok    native unit: no Environment= line
+tasks/verify-fup/V3/v3_obs_lib_test.sh: line 220: /w/tasks/verify-fup/V3/records/native.unit.rendered: Read-only file system
+ok    docker ExecStart: token file mounted read-only at the fixed path
+ok    docker ExecStart: --group-add gid
+ok    docker ExecStart: --ulimit core=0
+ok    docker ExecStart: --env-file
+ok    docker ExecStart: no -e
+ok    docker unit: no token variable
+ok    docker unit: LimitCORE=0
+tasks/verify-fup/V3/v3_obs_lib_test.sh: line 230: /w/tasks/verify-fup/V3/records/docker.unit.rendered: Read-only file system
+ok    docker unit: no telcoin-alloy group -> rc 1
+ok    docker unit: no group -> no unit written
+ok    docker unit: no group -> said
+ok    docker unit: the host group's gid goes into --group-add
+ok    vendored both: bearer_token_file twice
+ok    vendored both: TLS13 twice
+ok    vendored both: logs server_name
+ok    vendored both: metrics server_name
+ok    vendored both: no bearer_token from env
+ok    vendored both: no plain bearer_token
+ok    vendored logs-only: one bearer_token_file
+ok    vendored logs-only: tls_config in loki.write
+ok    vendored logs-only: no metrics
+ok    vendored metrics-only: one bearer_token_file
+ok    vendored metrics-only: tls_config in remote_write
+ok    vendored metrics-only: no loki.write
+ok    fallback both: bearer_token_file twice
+ok    fallback both: TLS13 twice
+ok    fallback both: logs server_name
+ok    fallback both: metrics server_name
+ok    fallback both: no bearer_token from env
+ok    fallback both: no plain bearer_token
+ok    fallback logs-only: one bearer_token_file
+ok    fallback logs-only: tls_config in loki.write
+ok    fallback logs-only: no metrics
+ok    fallback metrics-only: one bearer_token_file
+ok    fallback metrics-only: tls_config in remote_write
+ok    fallback metrics-only: no loki.write
+ok    fallback endpoint blocks == vendored endpoint blocks
+ok    fallback functional body == vendored (comments/whitespace ignored)
+ok    sync note: from local.file_match to EOF identical to upstream
+ok    sha256(observability/config.alloy) equals the claimed value
+ok    existing token: legacy env line when no token file
+ok    migration: token file gets the legacy value
+ok    migration: token file 0640 telcoin-alloy
+ok    migration: env file rewritten without the token
+ok    migration: said once per run
+ok    migration: message lacks the token
+ok    existing token: the token file first
+ok    existing token: token file beats the legacy line
+ok    migration: an existing token file is not overwritten by the legacy value
+ok    existing token: empty token file -> legacy line
+ok    two legacy lines: the first is moved
+ok    two legacy lines: neither stays
+ok    no env file: rc 0
+ok    no env file: no token file invented
+ok    no env file: no migration message
+ok    existing token: none
+ok    migration: token write fails -> rc 1
+ok    migration: token write fails -> env file keeps the token (not lost)
+ok    partial disable (metrics): rc 0
+ok    partial disable: token moved to the file
+ok    partial disable: env without the token
+ok    partial disable: unit now has LoadCredential
+ok    partial disable: said once
+ok    partial disable (logs): rc 0
+ok    partial disable (logs): token moved
+ok    enable on a legacy host: rc 0
+ok    enable: token file holds the reused token
+ok    enable: env file without the token
+ok    enable: said once
+ok    enable: token never in argv/systemctl/docker
+ok    docker enable: rc 0
+ok    docker enable: token file (trimmed)
+ok    docker enable: token file group telcoin-alloy
+ok    docker enable: unit mounts it
+ok    docker enable: token not in the unit
+ok    rotate up: rc 0
+ok    rotate up: token file holds the new token
+ok    rotate up: one Alloy restart
+ok    rotate up: is-active read 5 times
+ok    rotate up: no node restart, no guard, no epoch wait
+ok    rotate up: said
+ok    rotate up: token not in output
+ok    rotate up: token never in argv
+ok    rotate up: token written via a pipe (process substitution)
+ok    rotate up: OBS_ROTATE_MSG empty
+ok    rotate flapping: rc 1
+ok    rotate flapping: token file back to the old token
+ok    rotate flapping: token file, env, config, unit as before
+ok    rotate flapping: restarted again on the previous files
+ok    rotate flapping: said rolled back
+ok    rotate flapping: OBS_ROTATE_MSG says the previous token runs again
+ok    rotate flapping: restored token file keeps its mode and group
+ok    rotate dead: rc 1
+ok    rotate dead: files as before
+ok    rotate dead: two restarts
+ok    rotate dead: says it does not run on the previous token either
+ok    rotate restart rc 1: rc 1
+ok    rotate restart rc 1: files as before
+ok    rotate restart rc 1: restarted again
+ok    rotate write fails (ingest-token): rc 1
+ok    rotate write fails (ingest-token): no restart
+ok    rotate write fails (ingest-token): token file is the old one
+ok    rotate write fails (telcoin-alloy.env): rc 1
+ok    rotate write fails (telcoin-alloy.env): no restart
+ok    rotate write fails (telcoin-alloy.env): token file is the old one
+ok    rotate write fails (telcoin-alloy.service): rc 1
+ok    rotate write fails (telcoin-alloy.service): no restart
+ok    rotate write fails (telcoin-alloy.service): token file is the old one
+ok    rotate empty: rc 1
+ok    rotate empty: nothing changed
+ok    rotate whitespace-only: rc 1
+ok    rotate whitespace-only: nothing changed
+ok    rotate refusals: no restart
+ok    rotate without the unit: rc 1
+ok    rotate without the unit: nothing changed
+ok    rotate with both pipelines off: rc 1
+ok    rotate with both pipelines off: nothing changed
+ok    rotate legacy host: rc 0
+ok    rotate legacy host: new token in the file
+ok    rotate legacy host: env without the token
+ok    rotate legacy host: migration said once
+ok    rotate legacy host, Alloy dies: rc 1
+ok    rotate legacy host, rollback: token file absent again, env with the legacy line
+ok    rotate adversarial 1: rc 0
+ok    rotate adversarial 1: token file exact
+ok    rotate adversarial 1: not in argv, systemctl, output
+ok    rotate adversarial 2: rc 0
+ok    rotate adversarial 2: token file exact
+ok    rotate adversarial 2: not in argv, systemctl, output
+ok    rotate adversarial 3: rc 0
+ok    rotate adversarial 3: token file exact
+ok    rotate adversarial 3: not in argv, systemctl, output
+ok    rotate adversarial 4: rc 0
+ok    rotate adversarial 4: token file exact
+ok    rotate adversarial 4: not in argv, systemctl, output
+ok    rotate adversarial 5: rc 0
+ok    rotate adversarial 5: token file exact
+ok    rotate adversarial 5: not in argv, systemctl, output
+ok    docker rotate: rc 0
+ok    docker rotate: env has CREDENTIALS_DIRECTORY
+ok    docker rotate: unit mounts the token
+ok    docker rotate without the group: rc 1
+ok    docker rotate without the group: files back
+tasks/verify-fup/V3/v3_obs_lib_test.sh: line 501: /w/tasks/verify-fup/V3/records/pushurl-override-rotate.txt: Read-only file system
+FAIL  devnet override: rotate keeps OBS_PUSH_URL
+      expected (<) vs actual (>):
+      1c1
+      < OBS_PUSH_URL=https://d.example:8443/loki/api/v1/push
+      ---
+      > OBS_PUSH_URL=
+FAIL  devnet override: rotate keeps OBS_PUSH_HOST
+      expected (<) vs actual (>):
+      1c1
+      < OBS_PUSH_HOST=d.example
+      ---
+      > OBS_PUSH_HOST=
+FAIL  testnet override: partial disable keeps OBS_PUSH_URL
+      expected (<) vs actual (>):
+      1c1
+      < OBS_PUSH_URL=https://own-hub.example/loki/api/v1/push
+      ---
+      > OBS_PUSH_URL=https://obs.adiri.telcoin.network/loki/api/v1/push
+FAIL  rollback fidelity: files byte-identical (no newline / two newlines)
+      expected (<) vs actual (>):
+      1c1
+      < same
+      ---
+      > differs: ingest-token
+ok    disable: rc 0
+ok    disable: token file gone
+ok    disable: shred ran on the token file
+ok    disable: env without the token kept
+ok    disable: env holding the legacy token shredded
+ok    disable with nothing to shred: rc 0
+ok    status: present
+ok    status: never the token
+ok    status: wrong mode
+ok    status: wrong owner
+ok    status: legacy token still in env
+ok    status: legacy value not printed
+ok    status: missing
+SKIP  status: no sudo (root enters any directory)
+tasks/verify-fup/V3/v3_obs_lib_test.sh: line 569: /w/tasks/verify-fup/V3/records/status-after-disable.txt: Read-only file system
+FAIL  status after a full disable: no advice to run --rotate-token (it refuses then)
+      expected (<) vs actual (>):
+      1c1
+      < 0
+      ---
+      > 1
+ok    status: unit not installed -> no token warning
+
+212 checks, 5 failures, 1 skipped

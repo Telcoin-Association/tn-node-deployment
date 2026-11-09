@@ -1,3 +1,118 @@
+## Review: private alerts, a heartbeat pushed from the node host (issue #60, branch private-alerts, 2026-11-04)
+
+Base `hardening-followups` at 4a2cf6e (rebased onto its head before the PR). Shared spec
+`tasks/spec-alerts-shared.md` (section 13 records the decisions taken during the round), package
+specs `tasks/spec-alerts-<PKG>.md`, checkpoints `tasks/ckpt-alerts-<PKG>.md`.
+
+### What landed
+
+- `lib/tn-heartbeat.sh` (new, `HEARTBEAT_VERSION` 2.1.0): the runner systemd starts from
+  `telcoin-heartbeat.timer` under `DynamicUser`. Five checks in order (service state from
+  `systemctl show`, loopback RPC and chain id, the top-level consensus header number advancing,
+  node mode with a CvvInactive window plus block and epoch, `/health/network`), first down wins;
+  pushes to up to five Kuma, healthchecks or webhook targets with the URL handed to curl through
+  `-K`; state in the `StateDirectory` read through a key whitelist; exit 0/1/2. Sources nothing.
+- `lib/alerts.sh` (new, `ALERTS_VERSION` 2.1.0): targets file (root 0600 from a process
+  substitution), `alerts.env`, runner install, the two units, test heartbeat, enable with a test
+  and a rollback that leaves `.node-meta` byte for byte as it was, targets change with restore,
+  refresh that replaces only the values given, disable, status with an issue count (quiet one
+  line on a host without alerts; `unknown (run with sudo)` without root). Sourced at the end of
+  `lib/common.sh` behind the same guard as observability.
+- `setup-alerts.sh` (new, 2.1.0): a 7-item menu with hidden URL input and `--json` with exactly
+  one of `--status`, `--enable`, `--test`, `--refresh`, `--disable`; targets from
+  `--targets-stdin`, `TN_ALERT_TARGETS` or a warned `--target`; `--interval`, `--stall-after`,
+  `--inactive-after` (derived defaults max(180, 3 x interval), max(900, stall)), `--label`,
+  `--allow-http`; exit 0/1/2/3; the lock and the baseline refresh, never a node restart.
+- setup-node offers it on every network (`ENABLE_ALERTS` pending, `step_alerts` runs the child
+  once the node is active, the value is read back on a re-run); check-node runs `alerts_status`
+  and checks the four alerts paths' owners and modes; remove-node removes the alerts before the
+  node stops at every scope and on the leftover path, with fixed paths; update-scripts tracks
+  the three files and prints the `--refresh` command.
+- Docs: OPERATOR.md 4.14 and short additions, README section and rows and changelog, the
+  release note (closes #47 and #60), docs/testnet-addons.md, followup.md (UI card, retiring the
+  pull monitor, the maintenance marker, two side findings, a test-flake note), AGENTS.md rules
+  and a `## Private alerts` section, the partner guide 1.7 with its PDF (77 pages, second build
+  "PDF unchanged").
+- Tests: heartbeat_test 187, alerts_test 279 (271 as root), setup_alerts_test 209 (204 without
+  python3), setup_node_alerts_test 48, `tools/tests/vm.d/P0-alerts.sh` for the CI VM; updated
+  host_baseline, check_node_hardening, remove, remove_addons, updater_manifest, addon_gates,
+  addon_oldlib tests.
+
+### Verification
+
+- V1 (code): no E, 3 W (the rollback left an `ENABLE_ALERTS=false` line on a host without the
+  key; status without root said "off"; four runner mutants survived), 6 N (a healthchecks
+  `#fragment` would ping the success URL; `OnBootSec` fires once at enable; the base branch moved
+  on). V1d (docs): 2 E (a `done` field documented on every action that only an enable and a
+  test send), 14 W (fixed thresholds documented where the code derives them; a prompt quoted on
+  one line; log order; "nothing else is sent" understated), 22 N. 59 runner mutants, 46 killed
+  before the fixes; the four survivors that mattered die now (F-B), plus three more.
+- Fixes: F-A (undo via `alerts_disable keep-meta` and `meta_unset`; status `unknown (run with
+  sudo)` with `systemctl is-enabled`; `alerts_refresh [INTERVAL STALL INACTIVE]` and explicit
+  values on an enabled node, two-item `applied`), F-B (fragment refusal, the four scenarios),
+  F-C and F-D (every docs finding). V2 re-check: every fix proven end to end with the real
+  script and library as root in ubuntu:24.04 (`.node-meta` same bytes, inode and mtime after a
+  failed enable), no E, 1 W and 9 N, all applied by the orchestrator (docs wording, `network`
+  null in a non-root status, two stray files removed).
+- Final tree: fixture suite 65 files in bash 5.3.9, `bash:3.2` and `ubuntu:24.04` (as root);
+  `bash -n` under both bashes, `check-bash32`, `shellcheck --severity=error`, the perl,
+  passphrase-print, root-write-pipe, network-hits and ci_pins lints clean; `systemd-analyze
+  verify` on both units and the data-dir variant, `security` exposure 1.5; sidecars regenerated.
+- Not proven locally: `P0-alerts.sh` end to end (Docker cannot supply a `LoadCredential=`
+  directory); the "Ubuntu 24.04 VM assertions" job proves DynamicUser, LoadCredential,
+  `systemctl show` under the sandbox and the push from inside it.
+
+### CI round (2026-11-05)
+
+- The first CI run on PR #61 found three things the local gates could not: the "Ubuntu 24.04 VM
+  assertions" job showed the runner never saw the node's service state (a `DynamicUser` cannot
+  use the system bus: dbus-daemon drops a connection from a uid it cannot resolve, reproduced on
+  systemd 255 and fixed with a root `ExecStartPre=-+` that writes `systemctl show` to
+  `/run/telcoin/heartbeat-service`, proven in a privileged systemd container); the macOS bash 3.2
+  fixture job failed two new tests on BSD tools (`grep -o` with `\|` alternation, an awk `-v` value
+  holding a newline); and the base branch had moved on (rebased twice, three conflicts resolved:
+  update-scripts' `local` line, the release note's #49 bullet, the sidecars).
+- The base moved a third time while the fix landed (eight round-2 docs commits, among them a
+  partner-guide bump to 1.7 for OpenPGP signing and image packages), so the guide with private
+  alerts is 1.8 (the guide commit's title still says 1.7; its metadata and PDF say 1.8). GitHub
+  runs no `pull_request` workflow while a PR conflicts, which is why the push before that rebase
+  had no CI run.
+- Every other check was green on the first run: bash -n on both bashes, shellcheck, the Linux
+  fixture suite, the hardening lints, the release manifest, checksum freshness, the UI tests.
+
+### Merge of the base (2026-11-04)
+
+The base moved a fourth time (41 round-2 commits: the finalize image override, the
+build-feature run under `timeout -k`, the record-order fix, the checked install pass, the
+cut-release fixes, the review records) and the operator asked for a merge, not a rebase, with
+both sides kept. `origin/hardening-followups` (4a24629) was merged into `private-alerts` as
+01c4eb7. The sources all merged on their own with no contradiction: the base's edits sit in
+the Docker, finalize, release and cut-release areas, mine in the alerts areas; `write_node_meta`
+takes key=value arguments on both sides. The only conflicts were generated files, rebuilt from
+the merged sources: the three sidecars (`tools/gen-checksums.sh`) and the guide PDF (77 pages,
+byte-identical on a second build). The guide stays at 1.8: the base changed the guide text
+twice under 1.7 without a bump, and no PDF with either side's text has shipped. Gates on the
+merge: `bash -n`, the bash 3.2 lint, shellcheck, the perl lint and `git diff --check` clean;
+the fixture suite 66 files, 0 failed in bash 5.3.9, bash 3.2.57 and Ubuntu 24.04.
+
+### Process notes
+
+- Agent budgets: A1b (342k), V1 (336k), V1d (312k), F-A (308k), A2 (299k) and V2 (265k) ran past
+  the 250k guideline. The library package carried the library, the common.sh block, the fixture
+  test and the VM assertion; the verifiers carried every gate plus a mutant run. Next round:
+  split a library package from its tests, and a verifier's gates from its mutants.
+- The docs agents wrote before the code existed and the verifier found 38 docs-versus-code
+  items; a second docs pass after the code fixers landed caught the rest. Writing docs from the
+  spec in parallel saved wall-clock time but cost one extra docs pass.
+
+### Left to the maintainer
+
+- Merge this PR into `hardening-followups` before `scripts-v2.1.0` is cut (the three new files
+  must be in that release); then PR #59 into main; then the cut.
+- After the first real install: enable with a Kuma push URL, stop the node once, see the `down`
+  reach the monitor; confirm the VM job passed on this PR.
+- Follow-ups in followup.md: the UI card, retiring the pull monitor, the maintenance marker.
+
 ## Review: main merged into docs/technical-specification; guide 1.5 and specification 1.2 against telcoin-network main 7167e7800 (2026-11-03)
 
 Branch `docs/technical-specification` (PR #58, draft). Two commits on top of 619f80f: the merge of
@@ -597,3 +712,85 @@ HEAD = 7fb7c8d (not pushed). Two commits on main: e20500c (support address, setu
 - Row 10c leaves out the ERROR-level sibling line at close_epoch.rs:653-662 (also no action).
 - "which waits for the epoch boundary" for edit-config menu item 12 is the guide's existing
   shorthand (waits only for a `CvvActive` node inside `TN_EPOCH_MARGIN`).
+
+## Review: follow-ups round, scripts-v2.1.0 (2026-11-03 to 2026-11-04)
+
+Plan of 2026-11-02 executed on branch `hardening-followups` (draft PR #59, 166 commits over main
+1187ddb). Specs in `tasks/spec-fup-*.md`; checkpoints `tasks/ckpt-fup-*.md` and
+`tasks/ckpt-verify-*.md`; verifier harnesses `tasks/verify-fup/V1..V6/`; the orchestrator's
+own notes in `tasks/ckpt-fup-ORCH.md`.
+
+- Wave 0: Dependabot #53 to #57 merged (two over SSH, since both tokens refuse workflow-file
+  merges); 16 issue status comments; #34 closed; specs; draft PR.
+- Wave 1 and 2: nine packages (LIB-A, LIB-B, KEYS, AUDIT, OBS, REL, FW, UI-S, NET-2, GOV),
+  AUDIT-2 for the add-on refresh hooks, and nine follow-up rounds from the verifiers and the
+  whole-range review; six independent verifiers (harness first), 170 mutants, 169 caught.
+- The review (`/code-review high`, eight angles) found seven seam issues, all fixed: the
+  interactive key removal and the host baseline on multi-node hosts, the push-URL override
+  intent, the explicit epoch-wait cap, a held firewall lock, an unconditional table rewrite,
+  a failed baseline install leaving rules loaded.
+- Release prep: 14 version constants at 2.1.0, sidecars regenerated twice (after the fixes).
+- Final gates on f0a47c8: fixture suite 61 files, 0 failed under bash 5.3, bash:3.2 (with and
+  without flock) and ubuntu:24.04; helper 548/548 under bash 5 and 3.2; pytest 281 on Python
+  3.10 and 3.12; shellcheck 0.9 and 0.11, check-bash32, bash -n under 3.2, perl, passphrase,
+  root-write-pipe and network-hits lints clean; actionlint clean; the vendored Alloy config
+  identical to upstream from the first River component; sync-note sha matching; no attribution
+  trailers; no private-path mention.
+- CI: all nine jobs and Integration green on dbec6cb; the final tip's run is linked from the
+  PR body.
+- Docs: README, OPERATOR.md (key lifecycle 4.12, host baseline 4.13), AGENTS.md (mainnet switch,
+  contributing, CI, lints), docs/testnet-addons.md, followup.md, CHANGELOG/scripts-v2.1.0.md,
+  partner guide 1.6 with a byte-identical PDF.
+- Upstream: deploy-networks-common PR #8 (config.alloy token file and TLS 1.3), merged 2026-11-04
+  as 18f8485; the vendored header and sync note name it.
+- Lessons recorded in `tasks/lessons.md` (BSD userland on the macOS runner, the lock fallback,
+  linted verifier records, tree-wide lints on orchestrator commits, commit messages through a
+  file, verifier rounds back to the owning implementer).
+
+Left to the maintainer (commands in the closing report): the github-pages tag policy,
+`scripts-v2.0.0` cut and signed from main before this merges, the #30 rulesets and settings
+(JSON with the two missing contexts and a second approver), telcoin-network PR #1716, the
+deploy-networks-common PR #8 merge, the values for the second code owner, mainnet epoch
+timing and the nft rate, and `scripts-v2.1.0` with `--serial 2` after the merge.
+
+## Review: round 2 on PR #59 (2026-11-04/05)
+
+Plan of 2026-11-04 (`tasks/plan.md`), specs `tasks/spec-r2-*.md`, checkpoints `tasks/ckpt-r2-*.md`,
+verifier records `tasks/verify-r2/{V7,V7-IMG,V8}/`. Last code commit ee641df (90 commits over 4a2cf6e, plus the records); CI and Integration green on
+the final tip; the whole-range review (`tasks/verify-r2/REV/REPORT.md`): no ERROR, three MEDIUM
+(the tag step could sign a moved origin/main, a rerun ignored `--serial`, the feature-check
+timeout could not stop a container ignoring SIGTERM), six LOW and six NOTEs; every MEDIUM and
+LOW fixed in the SIG-2 and IMG-3 rounds, the NOTEs recorded.
+
+What landed:
+- SIG: OpenPGP-signed script releases (`MANIFEST.asc`, `lib/release-keys/*.asc` as the allowlist,
+  one RELEASE SIGNATURES block in update-scripts, install.sh and release-scripts, shell dearmor,
+  gpgv status policy, `TN_SIG_THRESHOLD` 1, installer-embedded keys, bootstrap through sidecars,
+  CR and non-key refusals), `tools/cut-release.sh prep|tag|status`, CI and VM gates, fixtures with
+  real gpg and fakes. First signed release: scripts-v2.1.0, serial 1; scripts-v2.0.0 never tagged.
+- IMG: `tn-mainnet` and `tn-testnet` packages, old package recognition-only, `tn-dev` for devnet,
+  pull rule beside the recognition rule, IMAGE_DIGEST package rule, storage floor by network,
+  build-feature check before any container start (setup, update, edit, finalize), UI twins,
+  docker-detect counts devnet repositories, the image prompt stops at end of input.
+- EPOCH: `MAINNET_EPOCH_DURATION`/`TESTNET_EPOCH_DURATION` 21600 s; the blind wait derives from
+  the network's constant.
+- Owners: three code owners; Alloy header at deploy-networks-common main 18f8485.
+- Upstream: telcoin-network draft PR #1784 (packages per channel in etc/release.sh, Makefile
+  tn-dev, docs), V8-verified (484 assertions at the final tip).
+- Docs: README, OPERATOR, AGENTS, lib/release-keys/README, both changelogs, followup, partner
+  guide 1.7 (PDF byte-identical twice). Comments on #41 (manifest proposal) and #46 (scheme).
+- Test library: `check_has`/`check_lacks` read a here-string (a pipefail flake).
+
+Verification: V7 SIG (0 ERROR, 3 WARN fixed, 39 mutants: 36 caught by the fixtures, 39 with the
+harness), V7-IMG (0 ERROR, five fixture gaps and the docker-detect gap fixed, 48 counting mutants
+all caught by the fixtures after the fix round), V8 on the upstream branch (0 ERROR, 3 WARN
+fixed, 484/484 at the final tip); full suite 62 files x 4 environments (bash 5.3, bash 3.2 with
+and without flock, Ubuntu 24.04), helper 557 x 2 shells, pytest 283 x 2 interpreters, every
+lint, a sentinel-docker run of the whole suite (no fixture reaches the host docker), CI on every
+push, the review.
+
+Left to the maintainer: rulesets (#30) with `require_code_owner_review`; the signing environment
+(forwarded gpg-agent) and a test signature; after the merge the ceremony (`cut-release.sh prep
+scripts-v2.1.0 --serial 1`, merge, `tag`); PR #1784 review and the package access lists after the
+first pushes; a one-time check that `DEFAULT_DOCKER_IMAGE` prints `Build Features: adiri`;
+closing #49 if wanted.

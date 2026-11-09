@@ -10,6 +10,8 @@
 # error. The network RPC is the public RPC of the network recorded in
 # .node-meta. Falls back gracefully if the local RPC is unreachable -- the
 # network's view of your node is still reported. Runs on Linux and macOS.
+# Private alerts (setup-alerts.sh), when this host has them, are checked too:
+# the timer, the last heartbeat and its pushes, the files' owners and modes.
 #
 # USAGE:
 #   bash check-node.sh                              # check the installed node
@@ -38,7 +40,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 # else should abort the run.
 set +e
 
-readonly SCRIPT_VERSION="2.0.0"
+readonly SCRIPT_VERSION="2.1.0"
 readonly STALE_THRESHOLD_SECONDS=60
 # WorkerConfigs system contract: numWorkers() is the number of workers every
 # committee member must run.
@@ -68,6 +70,11 @@ NODE_NETWORK=""
 NETWORK_SRC=""
 NETWORK_NOTE=""
 EXPECTED_CHAIN_ID=""
+# Also set by resolve_network: NETWORK_RPC_LABEL is the report header's network
+# RPC line ("" with --no-network); NETWORK_SKIP_WHY says why the network RPC is
+# not queried when QUERY_NETWORK is false.
+NETWORK_RPC_LABEL=""
+NETWORK_SKIP_WHY="--no-network"
 
 # The node's own identity, set by resolve_identity: the authority id that
 # consensus headers carry as author, and the execution address that committees
@@ -192,7 +199,7 @@ Usage: $0 [OPTIONS]
   --rpc <URL>              Local RPC endpoint (default: http://127.0.0.1:<RPC_PORT from .node-meta, or ${DEFAULT_RPC_PORT}>)
   --network-rpc <URL>      Network RPC for ground truth (default: the public RPC of the network in
                            .node-meta: testnet ${TESTNET_RPC_URL}, devnet ${DEVNET_RPC_URL},
-                           mainnet ${MAINNET_RPC_URL})
+                           mainnet ${MAINNET_RPC_URL}; none when the network is unknown)
   --no-network             Skip the network RPC query (local-only mode)
   --audit                  Only audit this host's node security settings (systemd floor,
                            passphrase delivery, credential, unit) and exit 1 on any warning
@@ -336,7 +343,9 @@ chain_network() {
 # (LOCAL_CHAIN_ID, probed before the report starts) stands in for it. With
 # neither, EXPECTED_CHAIN_ID stays empty and any Telcoin chain id is accepted.
 # NETWORK_RPC keeps a --network-rpc value; otherwise it becomes the public RPC of
-# that network, or the testnet RPC when the network is unknown.
+# that network. When the network is unknown and no --network-rpc was given there
+# is no RPC to compare with (another network's would be the wrong yardstick):
+# QUERY_NETWORK becomes false and NETWORK_SKIP_WHY says why.
 resolve_network() {
     local meta net chain_dec
     meta="$(node_meta_path 2>/dev/null || true)"
@@ -365,9 +374,18 @@ resolve_network() {
         [[ -z "$NODE_NETWORK" ]] || NETWORK_SRC="the local chain id"
     fi
     EXPECTED_CHAIN_ID="$(network_chain_id "$NODE_NETWORK")"
-    if [[ -z "$NETWORK_RPC" ]]; then
+    if [[ -n "$NETWORK_RPC" ]]; then
+        NETWORK_RPC_LABEL="${NETWORK_RPC} (--network-rpc, for ${NODE_NETWORK:-an unknown network})"
+    else
         NETWORK_RPC="$(network_rpc_url "$NODE_NETWORK")"
-        NETWORK_RPC="${NETWORK_RPC:-$TESTNET_RPC_URL}"
+        NETWORK_RPC_LABEL="${NETWORK_RPC} (${NODE_NETWORK} public RPC)"
+    fi
+    if [[ "$QUERY_NETWORK" != "true" ]]; then
+        NETWORK_RPC_LABEL=""
+    elif [[ -z "$NETWORK_RPC" ]]; then
+        QUERY_NETWORK=false
+        NETWORK_SKIP_WHY="network unknown; give --network-rpc URL to compare"
+        NETWORK_RPC_LABEL="none (${NETWORK_SKIP_WHY})"
     fi
     return 0
 }
@@ -740,6 +758,7 @@ fetch_node_mode() {
 }
 
 # report_legacy_observer_flag -- warn when the node launch file (start wrapper, or
+# network-gated: release history of --observer; no endpoint
 # the unit of a legacy docker install) still passes --observer. v0.15.0-adiri
 # ignores the flag, but later releases reject it, so the node would not start
 # after a binary/image update. Warn-only: never touches HEALTH_ISSUES, and silent
@@ -751,6 +770,7 @@ report_legacy_observer_flag() {
     read -r svc _ file <<<"$target"
     [[ -n "$file" && -r "$file" ]] || return 0
     tn_node_has_observer_flag "$file" || return 0
+    # network-gated: warns about the retired --observer, which only installs of older script releases carry; names a testnet tag
     print_warn "Launch file ${file} still passes --observer; releases after v0.15.0-adiri reject it and the node will not start after an update."
     print_info "Fix: bash ${SCRIPT_DIR}/update-scripts.sh && sudo bash ${SCRIPT_DIR}/update-node.sh (strips the flag),"
     print_info "     or delete the --observer token from ${file} and restart ${svc}."
@@ -942,6 +962,97 @@ report_testnet_addons() {
         else
             print_warn "VPN recorded as '${vpn}' in .node-meta but wg0 is not up -- run setup-vpn.sh"
         fi
+    fi
+}
+
+# ymd_days YYYY-MM-DD -- print the day number (days since 1970-01-01) of a real
+# calendar date from 1970 on; rc 1 for anything else. Pure bash: busybox and
+# macOS date cannot parse a date, and the same text runs in every script that
+# reads a MANIFEST date (tools/tests/release_scripts_test.sh checks the copies).
+# The digits are listed one by one: in a UTF-8 locale [0-9] can match other
+# digits, such as full-width ones, that bash arithmetic cannot read.
+ymd_days() {
+    local y m d n
+    [[ "$1" =~ ^([0123456789]{4})-([0123456789]{2})-([0123456789]{2})$ ]] || return 1
+    y=$((10#${BASH_REMATCH[1]}))
+    m=$((10#${BASH_REMATCH[2]}))
+    d=$((10#${BASH_REMATCH[3]}))
+    n=31
+    if [[ $m -eq 4 || $m -eq 6 || $m -eq 9 || $m -eq 11 ]]; then
+        n=30
+    elif [[ $m -eq 2 ]]; then
+        n=28
+        if (( y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) )); then n=29; fi
+    fi
+    if (( y < 1970 || m < 1 || m > 12 || d < 1 || d > n )); then return 1; fi
+    # Days from the civil date (H. Hinnant's algorithm), the year starting in March.
+    if (( m <= 2 )); then y=$((y - 1)); m=$((m + 9)); else m=$((m - 3)); fi
+    printf '%s\n' "$(( (y / 400) * 146097 + (y % 400) * 365 + (y % 400) / 4 - (y % 400) / 100 \
+        + (153 * m + 2) / 5 + d - 1 - 719468 ))"
+}
+
+# cn_days N -- "1 day" or "N days".
+cn_days() {
+    if [[ "$1" == "1" ]]; then echo "1 day"; else echo "$1 days"; fi
+}
+
+# cn_manifest_key FILE KEY -- the value of the first KEY= line in FILE, or "".
+cn_manifest_key() {
+    awk -F= -v k="$2" '$1 == k {sub(/^[^=]*=/, ""); print; exit}' "$1" 2>/dev/null
+}
+
+# report_scripts_release -- the signed script release these scripts came from,
+# read from the MANIFEST record that update-scripts.sh and install.sh keep in
+# the scripts directory: tag, serial, release date and age, and the expiry
+# date. Reads the record only: no signature check and no network
+# (update-scripts.sh --check does both). An expired release and a tree with no
+# record are warnings, not health issues.
+report_scripts_release() {
+    local m="${SCRIPT_DIR}/MANIFEST" rel serial rdate expires today day age
+    echo ""
+    print_step "Checking the script release..."
+    if [[ ! -f "$m" ]]; then
+        print_warn "No signed release installed: ${SCRIPT_DIR} has no MANIFEST record."
+        print_info "  Bring the scripts to the latest signed release: bash ${SCRIPT_DIR}/update-scripts.sh"
+        return 0
+    fi
+    rel="$(cn_manifest_key "$m" release)"
+    serial="$(cn_manifest_key "$m" serial)"
+    rdate="$(cn_manifest_key "$m" date)"
+    expires="$(cn_manifest_key "$m" expires)"
+    if [[ ! "$rel" =~ ^scripts-v[0-9]+\.[0-9]+\.[0-9]+$ || ! "$serial" =~ ^[1-9][0-9]{0,8}$ ]]; then
+        print_warn "The release record ${m} lacks a valid release= or serial= line."
+        print_info "  Check it: bash ${SCRIPT_DIR}/update-scripts.sh --check"
+        return 0
+    fi
+    today="$(ymd_days "$(date -u +%Y-%m-%d)")" || today=""
+    if [[ -n "$today" ]] && day="$(ymd_days "$rdate")"; then
+        age=$((today - day))
+        if (( age < 0 )); then
+            age="dated ahead of this host's clock"
+        elif (( age == 0 )); then
+            age="today"
+        else
+            age="$(cn_days "$age") ago"
+        fi
+        print_info "Scripts release: ${rel} (serial ${serial}), released ${rdate}, ${age}"
+    else
+        print_info "Scripts release: ${rel} (serial ${serial}), release date not recorded"
+    fi
+    if [[ -z "$expires" ]]; then
+        print_info "  The release carries no expiry date."
+    elif [[ -z "$today" ]] || ! day="$(ymd_days "$expires")"; then
+        print_warn "The release record has an unreadable expiry date: expires=${expires}"
+    elif (( day > today )); then
+        print_ok "Scripts release expires ${expires} (in $(cn_days $((day - today))))"
+    else
+        if (( day == today )); then
+            age="today"
+        else
+            age="$(cn_days $((today - day))) ago"
+        fi
+        print_warn "Scripts release ${rel} expired ${age} (on ${expires}): a newer signed release is overdue."
+        print_info "  Check for it: bash ${SCRIPT_DIR}/update-scripts.sh --check"
     fi
 }
 
@@ -1250,6 +1361,7 @@ report_public_rpc() {
 # check_network_chain -- read the network RPC's own eth_chainId (§3). When it is
 # not the chain this node's network uses, the endpoint is the wrong yardstick
 # (today https://rpc.telcoin.network, the planned mainnet RPC, still serves the
+# network-gated: documents which chain the mainnet RPC serves today; no endpoint
 # Adiri testnet, chain 2017): warn, set NETWORK_WRONG_CHAIN and let §3 skip the
 # comparison instead of blaming the node. Says nothing when the chain id cannot
 # be read; the consensus probe that follows reports an endpoint that is down.
@@ -1376,7 +1488,7 @@ report_worker_count() {
 # network_gap_reason -- why the network RPC is not being used this run.
 network_gap_reason() {
     if [[ "$QUERY_NETWORK" != "true" ]]; then
-        echo "--no-network"
+        echo "$NETWORK_SKIP_WHY"
     elif [[ "$NETWORK_WRONG_CHAIN" == "true" ]]; then
         echo "the network RPC serves another chain"
     else
@@ -1784,12 +1896,15 @@ _cn_own() {
 # script paths root's, .node-meta and the passphrase file root 0600, backups
 # root 0700, the data dir the service account's 0700, the log dir
 # root:telcoin-log 0750, the node log dir (NODE_LOG_DIR, when it exists) the
-# service account's with group telcoin-log 2750 (setgid), nothing under the install, config and start-script
-# trees owned by another account. The old layout warns (on mainnet it fails: a
-# mainnet host is installed fresh); a drifted layout 2 fails.
+# service account's with group telcoin-log 2750 (setgid), the private alerts
+# files root's when they exist (the heartbeat runner 0755, /etc/telcoin/alerts
+# 0755, its targets file 0600, alerts.env 0644), nothing under the install,
+# config and start-script trees owned by another account. The old layout
+# warns (on mainnet it fails: a mainnet host is installed fresh); a drifted
+# layout 2 fails.
 check_ownership_layout() {
     local pre="${TN_ROOT_PREFIX:-}" meta layout rc=0 net v suser sgroup method
-    local inst etc libexec start dd logd d extra
+    local inst etc libexec start dd logd d extra hb
     if ! have_fns tn_root_dir_ok tn_start_script_path tn_detect_network; then
         CN_SKIPPED_CHECKS="${CN_SKIPPED_CHECKS:-} check_ownership_layout"
         return 0
@@ -1863,6 +1978,14 @@ check_ownership_layout() {
     [[ ! -e "${etc}/node.env" && ! -L "${etc}/node.env" ]] || _cn_own "${etc}/node.env" root root 0644
     [[ ! -e "${etc}/bls-passphrase" && ! -L "${etc}/bls-passphrase" ]] || _cn_own "${etc}/bls-passphrase" root root 0600
     [[ ! -e "${etc}/bls-passphrase.cred" && ! -L "${etc}/bls-passphrase.cred" ]] || _cn_own "${etc}/bls-passphrase.cred" root root 0600
+    # Private alerts (setup-alerts.sh): the runner and its config. The targets file
+    # holds the monitor URLs, which are secrets. The runner's own state lives in its
+    # systemd StateDirectory, outside this table.
+    hb="${pre}/usr/local/libexec/telcoin/tn-heartbeat"
+    [[ ! -e "$hb" && ! -L "$hb" ]] || _cn_own "$hb" root root 0755
+    [[ ! -e "${etc}/alerts" && ! -L "${etc}/alerts" ]] || _cn_own "${etc}/alerts" root root 0755
+    [[ ! -e "${etc}/alerts/targets" && ! -L "${etc}/alerts/targets" ]] || _cn_own "${etc}/alerts/targets" root root 0600
+    [[ ! -e "${etc}/alerts/alerts.env" && ! -L "${etc}/alerts/alerts.env" ]] || _cn_own "${etc}/alerts/alerts.env" root root 0644
     [[ ! -e "${pre}/var/backups/telcoin" ]] || _cn_own "${pre}/var/backups/telcoin" root root 0700
     if dd="$(detect_data_dir)" && [[ -e "$dd" || -L "$dd" ]]; then
         _cn_own "$dd" "$suser" "$sgroup" 0700
@@ -2033,6 +2156,386 @@ check_healthcheck_on_mainnet() {
     return 0
 }
 
+# check_alerts -- private alerts (setup-alerts.sh, every network). alerts_status
+# (lib/alerts.sh) prints its own lines and returns the number of issues it found
+# (the timer off while alerts are on, a stale last run, every push failing, a
+# loose targets file, an outdated runner); they count in HEALTH_ISSUES. Without
+# lib/alerts.sh the check is skipped, and named in the skipped-checks warning only
+# when this host has private alerts (the timer unit exists, or .node-meta says
+# ENABLE_ALERTS=true or pending).
+check_alerts() {
+    local n=0 v=""
+    if ! have_fns alerts_status; then
+        v="$(meta_get ENABLE_ALERTS 2>/dev/null || true)"
+        if [[ -e "${TN_ROOT_PREFIX:-}/etc/systemd/system/telcoin-heartbeat.timer" || "$v" == "true" || "$v" == "pending" ]]; then
+            CN_SKIPPED_CHECKS="${CN_SKIPPED_CHECKS:-} check_alerts"
+        fi
+        return 0
+    fi
+    alerts_status || n=$?
+    HEALTH_ISSUES=$(( HEALTH_ISSUES + n ))
+    return 0
+}
+
+# The P2P committee allowlist (firewall-setup.sh --p2p-committee): the state dir
+# of tn-p2p-allow-sync (root 0700: config, status, the last-good program) and the
+# timer that runs one sync every 5 minutes. check_p2p_committee reads its files
+# key by key and never sources them.
+
+# _cn_allow_kv KEY TEXT [config] -- print the value of the first KEY=VALUE line of
+# TEXT when it matches the value grammar of tn-p2p-allow-sync's status file,
+# [A-Za-z0-9._:-]* (as fw_allow_kv in firewall-setup.sh reads it), or with
+# "config" that of its config file, which adds the commas and slashes of the port
+# and source lists. rc 1 when there is no such line.
+_cn_allow_kv() {
+    local line re='^[A-Za-z0-9._:-]*$'
+    [[ "${3:-}" != "config" ]] || re='^[A-Za-z0-9._:/,-]*$'
+    while IFS= read -r line; do
+        case "$line" in
+            "$1"=*)
+                line="${line#*=}"
+                [[ "$line" =~ $re ]] || return 1
+                printf '%s\n' "$line"
+                return 0 ;;
+        esac
+    done <<< "${2:-}"
+    return 1
+}
+
+# _cn_pos_int VALUE -- rc 0 when VALUE is a decimal number above 0 (at most 12
+# digits, a unix time or a duration in seconds, so arithmetic on it cannot
+# overflow).
+_cn_pos_int() {
+    [[ "${1:-}" =~ ^[0-9]{1,12}$ ]] && (( 10#$1 > 0 ))
+}
+
+# _cn_allow_run DIR ARG... -- TN_P2P_ALLOW_BIN --state-dir DIR ARG..., as
+# fw_allow_run in firewall-setup.sh runs it: stdin closed, no file descriptor
+# above 2, no TN_BLS_PASSPHRASE. Its stdout and stderr (the log lines) both go to
+# stdout. rc is the tool's.
+_cn_allow_run() {
+    local dir="$1"
+    shift
+    (
+        unset TN_BLS_PASSPHRASE 2>/dev/null || true
+        _tn_exec_closed "$TN_P2P_ALLOW_BIN" --state-dir "$dir" "$@"
+    ) < /dev/null 2>&1
+}
+
+# _cn_fw_p2p_ports -- the node's P2P ports, comma-joined in order, as
+# firewall-setup.sh lists them ("p2p_ports" of --json --status, which is
+# fw_p2p_ports): the P2P_PORTS value fw_allow_write_config writes. Asking the
+# script keeps one rule for the ports the node binds. rc 1 when it is missing,
+# fails or lists none.
+_cn_fw_p2p_ports() {
+    local tool="${SCRIPT_DIR}/firewall-setup.sh" json="" inner list=""
+    local re='"p2p_ports":[[]([^]]*)[]]' port_re='"port":([0-9]+)'
+    [[ -r "$tool" ]] || return 1
+    if command -v timeout >/dev/null 2>&1; then
+        json="$(timeout 20 bash "$tool" --json --status < /dev/null 2>/dev/null | tail -n 1)" || true
+    else
+        json="$(bash "$tool" --json --status < /dev/null 2>/dev/null | tail -n 1)" || true
+    fi
+    [[ "$json" =~ $re ]] || return 1
+    inner="${BASH_REMATCH[1]}"
+    while [[ "$inner" =~ $port_re ]]; do
+        list="${list:+${list},}${BASH_REMATCH[1]}"
+        inner="${inner#*"${BASH_REMATCH[0]}"}"
+    done
+    [[ -n "$list" ]] || return 1
+    printf '%s\n' "$list"
+}
+
+# _cn_src_join LIST -- P2P_ALLOW_FROM as .node-meta holds it, written the way
+# fw_allow_write_config writes it to the config: split at commas, blanks
+# dropped, joined with commas.
+_cn_src_join() {
+    local s out=""
+    local -a parts=()
+    IFS=, read -r -a parts <<< "${1:-}" || true
+    for s in ${parts[@]+"${parts[@]}"}; do
+        s="${s//[[:space:]]/}"
+        [[ -z "$s" ]] || out="${out:+${out},}${s}"
+    done
+    printf '%s\n' "$out"
+}
+
+# check_p2p_committee -- the P2P committee allowlist, when P2P_COMMITTEE=on in
+# .node-meta; silent when it is off and when all is well. A failure when
+# tn-p2p-allow-sync is missing, when nftables has no table inet tn_p2p_allow (P2P
+# is then open to every source), when `tn-p2p-allow-sync check` finds an address
+# of the current committee missing from the allow sets (at most five named), and
+# when that check fails (its reason named). A warning when the sync timer is not
+# enabled and active; when the new-flow limit table inet tn_p2p is loaded as well;
+# at once when the last run in the status file failed (RESULT=error, its
+# STALE_REASON named) and when systemd's last run of the sync unit failed (a
+# Result other than success); at once for a STALE_REASON that needs the
+# operator (rpc-method-missing, snapshot-version-*, state-invalid) and for
+# epoch-regressed, which clears by itself once the node catches up; for any other
+# STALE_REASON when the last good sync is older than 2 epochs (the epoch duration
+# from the node's tn_getCurrentEpochInfo, else EPOCH_DURATION in the status file,
+# else 21600 s), with STALE_SINCE; for committee keys whose records list other
+# addresses than their multiaddrs (at most five named); and when the tool's config no longer matches RPC_PORT in
+# .node-meta, the node's P2P ports or P2P_ALLOW_FROM. An info line when the check
+# cannot judge (exit 3). Only the failures count in HEALTH_ISSUES; the warnings,
+# the at-once ones included, never do, like check-node's other warn-only lines, so
+# a node whose every sync fails can still end with "All checks passed" below its
+# warning (the allowlist keeps its last-good set, and a committee address it then
+# lacks is the failure).
+check_p2p_committee() {
+    local dir meta mode rc=0 fix bin_ok=1 tables="" loaded=unknown st="" cfg=""
+    local result reason since base dur line now age out crc res w verdict mtotal xtotal
+    local ushow ures ustat why
+    local miss="" mism="" nmiss=0 nmism=0 named_miss=0 named_mism=0 tok="" l v have want drift=""
+    local reason_re=' reason=([A-Za-z0-9._:-]+) '
+    local -a words=()
+    dir="${TN_ROOT_PREFIX:-}/var/lib/telcoin-p2p-allow"
+    fix="sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee sync"
+    meta="$(node_meta_path 2>/dev/null || true)"
+    if [[ -n "$meta" && -f "$meta" && ! -r "$meta" ]]; then
+        [[ ! -d "$dir" ]] || print_info "P2P committee allowlist not checked: ${meta} is readable by root only (run with sudo)."
+        return 0
+    fi
+    mode="$(meta_get P2P_COMMITTEE 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        print_warn "P2P_COMMITTEE is set more than once in ${meta}; the P2P committee allowlist was not checked (remove the extra lines)."
+        return 0
+    fi
+    [[ "$mode" == "on" ]] || return 0
+    if ! have_fns _tn_exec_closed tn_local_rpc_url || [[ -z "${TN_P2P_ALLOW_BIN:-}" ]]; then
+        CN_SKIPPED_CHECKS="${CN_SKIPPED_CHECKS:-} check_p2p_committee"
+        return 0
+    fi
+    if [[ -e "$dir" ]] && { [[ ! -r "$dir" ]] || [[ ! -x "$dir" ]]; }; then
+        print_info "P2P committee allowlist not checked: ${dir} is readable by root only (run with sudo)."
+        return 0
+    fi
+
+    if [[ ! -f "$TN_P2P_ALLOW_BIN" || ! -x "$TN_P2P_ALLOW_BIN" ]]; then
+        print_error "P2P committee mode is on, but its sync tool ${TN_P2P_ALLOW_BIN} is missing, so nothing keeps the allowlist in step with the committee."
+        print_info "  Fix: ${fix}  (reinstalls the pinned tn-p2p-allow-sync)"
+        (( ++HEALTH_ISSUES ))
+        bin_ok=0
+    fi
+
+    rc=0
+    if command -v nft >/dev/null 2>&1; then
+        tables="$(nft list tables < /dev/null 2>/dev/null)" || rc=$?
+    else
+        rc=127
+    fi
+    if [[ $rc -ne 0 ]]; then
+        print_warn "P2P committee allowlist: nft could not list the nftables tables (exit ${rc}), so table inet tn_p2p_allow was not checked."
+    elif grep -qx 'table inet tn_p2p_allow' <<< "$tables"; then
+        loaded=yes
+    else
+        loaded=no
+        print_error "P2P committee mode is on, but nftables has no table inet tn_p2p_allow: P2P is open to every source."
+        print_info "  Fix: ${fix}  (loads the allowlist again)"
+        (( ++HEALTH_ISSUES ))
+    fi
+    if [[ $rc -eq 0 ]] && grep -qx 'table inet tn_p2p' <<< "$tables"; then
+        print_warn "P2P committee mode is on, but the new-flow limit table inet tn_p2p is loaded as well: committee mode removes it, since a source the allowlist accepts still passes through the limit chain."
+        print_info "  Fix: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --enable  (in committee mode it removes the limit and its boot copy)"
+    fi
+
+    if ! systemctl is-enabled telcoin-p2p-allow-sync.timer >/dev/null 2>&1 \
+        || ! systemctl is-active telcoin-p2p-allow-sync.timer >/dev/null 2>&1; then
+        print_warn "P2P committee allowlist: telcoin-p2p-allow-sync.timer is not enabled and active, so the allowlist no longer follows the committee."
+        print_info "  Fix: ${fix}"
+    fi
+
+    # The last run, from the status file the tool writes after every run that
+    # reached a decision: a reason that needs the operator is said at once, a
+    # failed run (RESULT=error) at once with its reason, and any other stale run
+    # once the last good sync is older than 2 epochs.
+    if [[ -f "${dir}/status" && ! -L "${dir}/status" ]]; then
+        st="$(cat -- "${dir}/status" 2>/dev/null)" || st=""
+    fi
+    result="$(_cn_allow_kv RESULT "$st")" || result=""
+    reason="$(_cn_allow_kv STALE_REASON "$st")" || reason=""
+    since="$(_cn_allow_kv STALE_SINCE "$st")" || since=""
+    _cn_pos_int "$since" || since=""
+    case "${result}/${reason}" in
+        */rpc-method-missing)
+            print_warn "P2P committee allowlist (rpc-method-missing): this node release lacks tn_admissionSnapshot, or tn is not in its --http.api; update the node or add tn to --http.api. Until then the allowlist keeps its last-good set."
+            print_info "  Fix: sudo bash ${SCRIPT_DIR}/update-node.sh  (a release that serves it), or put tn back in the node's --http.api; the next timer sync then clears it" ;;
+        */snapshot-version-*)
+            print_warn "P2P committee allowlist: the node serves admission snapshot version ${reason#snapshot-version-}, which the installed tn-p2p-allow-sync does not read, so the allowlist keeps its last-good set; that does not clear on its own."
+            print_info "  Fix: bash ${SCRIPT_DIR}/update-scripts.sh, then ${fix}  (installs the tool the new scripts pin)" ;;
+        */epoch-regressed)
+            print_warn "P2P committee allowlist: the node reports an epoch below the one the allowlist was built from (epoch-regressed${since:+, stale since $(utc_time "$since")}), so the allowlist keeps its last-good set. It clears by itself once the node's tracked epoch is back at or above the applied one (after a startup record-sync replay)."
+            print_info "  If it persists past 2 epochs: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee off, then --p2p-committee on  (the allowlist starts again from the node's snapshot)" ;;
+        */state-invalid)
+            print_warn "P2P committee allowlist: tn-p2p-allow-sync cannot read its own state.json (state-invalid), so every sync fails and the loaded allowlist no longer follows the committee; that does not clear on its own."
+            print_info "  Fix: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee off, then --p2p-committee on  (the allowlist starts again from the node's snapshot)" ;;
+        error/*)
+            why="$reason"
+            [[ -z "$since" ]] || why="${why:+${why}, }failing since $(utc_time "$since")"
+            print_warn "P2P committee allowlist: its last sync failed${why:+ (${why})}, so it keeps its last-good set until a sync succeeds."
+            case "$reason" in
+                config-invalid) print_info "  Fix: ${fix}  (rewrites its config)" ;;
+                *) print_info "  Why: journalctl -u telcoin-p2p-allow-sync.service -n 20; sync now: ${fix}" ;;
+            esac ;;
+        *)
+            base="$(_cn_allow_kv LAST_GOOD "$st")" || base=""
+            _cn_pos_int "$base" || base="$since"
+            if [[ -n "$base" ]]; then
+                dur=""
+                if have_fns tn_epoch_info && [[ "${LOCAL_RPC_MODE:-}" != "DOWN" ]] \
+                    && line="$(tn_epoch_info "${RPC_URL:-}" "" 5 2>/dev/null)"; then
+                    read -r _ _ dur _ <<< "$line"
+                fi
+                _cn_pos_int "$dur" || dur="$(_cn_allow_kv EPOCH_DURATION "$st")" || dur=""
+                _cn_pos_int "$dur" || dur=21600
+                now="$(date +%s)"
+                age=$(( now - 10#$base ))
+                (( age > 0 )) || age=0
+                if (( age > 2 * 10#$dur )); then
+                    print_warn "P2P committee allowlist is stale: no good sync for $(fmt_secs "$age"), more than 2 epochs of $(fmt_secs "$((10#$dur))")${since:+; failing since $(utc_time "$since")}${reason:+ (${reason})}. It keeps its last-good set, so it no longer follows the committee."
+                    print_info "  Why: journalctl -t tn-p2p-allow -n 20; sync now: ${fix}"
+                fi
+            fi ;;
+    esac
+
+    # The sync unit's last run, as systemd saw it. A timer run can fail without
+    # a status to show for it (in the unit's sandbox before the tool starts, on
+    # an unsafe state dir, without nft); exit 3 and 4 are the unit's
+    # SuccessExitStatus, so systemd counts them as success. A failed run the
+    # status file names (RESULT=error) was said above.
+    if [[ "$result" != "error" ]]; then
+        ushow="$(systemctl show -p Result -p ExecMainStatus telcoin-p2p-allow-sync.service < /dev/null 2>/dev/null)" || ushow=""
+        ures="$(_cn_allow_kv Result "$ushow")" || ures=""
+        ustat="$(_cn_allow_kv ExecMainStatus "$ushow")" || ustat=""
+        case "${ures}:${ustat}" in
+            :*|success:*|exit-code:0|exit-code:3|exit-code:4) ;;
+            *)
+                case "$ures" in
+                    exit-code) why="it exited with status ${ustat:-unknown}" ;;
+                    signal|core-dump) why="it was killed by signal ${ustat:-unknown}" ;;
+                    *) why="systemd result ${ures}" ;;
+                esac
+                print_warn "P2P committee allowlist: the last run of telcoin-p2p-allow-sync.service failed (${why}), so the allowlist keeps its last-good set until a sync succeeds."
+                print_info "  Why: journalctl -u telcoin-p2p-allow-sync.service -n 20; sync now: ${fix}" ;;
+        esac
+    fi
+
+    # Consistency: every current committee address of the node's snapshot in the
+    # live allow sets. Without the binary or the table the lines above said it.
+    if [[ $bin_ok -eq 1 && "$loaded" == "yes" ]]; then
+        crc=0
+        out="$(_cn_allow_run "$dir" check)" || crc=$?
+        res=""
+        while IFS= read -r l; do
+            l="${l#<[0-9]>}"
+            case "$l" in
+                "missing "*)
+                    # at most five named, however many lines the tool prints
+                    v="${l#missing }"
+                    if [[ "$v" =~ ^[0-9A-Fa-f.:]{2,45}$ ]]; then
+                        if (( named_miss < 5 )); then
+                            miss="${miss:+${miss}, }${v}"
+                            named_miss=$(( named_miss + 1 ))
+                        fi
+                        nmiss=$(( nmiss + 1 ))
+                    fi ;;
+                "mismatch 0x"*)
+                    v="${l#mismatch }"
+                    if [[ "$v" =~ ^0x[0-9a-f]{16}$ ]]; then
+                        if (( named_mism < 5 )); then
+                            mism="${mism:+${mism}, }${v}"
+                            named_mism=$(( named_mism + 1 ))
+                        fi
+                        nmism=$(( nmism + 1 ))
+                    fi ;;
+                result=*)
+                    res="$l" ;;
+                "error "*"reason="*|"stale "*"reason="*)
+                    if [[ -z "$tok" && " ${l} " =~ $reason_re ]]; then
+                        tok="${BASH_REMATCH[1]}"
+                    fi ;;
+            esac
+        done <<< "$out"
+        verdict="" mtotal="" xtotal=""
+        read -r -a words <<< "$res" || true
+        for w in ${words[@]+"${words[@]}"}; do
+            case "$w" in
+                result=*) verdict="${w#result=}" ;;
+                missing_total=*) mtotal="${w#missing_total=}" ;;
+                mismatch_total=*) xtotal="${w#mismatch_total=}" ;;
+            esac
+        done
+        [[ "$mtotal" =~ ^[0-9]{1,9}$ ]] || mtotal="$nmiss"
+        [[ "$xtotal" =~ ^[0-9]{1,9}$ ]] || xtotal="$nmism"
+        case "${crc}:${verdict}" in
+            0:ok) ;;
+            1:missing)
+                (( 10#$mtotal <= named_miss )) || miss="${miss}, and $(( 10#$mtotal - named_miss )) more"
+                print_error "P2P committee allowlist lacks ${mtotal} address(es) of the current committee (${miss:-none named}): P2P packets from them are dropped."
+                print_info "  Fix: ${fix}"
+                (( ++HEALTH_ISSUES )) ;;
+            1:absent)
+                print_error "P2P committee mode is on, but tn-p2p-allow-sync check finds no table inet tn_p2p_allow: P2P is open to every source."
+                print_info "  Fix: ${fix}  (loads the allowlist again)"
+                (( ++HEALTH_ISSUES )) ;;
+            1:dormant)
+                # `flags dormant` set on the table by hand; a sync re-applies
+                # the program, which declares the table without flags.
+                print_error "P2P committee mode is on, but tn-p2p-allow-sync check finds table inet tn_p2p_allow dormant (set by hand): it enforces nothing, and P2P is open to every source until a sync applies it again."
+                if (( 10#$mtotal > 0 )); then
+                    (( 10#$mtotal <= named_miss )) || miss="${miss}, and $(( 10#$mtotal - named_miss )) more"
+                    print_info "  It also lacks ${mtotal} address(es) of the current committee (${miss:-none named}), which the sync adds back."
+                fi
+                print_info "  Fix: ${fix}  (applies the allowlist again, which wakes the table)"
+                (( ++HEALTH_ISSUES )) ;;
+            3:behind)
+                print_info "P2P committee allowlist not compared with the committee: the last sync is behind the snapshot (a newer epoch, or an address it never held), which the next sync catches up." ;;
+            3:*)
+                print_info "P2P committee allowlist not compared with the committee: the node's admission snapshot cannot be used now${tok:+ (${tok})}." ;;
+            *)
+                tok="${tok:+reason ${tok}}"
+                [[ -n "$tok" ]] || tok="exit ${crc}"
+                print_error "P2P committee allowlist consistency check failed: tn-p2p-allow-sync check ended with ${tok}."
+                print_info "  Fix: ${fix}  (rewrites its config and state dir); details: journalctl -t tn-p2p-allow -n 20"
+                (( ++HEALTH_ISSUES )) ;;
+        esac
+        if [[ -n "$mism" && ( $crc -eq 0 || $crc -eq 1 ) ]]; then
+            (( 10#$xtotal <= named_mism )) || mism="${mism}, and $(( 10#$xtotal - named_mism )) more"
+            print_warn "P2P committee allowlist: ${xtotal} committee key(s) have node records that list other addresses than the ones this node knows them by (${mism}); the allowlist admits both."
+        fi
+    fi
+
+    # Drift: the config the tool reads against what the scripts would write now.
+    if [[ -f "${dir}/config" && ! -L "${dir}/config" ]]; then
+        cfg="$(cat -- "${dir}/config" 2>/dev/null)" || cfg=""
+    fi
+    [[ -n "$cfg" ]] || return 0
+    if want="$(tn_local_rpc_url)"; then
+        want="${want##*:}"
+        have="$(_cn_allow_kv RPC_PORT "$cfg" config)" || have="(none)"
+        [[ "$have" == "$want" ]] || drift="${drift}  RPC_PORT: ${have} in the config, ${want} in .node-meta"$'\n'
+    fi
+    if want="$(_cn_fw_p2p_ports)"; then
+        have="$(_cn_allow_kv P2P_PORTS "$cfg" config)" || have="(none)"
+        [[ "$have" == "$want" ]] || drift="${drift}  P2P_PORTS: ${have} in the config, ${want} on the node"$'\n'
+    else
+        print_info "P2P committee allowlist: its P2P ports were not compared with the node's (firewall-setup.sh --json --status listed none)."
+    fi
+    rc=0
+    v="$(meta_get P2P_ALLOW_FROM)" || rc=$?
+    if [[ $rc -ne 2 ]]; then
+        want="$(_cn_src_join "$v")"
+        have="$(_cn_allow_kv P2P_ALLOW_FROM "$cfg" config)" || have="(none)"
+        [[ "$have" == "$want" ]] || drift="${drift}  P2P_ALLOW_FROM: ${have:-empty} in the config, ${want:-empty} in .node-meta"$'\n'
+    fi
+    if [[ -n "$drift" ]]; then
+        print_warn "The P2P committee allowlist config no longer matches this node (a change that skipped its resync):"
+        printf '%s' "$drift"
+        print_info "  Fix: ${fix}  (rewrites the config)"
+    fi
+    return 0
+}
+
 # =============================================================================
 # REPORT HEADER
 # =============================================================================
@@ -2070,7 +2573,7 @@ if [[ -n "$NODE_NETWORK" ]]; then
 else
     print_info "Network:      unknown (${NETWORK_NOTE:-not recorded}; any Telcoin chain id is accepted)"
 fi
-[[ "$QUERY_NETWORK" == "true" ]] && print_info "Network RPC:  ${NETWORK_RPC}"
+[[ -z "$NETWORK_RPC_LABEL" ]] || print_info "Network RPC:  ${NETWORK_RPC_LABEL}"
 print_info "Time:         $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
 if ! version_gte "${COMMON_VERSION:-0}" "2.0.0"; then
     print_warn "lib/common.sh ${COMMON_VERSION:-unknown} is older than 2.0.0: checks that need its newer helpers are skipped. Run update-scripts.sh."
@@ -2104,7 +2607,7 @@ resolve_identity
 report_address_mismatch
 # Hardening checks. Each function lands with its own package; a missing one is skipped.
 for _hc in check_bls_cleartext check_update_lock check_ownership_layout check_unit_environ \
-           check_unit_sandbox check_health_score check_healthcheck_on_mainnet; do
+           check_unit_sandbox check_health_score check_healthcheck_on_mainnet check_p2p_committee check_alerts; do
     have_fns "$_hc" && "$_hc"
 done
 unset _hc
@@ -2195,7 +2698,7 @@ if [[ "$QUERY_NETWORK" == "true" ]]; then
         (( ++HEALTH_ISSUES ))
     fi
 else
-    print_info "Network query skipped (--no-network)"
+    print_info "Network query skipped (${NETWORK_SKIP_WHY})"
 fi
 
 # =============================================================================
@@ -2544,6 +3047,11 @@ report_testnet_addons
 # 9.6 PUBLIC RPC (Caddy tn-rpc vhost / https + wss probes / worker.rpc advert)
 # =============================================================================
 report_public_rpc
+
+# =============================================================================
+# 9.7 SCRIPT RELEASE (the installed signed release and its expiry)
+# =============================================================================
+report_scripts_release
 
 # =============================================================================
 # 10. SUMMARY

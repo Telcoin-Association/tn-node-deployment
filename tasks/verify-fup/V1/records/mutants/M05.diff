@@ -1,0 +1,4 @@
+1526c1526
+<     if [[ "$net_rule" == mainnet ]] && ! _lib_call tn_mainnet_enabled >/dev/null 2>&1; then
+---
+>     if [[ "$net_rule" == mainnet ]] && { _lib_call tn_mainnet_enabled >/dev/null 2>&1; [[ $? -eq 1 ]]; }; then

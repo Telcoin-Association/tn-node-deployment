@@ -1,0 +1,4 @@
+1559c1559
+<         ref="$(tn_docker_recorded_tag "$ref" 2>/dev/null)" || return 0
+---
+>         return 0

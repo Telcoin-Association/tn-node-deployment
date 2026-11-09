@@ -1,0 +1,4 @@
+4646c4646
+<     need=$(( margin + settle + 2 * poll ))
+---
+>     need=$(( margin + settle ))

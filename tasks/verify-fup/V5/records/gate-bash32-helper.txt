@@ -1,0 +1,552 @@
+ok    sourcing with arguments runs nothing
+ok    sourcing without arguments runs nothing
+ok    helper-version prints 3
+ok    an unknown subcommand is refused
+ok    tracing-enable: 'observer' in front changes nothing (unified)
+ok    tracing-enable: 'validator' in front changes nothing (unified)
+ok    tracing-enable restarts the resolved unit
+ok    tracing-enable writes --node-name telcoin
+ok    tracing-disable: 'observer' in front changes nothing (unified-traced)
+ok    tracing-disable: 'validator' in front changes nothing (unified-traced)
+ok    tracing-disable strips the tracing flags
+ok    tracing-disable restarts the resolved unit
+ok    update-check: 'observer' in front changes nothing (unified)
+ok    update-check: 'validator' in front changes nothing (unified)
+ok    update-check argv
+ok    update-prepare: 'observer' in front changes nothing (unified)
+ok    update-prepare: 'validator' in front changes nothing (unified)
+ok    update-prepare argv
+ok    update-apply: 'observer' in front changes nothing (unified)
+ok    update-apply: 'validator' in front changes nothing (unified)
+ok    update-apply argv
+ok    update-discard: 'observer' in front changes nothing (unified)
+ok    update-discard: 'validator' in front changes nothing (unified)
+ok    update-discard argv
+ok    restart-count: 'observer' in front changes nothing (unified)
+ok    restart-count: 'validator' in front changes nothing (unified)
+ok    restart-count asks the journal about the resolved unit
+ok    restart-count prints the count
+ok    log-clear: 'observer' in front changes nothing (unified)
+ok    log-clear: 'validator' in front changes nothing (unified)
+ok    log-clear prints ok
+ok    log-clear empties the unit's log
+ok    config-set: 'observer' in front changes nothing (unified)
+ok    config-set: 'validator' in front changes nothing (unified)
+ok    config-set argv
+ok    set-hostname: 'observer' in front changes nothing (unified)
+ok    set-hostname: 'validator' in front changes nothing (unified)
+ok    set-hostname writes network-config
+ok    set-hostname records the name in .node-meta
+ok    set-hostname records it through the library's meta_set
+ok    set-hostname restarts the resolved unit
+ok    addons-status: 'observer' in front changes nothing (unified)
+ok    addons-status: 'validator' in front changes nothing (unified)
+ok    addons-status reads the resolved meta
+ok    meta-cat: 'observer' in front changes nothing (unified)
+ok    meta-cat: 'validator' in front changes nothing (unified)
+ok    meta-cat prints the resolved meta
+ok    tracing-enable: 'observer' in front changes nothing (observer)
+ok    tracing-enable: 'validator' in front changes nothing (observer)
+ok    observer-only box: tracing-enable restarts telcoin-observer
+ok    set-hostname: 'observer' in front changes nothing (both)
+ok    set-hostname: 'validator' in front changes nothing (both)
+ok    both legacy units: set-hostname restarts telcoin-validator
+ok    both legacy units: the name lands in the validator data dir
+ok    set-hostname validator keeps its argument
+ok    set-hostname validator succeeds
+ok    update-prepare with one argument takes it as the ref (and refuses it)
+ok    docker-status observer keeps its argument
+ok    a surplus argument after the token is refused
+ok    tracing-enable observer extra runs nothing
+ok    tracing-enable with a non-role argument is refused
+ok    config-set with a third argument is refused
+ok    config-set with a token and a third argument is refused
+ok    resolve: unified only
+ok    resolve: observer only
+ok    resolve: validator only
+ok    resolve: both legacy units -> validator
+ok    resolve: legacy unit with the unified meta and its DATA_DIR
+ok    resolve: unified unit with a legacy meta
+ok    resolve: nothing installed
+ok    tracing-enable on 'unified' restarts telcoin
+ok    tracing-enable on 'unified' edits the telcoin wrapper
+ok    tracing-enable on 'observer' restarts telcoin-observer
+ok    tracing-enable on 'observer' edits the telcoin-observer wrapper
+ok    tracing-enable on 'validator' restarts telcoin-validator
+ok    tracing-enable on 'validator' edits the telcoin-validator wrapper
+ok    tracing-enable on 'both' restarts telcoin-validator
+ok    tracing-enable on 'both' edits the telcoin-validator wrapper
+ok    tracing-enable on 'mixed' restarts telcoin-observer
+ok    tracing-enable on 'mixed' edits the telcoin-observer wrapper
+ok    tracing-enable on 'mixed-meta' restarts telcoin
+ok    tracing-enable on 'mixed-meta' edits the telcoin wrapper
+ok    both legacy units: the observer wrapper is left alone
+ok    mixed: set-hostname writes to the DATA_DIR of the unified meta
+ok    a recorded DATA_DIR that does not exist is reported, not replaced
+ok    service stop succeeds
+ok    service stop: check, wait, check, then systemctl stop with the lock held
+ok    service stop ends with a done event
+ok    service stop releases the lock
+ok    service restart succeeds
+ok    service restart: check, wait, check, then systemctl restart with the lock held
+ok    service restart ends with a done event
+ok    service restart releases the lock
+ok    service stop acts on the resolved unit
+ok    allow-quorum-risk reaches the committee check
+ok    allow-quorum-risk is not passed on as an argument
+ok    the override is in the audit log
+ok    the checks ask the node's own RPC port
+ok    service with nothing installed is refused
+ok    service start is not a helper call
+ok    service with no action is refused
+ok    service with a bad action is refused
+ok    service with two actions is refused
+ok    allow-quorum-risk alone is not an action
+ok    a committee refusal fails the call
+ok    a committee refusal stops after the first check
+ok    a committee refusal ends in a done event marked quorum
+ok    a committee refusal releases the lock
+ok    a refusal after the wait: check, wait, check, no systemctl
+ok    a refusal after the wait puts the start script back
+ok    a refusal after the wait says so
+ok    a refusal after the wait releases the lock
+ok    a refused set-hostname puts network-config back
+ok    a refused set-hostname records no name
+ok    a refused set-hostname restarts nothing
+ok    a refused first set-hostname leaves no network-config
+ok    a cancelled call fails
+ok    a cancelled call puts the start script back
+ok    a cancelled call restarts nothing
+ok    a cancelled call says so
+ok    a cancelled call releases the lock
+ok    service restart is refused while the update lock is held
+ok    a held lock: nothing checked or restarted
+ok    a held lock: the page is told why
+ok    tracing-enable is refused while the update lock is held
+ok    a held lock: the start script is not edited
+ok    a held lock: the start script is unchanged
+ok    Docker start script: tracing-enable succeeds
+ok    Docker start script: the flags join the node command
+ok    Docker start script: written through tn_write_root_file
+ok    Docker start script: tracing-disable gives the line back
+ok    Docker start script: no copy is left beside it
+ok    renamed binary: tracing-enable succeeds
+ok    renamed binary: the flags go on the --http line, before nothing else
+ok    tracing already on: nothing to do
+ok    tracing already on: no restart
+ok    tracing already on: no committee check
+ok    renamed binary: no copy is left beside it
+ok    an unreadable node command fails the call
+ok    an unreadable node command restarts nothing
+ok    an unreadable node command leaves the script alone
+ok    a failed edit releases the lock
+ok    setup-keygen calls setup-node.sh directly
+ok    setup-keygen never puts the passphrase in an argument
+ok    setup-keygen token form
+ok    setup-keygen sends --passphrase-stdin when the engine has it
+ok    the engine reads the passphrase on its stdin
+ok    setup-keygen refuses an engine without --passphrase-stdin
+ok    an old setup engine is never run
+ok    the passphrase never goes to the environment
+ok    setup-finalize calls setup-node.sh directly
+ok    TN_SETUP_RPC_DOMAIN becomes --rpc-domain
+ok    token form with TN_SETUP_RPC_DOMAIN
+ok    TN_SETUP_RPC_PUBLIC, TN_SETUP_INSTANCE, TN_SETUP_PASSPHRASE_METHOD from an old server are ignored
+ok    an invalid TN_SETUP_RPC_DOMAIN is refused
+ok    a data dir under /var/lib/telcoin is accepted
+ok    setup-node.sh ran for every accepted setup call
+ok    --rpc-public never appears in a setup argv
+ok    --passphrase-method never appears in a setup argv
+ok    setup-keygen without a network
+ok    setup-keygen on devnet
+ok    setup-keygen as root
+ok    setup-keygen as telcoin-ui
+ok    setup-keygen with group root
+ok    setup-keygen with an upper-case user
+ok    setup-keygen data dir /usr/local/sbin
+ok    setup-keygen data dir /etc/telcoin
+ok    setup-keygen data dir with ..
+ok    setup-keygen data dir /var/lib/telcoin-ui
+ok    setup-keygen data dir /var/lib/telcoin-staging/x
+ok    setup-keygen data dir /srv/telcoin
+ok    setup-keygen data dir /data/telcoin
+ok    setup-keygen multiaddr with a newline
+ok    setup-keygen multiaddr with a space
+ok    setup-keygen multiaddr with a tab
+ok    setup-keygen build ref main
+ok    setup-keygen mainnet tag on testnet
+ok    setup-keygen foreign image
+ok    setup-keygen image tag latest
+ok    setup-keygen legacy image tag latest
+ok    setup-keygen devnet image tag
+ok    setup-keygen without a passphrase on stdin
+ok    setup-keygen with a padded passphrase
+ok    mainnet setup-keygen with a 10-byte passphrase
+ok    the 10-byte mainnet passphrase is what is refused
+ok    mainnet setup-keygen refused while TN_MAINNET_ENABLED is 0
+ok    the mainnet refusal names the library constant
+ok    mainnet setup-keygen refused when tn_mainnet_enabled returns 1
+ok    tn_mainnet_enabled rc 1: the refusal names the constant
+ok    mainnet setup-finalize refused when tn_mainnet_enabled returns 1
+ok    mainnet setup-finalize: setup-node.sh never runs
+ok    an engine library without tn_mainnet_enabled: _lib_call gives 127
+ok    mainnet setup-keygen refused when the library has no tn_mainnet_enabled
+ok    rc 127: the refusal names the constant
+ok    mainnet setup-keygen runs setup-node.sh when tn_mainnet_enabled says yes
+ok    setup-finalize without listener multiaddrs (NC-2)
+ok    setup-keygen accepts the testnet image by digest
+ok    setup-keygen accepts a legacy testnet image by digest
+ok    setup-keygen refuses a look-alike repository
+ok    setup-keygen names the look-alike image it refuses
+ok    setup-keygen refuses the legacy repository on mainnet
+ok    setup-keygen names the legacy image it refuses on mainnet
+ok    setup-keygen refused on an installed node
+ok    setup-finalize refused on an installed node
+ok    setup-keygen refused on a legacy validator node
+ok    setup-finalize refused on a legacy validator node
+ok    setup-keygen refused on a legacy observer node
+ok    setup-finalize refused on a legacy observer node
+ok    setup-keygen refused on a legacy unit without .node-meta
+ok    setup-keygen refused on a legacy .node-meta without a unit
+ok    setup-keygen refused once keygen wrote .node-meta
+ok    setup-finalize runs after keygen wrote .node-meta
+ok    mainnet release keygen: --release-tag and the journal by default
+ok    mainnet: an explicit file target and --allow-no-tpm
+ok    testnet: no log target unless asked, no --allow-no-tpm
+ok    a Docker install by release tag sends --release-tag
+ok    setup-keygen refuses a log target other than journal or file
+ok    setup-keygen refuses TN_SETUP_ALLOW_NO_TPM=yes
+ok    setup-keygen refuses an image by tag (a tag goes in TN_SETUP_BUILD_REF)
+ok    setup-keygen refuses an image digest and a release tag together
+ok    a release tag needs an engine with --release-tag
+ok    --build-ref is never sent
+ok    the 253-character name is 253 long
+ok    the 254-character name is 254 long
+ok    valid_hostname refuses 'localhost'
+ok    valid_hostname refuses '1.2.3.4'
+ok    valid_hostname refuses 'a..b'
+ok    valid_hostname refuses '-x.example'
+ok    valid_hostname refuses aaaaaaaaaaaa... (254 chars)
+ok    valid_hostname refuses aaaaaaaaaaaa... (76 chars)
+ok    valid_hostname refuses ''
+ok    valid_hostname refuses 'x.example.org.'
+ok    valid_hostname refuses 'under_score.example.org'
+ok    valid_hostname refuses 'x-.example.org'
+ok    valid_hostname refuses 'https://x.example.org'
+ok    valid_hostname refuses 'x.example.org:443'
+ok    valid_hostname refuses '10.0.0.1'
+ok    valid_hostname accepts 'node7.adiri.telcoin.network'
+ok    valid_hostname accepts 'a.b'
+ok    valid_hostname accepts aaaaaaaaaaaa... (75 chars)
+ok    valid_hostname accepts aaaaaaaaaaaa... (253 chars)
+ok    valid_hostname accepts 'Node7.Example.ORG'
+ok    valid_hostname accepts '123.example.org'
+ok    valid_hostname accepts 'x-1.example.org'
+ok    caddy-dns-check refuses 'localhost'
+ok    rpc-dns-check refuses 'localhost'
+ok    caddy-enable refuses 'localhost'
+ok    rpc-enable refuses 'localhost'
+ok    caddy-dns-check refuses '1.2.3.4'
+ok    rpc-dns-check refuses '1.2.3.4'
+ok    caddy-enable refuses '1.2.3.4'
+ok    rpc-enable refuses '1.2.3.4'
+ok    caddy-dns-check refuses 'a..b'
+ok    rpc-dns-check refuses 'a..b'
+ok    caddy-enable refuses 'a..b'
+ok    rpc-enable refuses 'a..b'
+ok    caddy-dns-check refuses '-x.example'
+ok    rpc-dns-check refuses '-x.example'
+ok    caddy-enable refuses '-x.example'
+ok    rpc-enable refuses '-x.example'
+ok    caddy-dns-check refuses aaaaaaaaaaaa... (254 chars)
+ok    rpc-dns-check refuses aaaaaaaaaaaa... (254 chars)
+ok    caddy-enable refuses aaaaaaaaaaaa... (254 chars)
+ok    rpc-enable refuses aaaaaaaaaaaa... (254 chars)
+ok    caddy-dns-check refuses aaaaaaaaaaaa... (76 chars)
+ok    rpc-dns-check refuses aaaaaaaaaaaa... (76 chars)
+ok    caddy-enable refuses aaaaaaaaaaaa... (76 chars)
+ok    rpc-enable refuses aaaaaaaaaaaa... (76 chars)
+ok    caddy-dns-check accepts 'node7.adiri.telcoin.network'
+ok    rpc-dns-check accepts 'node7.adiri.telcoin.network'
+ok    caddy-enable accepts 'node7.adiri.telcoin.network'
+ok    caddy-dns-check accepts aaaaaaaaaaaa... (253 chars)
+ok    rpc-dns-check accepts aaaaaaaaaaaa... (253 chars)
+ok    caddy-enable accepts aaaaaaaaaaaa... (253 chars)
+ok    the dashboard password never reaches an argument
+ok    caddy-enable without a password on stdin
+ok    caddy-enable with a password under 16 characters
+ok    caddy-enable with a 15-character password
+ok    caddy-enable with a tab in the password
+ok    caddy-enable accepts a 16-character password
+ok    caddy-enable refuses an engine without --password-stdin
+ok    an old caddy engine is never run
+ok    rpc-enable <host>
+ok    rpc-enable <host> <ip>
+ok    rpc-enable <host> - <dash>
+ok    rpc-enable <host> <ip> <dash>
+ok    rpc-enable <host> - (no dash) is the plain call
+ok    rpc-enable refuses a dashboard host equal to the RPC host
+ok    rpc-enable compares the two hosts without case
+ok    rpc-enable refuses an invalid dashboard host
+ok    rpc-enable refuses an invalid inbound IP
+ok    rpc-enable refuses a fourth argument
+ok    config-set accepts primary_listener=/ip4/0.0.0.0/udp/49590/quic-v1
+ok    config-set accepts worker_listener=/ip6/::/udp/49594/quic-v1
+ok    config-set accepts metrics=127.0.0.1:9101
+ok    config-set accepts metrics=off
+ok    config-set accepts verbosity=-v
+ok    config-set accepts verbosity=-vvv
+ok    config-set accepts bootstrap_peers=none
+ok    config-set accepts bootstrap_peers=/home/ubuntu/peers.yaml
+ok    config-set accepts state_export=off
+ok    config-set accepts state_export=unlimited
+ok    config-set accepts state_export=1
+ok    config-set accepts state_export=999999
+ok    config-set accepts allow_private_forward_targets=true
+ok    config-set accepts allow_private_forward_targets=false
+ok    config-set refuses metrics=on
+ok    config-set refuses metrics=OFF
+ok    config-set refuses metrics=127.0.0.1
+ok    config-set refuses verbosity=-vvvvvv
+ok    config-set refuses docker_image=adiri
+ok    config-set refuses metrics=0.0.0.0:9101
+ok    config-set refuses metrics=10.0.0.5:9101
+ok    config-set refuses verbosity=-vvvv
+ok    config-set refuses verbosity=-vvvvv
+ok    config-set refuses docker_image=ghcr.io/telcoin-association/telcoin-network:v0.15.0-adiri
+ok    config-set refuses bootstrap_peers=peers.yaml
+ok    config-set refuses bootstrap_peers=None
+ok    config-set refuses bootstrap_peers=/tmp/peers file.yaml
+ok    config-set refuses bootstrap_peers=/tmp/$(id).yaml
+ok    config-set refuses bootstrap_peers=
+ok    config-set refuses state_export=0
+ok    config-set refuses state_export=01
+ok    config-set refuses state_export=1000000
+ok    config-set refuses state_export=-1
+ok    config-set refuses state_export=Unlimited
+ok    config-set refuses allow_private_forward_targets=yes
+ok    config-set refuses allow_private_forward_targets=1
+ok    config-set refuses allow_private_forward_targets=TRUE
+ok    config-set refuses not_a_field=1
+ok    config-set takes a primary listener on the advertised port
+ok    config-set takes a worker listener on the advertised port
+ok    config-set refuses a primary listener on another port, with edit-config's message
+ok    a listener on another port runs nothing
+ok    a port of more than five digits has no port to compare, as in edit-config
+ok    a recorded address without a UDP port refuses
+ok    a recorded address set twice refuses
+ok    the other listener is checked on its own key
+ok    config-set: 'observer' in front changes nothing (unified)
+ok    config-set: 'validator' in front changes nothing (unified)
+ok    config-set state_export 5 argv
+ok    allow-port-mismatch: the mismatch reaches edit-config with the flag
+ok    allow-port-mismatch on a matching port still passes the flag
+ok    allow-port-mismatch still needs a UDP port
+ok    allow-port-mismatch is for the listeners only
+ok    config-set takes no other option
+ok    config-set takes at most three arguments
+ok    allow-port-mismatch refuses an engine without the flag
+ok    credential migrate runs edit-config.sh --json --migrate-credential
+ok    credential migrate closes the engine's stdin
+ok    credential reseal runs edit-config.sh --json --reseal
+ok    credential refuses ''
+ok    credential refuses 'Migrate'
+ok    credential refuses 'seal'
+ok    credential refuses 'tpm'
+ok    credential refuses '--reseal'
+ok    credential refuses 'migrate extra'
+ok    credential refuses a second argument
+ok    credential refuses an engine without --reseal
+ok    credential is audited
+ok    firewall-port argv
+ok    firewall-port refuses a port outside the list
+ok    firewall-status argv
+ok    caddy-status argv
+ok    rpc-disable argv
+ok    docker-logs argv
+ok    set-logrotate hands the size and the config path to tn_install_logrotate
+ok    set-logrotate prints ok
+ok    clear-rotated removes rotated logs only
+ok    clear-rotated leaves the live log
+ok    firewall-enable without sources
+ok    firewall-enable runs the engine from /
+ok    firewall-enable with one address
+ok    firewall-enable with three sources
+ok    firewall-enable takes 16 sources
+ok    firewall-enable refuses ''0.0.0.0/0''
+ok    firewall-enable refuses ''0.0.0.0''
+ok    firewall-enable refuses ''::/0''
+ok    firewall-enable refuses ''::''
+ok    firewall-enable refuses ''10.0.0.0/7''
+ok    firewall-enable refuses ''10.0.0.0/0''
+ok    firewall-enable refuses ''010.0.0.1''
+ok    firewall-enable refuses ''10.0.0.256''
+ok    firewall-enable refuses ''10.0.0.1/33''
+ok    firewall-enable refuses ''10.0.0.1/08''
+ok    firewall-enable refuses ''2001:db8::/129''
+ok    firewall-enable refuses ''/etc/passwd''
+ok    firewall-enable refuses ''etc/passwd''
+ok    firewall-enable refuses ''10.0.0.1,,10.0.0.2''
+ok    firewall-enable refuses '',10.0.0.1''
+ok    firewall-enable refuses ''10.0.0.1,''
+ok    firewall-enable refuses ''10.0.0.1;id''
+ok    firewall-enable refuses ''a$(id)''
+ok    firewall-enable refuses '10.0.0.1,10.... (160 chars)'
+ok    firewall-enable refuses ''10.0.0.1/8/8''
+ok    firewall-enable refuses a third argument
+ok    firewall-enable refuses --ssh-anywhere
+ok    firewall-enable with sources refuses an engine without --ssh-from
+ok    firewall-enable with sources needs the library check
+ok    an argument with a space is refused
+ok    an argument with a newline is refused
+ok    an argument with a tab is refused
+ok    a leading dash is refused
+ok    a leading dash is refused (set-hostname)
+ok    a surplus argument is refused (journal-tail)
+ok    an argument to a no-argument subcommand is refused
+ok    an argument over 512 bytes is refused
+ok    update-prepare accepts a testnet release tag
+ok    update-prepare accepts a named testnet release candidate
+ok    update-prepare refuses main on testnet
+ok    update-prepare refuses feature/x on testnet
+ok    update-prepare refuses v0.16.0 on testnet
+ok    update-prepare refuses v0.16.0-adiri-hotfix on testnet
+ok    update-prepare refuses v0.16-adiri on testnet
+ok    update-prepare refuses 5535ef1f0425973bd81ef3162f3d07219c3456d0 on testnet
+ok    update-prepare refuses V0.16.0-adiri on testnet
+ok    update-prepare refuses v0.16.0-adiri/../x on testnet
+ok    update-prepare refuses v0.17.0-adiri-rc0 on testnet
+ok    update-prepare refuses v0.17.0-adiri-rc01 on testnet
+ok    update-prepare refuses v0.17.0-adiri-rc on testnet
+ok    update-prepare refuses v0.17.0-rc1 on testnet
+ok    update-prepare accepts a mainnet release tag
+ok    update-prepare refuses a testnet tag on mainnet
+ok    update-prepare refuses a release candidate on mainnet
+ok    update-prepare refuses on devnet
+ok    update-prepare refuses a duplicated NETWORK
+ok    audit: one start line per mutating call, one refused line per refusal
+ok    audit: the accepted call
+ok    audit: the refusal names its reason
+ok    audit: read-only calls are not logged
+ok    audit: the log is not group or world readable
+ok    audit: a call refused by the generic checks leaves one refused line each
+ok    audit: the generic refusal names the subcommand, not the arguments
+ok    audit: a control character in a refused call is written as a space
+ok    audit: a refused read-only call is not logged
+ok    node-env-cat prints the primary listener
+ok    node-env-cat prints TN_RPC_ADDR
+ok    node-env-cat prints only the three keys
+ok    journal-tail argv
+ok    journal-follow argv
+ok    journal-tail refuses 0
+ok    journal-tail refuses abc
+ok    journal-tail refuses 200001
+ok    journal-tail refuses 01
+ok    quorum-check asks the library guard about the local RPC, never overriding it
+ok    quorum-check reports the guard's answer
+ok    quorum-check reports a refusal
+ok    host-audit runs check-node.sh --audit
+ok    host-audit takes no argument
+ok    host-audit refuses a check-node.sh without --audit
+ok    host-audit without check-node.sh says so
+ok    host-audit reports the passphrase method
+ok    host-audit never prints the passphrase
+ok    host-audit prints no part of it either
+ok    node_wrapper resolves the libexec start script
+ok    node_wrapper resolves the Docker start script
+ok    node_wrapper ignores another ExecStart
+ok    log-clear refuses a symlinked log file
+ok    log-clear left the symlink target alone
+ok    log-clear in a dir the root check refuses runs as its owner
+ok    set-logrotate refuses 10X
+ok    set-logrotate refuses 1g
+ok    set-logrotate refuses an empty size
+ok    logrotate-seed calls tn_install_logrotate without a size (keep or default)
+ok    set-logrotate without the log group fails
+ok    set-logrotate without the log group says how to migrate
+ok    logrotate-seed without the log group says how to migrate
+ok    another library failure keeps the plain message
+ok    set-hostname reads network-config as the service account
+ok    set-hostname writes network-config as the service account
+ok    set-hostname replaces only the hostname line
+ok    set-hostname refuses a root-owned data dir
+ok    docker-detect lists the containers of the library's repositories, by digest or by tag
+ok    docker-status refuses a container docker-detect does not list
+ok    docker-status refuses a look-alike repository
+ok    docker-status takes a legacy-repository container
+ok    docker-logs refuses an unknown container
+ok    docker-logs refuses a zero line count
+ok    docker-status never asks for Config.Env
+ok    docker-logs-full is capped
+ok    jaeger-start binds loopback ports, drops capabilities
+ok    a library not owned by root is not used
+ok    _lib_call reports a missing function as 127
+ok    update-prepare without a usable library refuses (nolib)
+ok    update-prepare without a usable library runs nothing (nolib)
+ok    update-prepare without a usable library refuses (lib-not-root)
+ok    update-prepare without a usable library runs nothing (lib-not-root)
+ok    set-logrotate without a usable library refuses (nolib)
+ok    set-logrotate without a usable library runs nothing (nolib)
+ok    set-logrotate without a usable library refuses (lib-not-root)
+ok    set-logrotate without a usable library runs nothing (lib-not-root)
+ok    logrotate-seed without a usable library refuses (nolib)
+ok    logrotate-seed without a usable library runs nothing (nolib)
+ok    logrotate-seed without a usable library refuses (lib-not-root)
+ok    logrotate-seed without a usable library runs nothing (lib-not-root)
+ok    quorum-check without a usable library refuses (nolib)
+ok    quorum-check without a usable library runs nothing (nolib)
+ok    quorum-check without a usable library refuses (lib-not-root)
+ok    quorum-check without a usable library runs nothing (lib-not-root)
+ok    setup-keygen without the library refuses
+ok    setup-keygen without the library never reaches setup-node
+ok    with the library: passphrase_ok refuses a 15-byte mainnet value
+ok    with the library: passphrase_ok takes a 16-byte mainnet value
+SKIP  set-logrotate vs tn_install_logrotate (needs root, TN_UI_TEST_ROOT=1 and the telcoin-log group)
+ok    firewall-enable with SSH only
+ok    firewall-enable with SSH only passes no P2P list
+ok    firewall-enable with SSH and P2P lists
+ok    firewall-enable with a P2P list runs the engine from /
+ok    firewall-enable with a P2P list alone ('-' for SSH)
+ok    firewall-enable with a P2P list alone (empty SSH)
+ok    firewall-enable with '-' alone gives no list
+ok    firewall-enable with '-' alone passes no --ssh-from
+ok    firewall-enable takes 16 P2P sources
+ok    firewall-enable refuses the P2P list ''0.0.0.0/0''
+ok    firewall-enable refuses the P2P list ''0.0.0.0''
+ok    firewall-enable refuses the P2P list ''::/0''
+ok    firewall-enable refuses the P2P list ''::''
+ok    firewall-enable refuses the P2P list ''10.0.0.0/7''
+ok    firewall-enable refuses the P2P list ''010.0.0.1''
+ok    firewall-enable refuses the P2P list ''10.0.0.256''
+ok    firewall-enable refuses the P2P list ''10.0.0.1/33''
+ok    firewall-enable refuses the P2P list ''2001:db8::/129''
+ok    firewall-enable refuses the P2P list ''etc/passwd''
+ok    firewall-enable refuses the P2P list ''10.0.0.1,,10.0.0.2''
+ok    firewall-enable refuses the P2P list '',10.0.0.1''
+ok    firewall-enable refuses the P2P list ''10.0.0.1,''
+ok    firewall-enable refuses the P2P list ''10.0.0.1;id''
+ok    firewall-enable refuses the P2P list ''a$(id)''
+ok    firewall-enable refuses the P2P list '10.0.0.1,10.... (160 chars)'
+ok    firewall-enable refuses the P2P list ''10.0.0.1/8/8''
+ok    firewall-enable refuses the P2P list ''-''
+ok    firewall-enable refuses the P2P list ''--p2p-anywhere''
+ok    firewall-enable refuses the P2P list ''/etc/passwd''
+ok    firewall-enable refuses the P2P list ''/10.0.0.0/8''
+ok    firewall-enable refuses the P2P list ''/''
+ok    a P2P list that starts with / is refused as a file path
+ok    a P2P file path never reaches the engine
+ok    an SSH list that starts with / is refused as a file path
+ok    a P2P value that is not a comma list is refused
+ok    a bad P2P entry is named
+ok    seventeen P2P sources are refused
+ok    a bad SSH list is refused before the P2P list
+ok    a bad SSH list with a good P2P list runs nothing
+ok    firewall-enable with a P2P list refuses an engine without --p2p-from
+ok    an engine without --p2p-from is not run
+ok    firewall-enable with a P2P list needs the library check
+ok    the audit log records both lists
+ok    no recorded call carries --observer
+ok    no recorded call carries --validator
+
+548 checks, 0 failed (bash 3.2.57(1)-release)
+rc=0

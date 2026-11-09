@@ -1,0 +1,4 @@
+2364c2364
+<         mainnet) rpc="$MAINNET_RPC_URL" ;;
+---
+>         mainnet) rpc="$TESTNET_RPC_URL" ;;

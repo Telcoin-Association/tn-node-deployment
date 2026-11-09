@@ -122,6 +122,66 @@ else
     skip "root_dir_ok: root-owned dir, modes, owner, symlinked and g+w parents" "$NOT_ROOT_REASON"
 fi
 
+# ---- _tn_root_layout_dir: exactly the mode asked for --------------------------
+# GNU chmod and install keep a directory's setuid and setgid bits for a numeric
+# mode of fewer than five digits, so an inherited g+s turned 0700 into 02700,
+# which tn-p2p-allow-sync refuses as state-dir-invalid. As root the helper runs
+# for real in RB; as a normal user in T, with its root-only steps stood in for
+# (the parent check, chown, install's -o and -g), so chmod and install still set
+# the mode for real.
+# special DIR -- the setuid, setgid and sticky bits DIR has (u, g, t), or none.
+special() {
+    local s=""
+    [[ -u "$1" ]] && s="${s}u"
+    [[ -g "$1" ]] && s="${s}g"
+    [[ -k "$1" ]] && s="${s}t"
+    printf '%s\n' "${s:-none}"
+}
+layout() {
+    if [[ -n "$RB" ]]; then
+        _tn_root_layout_dir "$@"
+        return
+    fi
+    (
+        tn_root_dir_ok() { [[ -d "$1" && ! -L "$1" ]]; }
+        chown() { :; }
+        install() {
+            local -a a=()
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    -o|-g) shift 2 ;;
+                    *) a+=("$1"); shift ;;
+                esac
+            done
+            "$(type -P install)" "${a[@]}"
+        }
+        _tn_root_layout_dir "$@"
+    )
+}
+L="${RB:-$T}/layout"
+mkdir -m 0755 "$L"
+mkdir "$L/state" && chmod 2755 "$L/state"
+check "layout_dir: fixture state dir has g+s" "g" "$(special "$L/state")"
+run layout "$L/state" root 0700
+check_rc "layout_dir: existing g+s dir, 0700 rc 0" 0 "$RC"
+check "layout_dir: existing g+s dir ends up exactly 0700" "700 none" "$(stat -c %a -- "$L/state") $(special "$L/state")"
+mkdir "$L/both" && chmod 6755 "$L/both"
+run layout "$L/both" root 0755
+check_rc "layout_dir: existing u+s,g+s dir, 0755 rc 0" 0 "$RC"
+check "layout_dir: existing u+s,g+s dir ends up exactly 0755" "755 none" "$(stat -c %a -- "$L/both") $(special "$L/both")"
+mkdir "$L/sg" && chmod 2755 "$L/sg"
+run layout "$L/sg/new" root 0700
+check_rc "layout_dir: new dir under a g+s parent rc 0" 0 "$RC"
+check "layout_dir: new dir under a g+s parent is exactly 0700" "700 none" "$(stat -c %a -- "$L/sg/new") $(special "$L/sg/new")"
+run layout "$L/sg/new" root 0700
+check "layout_dir: a second run keeps 0700" "0 700 none" "$RC $(stat -c %a -- "$L/sg/new") $(special "$L/sg/new")"
+if [[ -n "$RB" ]]; then
+    check "layout_dir: root owns them" "0 0 700|0 0 755|0 0 700" \
+        "$(owner_mode "$L/state")|$(owner_mode "$L/both")|$(owner_mode "$L/sg/new")"
+else
+    skip "layout_dir: root owns them" "$NOT_ROOT_REASON"
+fi
+
 # ---- tn_write_root_file: refusals (any user) ----------------------------------
 printf 'orig\n' > "$T/target"
 ln -s "$T/target" "$T/dest-link"

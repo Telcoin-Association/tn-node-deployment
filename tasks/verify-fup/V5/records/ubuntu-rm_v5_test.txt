@@ -1,0 +1,32 @@
+ok    R1 json service: rc 0
+ok    R1 json service: limit untouched
+ok    R1 json service: no p2p-limit systemctl call
+ok    R1 json data: rc 0
+ok    R1 json data: limit untouched
+ok    R1 json data: no p2p-limit systemctl call
+ok    R2 json keys (last node): rc 0
+ok    R2 json keys: unit, file and table gone
+ok    R2 json keys: unit disabled and stopped
+ok    R2 json keys: the table delete program
+ok    R2 json keys: stdout is JSON only, ends with done ok
+info  R3 keys with another node unit: rc=0 state=[unit - table] other=/tmp/tn_test.RRjWW3/root/etc/systemd/system/telcoin-validator.service 
+ok    R3 json keys with another node: unit and table untouched
+FAIL  R3b (adversarial) json keys with another node: the boot ruleset file survives
+      expected (<) vs actual (>):
+      1c1
+      < file
+      ---
+      > -
+ok    R4 menu with two nodes: limit untouched
+ok    R5 menu, last node: limit removed
+ok    R5 menu: says so
+ok    R6 leftovers: rc 0, limit removed
+info  R7 only the limit unit and table left: remove_leftovers rc=3 state=[unit - table]
+ok    R8 nft refuses the delete: rc 0, unit and file gone, table stays
+ok    R8 warning names the command
+ok    R9 nft absent: rc 0, unit and file gone
+ok    R9 nft absent: no nft call
+ok    R10 no table: no nft -f call
+ok    R11 no unit: no systemctl call for it
+
+23 checks, 1 failures, 0 skipped

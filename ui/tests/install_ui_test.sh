@@ -44,7 +44,7 @@ run_case() {
     shift 4
     rm -f "$co/ran"
     env -u SUDO_USER -u SUDO_UID -u SUDO_GID "$@" \
-        bash "$co/ui/install-ui.sh" --update </dev/null >"$T/out" 2>&1
+        "${BASH:-bash}" "$co/ui/install-ui.sh" --update </dev/null >"$T/out" 2>&1
     rc=$?
     [[ -e "$co/ran" ]] && ran=yes
     check "$name" "rc=${want_rc} library-ran=${want_ran}" "rc=${rc} library-ran=${ran}"
@@ -89,7 +89,8 @@ else
     # Other administrators (sudo or adm members) and the service accounts. These
     # create accounts and groups, so only in a throwaway container (busybox
     # adduser/addgroup, as in bash:3.2).
-    if [[ -f /.dockerenv ]] && command -v adduser >/dev/null 2>&1 && command -v addgroup >/dev/null 2>&1; then
+    if [[ -f /.dockerenv ]] && command -v adduser >/dev/null 2>&1 && command -v addgroup >/dev/null 2>&1 \
+        && adduser --help 2>&1 | grep -q BusyBox; then
         getent group sudo >/dev/null 2>&1 || addgroup -g 4600 sudo >/dev/null 2>&1
         adduser -D -H -u 4500 admin2 >/dev/null 2>&1; addgroup admin2 sudo >/dev/null 2>&1
         adduser -D -H -u 4510 logadm >/dev/null 2>&1; addgroup logadm adm >/dev/null 2>&1

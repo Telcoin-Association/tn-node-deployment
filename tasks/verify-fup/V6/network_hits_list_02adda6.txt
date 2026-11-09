@@ -1,0 +1,148 @@
+lib/common.sh:20: testnet constant, selected by NETWORK -- readonly TESTNET_CHAIN_NAME="adiri"  # network-gated: testnet constant, selected by NETWORK
+lib/common.sh:21: testnet constant, selected by NETWORK -- readonly TESTNET_RPC_URL="https://rpc.adiri.tel"  # network-gated: testnet constant, selected by NETWORK
+lib/common.sh:57: the comment names the testnet fleet; 9101 is the default on every network -- readonly DEFAULT_METRICS_PORT="9101"   # node loopback Prometheus endpoint (matches the adiri fleet)
+lib/common.sh:86: the testnet tag form, documented beside the mainnet one -- # The suffix of each network's release tags: testnet vX.Y.Z-adiri, mainnet
+lib/common.sh:89: testnet constant; nothing in this release reads it -- readonly NETWORK_TAG_SUFFIX_TESTNET="-adiri"  # network-gated: testnet constant; nothing in this release reads it
+lib/common.sh:95: testnet release history behind MIN_SOURCE_VERSION_TESTNET; no endpoint -- # `keytool set-rpc` and `keytool generate pop` arrived in v0.12.0-adiri and
+lib/common.sh:97: testnet release history; no endpoint -- # `--enable-state-export` in v0.13.0-adiri, so 0.13.0 is the first release with
+lib/common.sh:1516: documents the legacy testnet repository; tn_docker_repos_for never gives it to mainnet -- # images of the releases made before signed releases, v0.16.0-adiri among them,
+lib/common.sh:1518: names the legacy testnet repository; no mainnet path takes it -- # are in the Artifact Registry adiri repository (TN_TESTNET_LEGACY_IMAGE_REPO;
+lib/common.sh:1524: legacy testnet repository; tn_docker_repos_for lists it for testnet and devnet, never mainnet -- readonly TN_TESTNET_LEGACY_IMAGE_REPO="us-docker.pkg.dev/telcoin-network/tn-public/adiri"
+lib/common.sh:1527: tag list of the legacy testnet repository; nothing in this release reads it -- readonly GAR_TAGS_URL="https://us-docker.pkg.dev/v2/telcoin-network/tn-public/adiri/tags/list"
+lib/common.sh:1530: the testnet fallback image (latest_docker_image, testnet only) -- # registry answers: v0.16.0-adiri by digest (the Docker-Content-Digest the legacy
+lib/common.sh:1532: testnet fallback tag (latest_docker_image, testnet only) -- readonly DEFAULT_DOCKER_TAG="v0.16.0-adiri"  # network-gated: testnet fallback tag (latest_docker_image, testnet only)
+lib/common.sh:1599: every testnet release is a prerelease; mainnet skips prereleases -- # skipped; prereleases count on testnet (every Adiri release is one) and are
+lib/common.sh:1689: the testnet tag form, documented beside the mainnet one -- # testnet vX.Y.Z-adiri, or its release candidate vX.Y.Z-adiri-rcN (N from 1, no
+lib/common.sh:1708: testnet tag form, in the testnet arm of the network case -- testnet) re="^v${n}\.${n}\.${n}-adiri(-rc[1-9][0-9]*)?$" ;;
+lib/common.sh:1730: message that lists the tag form of every network -- printf '%s\n' "testnet vX.Y.Z-adiri or the release candidate vX.Y.Z-adiri-rcN, mainnet vX.Y.Z, devnet <name>-devnet; release candidates are testnet only"
+lib/common.sh:1739: accepts the testnet suffix to order tags; tn_release_tag_ok judges the network -- re='^v([0-9]{1,9})\.([0-9]{1,9})\.([0-9]{1,9})(-adiri)?(-rc([1-9][0-9]{0,7}))?$'
+lib/common.sh:1754: the testnet suffix tn_release_tag_key orders; the network is judged elsewhere -- # vX.Y.Z with an optional -adiri and an optional -rcN (the network is not
+lib/common.sh:1993: example refs in the testnet form; no endpoint -- # (v0.13.0-adiri, main, a commit) or a docker image reference, which is judged
+lib/common.sh:1995: example image ref in the testnet form; no endpoint -- # on the part after its last ":" (…/adiri:v0.15.0-adiri). Prints one message on
+lib/common.sh:2002: the testnet tag form, and adiri as another name for testnet -- # network-gated: the testnet tag form, and adiri as another name for testnet
+lib/common.sh:2003: the testnet tag form, and adiri as another name for testnet -- # vX.Y.Z-adiri and vX.Y.Z-adiri-rcN, mainnet vX.Y.Z). <network> is testnet (or adiri), mainnet or
+lib/common.sh:2012: adiri is read as testnet; the example is the testnet tag form -- # network-gated: adiri is read as testnet; the example is the testnet tag form
+lib/common.sh:2013: adiri is read as testnet; the example is the testnet tag form -- testnet|adiri) network=testnet; floor="$MIN_SOURCE_VERSION_TESTNET"; example="v${floor}-adiri" ;;
+lib/common.sh:2682: the testnet choice of the network menu -- echo "  1) Adiri Testnet  (Chain ID: ${TESTNET_CHAIN_ID})  -- for testing"
+lib/common.sh:2715: shown only while mainnet is disabled: points at the testnet choice -- print_info "Please select Adiri Testnet for now."
+lib/common.sh:2754: the testnet build feature, for NETWORK=testnet only -- # for NETWORK needs: "--features adiri" for testnet, nothing for mainnet (rc 0).
+lib/common.sh:2759: testnet arm: the feature of a testnet build -- testnet) printf '%s\n' "--features adiri" ;;  # network-gated: testnet arm: the feature of a testnet build
+lib/common.sh:2818: testnet release history; no endpoint -- # is exactly what broke v0.12.0-adiri source updates: tn-contracts gained
+lib/common.sh:4926: the tn-contracts commit the testnet releases pin; no endpoint -- # v0.16.0-adiri pins, as v0.15.0-adiri did.) The decode is strict: exactly
+lib/common.sh:6631: testnet release history of the chain configs; no endpoint -- # DEFAULT_DOCKER_IMAGE runs; the three files are the same since v0.15.0-adiri).
+lib/common.sh:6635: testnet constant: the tag of the testnet chain-config pins -- readonly TESTNET_CHAIN_CONFIGS_TAG="v0.16.0-adiri"  # network-gated: testnet constant: the tag of the testnet chain-config pins
+lib/common.sh:6725: the testnet tag form; the picker offers the tags of its own NETWORK -- # Telcoin's testnet release tags (-adiri) sit on a branch parallel to main and
+lib/common.sh:7504: the testnet build features; a mainnet build must have none -- # mainnet and on testnet lists adiri and nothing but adiri and faucet (the adiri
+lib/common.sh:7507: has_adiri counts the testnet feature, checked in the testnet arm only -- # network-gated: has_adiri counts the testnet feature, checked in the testnet arm only
+lib/common.sh:7508: has_adiri counts the testnet feature, checked in the testnet arm only -- local text="${1:-}" net="${2:-}" ref="${3:-}" want="" ver n feats f has_adiri=0 re
+lib/common.sh:7537: testnet arm: the testnet build feature -- adiri) has_adiri=1 ;;  # network-gated: testnet arm: the testnet build feature
+lib/common.sh:7541: testnet arm: names the features a testnet build may have -- print_warn "This build has the feature ${f}; a testnet build has adiri (and faucet) only." >&2
+lib/common.sh:7546: testnet arm: a testnet build needs the feature -- if [[ "$has_adiri" -ne 1 ]]; then  # network-gated: testnet arm: a testnet build needs the feature
+lib/common.sh:7548: testnet arm: names the feature a testnet build lacks -- print_warn "This build lacks the adiri feature a testnet build needs (features: ${feats:-none})." >&2
+lib/common.sh:7831: legacy testnet tag; this fallback runs on testnet only -- # (v0.16.0-adiri); the newest-release pick (latest_docker_image) never takes it.
+lib/common.sh:8325: default of the VPN hub endpoint; only setup-vpn reads it, behind require_testnet -- : "${TN_WG_HUB_ENDPOINT:=34.20.198.253:51820}"
+lib/common.sh:8331: default of the monitor source; apply_kuma_rule adds its rule only when is_testnet_like, else deletes it -- : "${TN_KUMA_SRC:=104.155.184.201/32}"
+lib/common.sh:8339: default of the testnet log hub; obs_effective_push_url gives it only when NETWORK=testnet -- : "${OBS_PUSH_URL_TESTNET:=https://obs.adiri.telcoin.network/loki/api/v1/push}"
+lib/common.sh:8349: documents is_testnet; no endpoint -- # already set there). Returns 0 on the Adiri testnet.
+lib/common.sh:8353: documents is_testnet_like; no endpoint -- # is_testnet_like — soft check for the hard gate below. Returns 0 on the Adiri
+lib/common.sh:8365: refusal message off testnet: says where the add-ons are offered -- print_info  "The VPN / observability / healthcheck add-ons are offered only on the Adiri testnet."
+lib/common.sh:8601: names the reserved overlay net of the testnet core nodes; no endpoint -- # NOT in a reserved /24 (hub/adiri/devnet/maintainers). The core team assigns one
+lib/common.sh:9587: testnet release history; no endpoint -- # --bootstrap-peers, new in v0.15.0-adiri), 1 when it does not, 4 when the probe
+lib/common.sh:9928: testnet release history; no endpoint -- # keytool writes node-info.yaml beside the node keys. v0.15.0-adiri and later
+lib/common.sh:10141: testnet release history of --observer; no endpoint -- # v0.15.0-adiri reject the flag outright, so an old wrapper must lose it before the
+lib/common.sh:10200: example targets in the testnet form; no endpoint -- # `v0.15.0-adiri`, `us-docker.pkg.dev/...:v0.14.0-adiri` or `main telcoin-network
+lib/common.sh:10202: testnet release history of --observer; no endpoint -- # 0.16.0`. The FIRST x.y.z in it is compared against 0.15.0: v0.15.0-adiri still
+lib/common.sh:10205: testnet release history of --observer; no endpoint -- # v0.16.0-adiri, rejects it when it parses its arguments (`unexpected argument
+lib/common.sh:10242: monitor address in the testnet add-on prompt (prompt_testnet_addons returns unless is_testnet) -- print_info "Association uptime monitor (${TN_KUMA_SRC:-104.155.184.201/32}) so we can alert you if your node drops."
+lib/observability.sh:43: testnet hub default; obs_effective_push_url gives it only when NETWORK=testnet -- : "${OBS_PUSH_URL_TESTNET:=https://obs.adiri.telcoin.network/loki/api/v1/push}"
+lib/observability.sh:45: testnet hub default; obs_effective_metrics_url gives it only when NETWORK=testnet -- : "${OBS_METRICS_PUSH_URL_TESTNET:=https://obs.adiri.telcoin.network/api/v1/write}"
+lib/observability.sh:77: documents the testnet arm of the push URL precedence -- #   3. else (testnet)       -> OBS_*_PUSH_URL_TESTNET (the adiri hub)
+lib/observability.sh:140: the comment names the testnet fleet; 9101 is the default on every network -- # time), else read back from .node-meta, else the default 9101 to match the adiri fleet.
+lib/observability.sh:226: documents the testnet chain label -- # testnet + the empty/unknown fallback stay "adiri" so existing testnet telemetry is
+lib/observability.sh:232: chain label of testnet and of an unknown NETWORK; obs ships nothing unless NETWORK is testnet or devnet -- *)       TN_CHAIN="${TESTNET_CHAIN_NAME:-adiri}" ;;
+lib/observability.sh:244: names the upstream node agent config, not an endpoint -- # prometheus.* (metrics). With both on it is byte-identical to the canonical, adiri-
+lib/observability.sh:350: names the upstream node agent config, not an endpoint -- # in sync with observability/config.alloy (and thus adiri).
+lib/observability.sh:354: names the upstream node agent config, not an endpoint -- // Fallback copy (canonical: observability/config.alloy, byte-identical to adiri).
+lib/observability.sh:853: names the core team's testnet sidecar this unit copies; no endpoint -- # unit. Mirrors the adiri start-validator-node.sh sidecar (container telcoin-alloy, host
+lib/observability.sh:1427: documents the testnet case of the fail-closed check -- # On testnet the effective URLs resolve to the adiri hub, so this never trips.
+check-node.sh:760: release history of --observer; no endpoint -- # the unit of a legacy docker install) still passes --observer. v0.15.0-adiri
+check-node.sh:772: warns about the retired --observer, which only installs of older script releases carry; names a testnet tag -- print_warn "Launch file ${file} still passes --observer; releases after v0.15.0-adiri reject it and the node will not start after an update."
+check-node.sh:1363: documents which chain the mainnet RPC serves today; no endpoint -- # Adiri testnet, chain 2017): warn, set NETWORK_WRONG_CHAIN and let §3 skip the
+edit-config.sh:71: release named in the testnet tag form; edit_need_flag asks the installed release on any network -- #                                     Needs v0.15.0-adiri or later and a start
+edit-config.sh:78: release named in the testnet tag form; edit_need_flag asks the installed release on any network -- #                                     v0.13.0-adiri or later); N keeps only the
+edit-config.sh:81: release named in the testnet tag form; edit_need_flag asks the installed release on any network -- #                                     --state-export-keep, v0.15.0-adiri or later)
+edit-config.sh:2603: release named in the testnet tag form, shown on every network; edit_need_flag asks the installed release -- print_info "as ${peers}. Needs v0.15.0-adiri or later."
+edit-config.sh:2633: release named in the testnet tag form, shown on every network -- echo "  2) On, keep every epoch's export     (v0.13.0-adiri or later)"
+edit-config.sh:2635: release named in the testnet tag form, shown on every network -- echo "  3) On, keep only the last N epochs   (v0.15.0-adiri or later)"
+install-caddy.sh:57: example hostname in the testnet domain; documentation only -- #     hostnames. The node's public name (e.g. nodeN.adiri.telcoin.network) carries RPC;
+install-caddy.sh:59: example hostname in the testnet domain; documentation only -- #     the dashboard goes on another name (e.g. dashboard.nodeN.adiri.telcoin.network).
+install-caddy.sh:788: example hostnames in a message shown on every network; the operator's own names are checked -- printf '%s' "${domain} already serves the Node Manager dashboard -- the dashboard and the public RPC endpoint need DIFFERENT hostnames. The node's public name (e.g. nodeN.adiri.telcoin.network) should carry the RPC endpoint, with the dashboard on another hostname (e.g. dashboard.${domain}). Nothing was changed. To move the dashboard (same login) and enable RPC in one step, first create the DNS A record for dashboard.${domain} pointing at this server (Caddy requests a certificate for it), then run: sudo bash ${SCRIPT_DIR}/install-caddy.sh --phase=rpc-enable --rpc-domain ${domain} --move-dashboard-to dashboard.${domain}"
+install-caddy.sh:793: example hostnames in a message shown on every network; the operator's own names are checked -- printf '%s' "${domain} already serves the public RPC endpoint -- the dashboard and the public RPC endpoint need DIFFERENT hostnames. The node's public name (e.g. nodeN.adiri.telcoin.network) should carry the RPC endpoint; put the dashboard on another hostname (e.g. dashboard.${domain}). Nothing was changed."
+install-caddy.sh:2970: example hostname in a prompt shown on every network; the operator types their own -- read -r -p "  Dashboard domain (e.g. admin.node1.adiri.telcoin.network): " domain
+install-caddy.sh:3036: example hostname in a prompt shown on every network; the operator types their own -- read -r -p "  Public RPC domain (e.g. node1.adiri.telcoin.network): " domain
+remove-node.sh:1387: image repositories of every network; the scan reads only and each removal asks first -- | grep -E 'telcoin-network/tn-public|/tn-public/|-adiri|ghcr\.io/telcoin-association/telcoin-network' || true  # network-gated: image repositories of every network; the scan reads only and each removal asks first
+setup-node.sh:19: example hostname in the testnet domain, in the help text -- #                            own public name, e.g. node7.adiri.telcoin.network; the
+setup-node.sh:66: the testnet tag form, beside the mainnet one -- #   --release-tag <tag>      The release to install or build: vX.Y.Z-adiri on testnet,
+setup-node.sh:81: release named in the testnet tag form; require_node_flag asks the release on any network -- #                            bootstrap servers (v0.15.0-adiri and later). The file holds
+setup-node.sh:92: release named in the testnet tag form; require_node_flag asks the release on any network -- #                            <datadir>/consensus-db/state_exports/epoch-N/ (v0.13.0-adiri
+setup-node.sh:98: release named in the testnet tag form; require_node_flag asks the release on any network -- #                            --enable-state-export as well (v0.15.0-adiri and later).
+setup-node.sh:402: documents the testnet build feature (tn_cargo_features_for) -- # Select network first so NETWORK is set before source build (needed for --features adiri).
+setup-node.sh:1228: example hostname in a prompt shown on every network; the operator types their own -- print_info "for the RPC endpoint, e.g. node7.adiri.telcoin.network."
+setup-node.sh:1231: example hostname in a prompt shown on every network -- print_info "dashboard.<your-node-domain> (e.g. dashboard.node7.adiri.telcoin.network) --"
+setup-node.sh:1249: example hostname in a message shown on every network -- print_warn "Not a bare hostname: ${input}. Enter just the name, e.g. node7.adiri.telcoin.network (no https://, no path, no IP address)."
+setup-node.sh:1312: example hostname in a message shown on every network -- err="invalid --rpc-domain ${PUBLIC_RPC_DOMAIN} -- give a bare hostname such as node7.adiri.telcoin.network (no https://, no path, no IP address)."
+setup-node.sh:1333: example hostname in a message shown on every network -- setup_fail "invalid ${flag} ${url} -- give a ${kind}:// or ${kind}s:// URL with a host name or IP address, such as ${kind}s://node7.adiri.telcoin.network/ (no spaces, quotes or user@ part)."
+setup-node.sh:2291: first release with the flag, named in the testnet tag form for the refusal; require_node_flag asks the release -- require_node_flag "$spec" --bootstrap-peers v0.15.0-adiri
+setup-node.sh:2298: first release with the flag, named in the testnet tag form for the refusal; require_node_flag asks the release -- require_node_flag "$spec" --enable-state-export v0.13.0-adiri
+setup-node.sh:2303: first release with the flag, named in the testnet tag form for the refusal; require_node_flag asks the release -- require_node_flag "$spec" --enable-state-export v0.13.0-adiri
+setup-node.sh:2305: first release with the flag, named in the testnet tag form for the refusal; require_node_flag asks the release -- require_node_flag "$spec" --state-export-keep v0.15.0-adiri
+setup-node.sh:2315: first release with the flag, named in the testnet tag form for the refusal; require_node_flag asks the release -- require_node_flag "$spec" "$w" v0.13.0-adiri
+setup-node.sh:3032: adiri is read as testnet -- testnet|adiri)  # network-gated: adiri is read as testnet
+setup-vpn.sh:1115: enrollment note of the testnet-only VPN (require_testnet); names the core team's repository -- print_info "adiri-genesis checkout; it stamps the enrollment date and pushes the hub):"
+update-node.sh:52: the testnet tag form, beside the mainnet one -- # Updates take release tags only (vX.Y.Z-adiri on testnet, vX.Y.Z on mainnet),
+update-node.sh:298: example tag in the testnet form, shown on every network -- print_info "Check a release before installing it (TAG is the release, such as vX.Y.Z-adiri):"
+update-node.sh:920: release history of --observer; no endpoint -- # v0.15.0-adiri takes the flag as a hidden no-op and later releases refuse to
+update-node.sh:2010: documents the testnet build feature (tn_cargo_features_for) -- # The network decides the build features (adiri on testnet, none on
+update-node.sh:2023: message of a mainnet build: names the testnet feature it leaves out -- print_info "Network: ${network} -- building without the adiri feature"
+ui/server.py:284: the testnet tag form, documented beside the mainnet one -- # Release tags (lib/common.sh tn_release_tag_ok): testnet vX.Y.Z-adiri or its
+ui/server.py:286: the testnet release candidate form -- # release candidate vX.Y.Z-adiri-rcN (N from 1, no leading zero), mainnet
+ui/server.py:298: testnet tag form, the testnet entry of RELEASE_TAG_RE -- "testnet": re.compile(rf"v{_TAG_PART}\.{_TAG_PART}\.{_TAG_PART}-adiri(?:-rc[1-9][0-9]*)?"),
+ui/server.py:325: the testnet suffix release_tag_key orders; release_tag_ok judges the network -- # The release tag forms tn_release_tag_key orders: vX.Y.Z, an optional -adiri
+ui/server.py:329: the testnet suffix release_tag_key orders; release_tag_ok judges the network -- r"v([0-9]{1,9})\.([0-9]{1,9})\.([0-9]{1,9})(-adiri)?(-rc([1-9][0-9]{0,7}))?")
+ui/server.py:346: adiri is read as testnet, as the helper reads it -- # network-gated: adiri is read as testnet, as the helper reads it
+ui/server.py:347: adiri is read as testnet, as the helper reads it -- """testnet | mainnet for a NETWORK value (adiri is testnet); None otherwise."""
+ui/server.py:349: adiri is read as testnet, as the helper reads it -- # network-gated: adiri is read as testnet, as the helper reads it
+ui/server.py:350: adiri is read as testnet, as the helper reads it -- return {"testnet": "testnet", "adiri": "testnet", "mainnet": "mainnet"}.get(v)
+ui/server.py:378: legacy testnet repository; DOCKER_REPO lists it for testnet and devnet, never mainnet -- TESTNET_LEGACY_IMAGE_REPO = "us-docker.pkg.dev/telcoin-network/tn-public/adiri"
+ui/server.py:390: the testnet fallback image; latest_docker_image takes it on testnet only -- # v0.16.0-adiri by digest, as lib/common.sh DEFAULT_DOCKER_IMAGE.
+ui/server.py:433: example in the testnet form, chosen when the network is testnet -- example = "v1.2.3-adiri" if network == "testnet" else "v1.2.3"
+ui/server.py:1113: example version string; no endpoint -- """The major part of a version string ("v0.16.0-adiri" -> "v0"); "" when
+ui/server.py:1374: display name of chain 2017, picked by the node's chain id -- 2017: {"name": "Adiri Testnet", "slug": "testnet"},  # network-gated: display name of chain 2017, picked by the node's chain id
+ui/server.py:1375: display name of the devnet chain 32285, picked by the node's chain id -- 32285: {"name": "Adiri Devnet", "slug": "devnet"},  # network-gated: display name of the devnet chain 32285, picked by the node's chain id
+ui/server.py:1382: documents the testnet public RPC below -- # fallbacks for when the balancer is degraded. Testnet uses rpc.adiri.tel:
+ui/server.py:1390: testnet public RPC, looked up by the node's chain id -- 2017:  ["https://rpc.adiri.tel"],  # network-gated: testnet public RPC, looked up by the node's chain id
+ui/server.py:2124: the tn-contracts commit the testnet releases pin; no endpoint -- # the commit telcoin-network v0.16.0-adiri pins (as v0.15.0-adiri did), and the
+ui/server.py:2945: the testnet tag form; the tag is read for the network asked -- """Latest release git tag of the network, vX.Y.Z-adiri on testnet, vX.Y.Z on
+ui/server.py:5111: example in the testnet form, chosen when the network is testnet -- example = "vX.Y.Z-adiri" if net == "testnet" else "vX.Y.Z"
+ui/server.py:5606: status page per network -- STATUS_PAGE_LINKS = {"testnet": "https://status.adiri.telcoin.network/"}  # network-gated: status page per network
+ui/telcoin-ui-helper.sh:506: adiri is read as testnet -- # network-gated: adiri is read as testnet
+ui/telcoin-ui-helper.sh:507: adiri is read as testnet -- # (adiri counts as testnet). Prints nothing and returns 1 for anything else.
+ui/telcoin-ui-helper.sh:518: adiri is read as testnet -- testnet|adiri) echo testnet ;;  # network-gated: adiri is read as testnet
+ui/telcoin-ui-helper.sh:526: the testnet tag form, beside the mainnet one -- # vX.Y.Z-adiri or its release candidate vX.Y.Z-adiri-rcN, mainnet vX.Y.Z).
+ui/telcoin-ui-helper.sh:916: -adiri is printed only when net is testnet -- || die "ref must be a release tag of ${net} (vX.Y.Z$([[ "$net" == testnet ]] && echo -adiri)); branches and commit ids are refused: $ref"  # network-gated: -adiri is printed only when net is testnet
+ui/telcoin-ui-helper.sh:1542: adiri is read as testnet -- testnet|adiri) net_rule=testnet ;;  # network-gated: adiri is read as testnet
+ui/static/index.html:449: the wizard starts on testnet; the helper reads adiri as testnet -- setup: { network:'adiri', method:'source',  // network-gated: the wizard starts on testnet; the helper reads adiri as testnet
+ui/static/index.html:575: placeholder of last resort in the testnet domain; shown only as an example -- const DEFAULT_RPC_HOST = 'node7.adiri.telcoin.network';   // placeholder of last resort
+ui/static/index.html:589: example URL in a comment -- // Host part of an advertised URL such as https://node7.adiri.telcoin.network/,
+ui/static/index.html:2406: testnet and mainnet examples side by side -- placeholder="release tag, e.g. v0.16.0-adiri (testnet) or v1.0.0 (mainnet)"></div>  <!-- network-gated: testnet and mainnet examples side by side -->
+ui/static/index.html:3602: the testnet card; the helper reads adiri as testnet -- <!-- network-gated: the testnet card; the helper reads adiri as testnet -->
+ui/static/index.html:3603: the testnet card; the helper reads adiri as testnet -- <div class="rcard ${state.setup.network==='adiri'?'sel':''}" data-net="adiri">
+ui/static/index.html:3604: label of the testnet card -- <div class="rt">Adiri Testnet</div><div class="rd">Telcoin's public test network. Recommended for new nodes.</div></div>  <!-- network-gated: label of the testnet card -->
+ui/static/index.html:3638: testnet tag form, chosen unless the wizard's network is mainnet -- const tag = new RegExp(setupNetwork()==='mainnet' ? '^v'+part+'\\.'+part+'\\.'+part+'$' : '^v'+part+'\\.'+part+'\\.'+part+'-adiri(-rc[1-9][0-9]*)?$');
+ui/static/index.html:3657: example tag in the testnet form, chosen unless the wizard's network is mainnet -- : `<div class="field"><label>Docker image: a release tag (${mainnet?'v1.2.3':'v0.16.0-adiri'}) or the image by digest (…@sha256:…); latest is refused</label>
+ui/static/index.html:3658: the same example, chosen by network -- <input id="mDockerImage" placeholder="${mainnet?'v1.2.3':'v0.16.0-adiri'}" value="${esc(state.setup.dockerImage||'')}"></div>`;  // network-gated: the same example, chosen by network
+ui/static/index.html:3829: label of the testnet choice in the review -- ['Network', s.network==='adiri'?'Adiri Testnet':s.network],
+ui/static/index.html:4117: display names keyed by network -- function netLabel(n){ return ({testnet:'Adiri Testnet', devnet:'Adiri Devnet', mainnet:'Telcoin Mainnet'})[n] || (n?cap(n):'—'); }
+ui/static/index.html:4121: names the testnet in a comment -- // Nav-bar network status pill (Adiri Testnet, from /api/network/status)
+observability/config.alloy:10: names the upstream node agent config in the testnet repository, not an endpoint -- // to adiri-genesis/common/observability/node-agent/config.alloy (the core team's node
+observability/config.alloy:15: names the upstream repository, not an endpoint -- // deploys this file verbatim. If you edit the blocks, mirror the change in adiri-genesis

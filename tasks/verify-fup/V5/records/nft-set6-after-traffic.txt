@@ -1,0 +1,9 @@
+table inet tn_p2p {
+	set tn_p2p_src6 {
+		type ipv6_addr
+		size 65535
+		flags dynamic,timeout
+		timeout 2m
+		elements = { 2001:db8:1:2:: limit rate over 20/minute burst 40 packets expires 1m59s494ms }
+	}
+}

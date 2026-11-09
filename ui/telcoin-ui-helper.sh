@@ -73,7 +73,7 @@
 #   telcoin-ui-helper rpc-disable
 #   telcoin-ui-helper firewall-status
 #   telcoin-ui-helper firewall-port   <port>/<proto> <on|off>   (node ports only)
-#   telcoin-ui-helper firewall-enable [<ssh-source>[,<ssh-source>...]]
+#   telcoin-ui-helper firewall-enable [<ssh-source>[,<ssh-source>...]|-] [<p2p-source>[,<p2p-source>...]]
 #   telcoin-ui-helper addons-status                             (read-only)
 #   telcoin-ui-helper meta-cat                                  (read-only)
 #   telcoin-ui-helper node-env-cat                              (read-only)
@@ -503,6 +503,7 @@ same_host() {
 
 # node_network -- testnet or mainnet, from the library's tn_detect_network (meta
 # NETWORK, else the genesis chain id); the fallback reads NETWORK from .node-meta
+# network-gated: adiri is read as testnet
 # (adiri counts as testnet). Prints nothing and returns 1 for anything else.
 node_network() {
     local net rc=0
@@ -514,13 +515,14 @@ node_network() {
     [[ $rc -eq 127 ]] || return 1
     net="$(meta_value NETWORK 2>/dev/null)" || return 1
     case "$net" in
-        testnet|adiri) echo testnet ;;
+        testnet|adiri) echo testnet ;;  # network-gated: adiri is read as testnet
         mainnet) echo mainnet ;;
         *) return 1 ;;
     esac
 }
 
 # release_tag_ok <network> <tag> -- the library's tn_release_tag_ok (testnet
+# network-gated: the testnet tag form, beside the mainnet one
 # vX.Y.Z-adiri or its release candidate vX.Y.Z-adiri-rcN, mainnet vX.Y.Z).
 release_tag_ok() {
     _lib_req tn_release_tag_ok "$1" "$2"
@@ -911,7 +913,7 @@ cmd_update_prepare() {
     [[ -n "$ref" ]] || die "missing ref"
     net="$(node_network)" || die "cannot tell this node's network (NETWORK in .node-meta must be testnet or mainnet)"
     release_tag_ok "$net" "$ref" \
-        || die "ref must be a release tag of ${net} (vX.Y.Z$([[ "$net" == testnet ]] && echo -adiri)); branches and commit ids are refused: $ref"
+        || die "ref must be a release tag of ${net} (vX.Y.Z$([[ "$net" == testnet ]] && echo -adiri)); branches and commit ids are refused: $ref"  # network-gated: -adiri is printed only when net is testnet
     exec_job bash "$UPDATE_SCRIPT" --json --prepare --ref "$ref"
 }
 
@@ -1322,7 +1324,8 @@ cmd_rpc_enable() {
 # Firewall subcommands -- thin wrappers around firewall-setup.sh --json. Only
 # the three node ports may be toggled. firewall-enable applies the engine's
 # lockout-safe defaults (SSH stays allowed, from the given sources when there
-# are some); no other SSH or policy setting is reachable here.
+# are some; the P2P ports from the given P2P sources when there are some); no
+# other SSH or policy setting is reachable here.
 # =============================================================================
 
 firewall_script_ready() {
@@ -1346,27 +1349,47 @@ cmd_firewall_port() {
     exec bash "$FIREWALL_SCRIPT" --json --port "$spec" "$pstate"
 }
 
-# firewall-enable [<sources>] -- firewall-setup.sh --json --enable. <sources> is
-# the SSH source list, passed as --ssh-from: at most 16 addresses or CIDRs
-# joined by commas, each accepted by the library's validate_health_src (never
-# /0, the unspecified address or a mask shorter than /8). Without it the engine
-# uses the list .node-meta keeps; on mainnet it refuses when there is none, and
-# its done event says so. Runs from / so the list is never read as a file path.
+# _fw_check_sources <SSH|P2P> <list> -- refuse the running call unless <list> is
+# at most 16 addresses or CIDRs joined by commas, each accepted by the library's
+# validate_health_src (never /0, the unspecified address or a mask shorter than
+# /8). A list that starts with / is refused first: the engine would read it as
+# a file, and this helper never hands it one.
+_fw_check_sources() {
+    local what="$1" list="$2" s n=0
+    local -a srcs=()
+    [[ "$list" != /* ]] || die "invalid ${what} source list: $list (a file path is not taken here; give addresses or CIDRs joined by commas)"
+    [[ "$list" =~ ^[^,]+(,[^,]+)*$ ]] || die "invalid ${what} source list (addresses or CIDRs joined by commas): $list"
+    IFS=, read -r -a srcs <<< "$list"
+    for s in "${srcs[@]}"; do
+        n=$((n + 1))
+        [[ "$s" =~ ^[0-9A-Fa-f.:]+(/[0-9]{1,3})?$ ]] && _lib_req validate_health_src "$s" \
+            || die "invalid ${what} source: $s (an address, or a CIDR of /8 or narrower; never /0)"
+    done
+    (( n <= 16 )) || die "too many ${what} sources: $n (at most 16)"
+}
+
+# firewall-enable [<ssh-sources>|-] [<p2p-sources>] -- firewall-setup.sh --json
+# --enable. <ssh-sources> is passed as --ssh-from and <p2p-sources> as
+# --p2p-from, each checked by _fw_check_sources; "-" or nothing for the SSH list
+# gives none, so a P2P list can come alone. Without a list the engine uses the
+# one .node-meta keeps (SSH_ALLOW_FROM, P2P_ALLOW_FROM); on mainnet it refuses
+# when there is no SSH list, and its done event says so. Without any P2P list
+# the P2P ports stay open to every address. Runs from / so a list is never
+# read as a file path.
 cmd_firewall_enable() {
-    local list="${1:-}" s n=0
-    local -a args=( --json --enable ) srcs=()
+    local ssh="${1:-}" p2p="${2:-}"
+    local -a args=( --json --enable )
     firewall_script_ready
-    if [[ -n "$list" ]]; then
-        [[ "$list" =~ ^[^,]+(,[^,]+)*$ ]] || die "invalid SSH source list (addresses or CIDRs joined by commas): $list"
-        IFS=, read -r -a srcs <<< "$list"
-        for s in "${srcs[@]}"; do
-            n=$((n + 1))
-            [[ "$s" =~ ^[0-9A-Fa-f.:]+(/[0-9]{1,3})?$ ]] && _lib_req validate_health_src "$s" \
-                || die "invalid SSH source: $s (an address, or a CIDR of /8 or narrower; never /0)"
-        done
-        (( n <= 16 )) || die "too many SSH sources: $n (at most 16)"
+    [[ "$ssh" != "-" ]] || ssh=""
+    if [[ -n "$ssh" ]]; then
+        _fw_check_sources SSH "$ssh"
         engine_has "$FIREWALL_SCRIPT" --ssh-from
-        args+=( --ssh-from "$list" )
+        args+=( --ssh-from "$ssh" )
+    fi
+    if [[ -n "$p2p" ]]; then
+        _fw_check_sources P2P "$p2p"
+        engine_has "$FIREWALL_SCRIPT" --p2p-from
+        args+=( --p2p-from "$p2p" )
     fi
     cd / || die "cannot change to /"
     exec bash "$FIREWALL_SCRIPT" "${args[@]}" </dev/null
@@ -1464,11 +1487,14 @@ service_account_ok() {
     _lib_req tn_service_user_ok "$1" "$2" >/dev/null
 }
 
-# docker_image_ok <image> <network> -- the library's tn_docker_image_allowed
-# with digests required: <repository>@sha256:<digest>, the repository one the
-# network's images may come from (on testnet either testnet repository).
+# docker_image_ok <image> <network> -- an image a new install may pull, by the
+# rule setup-node applies: the library's tn_docker_image_allowed with digests
+# required (<repository>@sha256:<digest> of a repository the network's images may
+# come from), and tn_docker_pull_repo_ok for its repository, so the old single
+# ghcr.io package, which holds no release, is refused here as setup-node refuses it.
 docker_image_ok() {
-    TN_DOCKER_REQUIRE_DIGEST=1 _lib_req tn_docker_image_allowed "$1" "$2" >/dev/null
+    TN_DOCKER_REQUIRE_DIGEST=1 _lib_req tn_docker_image_allowed "$1" "$2" >/dev/null \
+        && _lib_req tn_docker_pull_repo_ok "$2" "${1%%@*}" >/dev/null
 }
 
 # passphrase_ok <value> <network> -- the library's tn_passphrase_ok (no CR/LF,
@@ -1516,11 +1542,16 @@ cmd_setup() {
 
     # Validate every value before it reaches the setup script.
     case "$network" in
-        testnet|adiri) net_rule=testnet ;;
+        testnet|adiri) net_rule=testnet ;;  # network-gated: adiri is read as testnet
         mainnet) net_rule=mainnet ;;
         "") die "missing network (TN_SETUP_NETWORK)" ;;
         *) die "invalid network: $network" ;;
     esac
+    # Mainnet only when the engine library offers it (tn_mainnet_enabled); an
+    # older library without the function (rc 127) counts as not offering it.
+    if [[ "$net_rule" == mainnet ]] && ! _lib_call tn_mainnet_enabled >/dev/null 2>&1; then
+        die "mainnet is not enabled in this script release (TN_MAINNET_ENABLED in ${HELPER_LIB}); nothing was changed"
+    fi
     case "$method" in source|docker|existing|release|"") ;; *) die "invalid install method: $method" ;; esac
     [[ -z "$addr"      || "$addr"      =~ ^0x[0-9a-fA-F]{40}$ ]]            || die "invalid address"
     [[ -z "$build_ref" ]] || release_tag_ok "$net_rule" "$build_ref" \
@@ -1602,8 +1633,9 @@ cmd_setup_finalize() { cmd_setup finalize; }
 
 # _docker_tn_names -- read "<name><TAB><image>" lines on stdin and print each
 # name whose image, by tag or by digest, comes from a repository the library
-# accepts testnet or mainnet images from (tn_docker_repo_ok). Runs inside the
-# library (_lib_call).
+# recognises testnet, mainnet or devnet images from (tn_docker_repo_ok): the
+# devnet list holds the dev package tn-dev, where the node team's dev images
+# go. Runs inside the library (_lib_call).
 _docker_tn_names() {
     local name img repo
     while IFS=$'\t' read -r name img; do
@@ -1611,15 +1643,16 @@ _docker_tn_names() {
         case "${repo##*/}" in
             *:*) repo="${repo%:*}" ;;
         esac
-        if tn_docker_repo_ok testnet "$repo" || tn_docker_repo_ok mainnet "$repo"; then
+        if tn_docker_repo_ok testnet "$repo" || tn_docker_repo_ok mainnet "$repo" \
+            || tn_docker_repo_ok devnet "$repo"; then
             printf '%s\n' "$name"
         fi
     done
 }
 
 # Print the names of running Telcoin Network containers, one per line: those
-# running an image of the library's testnet or mainnet repositories. Empty
-# output (rc 0) when docker is absent, no matching container runs, or the
+# running an image of the library's testnet, mainnet or devnet repositories.
+# Empty output (rc 0) when docker is absent, no matching container runs, or the
 # library cannot be read.
 cmd_docker_detect() {
     command -v docker >/dev/null 2>&1 || return 0
@@ -1742,9 +1775,9 @@ max_args() {
         firewall-status|addons-status|meta-cat|node-env-cat|host-audit) echo 0 ;;
         setup-keygen|setup-finalize|docker-detect|internal-ip) echo 0 ;;
         update-prepare|journal-tail|set-hostname|set-logrotate|credential) echo 1 ;;
-        firewall-enable|service) echo 1 ;;
+        service) echo 1 ;;
         docker-status|docker-logs-full|docker-node-info|docker-stats|docker-log-size) echo 1 ;;
-        caddy-dns-check|rpc-dns-check|firewall-port|docker-logs) echo 2 ;;
+        caddy-dns-check|rpc-dns-check|firewall-port|firewall-enable|docker-logs) echo 2 ;;
         config-set|caddy-enable|rpc-enable) echo 3 ;;
         *) return 1 ;;
     esac
@@ -1823,7 +1856,7 @@ main() {
         rpc-disable)     cmd_rpc_disable ;;
         firewall-status) cmd_firewall_status ;;
         firewall-port)   cmd_firewall_port "${1:-}" "${2:-}" ;;
-        firewall-enable) cmd_firewall_enable "${1:-}" ;;
+        firewall-enable) cmd_firewall_enable "${1:-}" "${2:-}" ;;
         addons-status)   cmd_addons_status ;;
         meta-cat)        cmd_meta_cat ;;
         node-env-cat)    cmd_node_env_cat ;;

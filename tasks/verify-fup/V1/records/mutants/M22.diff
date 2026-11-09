@@ -1,0 +1,5 @@
+375a376
+>     check_internet
+401,402d401
+<     # After the network is chosen: check_internet probes that network's own RPC.
+<     check_internet

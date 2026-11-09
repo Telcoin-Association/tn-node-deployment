@@ -1,0 +1,36 @@
+[Unit]
+Description=Telcoin node log shipper (Grafana Alloy -> central Loki)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=telcoin-alloy
+Group=telcoin-alloy
+SupplementaryGroups=telcoin-log
+EnvironmentFile=/etc/telcoin/alloy/telcoin-alloy.env
+LoadCredential=ingest-token:/etc/telcoin/alloy/ingest-token
+ExecStart=/usr/bin/alloy run --server.http.listen-addr=127.0.0.1:12345 --storage.path=/var/lib/telcoin-alloy /etc/telcoin/alloy/config.alloy
+StateDirectory=telcoin-alloy
+StateDirectoryMode=0750
+ProtectSystem=strict
+ReadWritePaths=/var/lib/telcoin-alloy
+InaccessiblePaths=-/var/lib/telcoin -/etc/telcoin/bls-passphrase.cred -/etc/telcoin/bls-passphrase -/srv/tn
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+Restart=on-failure
+RestartSec=10
+MemoryMax=512M
+CPUQuota=50%
+TasksMax=256
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target

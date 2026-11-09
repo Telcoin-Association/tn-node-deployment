@@ -1,0 +1,6 @@
+FAIL  F2 unknown network: no RPC, the query skipped with the note
+FAIL  F2 NETWORK=adiri in .node-meta is unknown: skipped, never the testnet RPC
+FAIL  F2 unknown local chain id: skipped
+FAIL  F5 report, unknown network: header line
+FAIL  F5 report, unknown network: section 3 says why
+FAIL  F5 report, unknown network: the testnet RPC is never asked

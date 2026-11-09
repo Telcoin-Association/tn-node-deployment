@@ -33,16 +33,33 @@ yet (this directory lags main's list until the next script release).
 
 Then every file used from the release (the tarball, IMAGE_DIGEST) must match its
 SHA256SUMS line, and the chain-config lines must carry the hashes these scripts
-pin. IMAGE_DIGEST must name an image repository the scripts accept for the
-network (on testnet the Artifact Registry adiri repository or
-ghcr.io/telcoin-association/telcoin-network). Nothing from a release that fails
-a check is installed or run.
+pin. IMAGE_DIGEST must name an image repository a new pull for the network
+takes (on mainnet ghcr.io/telcoin-association/tn-mainnet; on testnet
+ghcr.io/telcoin-association/tn-testnet or the Artifact Registry adiri
+repository). The old single ghcr.io package, which never held a release, is
+refused. Nothing from a release that fails a check is installed or run.
 
 Source builds check the release tag with the same keys: git verify-tag runs in
 a throwaway GnuPG home that holds them. A bad, expired or revoked tag signature
 refuses the build on every network. A tag that cannot be checked (no key here,
 gpg missing, an unsigned tag, or a signer whose key is not here) refuses the
 build on mainnet and builds with a warning on testnet.
+
+Script releases
+---------------
+
+The same maintainer key signs node releases and script releases: these keys
+sign the script releases of this repository too, from scripts-v2.1.0, the
+first signed one. A release's MANIFEST.asc holds detached OpenPGP signatures
+over its MANIFEST, and
+update-scripts.sh and install.sh (whose embedded copy of these files is its
+trust root) run gpgv --status-fd 1 against a keyring made from these files
+alone. The release is accepted when at least TN_SIG_THRESHOLD of these keys
+(one today) made a good signature and no signature is bad, expired or revoked;
+the same status rules as above apply. These files are listed in the signed
+MANIFEST like any script, so a script release that adds or removes a key must
+be signed by a key the host already has. tools/release-scripts.sh prepares and
+checks a release; tools/cut-release.sh runs the release steps.
 
 Format
 ------
@@ -69,7 +86,10 @@ Before a key expires, its maintainer extends the expiry, re-exports the public
 key and ships the new file in a script release, the same way a key is added
 below. Hosts must install that script release before the old expiry date: from
 that date gpgv reports EXPKEYSIG for every release signed with the key, and the
-scripts refuse those releases.
+scripts refuse those releases, script releases included. Only a script release
+that verifies against the copy a host already has can renew it, so a host that
+misses the window re-runs the installer, whose embedded keys are the renewed
+ones. grantkee.asc expires 2028-10-16.
 
 Adding or removing a key
 ------------------------

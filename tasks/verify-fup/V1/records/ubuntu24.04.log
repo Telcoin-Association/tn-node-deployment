@@ -1,0 +1,339 @@
+ok    variant on: patch applied (^readonly TN_MAINNET_ENABLED=1$)
+ok    variant floor: patch applied (^readonly MIN_SOURCE_VERSION_MAINNET="1.0.0"$)
+ok    variant launch: patch applied (^readonly TN_MAINNET_ENABLED=1$)
+ok    variant launch: patch applied (^readonly MIN_SOURCE_VERSION_MAINNET="1.0.0"$)
+ok    variant launch: patch applied (^readonly MAINNET_GENESIS_SHA256="1{64}"$)
+ok    variant nomain: tn_mainnet_enabled removed
+== A. Mainnet flag (LIB-A 1-4)
+ok    A1 shipped library: tn_mainnet_enabled rc 1, constant 0
+ok    A1 TN_MAINNET_ENABLED=1 in the environment does not enable mainnet; the constant cannot be set
+ok    A1 patched library: tn_mainnet_enabled rc 0
+ok    A1 constant line once, readonly, 0
+ok    A1 the UI constant line agrees with the library (False and 0)
+ok    A2 select_network (shipped) 2, Enter, 1: rc 0
+ok    A2 shipped: 2 then 1 gives testnet
+ok    A2 shipped: 2 says mainnet has not launched
+ok    A2 shipped: the line after 2 is read by the Enter prompt (no 'Please enter 1 or 2')
+ok    A2 shipped: menu says (coming soon)
+ok    A2 shipped: menu, note and Enter prompt exactly as before the round
+ok    A2 enabled: 2 gives the four mainnet values
+ok    A2 enabled: no (coming soon)
+ok    A2 enabled: no not-launched note
+ok    A2 enabled: 1 still gives testnet
+ok    A3 json_set_network mainnet (shipped): rc 1
+ok    A3 shipped: the refusal message
+ok    A3 shipped: nothing set after the refusal
+ok    A3 enabled: mainnet values set
+ok    A3 shipped: testnet unchanged
+ok    A3 shipped: adiri unchanged
+ok    A3 unknown network still refused
+ok    A3 e2e: setup-node --json --network mainnet exits 1
+ok    A3 e2e: error event carries the message
+ok    A3 e2e: ends with done ok:false
+ok    A3 e2e: stdout is JSON lines only
+ok    A3 e2e: nothing written under the root prefix
+ok    A3 e2e: a bad install flag is reported first, still nothing written
+ok    A3 e2e enabled: the mainnet refusal is gone
+ok    A4 helper setup mainnet, library 'ship': refused
+ok    A4 helper 'ship': the message names the constant and the library
+ok    A4 helper 'ship': setup-node never ran
+ok    A4 helper setup mainnet, library 'one': refused
+ok    A4 helper 'one': the message names the constant and the library
+ok    A4 helper 'one': setup-node never ran
+ok    A4 helper setup mainnet, library 'nomain': refused
+ok    A4 helper 'nomain': the message names the constant and the library
+ok    A4 helper 'nomain': setup-node never ran
+ok    A4 helper setup mainnet, library 'missing': refused
+ok    A4 helper 'missing': the message names the constant and the library
+ok    A4 helper 'missing': setup-node never ran
+ok    A4 helper, enabled library: no mainnet refusal
+ok    A4 helper, enabled library: setup-node runs
+ok    A4 helper, testnet: no mainnet refusal
+ok    A4 helper, testnet: setup-node runs
+ok    A4 helper, adiri (testnet): no mainnet refusal
+== H. An older library behind the new scripts
+ok    H1 setup-node over a library without tn_mainnet_enabled: exits 1
+ok    H1 the gate's JSON error names the library as older
+ok    H1 the gate's done event
+ok    H1 interactive: exits 1
+ok    H1 interactive: [ERROR] line on stderr
+== B. The release floor on the eight entry points (LIB-A 5)
+ok    B prepare_source_build: mainnet v0.9.0 below the 1.0.0 floor refused
+ok    B prepare_source_build: mainnet v0.9.0 refused before any fetch
+ok    B prepare_source_build: mainnet v1.0.0 goes on to the fetch
+ok    B prepare_source_build: mainnet v1.0.0 no floor message
+ok    B prepare_source_build: testnet v0.12.0-adiri refused (floor 0.13.0)
+ok    B prepare_source_build: testnet v0.12.0-adiri refused before any fetch
+ok    B prepare_source_build: testnet v0.13.0-adiri goes on
+ok    B prepare_source_build: testnet release candidate below the floor refused
+ok    B prepare_source_build: testnet rc below the floor: no fetch
+ok    B prepare_source_build: mainnet release candidate refused before any fetch
+ok    B prepare_source_build: mainnet rc below the floor refused before any fetch
+ok    B prepare_source_build: shipped (empty mainnet floor) v0.9.0 goes on
+ok    B prepare_release_update: mainnet v0.9.0 below the 1.0.0 floor refused
+ok    B prepare_release_update: mainnet v0.9.0 refused before any fetch
+ok    B prepare_release_update: mainnet v1.0.0 goes on to the fetch
+ok    B prepare_release_update: mainnet v1.0.0 no floor message
+ok    B prepare_release_update: testnet v0.12.0-adiri refused (floor 0.13.0)
+ok    B prepare_release_update: testnet v0.12.0-adiri refused before any fetch
+ok    B prepare_release_update: testnet v0.13.0-adiri goes on
+ok    B prepare_release_update: testnet release candidate below the floor refused
+ok    B prepare_release_update: testnet rc below the floor: no fetch
+ok    B prepare_release_update: mainnet release candidate refused before any fetch
+ok    B prepare_release_update: mainnet rc below the floor refused before any fetch
+ok    B prepare_release_update: shipped (empty mainnet floor) v0.9.0 goes on
+ok    B prepare_docker_update: mainnet v0.9.0 below the 1.0.0 floor refused
+ok    B prepare_docker_update: mainnet v0.9.0 refused before any fetch
+ok    B prepare_docker_update: mainnet v1.0.0 goes on to the fetch
+ok    B prepare_docker_update: mainnet v1.0.0 no floor message
+ok    B prepare_docker_update: testnet v0.12.0-adiri refused (floor 0.13.0)
+ok    B prepare_docker_update: testnet v0.12.0-adiri refused before any fetch
+ok    B prepare_docker_update: testnet v0.13.0-adiri goes on
+ok    B prepare_docker_update: testnet release candidate below the floor refused
+ok    B prepare_docker_update: testnet rc below the floor: no fetch
+ok    B prepare_docker_update: mainnet release candidate refused before any fetch
+ok    B prepare_docker_update: mainnet rc below the floor refused before any fetch
+ok    B prepare_docker_update: shipped (empty mainnet floor) v0.9.0 goes on
+ok    B json_prepare_source: mainnet v0.9.0 below the 1.0.0 floor refused
+ok    B json_prepare_source: mainnet v0.9.0 refused before any fetch
+ok    B json_prepare_source: the refusal is an error event
+ok    B json_prepare_source: mainnet v1.0.0 goes on to the fetch
+ok    B json_prepare_source: mainnet v1.0.0 no floor message
+ok    B json_prepare_source: testnet v0.12.0-adiri refused (floor 0.13.0)
+ok    B json_prepare_source: testnet v0.12.0-adiri refused before any fetch
+ok    B json_prepare_source: testnet v0.13.0-adiri goes on
+ok    B json_prepare_source: testnet release candidate below the floor refused
+ok    B json_prepare_source: testnet rc below the floor: no fetch
+ok    B json_prepare_source: mainnet release candidate refused before any fetch
+ok    B json_prepare_source: mainnet rc below the floor refused before any fetch
+ok    B json_prepare_source: shipped (empty mainnet floor) v0.9.0 goes on
+ok    B json_prepare_release: mainnet v0.9.0 below the 1.0.0 floor refused
+ok    B json_prepare_release: mainnet v0.9.0 refused before any fetch
+ok    B json_prepare_release: the refusal is an error event
+ok    B json_prepare_release: mainnet v1.0.0 goes on to the fetch
+ok    B json_prepare_release: mainnet v1.0.0 no floor message
+ok    B json_prepare_release: testnet v0.12.0-adiri refused (floor 0.13.0)
+ok    B json_prepare_release: testnet v0.12.0-adiri refused before any fetch
+ok    B json_prepare_release: testnet v0.13.0-adiri goes on
+ok    B json_prepare_release: testnet release candidate below the floor refused
+ok    B json_prepare_release: testnet rc below the floor: no fetch
+ok    B json_prepare_release: mainnet release candidate refused before any fetch
+ok    B json_prepare_release: mainnet rc below the floor refused before any fetch
+ok    B json_prepare_release: shipped (empty mainnet floor) v0.9.0 goes on
+ok    B json_prepare_docker: mainnet v0.9.0 below the 1.0.0 floor refused
+ok    B json_prepare_docker: mainnet v0.9.0 refused before any fetch
+ok    B json_prepare_docker: the refusal is an error event
+ok    B json_prepare_docker: mainnet v1.0.0 goes on to the fetch
+ok    B json_prepare_docker: mainnet v1.0.0 no floor message
+ok    B json_prepare_docker: testnet v0.12.0-adiri refused (floor 0.13.0)
+ok    B json_prepare_docker: testnet v0.12.0-adiri refused before any fetch
+ok    B json_prepare_docker: testnet v0.13.0-adiri goes on
+ok    B json_prepare_docker: testnet release candidate below the floor refused
+ok    B json_prepare_docker: testnet rc below the floor: no fetch
+ok    B json_prepare_docker: mainnet release candidate refused before any fetch
+ok    B json_prepare_docker: mainnet rc below the floor refused before any fetch
+ok    B json_prepare_docker: shipped (empty mainnet floor) v0.9.0 goes on
+ok    B edit_docker_image: mainnet v0.9.0 below the 1.0.0 floor refused
+ok    B edit_docker_image: mainnet v0.9.0 refused before any fetch
+ok    B edit_docker_image: mainnet v1.0.0 goes on to the fetch
+ok    B edit_docker_image: mainnet v1.0.0 no floor message
+ok    B edit_docker_image: testnet v0.12.0-adiri refused (floor 0.13.0)
+ok    B edit_docker_image: testnet v0.12.0-adiri refused before any fetch
+ok    B edit_docker_image: testnet v0.13.0-adiri goes on
+ok    B edit_docker_image: testnet release candidate below the floor refused
+ok    B edit_docker_image: testnet rc below the floor: no fetch
+ok    B edit_docker_image: mainnet release candidate refused before any fetch
+ok    B edit_docker_image: mainnet rc below the floor refused before any fetch
+ok    B edit_docker_image: shipped (empty mainnet floor) v0.9.0 goes on
+ok    B set_docker_image: mainnet v0.9.0 below the 1.0.0 floor refused
+ok    B set_docker_image: mainnet v0.9.0 refused before any fetch
+ok    B set_docker_image: the refusal is an error event
+ok    B set_docker_image: mainnet v1.0.0 goes on to the fetch
+ok    B set_docker_image: mainnet v1.0.0 no floor message
+ok    B set_docker_image: testnet v0.12.0-adiri refused (floor 0.13.0)
+ok    B set_docker_image: testnet v0.12.0-adiri refused before any fetch
+ok    B set_docker_image: testnet v0.13.0-adiri goes on
+ok    B set_docker_image: testnet release candidate below the floor refused
+ok    B set_docker_image: testnet rc below the floor: no fetch
+ok    B set_docker_image: mainnet release candidate refused before any fetch
+ok    B set_docker_image: mainnet rc below the floor refused before any fetch
+ok    B set_docker_image: shipped (empty mainnet floor) v0.9.0 goes on
+ok    B prepare_docker_update: mainnet <repo>:v0.9.0 refused before resolution
+ok    B prepare_docker_update: mainnet <repo>:v1.0.0 goes on
+ok    B prepare_docker_update: mainnet digest recorded as v0.9.0 refused by the floor
+ok    B prepare_docker_update: mainnet digest recorded as v1.0.0 goes on
+ok    B prepare_docker_update: testnet digest recorded as v0.12.0-adiri refused by the floor
+ok    B json_prepare_docker: mainnet <repo>:v0.9.0 refused before resolution
+ok    B json_prepare_docker: mainnet <repo>:v1.0.0 goes on
+ok    B json_prepare_docker: mainnet digest recorded as v0.9.0 refused by the floor
+ok    B json_prepare_docker: mainnet digest recorded as v1.0.0 goes on
+ok    B json_prepare_docker: testnet digest recorded as v0.12.0-adiri refused by the floor
+ok    B edit_docker_image: mainnet <repo>:v0.9.0 refused before resolution
+ok    B edit_docker_image: mainnet <repo>:v1.0.0 goes on
+ok    B edit_docker_image: mainnet digest recorded as v0.9.0 refused by the floor
+ok    B edit_docker_image: mainnet digest recorded as v1.0.0 goes on
+ok    B edit_docker_image: testnet digest recorded as v0.12.0-adiri refused by the floor
+ok    B set_docker_image: mainnet <repo>:v0.9.0 refused before resolution
+ok    B set_docker_image: mainnet <repo>:v1.0.0 goes on
+ok    B set_docker_image: mainnet digest recorded as v0.9.0 refused by the floor
+ok    B set_docker_image: mainnet digest recorded as v1.0.0 goes on
+ok    B set_docker_image: testnet digest recorded as v0.12.0-adiri refused by the floor
+== C. The mainnet digest rule (LIB-A 6)
+ok    C1 mainnet digest, nothing recorded: refused, nothing on stdout
+ok    C1 mainnet digest, nothing recorded: the reason on stderr
+ok    C2 mainnet digest recorded as v1.0.0: taken with that tag
+ok    C3 mainnet digest, another digest recorded: refused
+ok    C4 mainnet digest recorded with tag 'v0.16.0-adiri' (not a mainnet release): refused
+ok    C4 mainnet digest recorded with tag 'v1.0.0-rc1' (not a mainnet release): refused
+ok    C4 mainnet digest recorded with tag '' (not a mainnet release): refused
+ok    C5 mainnet digest in uppercase hex, lowercase recorded: refused
+ok    C5 mainnet digest in uppercase hex, recorded uppercase: refused
+ok    C6 testnet ghcr digest, nothing recorded: as before
+ok    C6 testnet GAR digest, nothing recorded: as before
+ok    C6 testnet digest recorded as v0.16.0-adiri: as before
+ok    C6 testnet digest recorded with a mainnet tag: as before
+ok    C6 testnet uppercase digest: as before
+ok    C6 devnet digest: as before
+ok    C6 devnet uppercase digest: as before
+ok    C6 testnet latest: as before
+ok    C6 testnet digest alone still taken (rc 0) with the downgrade warning
+ok    C7 json_prepare_docker: mainnet digest refused, nothing pulled
+ok    C7 prepare_docker_update: mainnet digest refused, nothing pulled
+ok    C7 set_docker_image: mainnet digest refused with the mainnet message
+ok    C7 set_docker_image: nothing pulled
+ok    C7 edit_docker_image: mainnet digest refused, nothing pulled
+FINDING C8 edit_docker_image: the mainnet refusal does not suggest a digest
+      expected: no
+      actual:   yes
+FINDING C8 edit_docker_image: the mainnet prompt gives no testnet tag as its example
+      expected: no
+      actual:   yes
+ok    C7 json_prepare_docker: recorded mainnet release digest goes on to the pull
+ok    C9 launch library: tn_docker_resolve_ref refuses the bare mainnet digest
+FINDING C9 setup-node --json --docker-image <ghcr digest> on mainnet at launch: refused like tn_docker_resolve_ref
+      expected: rc=1
+      actual:   rc=0
+FINDING C9 setup-node _preflight_docker at launch: a bare ghcr digest on mainnet is refused before the pull
+      expected: no
+      actual:   yes
+== D. Epoch timing derivation (LIB-B 1-2)
+ok    D1 21600 s epoch, 5000 s out: no wait
+ok    D1 the log names the 300s margin
+ok    D1 the log says margin and settle are derived
+ok    D2 21600 s epoch, 200 s out: waits to the boundary, then settles 90 s
+ok    D2 the settle is 90 s
+ok    D2 testnet numbers unchanged: the same naps as before the round
+ok    D2 testnet, far boundary: no wait before the round either
+ok    D3 604800 s epoch, 1000 s out: no wait
+ok    D3 the log names the 900s margin
+ok    D3 the log says 900 and 300 derived
+ok    D4 604800 s epoch, 800 s out (inside 900): waits 810, settles 300
+ok    D4 the step message carries the derived values
+ok    D4 settle 300
+ok    D5 TN_EPOCH_MARGIN=120 wins over the derived 900: no wait at 800 s
+ok    D5 the log names the source of each value
+ok    D6 TN_EPOCH_SETTLE=30 wins: waits 105, settles 30
+ok    D6 the log names TN_EPOCH_SETTLE
+ok    D7 an explicit margin above the clamp is used as given (5000): waits
+ok    D7 and the cap rises to cover it
+ok    D8 TN_EPOCH_WAIT_MAX=100 under derived 900+300: raised with the warning
+ok    D8 the raised cap lets the wait and the settle run
+ok    D8 the step message says the raised cap
+ok    D8 poll 20: the sum uses two polls of 20
+ok    D9 a cap equal to margin+settle+2*poll (420): no warning
+ok    D9 a cap one short (419): raised to 420
+ok    D10 TN_EPOCH_WAIT_MAX=0: no wait
+ok    D10 TN_EPOCH_WAIT_MAX=0: says the wait is off
+ok    D10 TN_EPOCH_WAIT_MAX=0: no warning
+ok    D10 TN_EPOCH_WAIT_MAX=0: no RPC asked
+ok    D10 TN_SKIP_EPOCH_WAIT=1: no wait, no RPC
+ok    D11 blind wait: 300 + 90 as before
+ok    D11 blind wait: the cap as set (100), no raise warning
+ok    D11 blind wait: explicit margin and settle (60 + 20)
+ok    D11 blind wait: the same messages as before the round
+ok    D12 CvvActive, epoch unreadable: continues without a wait
+ok    D12 says so
+ok    D13 epoch length read from the public RPC is used (900 margin): waits
+ok    D14 TN_EPOCH_MARGIN='abc' is not used: derived 900 (1000 s out: no wait)
+ok    D14 TN_EPOCH_MARGIN='' is not used: derived 900 (1000 s out: no wait)
+ok    D14 TN_EPOCH_MARGIN=' 300' is not used: derived 900 (1000 s out: no wait)
+ok    D14 TN_EPOCH_MARGIN='-5' is not used: derived 900 (1000 s out: no wait)
+ok    D14 TN_EPOCH_MARGIN='1234567890' is not used: derived 900 (1000 s out: no wait)
+ok    D14 TN_EPOCH_MARGIN='3e2' is not used: derived 900 (1000 s out: no wait)
+ok    D14 TN_EPOCH_MARGIN=0300 is 300 from the environment
+ok    D14 TN_EPOCH_SETTLE=abc is not used: derived 300
+ok    D15 epochDuration 0: the fixed 300/90 apply
+ok    D15 epochDuration 0, 200 s out: waits and settles 90
+ok    D16 epochDuration negative: no wait (unreadable epoch info)
+ok    D16 says the boundary could not be read
+ok    D16 epochDuration missing: no wait
+ok    D17 huge epochDuration: clamped to 900/300, far boundary, no wait
+ok    D17 a 19-digit epochDuration is unreadable: no wait
+ok    D17 epochDuration in hex (0x93a80 = 604800): derived 900/300
+ok    D17 18 h epoch: 900 and 270
+ok    D17 12 h epoch: 600 and 180 (docs note)
+ok    D19 boundary passed long ago: warns, no wait, with the timing sentence
+ok    D17 1 s epoch: clamped up to 300 and 90
+ok    D18 Observer: no wait
+== E. check_internet per network (LIB-B 3)
+ok    E1 testnet probes its own RPC
+ok    E1 mainnet probes the mainnet RPC only
+ok    E1 devnet probes the devnet RPC
+ok    E2 mainnet RPC down: falls back to 1.1.1.1, never the testnet RPC
+ok    E2 mainnet, nothing answers: exits 1
+ok    E2 and says so
+ok    E3 NETWORK '': fails closed (exit 1)
+ok    E3 NETWORK '': curl never runs
+ok    E3 NETWORK '': the message names NETWORK
+ok    E3 NETWORK '-unset': fails closed (exit 1)
+ok    E3 NETWORK '-unset': curl never runs
+ok    E3 NETWORK '-unset': the message names NETWORK
+ok    E3 NETWORK 'adiri': fails closed (exit 1)
+ok    E3 NETWORK 'adiri': curl never runs
+ok    E3 NETWORK 'adiri': the message names NETWORK
+ok    E3 NETWORK 'MAINNET': fails closed (exit 1)
+ok    E3 NETWORK 'MAINNET': curl never runs
+ok    E3 NETWORK 'MAINNET': the message names NETWORK
+ok    E3 NETWORK ' mainnet': fails closed (exit 1)
+ok    E3 NETWORK ' mainnet': curl never runs
+ok    E3 NETWORK ' mainnet': the message names NETWORK
+ok    E4 setup-node interactive: network chosen, then the mainnet RPC probed
+ok    E4 setup-node --json: no menu, the set network probed
+== F. check-node network RPC (LIB-B 4)
+ok    F0 check-node functions extracted
+ok    F1 mainnet: its own RPC, labelled
+ok    F1 testnet: its own RPC
+ok    F1 devnet: its own RPC
+ok    F2 unknown network: no RPC, the query skipped with the note
+ok    F2 NETWORK=adiri in .node-meta is unknown: skipped, never the testnet RPC
+ok    F2 NETWORK=adiri with the local chain id 2017: testnet from the chain id
+ok    F2 no .node-meta, local chain id 487: mainnet
+ok    F2 unknown local chain id: skipped
+ok    F3 --network-rpc wins on mainnet, labelled
+ok    F3 --network-rpc on an unknown network: queried
+ok    F4 --no-network: no label, why --no-network
+ok    F4 --no-network on an unknown network: why stays --no-network
+ok    F5 report, unknown network: header line
+ok    F5 report, unknown network: section 3 says why
+ok    F5 report, unknown network: the testnet RPC is never asked
+ok    F5 report, mainnet: header names the mainnet public RPC
+ok    F5 report, mainnet: asks the mainnet RPC
+ok    F5 report, mainnet: never the testnet RPC
+ok    F5 report, --network-rpc: header says whose it is
+ok    F5 report, --no-network: no RPC line, skipped (--no-network)
+ok    F5 report exits 0
+ok    F6 --help: the default is none when the network is unknown
+== G. _setup_image_example and its callers (LIB-B 5)
+ok    G1 mainnet example: the mainnet repository by digest
+ok    G1 mainnet example: no adiri
+ok    G2 'testnet' example unchanged from before the round
+ok    G2 'devnet' example unchanged from before the round
+ok    G2 '' example unchanged from before the round
+ok    G3 json_check_install_flags, mainnet, bad --docker-image: example is mainnet's
+ok    G3 finalize_install_inputs, mainnet, bad recorded image: example is mainnet's
+ok    G3 _preflight_docker, mainnet, a bad entry: the example is mainnet's
+ok    G4 devnet caller still names the devnet repository
+
+4 finding(s) recorded (FINDING lines above)
+
+315 checks, 0 failures, 0 skipped

@@ -1,0 +1,13 @@
+FAIL  A1 shipped library: tn_mainnet_enabled rc 1, constant 0
+FAIL  A1 TN_MAINNET_ENABLED=1 in the environment does not enable mainnet; the constant cannot be set
+FAIL  A2 shipped: 2 then 1 gives testnet
+FAIL  A2 shipped: 2 says mainnet has not launched
+FAIL  A2 shipped: menu says (coming soon)
+FAIL  A2 shipped: menu, note and Enter prompt exactly as before the round
+FAIL  A3 json_set_network mainnet (shipped): rc 1
+FAIL  A3 shipped: the refusal message
+FAIL  A3 shipped: nothing set after the refusal
+FAIL  A3 e2e: error event carries the message
+FAIL  A4 helper setup mainnet, library 'ship': refused
+FAIL  A4 helper 'ship': the message names the constant and the library
+FAIL  A4 helper 'ship': setup-node never ran

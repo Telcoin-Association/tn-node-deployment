@@ -1,20 +1,24 @@
-# Code owners. The main-branch ruleset requires a review from a code owner.
+# Code owners. The main-branch ruleset (issue #30) requires a pull-request review; with
+# three owners listed on every line, its require_code_owner_review can be set to true so
+# that review has to come from one of them.
 #
 # The release path (the updater, the installer, lib/, ui/, the workflows, the
-# release tooling and the maintainer key directory) is listed separately so a
-# second owner can be added to each line; the ruleset sets how many approvals
-# a pull request needs.
+# release tooling and the maintainer key directory) is listed separately so the
+# owners of each line can change independently; the ruleset sets how many
+# approvals a pull request needs. tools/tests/ci_pins_test.sh requires at least
+# two owners on every release-path line.
 
-*                           @grantkee
+*                           @grantkee @sstanfield @MavenRain
 
-/update-scripts.sh          @grantkee
-/install.sh                 @grantkee
-/lib/                       @grantkee
-/lib/allowed_signers        @grantkee
-/lib/wgvpn/peers/ssh/       @grantkee
-/ui/                        @grantkee
-/.github/                   @grantkee
-/tools/release-scripts.sh   @grantkee
-/MANIFEST                   @grantkee
-/MANIFEST.sig               @grantkee
-/RELEASE                    @grantkee
+/update-scripts.sh          @grantkee @sstanfield @MavenRain
+/install.sh                 @grantkee @sstanfield @MavenRain
+/lib/                       @grantkee @sstanfield @MavenRain
+/lib/release-keys/          @grantkee @sstanfield @MavenRain
+/lib/wgvpn/peers/ssh/       @grantkee @sstanfield @MavenRain
+/ui/                        @grantkee @sstanfield @MavenRain
+/.github/                   @grantkee @sstanfield @MavenRain
+/tools/release-scripts.sh   @grantkee @sstanfield @MavenRain
+/tools/cut-release.sh       @grantkee @sstanfield @MavenRain
+/MANIFEST                   @grantkee @sstanfield @MavenRain
+/MANIFEST.asc               @grantkee @sstanfield @MavenRain
+/RELEASE                    @grantkee @sstanfield @MavenRain

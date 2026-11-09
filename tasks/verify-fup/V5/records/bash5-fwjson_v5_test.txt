@@ -1,0 +1,14 @@
+ok    J1 --json --enable with a bad rate: rc 1
+ok    J2 stdout is JSON only
+ok    J3 an error event names the variable
+ok    J4 ends with done ok:false rc 1
+ok    J5 no ufw mutation, no nft write
+ok    J6 --json --enable: rc 0
+ok    J7 stdout is JSON only (the limit's info lines went to stderr)
+ok    J8 done ok:true
+ok    J9 the info line is on stderr
+ok    J10 --json --status: one line
+ok    J11 --json --status carries the limit, persistent
+ok    J12 --json --status parses
+
+12 checks, 0 failures, 0 skipped

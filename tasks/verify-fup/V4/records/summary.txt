@@ -1,0 +1,21 @@
+== host (rc 1) 2026-11-03T19:07Z
+RESULT dates_v4_test.sh rc=0 14 checks, 0 failures, 0 skipped
+RESULT updater_v4_test.sh rc=0 366 checks, 0 failures, 0 skipped
+RESULT install_v4_test.sh rc=0 115 checks, 0 failures, 0 skipped
+RESULT checknode_v4_test.sh rc=0 30 checks, 0 failures, 0 skipped
+RESULT release_v4_test.sh rc=1 90 checks, 2 failures, 0 skipped
+RESULT compat200_v4_test.sh rc=0 27 checks, 0 failures, 0 skipped
+== bash32 (rc 1) 2026-11-03T19:08Z
+RESULT dates_v4_test.sh rc=0 14 checks, 0 failures, 0 skipped
+RESULT updater_v4_test.sh rc=0 359 checks, 0 failures, 1 skipped
+RESULT install_v4_test.sh rc=0 115 checks, 0 failures, 0 skipped
+RESULT checknode_v4_test.sh rc=0 30 checks, 0 failures, 0 skipped
+RESULT release_v4_test.sh rc=1 90 checks, 2 failures, 0 skipped
+RESULT compat200_v4_test.sh rc=0 27 checks, 0 failures, 0 skipped
+== ubuntu (rc 1) 2026-11-03T19:08Z
+RESULT dates_v4_test.sh rc=0 14 checks, 0 failures, 0 skipped
+RESULT updater_v4_test.sh rc=0 359 checks, 0 failures, 1 skipped
+RESULT install_v4_test.sh rc=0 115 checks, 0 failures, 0 skipped
+RESULT checknode_v4_test.sh rc=0 30 checks, 0 failures, 0 skipped
+RESULT release_v4_test.sh rc=1 90 checks, 2 failures, 0 skipped
+RESULT compat200_v4_test.sh rc=0 27 checks, 0 failures, 0 skipped

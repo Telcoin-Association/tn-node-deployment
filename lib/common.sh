@@ -17,8 +17,8 @@ source "${BASH_SOURCE[0]%/*}/fallback.sh"
 # -----------------------------------------------------------------------------
 
 readonly TESTNET_CHAIN_ID="2017"
-readonly TESTNET_CHAIN_NAME="adiri"
-readonly TESTNET_RPC_URL="https://rpc.adiri.tel"
+readonly TESTNET_CHAIN_NAME="adiri"  # network-gated: testnet constant, selected by NETWORK
+readonly TESTNET_RPC_URL="https://rpc.adiri.tel"  # network-gated: testnet constant, selected by NETWORK
 readonly TESTNET_EXPLORER="https://telscan.io"
 
 # Mainnet has not launched. The chain id matches chain-configs/mainnet/genesis.yaml
@@ -28,6 +28,20 @@ readonly MAINNET_CHAIN_NAME="telcoin"
 readonly MAINNET_RPC_URL="https://rpc.telcoin.network"
 readonly MAINNET_EXPLORER="https://telscan.io"
 
+# Mainnet is offered only when this is 1: option 2 of the interactive network
+# menu (select_network), --network mainnet in a setup-node --json run, and a
+# Node Manager UI setup on mainnet (the UI helper asks tn_mainnet_enabled). At
+# 0 each of them refuses before anything on the host changes. It is flipped to 1
+# at launch, in the same release that pins the mainnet chain configs
+# (tn_chain_config_pin) and sets MIN_SOURCE_VERSION_MAINNET.
+readonly TN_MAINNET_ENABLED=0
+
+# tn_mainnet_enabled -- rc 0 when this script release offers mainnet
+# (TN_MAINNET_ENABLED is 1), rc 1 otherwise.
+tn_mainnet_enabled() {
+    [[ "$TN_MAINNET_ENABLED" == "1" ]]
+}
+
 readonly DEVNET_CHAIN_ID="32285"
 readonly DEVNET_CHAIN_NAME="devnet"
 # Devnet now has a global load balancer in front of all five nodes, so it has a
@@ -36,11 +50,34 @@ readonly DEVNET_CHAIN_NAME="devnet"
 readonly DEVNET_RPC_URL="${DEVNET_RPC_URL:-https://rpc.devnet.telcoin.network}"
 readonly DEVNET_EXPLORER="${DEVNET_EXPLORER:-}"
 
+# Epoch length in seconds per network, for when a node's own epoch timing cannot
+# be read (the blind wait of tn_wait_restart_window). Mainnet's equals
+# MAINNET_EPOCH_DURATION_SECS in telcoin-network; testnet runs 6-hour epochs
+# today. Devnet's is not known: no devnet genesis is kept in this repository.
+readonly MAINNET_EPOCH_DURATION="21600"
+readonly TESTNET_EPOCH_DURATION="21600"
+readonly DEVNET_EPOCH_DURATION=""
+
+# tn_network_epoch_duration NETWORK -- the epoch length in seconds this release
+# knows for NETWORK (mainnet, testnet or devnet), or nothing when it knows none
+# (devnet, any other name, or no name). Always rc 0.
+tn_network_epoch_duration() {
+    local dur=""
+    case "${1:-}" in
+        mainnet) dur="$MAINNET_EPOCH_DURATION" ;;
+        testnet) dur="$TESTNET_EPOCH_DURATION" ;;
+        devnet)  dur="$DEVNET_EPOCH_DURATION" ;;
+    esac
+    [[ -z "$dur" ]] || printf '%s\n' "$dur"
+    return 0
+}
+
 readonly DEFAULT_P2P_PORT="49590"
 readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
+# network-gated: the comment names the testnet fleet; 9101 is the default on every network
 readonly DEFAULT_METRICS_PORT="9101"   # node loopback Prometheus endpoint (matches the adiri fleet)
-readonly COMMON_VERSION="2.0.1"
+readonly COMMON_VERSION="2.1.0"
 
 # The operator runbook, for any message that should point operators at it.
 readonly TN_OPERATOR_GUIDE_URL="https://github.com/Telcoin-Association/tn-node-deployment/blob/main/OPERATOR.md"
@@ -67,15 +104,18 @@ readonly TN_REPO="https://github.com/Telcoin-Association/telcoin-network.git"
 readonly TN_SOURCE_DIR="/opt/telcoin-source"
 readonly MIN_RUST_VERSION="1.75.0"
 
+# network-gated: the testnet tag form, documented beside the mainnet one
 # The suffix of each network's release tags: testnet vX.Y.Z-adiri, mainnet
 # vX.Y.Z with none. tn_release_tag_ok is the rule these scripts apply; these two
 # stay for scripts of an earlier release that read them.
-readonly NETWORK_TAG_SUFFIX_TESTNET="-adiri"
+readonly NETWORK_TAG_SUFFIX_TESTNET="-adiri"  # network-gated: testnet constant; nothing in this release reads it
 readonly NETWORK_TAG_SUFFIX_MAINNET=""
 
 # Oldest release the source-build picker offers and tn_ref_min_check accepts.
 # Older tags exist upstream but lack features these scripts rely on:
+# network-gated: testnet release history behind MIN_SOURCE_VERSION_TESTNET; no endpoint
 # `keytool set-rpc` and `keytool generate pop` arrived in v0.12.0-adiri and
+# network-gated: testnet release history; no endpoint
 # `--enable-state-export` in v0.13.0-adiri, so 0.13.0 is the first release with
 # all three. main and custom refs stay available in the picker.
 # Bump this when the Telcoin team retires a baseline.
@@ -474,10 +514,11 @@ command_exists() {
 # other-writable. Group write is refused in the directories these scripts own
 # and everything below them (/var/log/telcoin, /etc/telcoin, /opt/telcoin,
 # /usr/local/libexec/telcoin, /var/backups/telcoin, /var/lib/telcoin-staging,
-# /run/telcoin, also under TN_ROOT_PREFIX). Above them, and in system paths the
-# scripts do not own, a group-writable directory passes only when its group is a
-# system group (gid below 1000): stock Ubuntu ships /var/log root:syslog 0775. A
-# path with a "." or ".." component is refused. Reads only; prints nothing.
+# /var/lib/telcoin-p2p-allow, /run/telcoin, also under TN_ROOT_PREFIX). Above
+# them, and in system paths the scripts do not own, a group-writable directory
+# passes only when its group is a system group (gid below 1000): stock Ubuntu
+# ships /var/log root:syslog 0775. A path with a "." or ".." component is
+# refused. Reads only; prints nothing.
 # (Copied into the VPN self-heal helper with declare -f: keep it self-contained.)
 tn_root_dir_ok() {
     local d="${1:-}" st uid gid mode rel
@@ -507,7 +548,7 @@ tn_root_dir_ok() {
                 fi
                 case "${rel}/" in
                     /var/log/telcoin/*|/etc/telcoin/*|/opt/telcoin/*|/usr/local/libexec/telcoin/*|\
-                    /var/backups/telcoin/*|/var/lib/telcoin-staging/*|/run/telcoin/*)
+                    /var/backups/telcoin/*|/var/lib/telcoin-staging/*|/var/lib/telcoin-p2p-allow/*|/run/telcoin/*)
                         return 1 ;;
                 esac
                 (( 10#$gid < 1000 )) || return 1
@@ -841,8 +882,14 @@ _tn_parent_ready() {
 # Absent: created with install -d. Present: must be a real directory (not a
 # symlink); only DIR itself gets the owner and mode, never its contents. rc 0, 1
 # refused (DIR a symlink or not a directory, its parent not root-owned), 2 failed.
+# A numeric MODE ends up exactly MODE: GNU chmod and install keep a directory's
+# setuid and setgid bits for a numeric mode of fewer than five digits (an
+# inherited g+s turns 0700 into 02700, which tn-p2p-allow-sync refuses), so it is
+# padded to five digits (00700), which they apply to all twelve bits; BSD and
+# busybox read 00700 as 0700.
 _tn_root_layout_dir() {
     local dir="$1" group="$2" mode="$3" rc=0
+    while [[ "$mode" =~ ^[01234567]{1,4}$ ]]; do mode="0${mode}"; done
     while [[ "$dir" == */ && "$dir" != / ]]; do dir="${dir%/}"; done
     if [[ "$dir" != /* ]]; then
         print_error "Refusing '${dir}': not an absolute path."
@@ -1424,10 +1471,12 @@ tn_move_node_log_dir() {
 # INPUT VALIDATION HELPERS
 # -----------------------------------------------------------------------------
 
-# Validate IPv4 dotted-quad. Returns 0 if valid.
+# Validate IPv4 dotted-quad. Returns 0 if valid. The digits are listed one by
+# one: in a UTF-8 locale [0-9] can match other digits, such as full-width ones,
+# that bash arithmetic cannot read.
 validate_ipv4() {
-    local ip="$1"
-    [[ "$ip" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+    local ip="$1" d='[0123456789]{1,3}'
+    [[ "$ip" =~ ^(${d})\.(${d})\.(${d})\.(${d})$ ]] || return 1
     local IFS=.
     local -a octets=($ip)
     for octet in "${octets[@]}"; do
@@ -1436,12 +1485,42 @@ validate_ipv4() {
     return 0
 }
 
-# Validate IPv6 (loose; accepts standard and compressed forms).
+# validate_ipv6 ADDR -- 0 when ADDR is an IPv6 address in the grammar of Rust's
+# Ipv6Addr::from_str, which tn-p2p-allow-sync and libp2p parse with: groups of 1-4
+# hex digits separated by ':', exactly 8 of them, or at most 7 around one '::'
+# that stands for one or more zero groups. The last two groups may be written as
+# a dotted IPv4 address (::ffff:192.0.2.1, 64:ff9b::192.0.2.1) whose octets are
+# 0-255 without a leading zero. No zone (fe80::1%eth0), brackets, prefix or
+# spaces; a single ':' never starts or ends it; at most 45 characters, the
+# longest form (ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255), so a long input
+# costs no time. Pure bash, no process. The classes list their characters one by
+# one: in a UTF-8 locale such as en_US.UTF-8, [0-9] and [a-f] also match other
+# characters (full-width digits, Arabic-Indic digits, é) that the tool refuses.
 validate_ipv6() {
-    local ip="$1"
-    [[ "$ip" =~ ^[0-9a-fA-F:]+$ ]] || return 1
-    [[ "$ip" == *":"* ]] || return 1
-    return 0
+    local ip="${1:-}" v4 part colons n=0 h='[0123456789ABCDEFabcdef]{1,4}'
+    local q='(25[012345]|2[01234][0123456789]|1[0123456789][0123456789]|[123456789]?[0123456789])'
+    local re_v4="^${q}\\.${q}\\.${q}\\.${q}\$" re_part="^${h}(:${h})*\$" re_full="^${h}(:${h}){7}\$"
+    [[ ${#ip} -le 45 && "$ip" == *:* ]] || return 1
+    # A dotted IPv4 tail is the last two groups: check it, then count it as 0:0.
+    if [[ "$ip" == *.* ]]; then
+        v4="${ip##*:}"
+        [[ "$v4" =~ $re_v4 ]] || return 1
+        ip="${ip%"$v4"}0:0"
+    fi
+    if [[ "$ip" != *::* ]]; then
+        [[ "$ip" =~ $re_full ]]
+        return
+    fi
+    [[ "$ip" != *:::* && "$ip" != *::*::* ]] || return 1
+    # The groups before and after the one '::', each part empty or 1-4 hex digit
+    # groups joined by single colons, at most 7 in all.
+    for part in "${ip%%::*}" "${ip#*::}"; do
+        [[ -n "$part" ]] || continue
+        [[ "$part" =~ $re_part ]] || return 1
+        colons="${part//[!:]/}"
+        n=$((n + ${#colons} + 1))
+    done
+    [[ $n -le 7 ]]
 }
 
 # Validate a public-facing IP (IPv4 or IPv6).
@@ -1492,20 +1571,41 @@ validate_multiaddr() {
     return 1
 }
 
-# Image repositories. The release pipeline publishes every channel's images to
-# ghcr.io (TN_GHCR_IMAGE_REPO): the testnet and mainnet repository. The testnet
-# images of the releases made before signed releases, v0.16.0-adiri among them,
+# Image repositories. Each network has its own package, and the channel is a
+# function of the release tag: the release pipeline publishes a vX.Y.Z release to
+# TN_MAINNET_IMAGE_REPO and a testnet release (tn_release_tag_ok) to
+# TN_TESTNET_IMAGE_REPO. Every stage derives the network's package again from the
+# network (tn_docker_repo_for), so a mainnet path never names the testnet package
+# and the reverse.
+readonly TN_MAINNET_IMAGE_REPO="ghcr.io/telcoin-association/tn-mainnet"
+readonly TN_TESTNET_IMAGE_REPO="ghcr.io/telcoin-association/tn-testnet"
+# The single package earlier script releases named for both networks. No release
+# was ever published there. It stays in the testnet and devnet lists
+# (TN_TESTNET_IMAGE_REPOS, TN_DEVNET_IMAGE_REPOS) only so that a container already
+# running from it is recognised (remove-node, the status screens); a new pull never
+# takes it (tn_docker_pull_repo_ok), and mainnet never accepts it.
+readonly TN_GHCR_LEGACY_IMAGE_REPO="ghcr.io/telcoin-association/telcoin-network"
+# The package the node team's dev images (devnet among them) are pushed to. Devnet
+# only, by digest: TN_DEVNET_IMAGE_REPOS lists it for a running container and for
+# a new pull; testnet and mainnet never accept it.
+readonly TN_DEV_IMAGE_REPO="ghcr.io/telcoin-association/tn-dev"
+# network-gated: documents the legacy testnet repository; tn_docker_repos_for never gives it to mainnet
+# The testnet images of the releases made before signed releases, v0.16.0-adiri among them,
+# network-gated: names the legacy testnet repository; no mainnet path takes it
 # are in the Artifact Registry adiri repository (TN_TESTNET_LEGACY_IMAGE_REPO;
 # GAR_IMAGE_BASE is its older name, kept for the scripts and tests that read it).
 # The legacy repository is read only while the testnet channel has no release on
 # GitHub, and for images recorded from it.
-readonly TN_GHCR_IMAGE_REPO="ghcr.io/telcoin-association/telcoin-network"
+# network-gated: legacy testnet repository; tn_docker_repos_for lists it for testnet and devnet, never mainnet
 readonly TN_TESTNET_LEGACY_IMAGE_REPO="us-docker.pkg.dev/telcoin-network/tn-public/adiri"
 readonly GAR_IMAGE_BASE="$TN_TESTNET_LEGACY_IMAGE_REPO"
+# network-gated: tag list of the legacy testnet repository; nothing in this release reads it
 readonly GAR_TAGS_URL="https://us-docker.pkg.dev/v2/telcoin-network/tn-public/adiri/tags/list"
 # Fallback only while testnet has no signed release, or neither GitHub nor the
+# network-gated: the testnet fallback image (latest_docker_image, testnet only)
 # registry answers: v0.16.0-adiri by digest (the Docker-Content-Digest the legacy
 # registry served for that tag on 2026-10-15).
+# network-gated: testnet fallback tag, used only on testnet paths (latest_docker_image, tn_docker_release_tag_for, _setup_tag_example, edit_docker_image)
 readonly DEFAULT_DOCKER_TAG="v0.16.0-adiri"
 readonly DEFAULT_DOCKER_IMAGE="${GAR_IMAGE_BASE}@sha256:b905b0982e87d5ca608e2f29192d0c5582793ae0043630074cddb9be1162ffea"
 
@@ -1572,6 +1672,7 @@ latest_docker_image() {
 
 # tn_release_newest_tag NETWORK -- print the newest final release tag NETWORK has
 # on GitHub, from the first 100 releases of TN_RELEASES_API_URL: drafts are
+# network-gated: every testnet release is a prerelease; mainnet skips prereleases
 # skipped; prereleases count on testnet (every Adiri release is one) and are
 # skipped on mainnet; the tag must pass tn_release_tag_final (no release
 # candidate), and the newest is the highest by tn_release_tag_key. rc 1 and
@@ -1661,6 +1762,7 @@ tn_passphrase_ok() {
 }
 
 # tn_release_tag_ok NETWORK TAG -- rc 0 when TAG is a release tag of NETWORK:
+# network-gated: the testnet tag form, documented beside the mainnet one
 # testnet vX.Y.Z-adiri, or its release candidate vX.Y.Z-adiri-rcN (N from 1, no
 # leading zero); mainnet vX.Y.Z, finals only (X, Y and Z are 0 or digits that
 # do not start with 0, as the release pipeline's TAG_RE has them; nothing
@@ -1679,6 +1781,7 @@ tn_release_tag_ok() {
     # accented letters in some locales.
     an='abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
     case "$net" in
+        # network-gated: testnet tag form, in the testnet arm of the network case
         testnet) re="^v${n}\.${n}\.${n}-adiri(-rc[1-9][0-9]*)?$" ;;
         mainnet) re="^v${n}\.${n}\.${n}$" ;;
         devnet) re="^[${an}][${an}._-]*-devnet$" ;;
@@ -1700,6 +1803,7 @@ tn_release_tag_final() {
 
 # tn_release_tag_grammar -- the release tag forms, for messages.
 tn_release_tag_grammar() {
+    # network-gated: message that lists the tag form of every network
     printf '%s\n' "testnet vX.Y.Z-adiri or the release candidate vX.Y.Z-adiri-rcN, mainnet vX.Y.Z, devnet <name>-devnet; release candidates are testnet only"
 }
 
@@ -1708,6 +1812,7 @@ tn_release_tag_grammar() {
 _tn_release_tag_key() {
     local re x y z r
     TN_RELEASE_TAG_KEY=""
+    # network-gated: accepts the testnet suffix to order tags; tn_release_tag_ok judges the network
     re='^v([0-9]{1,9})\.([0-9]{1,9})\.([0-9]{1,9})(-adiri)?(-rc([1-9][0-9]{0,7}))?$'
     [[ "${1:-}" =~ $re ]] || return 1
     x=$((10#${BASH_REMATCH[1]}))
@@ -1721,9 +1826,10 @@ _tn_release_tag_key() {
 # tn_release_tag_key TAG -- print TAG's sort key "X Y Z R", each field nine
 # digits, zero-padded, so keys order the same as text (LC_ALL=C sort) and as
 # numbers: R is N for the release candidate -rcN and 999999999 for a final, so
-# rc1 < rc2 < the final of the same X.Y.Z < any rc of a higher X.Y.Z. TAG is
-# vX.Y.Z with an optional -adiri and an optional -rcN (the network is not
-# judged here: that is tn_release_tag_ok). rc 1 and nothing for anything else.
+# rc1 < rc2 < the final of the same X.Y.Z < any rc of a higher X.Y.Z.
+# network-gated: the testnet suffix tn_release_tag_key orders; the network is judged elsewhere
+# TAG is vX.Y.Z with an optional -adiri and an optional -rcN (the network is
+# not judged here: that is tn_release_tag_ok). rc 1 and nothing for anything else.
 tn_release_tag_key() {
     _tn_release_tag_key "${1:-}" || return 1
     printf '%s\n' "$TN_RELEASE_TAG_KEY"
@@ -1959,17 +2065,21 @@ rpc_url_is_private() {
 }
 
 # tn_ref_min_check <ref> <network> — check a release ref against the network's
-# oldest supported release (MIN_SOURCE_VERSION_*). <ref> is a git ref
-# (v0.13.0-adiri, main, a commit) or a docker image reference, which is judged
-# on the part after its last ":" (…/adiri:v0.15.0-adiri). Prints one message on
-# stdout when rc is not 0:
+# oldest supported release (MIN_SOURCE_VERSION_*).
+# network-gated: example refs in the testnet form; no endpoint
+# <ref> is a git ref (v0.13.0-adiri, main, a commit) or a docker image (…/adiri:v0.15.0-adiri),
+# which is judged on the part after its last ":". Prints one message on stdout
+# when rc is not 0:
 #   rc 0  allowed: a release tag at or above the floor, or no floor for <network>
 #   rc 1  refused: an empty ref, or a version below the floor whatever its suffix
 #   rc 2  allowed with a warning: not a release tag (main, a commit, a digest, or
 #         a pre-release such as v0.13.0-rc1 on mainnet), so the version is unknown
-# A release tag is one tn_release_tag_ok accepts for <network> (testnet
-# vX.Y.Z-adiri and vX.Y.Z-adiri-rcN, mainnet vX.Y.Z). <network> is testnet (or adiri), mainnet or
-# devnet; devnet, and an empty or unknown network, have no floor.
+# A release tag is one tn_release_tag_ok accepts for <network>.
+# network-gated: the testnet tag forms, beside the mainnet one
+# Those are testnet vX.Y.Z-adiri and vX.Y.Z-adiri-rcN, mainnet vX.Y.Z.
+# network-gated: adiri is read as testnet
+# <network> is testnet (or adiri), mainnet or devnet; devnet, and an empty or
+# unknown network, have no floor.
 tn_ref_min_check() {
     local ref="${1:-}" network="${2:-}" floor example tag ver tag_re
     if [[ -z "$ref" ]]; then
@@ -1977,6 +2087,7 @@ tn_ref_min_check() {
         return 1
     fi
     case "$network" in
+        # network-gated: adiri is read as testnet; the example is the testnet tag form
         testnet|adiri) network=testnet; floor="$MIN_SOURCE_VERSION_TESTNET"; example="v${floor}-adiri" ;;
         mainnet)       floor="$MIN_SOURCE_VERSION_MAINNET"; example="v${floor}" ;;
         *)             floor="" ;;
@@ -2338,9 +2449,23 @@ check_ports() {
     done
 }
 
+# check_internet -- reach the public RPC of the node's network (NETWORK: testnet,
+# mainnet or devnet), else https://1.1.1.1; exit 1 when neither answers. An empty
+# or unknown NETWORK exits 1 before anything is contacted: no network's RPC is
+# guessed, so a mainnet setup never probes the testnet endpoint.
 check_internet() {
+    local rpc=""
     print_step "Checking internet connectivity..."
-    if curl -s --max-time 10 "$TESTNET_RPC_URL" &>/dev/null || \
+    case "${NETWORK:-}" in
+        testnet) rpc="$TESTNET_RPC_URL" ;;
+        mainnet) rpc="$MAINNET_RPC_URL" ;;
+        devnet)  rpc="$DEVNET_RPC_URL" ;;
+        *)
+            print_error "Cannot check internet connectivity: NETWORK must be testnet, mainnet or devnet (it is ${NETWORK:-empty}), so no network RPC was probed."
+            exit 1
+            ;;
+    esac
+    if curl -s --max-time 10 "$rpc" &>/dev/null || \
        curl -s --max-time 10 "https://1.1.1.1" &>/dev/null; then
         print_ok "Internet connectivity confirmed"
     else
@@ -2603,6 +2728,317 @@ write_advertised_name() {
     print_ok "Advertised node name set: ${name}"
 }
 
+# -----------------------------------------------------------------------------
+# Node admission settings in network-config (admission, trusted_nodes and
+# committee_peers) and the first node release that reads them
+# -----------------------------------------------------------------------------
+
+# The first node release whose network-config reads admission, trusted_nodes and
+# committee_peers. telcoin-network #1534 brought the three keys to main through
+# #1701 (5ccb88e86, 2026-10-16). No release tag contained that merge when this
+# floor was set; the newest, v0.16.0, ignores the keys, so the floor is the next
+# minor release. A floor too low would pass a release that drops the keys without
+# a word while the host looks configured; one too high only refuses a release
+# that would have worked.
+# TODO(node team): confirm
+readonly MIN_ADMISSION_VERSION="0.17.0"
+
+# tn_node_supports_admission VERSION -- whether the node release VERSION reads
+# the admission keys of network-config, that is MIN_ADMISSION_VERSION or later
+# (version_gte). VERSION is a release version or tag (0.17.0, v0.17.0, or either
+# with a suffix such as -rc1) or a docker image, judged on the part after its
+# last ":". Prints nothing.
+#   rc 0  a release at or above the floor
+#   rc 1  a release below the floor: it ignores the keys
+#   rc 2  not a release version (empty, main, a commit id, git describe output
+#         past a tag, a dirty tree): the answer is unknown, which is not a no
+tn_node_supports_admission() {
+    local v="${1:-}" ver
+    local re='^v?([0-9]+[.][0-9]+[.][0-9]+)(-[A-Za-z0-9][A-Za-z0-9.-]*)?$'
+    local past_re='-[0-9]+-g[0-9a-f]+(-dirty)?$'
+    if [[ "$v" == *:* ]]; then
+        v="${v##*:}"
+    fi
+    [[ "$v" =~ $re ]] || return 2
+    ver="${BASH_REMATCH[1]}"
+    if [[ "$v" =~ $past_re || "$v" == *-dirty ]]; then
+        return 2
+    fi
+    version_gte "$ver" "$MIN_ADMISSION_VERSION" || return 1
+}
+
+# tn_network_config_render DATA_DIR MODE TRUSTED_FILE COMMITTEE_FILE -- write
+# the node admission settings into DATA_DIR/network-config as three top-level
+# entries, editing the file as the service user (tn_as_service_user) the way
+# write_advertised_name does:
+#   admission        mode: MODE, one of Open, Grace or Closed (open, grace and
+#                    closed mean the same); a snapshot_max_age_secs that the old
+#                    admission entry holds is written again
+#   trusted_nodes    the map in TRUSTED_FILE: BLS public key to {primary:
+#                    {network_address, network_key}, workers: {<id>: {...}}}
+#   committee_peers  the map in COMMITTEE_FILE, in the bootstrap-peers.yaml shape
+# TRUSTED_FILE and COMMITTEE_FILE are absolute paths the service user can read
+# (the installed copies in the config dir are root 0644), or none, which leaves
+# that entry out of the file. A file's lines go under its key two spaces deeper,
+# without its blank lines and a leading "---" line, and without a byte order
+# mark or CRLF line ends, which a map saved on Windows may carry and which would
+# otherwise end up inside its first key and every value. A file that holds no
+# map, or a second YAML document, is refused: a key with nothing under it is a
+# null the node will not start with.
+#
+# The entries are replaced, never appended: the node writes a full default
+# network-config on its first start, which holds all three already, and a key
+# that appears twice stops the node. Block-boundary rule: a top-level key is a
+# line that starts at column 0 with a plain key (a letter, digit or "_", then
+# letters, digits, "_", "." or "-") followed by ":" and then the end of the
+# line, a space or a tab, so both `admission:` and `trusted_nodes: {}` start an
+# entry. An entry runs from its key line to the line before the next top-level
+# key, except that the blank lines and column-0 comments right before that next
+# key stay in the file, as everything outside the three entries does, line for
+# line (a last line without a newline gets one). Each entry is written where
+# its first occurrence was and any later occurrence is dropped; an entry the
+# file did not have goes at the end, in the order above. A file with a
+# column-0 line that is not a top-level key, a comment, a blank line or a line
+# starting with "-" (a flow document "{...}", a quoted or complex key, a
+# directive) is refused, because the rule cannot tell where its entries end; so
+# is a file with an indented line before its first key (a whole document
+# indented, say; a leading "---" is fine), a document marker ("---" or "...")
+# after it, which would make two documents of one, and a top-level key inside a
+# flow value ({...} or [...]) that an earlier line leaves open. network-config
+# itself is kept line for line, so a byte order mark or CRLF line ends there are
+# refused, named, rather than rewritten. A comment is not read as a lease: the
+# snapshot_max_age_secs kept is the one outside a "#" comment.
+#
+# The new text goes to network-config.tn-new, which one rename puts in place,
+# as _hn_write in ui/telcoin-ui-helper.sh does. A missing network-config is
+# created with the three entries alone; the node takes its defaults for the
+# rest. rc 0 written; rc 1 refused before anything was written (an argument, a
+# file the rules above refuse, or a snapshot_max_age_secs that is not a whole
+# number), with the reason on stderr; rc 2 the edit could not run or its write
+# failed. network-config is unchanged on rc 1 and rc 2.
+tn_network_config_render() {
+    local data_dir="${1:-}" mode="${2:-}" trusted="${3:-}" committee="${4:-}"
+    local f nc prog out rc=0
+    if [[ $# -ne 4 ]]; then
+        print_error "tn_network_config_render: expected DATA_DIR MODE TRUSTED_FILE COMMITTEE_FILE."
+        return 1
+    fi
+    case "$mode" in
+        Open|open) mode=Open ;;
+        Grace|grace) mode=Grace ;;
+        Closed|closed) mode=Closed ;;
+        *)
+            print_error "Admission mode '${mode}' is not one of open, grace or closed."
+            return 1
+            ;;
+    esac
+    if [[ "$data_dir" != /* || ! -d "$data_dir" || -L "$data_dir" ]]; then
+        print_error "The data dir '${data_dir}' is not a directory."
+        return 1
+    fi
+    for f in "$trusted" "$committee"; do
+        if [[ "$f" != none && "$f" != /* ]]; then
+            print_error "'${f}' is neither an absolute path nor none."
+            return 1
+        fi
+    done
+    nc="${data_dir}/network-config"
+    # the YAML surgery: awk alone (no python3 or yq on a node), run by the
+    # service user on its own file; exit 3 means refused, with the reason on
+    # stderr. The awk text holds no single quote.
+    # shellcheck disable=SC2016
+    prog='
+        function fail(msg) {
+            printf("network-config: %s\n", msg) > "/dev/stderr"
+            failed = 1
+            exit 3
+        }
+        # nest(key, path): key followed by the map in path, two spaces deeper
+        function nest(key, path,    out, s, rc, seen, ended, ln) {
+            out = key ":"
+            seen = 0
+            ended = 0
+            ln = 0
+            while ((rc = (getline s < path)) > 0) {
+                # network-config gets neither: a mark would start the first
+                # key, a carriage return would end every value
+                if (++ln == 1 && index(s, bom) == 1) s = substr(s, length(bom) + 1)
+                sub(/\r$/, "", s)
+                if (s ~ /^(---|[.][.][.])[ \t]*$/) {
+                    if (seen) ended = 1
+                    continue
+                }
+                if (s ~ /^[ \t]*$/) continue
+                if (s !~ /^[ \t]*#/) {
+                    if (ended) fail(path " holds more than one YAML document")
+                    if (!seen && s !~ /^[{]/ && s !~ /^[^ \t#{-].*:$/ && s !~ /^[^ \t#{-].*:[ \t]/)
+                        fail(path " does not start with a map keyed by BLS public key")
+                    seen = 1
+                }
+                out = out "\n  " s
+            }
+            if (rc < 0) fail("cannot read " path)
+            close(path)
+            if (!seen) fail(path " holds no map")
+            return out
+        }
+        # flow(s, d): how many flow collections ({...} or [...]) are open after
+        # line s, d of them being open before it. Quoted scalars and a comment
+        # do not count; outside a flow one starts only where a value does (at
+        # the indent, after "- " or after ": "), so a plain scalar such as a{b
+        # opens nothing.
+        function flow(s, d,    t, r) {
+            t = s
+            gsub(/"([^"\\]|\\.)*"/, "", t)
+            gsub(sq "[^" sq "]*" sq, "", t)
+            sub(/(^|[ \t])#.*/, "", t)
+            if (d == 0) {
+                if (match(t, /^[ \t]*(-[ \t]+)*[{[]/) || match(t, /:[ \t]+[{[]/))
+                    t = substr(t, RSTART + RLENGTH - 1)
+                else
+                    return 0
+            }
+            r = d + gsub(/[{[]/, "", t)
+            r -= gsub(/[]}]/, "", t)
+            return r > 0 ? r : 0
+        }
+        function emit(k) {
+            if (k == "admission") {
+                print "admission:"
+                print "  mode: " mode
+                if (age != "") print "  snapshot_max_age_secs: " age
+            } else if (k in body) {
+                print body[k]
+            }
+        }
+        BEGIN {
+            mode = ENVIRON["TN_NC_MODE"]
+            bom = "\357\273\277"
+            sq = "\047"
+            order[1] = "admission"; order[2] = "trusted_nodes"; order[3] = "committee_peers"
+            target["admission"] = 1; target["trusted_nodes"] = 1; target["committee_peers"] = 1
+            if (ENVIRON["TN_NC_TRUSTED"] != "none")
+                body["trusted_nodes"] = nest("trusted_nodes", ENVIRON["TN_NC_TRUSTED"])
+            if (ENVIRON["TN_NC_COMMITTEE"] != "none")
+                body["committee_peers"] = nest("committee_peers", ENVIRON["TN_NC_COMMITTEE"])
+        }
+        { L[++n] = $0 }
+        END {
+            if (failed) exit 3
+            # which entry each line belongs to; "" is outside every entry
+            cur = ""
+            marked = 0
+            open = 0
+            for (i = 1; i <= n; i++) {
+                s = L[i]
+                if (i == 1 && index(s, bom) == 1)
+                    fail("the file starts with a byte order mark; save it as UTF-8 without one")
+                if (s ~ /\r$/)
+                    fail("line " i " ends in a carriage return (CRLF line ends); save the file with LF line ends")
+                if (s ~ /^[A-Za-z0-9_][A-Za-z0-9_.-]*:$/ || s ~ /^[A-Za-z0-9_][A-Za-z0-9_.-]*:[ \t]/) {
+                    if (open > 0)
+                        fail("line " i " starts a top-level key inside the flow value that line " opened " leaves open, so its entries cannot be told apart")
+                    cur = s
+                    sub(/:.*/, "", cur)
+                    kind[i] = "key"
+                } else if (s ~ /^[ \t]*$/ || s ~ /^#/) {
+                    kind[i] = "gap"
+                } else if (s ~ /^(---|[.][.][.])([ \t]|$)/) {
+                    if (cur != "" || marked)
+                        fail("line " i " is a document marker (--- or ...) after the document has started: network-config must hold one YAML document")
+                    if (s !~ /^---[ \t]*(#.*)?$/)
+                        fail("line " i " starts at column 0 but is not a plain key, so its entries cannot be told apart")
+                    marked = 1
+                    kind[i] = "gap"
+                } else if (s ~ /^[ \t-]/) {
+                    if (cur == "")
+                        fail("line " i " comes before the first top-level key, so its entries cannot be told apart")
+                    kind[i] = "body"
+                } else {
+                    fail("line " i " starts at column 0 but is not a plain key, so its entries cannot be told apart")
+                }
+                owner[i] = cur
+                if (kind[i] != "gap" || open > 0) {
+                    d = flow(s, open)
+                    if (open == 0 && d > 0) opened = i
+                    open = d
+                }
+            }
+            if (open > 0)
+                fail("the flow value that line " opened " opens is never closed")
+            # blank lines and column-0 comments just before a key, or at the
+            # end, sit between entries and stay
+            between = 1
+            for (i = n; i >= 1; i--) {
+                if (kind[i] != "gap") between = (kind[i] == "key")
+                else if (between) owner[i] = ""
+            }
+            age = ""
+            for (i = 1; i <= n && age == ""; i++) {
+                s = L[i]
+                if (owner[i] != "admission" || kind[i] == "gap" || s ~ /^[ \t]*#/) continue
+                sub(/[ \t]#.*/, "", s)
+                if (match(s, /[{, \t]snapshot_max_age_secs[ \t]*:/)) {
+                    age = substr(s, RSTART + RLENGTH)
+                    sub(/^[ \t]+/, "", age)
+                    if (match(age, /[ \t,}#]/)) age = substr(age, 1, RSTART - 1)
+                    if (age !~ /^[0-9]+$/)
+                        fail("snapshot_max_age_secs of the admission entry is not a whole number: " age)
+                }
+            }
+            for (i = 1; i <= n; i++) {
+                k = owner[i]
+                if (k in target) {
+                    if (kind[i] == "key" && !(k in done)) {
+                        done[k] = 1
+                        emit(k)
+                    }
+                    continue
+                }
+                print L[i]
+            }
+            for (j = 1; j <= 3; j++) {
+                if (!(order[j] in done)) emit(order[j])
+            }
+        }'
+    # shellcheck disable=SC2016
+    out="$(tn_as_service_user sh -c '
+        nc="$1"; new="$1.tn-new"; src="$1"
+        if [ -e "$nc" ] && [ ! -f "$nc" ]; then
+            printf "network-config: %s is not a regular file\n" "$nc" >&2
+            exit 3
+        fi
+        [ -e "$nc" ] || src=/dev/null
+        for f in "$4" "$5"; do
+            if [ "$f" != none ] && { [ ! -f "$f" ] || [ ! -r "$f" ]; }; then
+                printf "network-config: cannot read %s\n" "$f" >&2
+                exit 3
+            fi
+        done
+        rm -f -- "$new" || exit 2
+        TN_NC_MODE="$3" TN_NC_TRUSTED="$4" TN_NC_COMMITTEE="$5" awk "$2" "$src" > "$new"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            rm -f -- "$new"
+            [ "$rc" -eq 3 ] && exit 3
+            exit 2
+        fi
+        mv -f -- "$new" "$nc" || { rm -f -- "$new"; exit 2; }' \
+        sh "$nc" "$prog" "$mode" "$trusted" "$committee" 2>&1)" || rc=$?
+    case "$rc" in
+        0) ;;
+        3)
+            print_error "The admission settings were not written to ${nc}: ${out#network-config: }"
+            return 1
+            ;;
+        *)
+            print_error "Could not write the admission settings to ${nc}${out:+: ${out}}"
+            return 2
+            ;;
+    esac
+    print_ok "Admission settings written to ${nc} (mode ${mode})"
+}
+
 # Record the ref of the source binary that was just installed, in a marker next
 # to the binary (<install_dir>/telcoin-network.version). The UI reads this to show
 # the version of the RUNNING binary instead of `git describe` of the source
@@ -2631,8 +3067,13 @@ select_network() {
     print_header "Network Selection"
     echo "  Which network do you want to connect to?"
     echo ""
+    # network-gated: the testnet choice of the network menu
     echo "  1) Adiri Testnet  (Chain ID: ${TESTNET_CHAIN_ID})  -- for testing"
-    echo "  2) Mainnet        (Chain ID: ${MAINNET_CHAIN_ID})  -- for production (coming soon)"
+    if tn_mainnet_enabled; then
+        echo "  2) Mainnet        (Chain ID: ${MAINNET_CHAIN_ID})  -- for production"
+    else
+        echo "  2) Mainnet        (Chain ID: ${MAINNET_CHAIN_ID})  -- for production (coming soon)"
+    fi
     echo ""
 
     local choice
@@ -2648,9 +3089,18 @@ select_network() {
                 break
                 ;;
             2)
+                if tn_mainnet_enabled; then
+                    NETWORK="mainnet"
+                    CHAIN_ID="$MAINNET_CHAIN_ID"
+                    CHAIN_NAME="$MAINNET_CHAIN_NAME"
+                    RPC_URL="$MAINNET_RPC_URL"
+                    EXPLORER_URL="$MAINNET_EXPLORER"
+                    break
+                fi
                 echo ""
                 print_warn "Mainnet has not launched yet."
                 print_info "Mainnet configuration will be available once the network goes live."
+                # network-gated: shown only while mainnet is disabled: points at the testnet choice
                 print_info "Please select Adiri Testnet for now."
                 echo ""
                 read -r -p "  Press Enter to return to network selection..."
@@ -2689,12 +3139,13 @@ select_install_method() {
 }
 
 # tn_cargo_features_for NETWORK -- print the cargo feature flags a source build
+# network-gated: the testnet build feature, for NETWORK=testnet only
 # for NETWORK needs: "--features adiri" for testnet, nothing for mainnet (rc 0).
 # rc 1 and no output for anything else, devnet and an empty value included, so
 # a caller never falls into a default build.
 tn_cargo_features_for() {
     case "${1:-}" in
-        testnet) printf '%s\n' "--features adiri" ;;
+        testnet) printf '%s\n' "--features adiri" ;;  # network-gated: testnet arm: the feature of a testnet build
         mainnet) return 0 ;;
         *) return 1 ;;
     esac
@@ -2752,6 +3203,7 @@ tn_detect_network() {
 # `git checkout <tag>` + `git pull` move the superproject but NOT its
 # submodules, so a source tree can sit on a ref whose submodule pointer was
 # advanced while the working copy still holds the old submodule content. That
+# network-gated: testnet release history; no endpoint
 # is exactly what broke v0.12.0-adiri source updates: tn-contracts gained
 # deployments/*.json that genesis.rs include_str!'s, and every node updated via
 # update-node.sh (which never synced submodules) died in cargo with a missing-
@@ -4355,12 +4807,22 @@ _tn_wait_say() {
 # _tn_wait_say, on stderr) is called as `fn step|log|warn MESSAGE`; JSON-mode
 # callers pass one that emits events. url defaults to tn_local_rpc_url.
 #
-# Environment: TN_SKIP_EPOCH_WAIT=1 skips the wait; TN_EPOCH_MARGIN (300) is how
-# close the boundary must be before waiting; TN_EPOCH_SETTLE (90) is the pause
-# after the epoch changes; TN_EPOCH_WAIT_MAX (1800) caps the whole wait, settle
-# included, and 0 turns the wait off; TN_EPOCH_POLL (15, clamped to 5-20) is the
-# poll and heartbeat interval. Each epoch read while waiting may take at most
-# 30 - poll seconds, so two heartbeats are never more than 30 s apart.
+# Environment: TN_SKIP_EPOCH_WAIT=1 skips the wait; TN_EPOCH_MARGIN is how close
+# the boundary must be before waiting; TN_EPOCH_SETTLE is the pause after the
+# epoch changes. Left unset, both follow the epoch length once an epoch read
+# gives it (_tn_epoch_timing): margin epochDuration/72 clamped to 300-900 s,
+# settle epochDuration/240 clamped to 90-300 s, which is 300 and 90 for a 6 h
+# epoch and 900 and 300 for a 7-day one; a whole number of seconds set in the
+# environment is used as given. When no epoch read gives the length (the blind
+# wait) they follow the network's epoch constant the same way
+# (tn_network_epoch_duration: 21600 s on mainnet and testnet, so 300 and 90),
+# and are 300 and 90 on a network without one. TN_EPOCH_WAIT_MAX (1800) caps
+# the whole wait as set, settle included, and 0 turns the wait off; once the
+# epoch length is known, a cap shorter than margin + settle + two polls is kept
+# and warned about, since the wait may then end before the epoch has settled.
+# TN_EPOCH_POLL (15, clamped to 5-20) is the poll and heartbeat interval. Each
+# epoch read while waiting may take at most 30 - poll seconds, so two heartbeats
+# are never more than 30 s apart.
 # TN_EPOCH_JITTER_MAX (30, 0 off) bounds a random pause after the settle, so
 # nodes that waited for the same boundary do not stop on the same second.
 # Callers run the committee guard again after this returns: the wait can be long.
@@ -4374,13 +4836,16 @@ _tn_wait_say() {
 #      the public RPC does not answer; otherwise log and return.
 #   2. Time to the boundary unreadable: warn and return; but for a node whose
 #      mode was unreadable (step 1), warn and wait TN_EPOCH_MARGIN +
-#      TN_EPOCH_SETTLE seconds, at most TN_EPOCH_WAIT_MAX (_tn_wait_blind). More
-#      than the margin away: log and return. Passed more than the margin ago
+#      TN_EPOCH_SETTLE seconds (unless set, derived from the network's epoch
+#      constant: 300 + 90 on mainnet and testnet), at most TN_EPOCH_WAIT_MAX
+#      as set (_tn_wait_blind). Otherwise margin and settle follow the epoch length
+#      read with the boundary, and the cap is checked against them. More than
+#      the margin away: log and return. Passed more than the margin ago
 #      with the epoch still open (stalled, or this node far behind): warn once
 #      and return.
 #   3. Otherwise one step message, then poll until the epoch id rises, with a log
 #      heartbeat every poll. Two failed reads in a row, or the cap: warn, return.
-#   4. Settle for TN_EPOCH_SETTLE seconds with heartbeats, inside the cap, then
+#   4. Settle for the settle time with heartbeats, inside the cap, then
 #      pause a random 0 to TN_EPOCH_JITTER_MAX seconds, also inside the cap.
 # A signal the caller traps (TERM, INT, HUP) runs its trap at once, not after the
 # current sleep (_tn_nap); when that trap returns instead of exiting, the wait
@@ -4428,16 +4893,18 @@ _tn_mode_unknown_wait_url() {
     return "$rc"
 }
 
-# _tn_wait_blind FN MARGIN SETTLE CAP POLL WHY -- the epoch timing of a node
-# that must wait could not be read anywhere: warn, then wait MARGIN + SETTLE
+# _tn_wait_blind FN MARGIN SETTLE CAP POLL WHY [TIMING] -- the epoch timing of a
+# node that must wait could not be read anywhere: warn, then wait MARGIN + SETTLE
 # seconds (at most CAP) in naps of POLL seconds with a heartbeat each, so the
-# restart does not land on a boundary that could not be seen. A signal the
-# caller traps and returns from ends the wait with a warning. Always rc 0.
+# restart does not land on a boundary that could not be seen. TIMING, the
+# sentence saying where MARGIN and SETTLE came from (_tn_blind_timing_text),
+# ends the warning. A signal the caller traps and returns from ends the wait
+# with a warning. Always rc 0.
 _tn_wait_blind() {
-    local fn="$1" margin="$2" settle="$3" cap="$4" poll="$5" why="$6" total slept=0 nap nrc
+    local fn="$1" margin="$2" settle="$3" cap="$4" poll="$5" why="$6" timing="${7:-}" total slept=0 nap nrc
     total=$(( margin + settle ))
     if (( total > cap )); then total="$cap"; fi
-    "$fn" warn "This node is in the committee, but the time to the next epoch boundary could not be read (${why}). Waiting ${total}s (TN_EPOCH_MARGIN + TN_EPOCH_SETTLE, at most TN_EPOCH_WAIT_MAX) so the restart does not land on it; set TN_SKIP_EPOCH_WAIT=1 to skip." || true
+    "$fn" warn "This node is in the committee, but the time to the next epoch boundary could not be read (${why}). Waiting ${total}s (TN_EPOCH_MARGIN + TN_EPOCH_SETTLE, at most TN_EPOCH_WAIT_MAX) so the restart does not land on it; set TN_SKIP_EPOCH_WAIT=1 to skip.${timing:+ ${timing}}" || true
     while (( slept < total )); do
         nap="$poll"
         if (( nap > total - slept )); then nap=$(( total - slept )); fi
@@ -4453,17 +4920,98 @@ _tn_wait_blind() {
     return 0
 }
 
+# _tn_epoch_timing DUR -- the margin and settle of tn_wait_restart_window for an
+# epoch of DUR seconds (0 when the length is not known), printed as
+#   <margin> <margin-source> <settle> <settle-source>
+# A TN_EPOCH_MARGIN or TN_EPOCH_SETTLE that is a whole number of seconds is used
+# as given, never clamped (source "env"). Otherwise margin is DUR/72 clamped to
+# 300-900 and settle DUR/240 clamped to 90-300 (source "derived"); with DUR 0 the
+# fixed 300 and 90 apply (source "default").
+_tn_epoch_timing() {
+    local dur="${1:-0}" margin settle msrc ssrc
+    [[ "$dur" =~ ^[0-9]{1,18}$ ]] || dur=0
+    dur=$(( 10#$dur ))
+    msrc="derived"
+    ssrc="derived"
+    if (( dur == 0 )); then
+        msrc="default"
+        ssrc="default"
+    fi
+    margin=$(( dur / 72 ))
+    if (( margin < 300 )); then margin=300; fi
+    if (( margin > 900 )); then margin=900; fi
+    settle=$(( dur / 240 ))
+    if (( settle < 90 )); then settle=90; fi
+    if (( settle > 300 )); then settle=300; fi
+    if [[ "${TN_EPOCH_MARGIN:-}" =~ ^[0-9]{1,9}$ ]]; then
+        margin=$(( 10#$TN_EPOCH_MARGIN ))
+        msrc="env"
+    fi
+    if [[ "${TN_EPOCH_SETTLE:-}" =~ ^[0-9]{1,9}$ ]]; then
+        settle=$(( 10#$TN_EPOCH_SETTLE ))
+        ssrc="env"
+    fi
+    printf '%s %s %s %s\n' "$margin" "$msrc" "$settle" "$ssrc"
+}
+
+# _tn_epoch_timing_text MARGIN MSRC SETTLE SSRC DUR -- one sentence for the wait's
+# messages saying which margin and settle are in effect and where they came from.
+_tn_epoch_timing_text() {
+    local margin="$1" msrc="$2" settle="$3" ssrc="$4" dur="$5"
+    if [[ "$msrc" == "derived" && "$ssrc" == "derived" ]]; then
+        printf 'Margin %ss and settle %ss, derived from a %s s epoch.' "$margin" "$settle" "$dur"
+        return 0
+    fi
+    printf 'Margin %s; settle %s.' \
+        "$(_tn_epoch_source_text "$margin" "$msrc" TN_EPOCH_MARGIN "$dur")" \
+        "$(_tn_epoch_source_text "$settle" "$ssrc" TN_EPOCH_SETTLE "$dur")"
+}
+
+# _tn_epoch_source_text VALUE SOURCE NAME DUR -- "300s from TN_EPOCH_MARGIN",
+# "900s derived from a 604800 s epoch" or "300s by default".
+_tn_epoch_source_text() {
+    case "$2" in
+        env)     printf '%ss from %s' "$1" "$3" ;;
+        derived) printf '%ss derived from a %s s epoch' "$1" "$4" ;;
+        *)       printf '%ss by default' "$1" ;;
+    esac
+}
+
+# _tn_blind_timing_text MARGIN MSRC SETTLE SSRC DUR -- the blind wait's sentence
+# naming the margin and settle in effect and where each came from: the network's
+# epoch constant DUR (tn_network_epoch_duration, source "derived"),
+# TN_EPOCH_MARGIN or TN_EPOCH_SETTLE ("env"), or the fixed default when the
+# network has no constant ("default"). "Margin 300s and settle 90s (network
+# default: epoch 21600 s)." or "Margin 120s (TN_EPOCH_MARGIN) and settle 90s
+# (network default: epoch 21600 s)."
+_tn_blind_timing_text() {
+    local margin="$1" msrc="$2" settle="$3" ssrc="$4" dur="$5" m="default" s="default"
+    case "$msrc" in
+        env)     m="TN_EPOCH_MARGIN" ;;
+        derived) m="network default: epoch ${dur} s" ;;
+    esac
+    case "$ssrc" in
+        env)     s="TN_EPOCH_SETTLE" ;;
+        derived) s="network default: epoch ${dur} s" ;;
+    esac
+    if [[ "$m" == "$s" ]]; then
+        printf 'Margin %ss and settle %ss (%s).' "$margin" "$settle" "$m"
+    elif [[ "$msrc" == "env" && "$ssrc" == "env" ]]; then
+        printf 'Margin %ss and settle %ss (%s, %s).' "$margin" "$settle" "$m" "$s"
+    else
+        printf 'Margin %ss (%s) and settle %ss (%s).' "$margin" "$m" "$settle" "$s"
+    fi
+}
+
 tn_wait_restart_window() {
     local url="${1:-}" fn="${2:-}"
     local margin settle cap poll mode out rc secs epoch boundary dur
     local start now waited slept remaining nap nrc due fails cur info note settle_left
-    local fallback="" must_wait=""
+    local fallback="" must_wait="" msrc ssrc need timing net
     [[ -n "$url" ]] || url="$(tn_local_rpc_url)" || url="http://127.0.0.1:0"
     if [[ -z "$fn" ]] || ! declare -F "$fn" >/dev/null 2>&1; then
         fn="_tn_wait_say"
     fi
-    margin="$(_tn_env_uint TN_EPOCH_MARGIN 300)"
-    settle="$(_tn_env_uint TN_EPOCH_SETTLE 90)"
     cap="$(_tn_env_uint TN_EPOCH_WAIT_MAX 1800)"
     poll="$(_tn_env_uint TN_EPOCH_POLL 15)"
     if (( poll < 5 )); then poll=5; fi
@@ -4518,7 +5066,13 @@ tn_wait_restart_window() {
     fi
     if [[ "$rc" -ne 0 ]]; then
         if [[ -n "$must_wait" ]]; then
-            _tn_wait_blind "$fn" "$margin" "$settle" "$cap" "$poll" "$out"
+            # No epoch read gave the length: margin and settle follow the
+            # network's epoch constant, unless set, as they would a read one.
+            net="$(tn_detect_network 2>/dev/null)" || net=""
+            dur="$(tn_network_epoch_duration "$net")"
+            read -r margin msrc settle ssrc <<<"$(_tn_epoch_timing "$dur")"
+            timing="$(_tn_blind_timing_text "$margin" "$msrc" "$settle" "$ssrc" "$dur")"
+            _tn_wait_blind "$fn" "$margin" "$settle" "$cap" "$poll" "$out" "$timing"
             return 0
         fi
         "$fn" warn "This node is in the committee, but the time to the next epoch boundary could not be read (${out}). Continuing without waiting." || true
@@ -4533,18 +5087,26 @@ tn_wait_restart_window() {
         "$fn" warn "This node is in the committee, but the epoch timing answer was not understood (${out}). Continuing without waiting." || true
         return 0
     fi
+    # The epoch length is known now: margin and settle follow it unless set.
+    [[ "$dur" =~ ^[0-9]{1,18}$ ]] || dur=0
+    read -r margin msrc settle ssrc <<<"$(_tn_epoch_timing "$dur")"
+    timing="$(_tn_epoch_timing_text "$margin" "$msrc" "$settle" "$ssrc" "$dur")"
+    need=$(( margin + settle + 2 * poll ))
+    if (( cap < need )); then
+        "$fn" warn "TN_EPOCH_WAIT_MAX ${cap} is shorter than margin ${margin} + settle ${settle} + two polls; the restart may land before the epoch has settled. Set it to at least ${need}, or TN_SKIP_EPOCH_WAIT=1 to skip the wait on purpose." || true
+    fi
     if (( secs > margin )); then
-        "$fn" log "Epoch ${epoch} ends in $(_tn_fmt_secs "$secs"), outside the ${margin}s margin; no need to wait." || true
+        "$fn" log "Epoch ${epoch} ends in $(_tn_fmt_secs "$secs"), outside the ${margin}s margin; no need to wait. ${timing}" || true
         return 0
     fi
     # The boundary passed longer ago than the margin and the epoch is still open:
     # it is stalled or this node is far behind, and waiting cannot help either.
     if (( secs < -margin )); then
-        "$fn" warn "Epoch ${epoch} should have ended $(_tn_fmt_secs "$(( -secs ))") ago and has not; not waiting." || true
+        "$fn" warn "Epoch ${epoch} should have ended $(_tn_fmt_secs "$(( -secs ))") ago and has not; not waiting. ${timing}" || true
         return 0
     fi
 
-    "$fn" step "Waiting for epoch ${epoch} to close before restarting: this node is in the committee and the boundary is $(_tn_due_text "$secs"). Waiting at most ${cap}s (TN_EPOCH_WAIT_MAX); set TN_SKIP_EPOCH_WAIT=1 to skip." || true
+    "$fn" step "Waiting for epoch ${epoch} to close before restarting: this node is in the committee and the boundary is $(_tn_due_text "$secs"). Waiting at most ${cap}s (TN_EPOCH_WAIT_MAX); set TN_SKIP_EPOCH_WAIT=1 to skip. ${timing}" || true
     start="$(_tn_now)"
     slept=0
     fails=0
@@ -4783,8 +5345,9 @@ _tn_word_fits() {
 #   word 4 isRetired         bool
 #   word 5 stakeVersion      uint8
 #   word 6 region            uint8
-# (IConsensusRegistry.ValidatorInfo in tn-contracts 10cc12b7, the commit
-# v0.16.0-adiri pins, as v0.15.0-adiri did.) The decode is strict: exactly
+# The layout is IConsensusRegistry.ValidatorInfo in tn-contracts 10cc12b7.
+# network-gated: the tn-contracts commit the testnet releases pin; no endpoint
+# v0.16.0-adiri pins that commit, as v0.15.0-adiri did. The decode is strict: exactly
 # seven words, each zero above its type, isRetired 0 or 1, status within the
 # enum, and status 6 (Any) only with isRetired set: retiring a validator writes
 # Any plus isRetired, the record kept as a tombstone, and nothing writes Any
@@ -5287,7 +5850,7 @@ tn_os_floor_check() {
         return 1
     fi
     if (( v < TN_CRED_MIN_SYSTEMD )); then
-        _tn_guard_say warn "systemd ${v} cannot encrypt credentials (needs ${TN_CRED_MIN_SYSTEMD}, Ubuntu 24.04): the BLS passphrase stays in a root-only file (${CONFIG_DIR:-$DEFAULT_CONFIG_DIR}/bls-passphrase)." "$fn"
+        _tn_guard_say warn "systemd ${v} cannot encrypt credentials (needs ${TN_CRED_MIN_SYSTEMD}; Ubuntu 24.04 ships 255): the BLS passphrase stays in a root-only file (${CONFIG_DIR:-$DEFAULT_CONFIG_DIR}/bls-passphrase)." "$fn"
     fi
     return 0
 }
@@ -5716,7 +6279,7 @@ _tn_cred_switch() {
         systemctl is-active --quiet "$svc" 2>/dev/null && restart=yes
     fi
     if [[ "$target" != "credential" && "$(tn_detect_network 2>/dev/null || true)" != "testnet" && "$(meta_get NETWORK 2>/dev/null || true)" != "devnet" ]]; then
-        _tn_guard_say warn "Off testnet the passphrase is kept only as an encrypted credential (systemd ${TN_CRED_MIN_SYSTEMD} or later, Ubuntu 24.04); nothing changed." "$fn"
+        _tn_guard_say warn "Off testnet and devnet the passphrase is kept only as an encrypted credential (systemd ${TN_CRED_MIN_SYSTEMD} or later; Ubuntu 24.04 ships 255); nothing changed." "$fn"
         return 1
     fi
     m_method="$(_tn_meta_keep PASSPHRASE_METHOD)" || p=PASSPHRASE_METHOD
@@ -5962,7 +6525,8 @@ tn_migrate_embedded_passphrase() {
 # "ok|warn|info  text" line per fact: systemd version against the floor, how the
 # BLS passphrase is stored (method, key, files; never the value), TPM2 presence,
 # a dm-crypt layer under the data and config dirs, core dumps (LimitCORE= of the
-# unit, fs.suid_dumpable, kernel.core_pattern) and kernel.yama.ptrace_scope.
+# unit, fs.suid_dumpable, kernel.core_pattern), kernel.yama.ptrace_scope and
+# the host baseline (tn_host_baseline_status: auditd rules, AIDE baseline).
 # rc 0 when nothing warned, 1 otherwise. Reads only.
 tn_host_audit() {
     local warn=0 v meta method key svc unit conf data cred plain d src types s pat
@@ -6049,18 +6613,515 @@ tn_host_audit() {
         1|2|3) _tn_audit_say ok "kernel.yama.ptrace_scope = ${v}" ;;
         *) _tn_audit_say warn "kernel.yama.ptrace_scope = ${v:-unavailable} (1 or higher keeps processes from tracing the node)" ;;
     esac
+    tn_host_baseline_status || warn=1
     unset -f _tn_audit_say
+    return "$warn"
+}
+
+# -----------------------------------------------------------------------------
+# Host baseline: auditd watches and an AIDE baseline (setup-node.sh --host-baseline)
+# -----------------------------------------------------------------------------
+# Opt-in. auditd watches the node keys (read, write, execute, attribute change),
+# the config dir and the node unit (write, attribute change). AIDE keeps a
+# baseline of the node's installed files in a config and a database of its own:
+# the Debian AIDE config (/etc/aide/aide.conf, from aide-common) selects the
+# whole file system, so a drop-in there could only add to a full scan. Neither
+# file is in /etc/aide/aide.conf.d, so a system-wide AIDE setup never reads
+# them. .node-meta HOST_BASELINE=true marks a host with all of it in place;
+# update-node and edit-config make the baseline again after a successful apply,
+# remove-node removes it. The paths are host paths; TN_ROOT_PREFIX is put in
+# front only where a file is read or written.
+readonly TN_HB_AUDIT_RULES="/etc/audit/rules.d/telcoin-node.rules"
+readonly TN_HB_AIDE_CONF="/etc/aide/telcoin-node.conf"
+readonly TN_HB_AIDE_DB="/var/lib/aide/telcoin-node.db"
+
+# _tn_hb_say LEVEL MSG [FN] -- report a host-baseline step: FN LEVEL MSG when FN
+# is a function (the scripts' step|log|warn printers), else print_step,
+# print_warn or print_info. Never fails.
+_tn_hb_say() {
+    if [[ -n "${3:-}" ]] && declare -F "$3" >/dev/null 2>&1; then
+        "$3" "$1" "$2" || true
+        return 0
+    fi
+    case "$1" in
+        step) print_step "$2" ;;
+        warn) print_warn "$2" ;;
+        *)    print_info "$2" ;;
+    esac
+    return 0
+}
+
+# _tn_hb_path_ok PATH -- rc 0 when PATH is absolute, holds only letters, digits
+# and . _ / -, and has no "." or ".." component: the audit rules and the AIDE
+# config are line based and AIDE reads its paths as regular expressions.
+_tn_hb_path_ok() {
+    [[ "${1:-}" =~ ^/[A-Za-z0-9._/-]*$ ]] || return 1
+    case "/${1}/" in
+        */./*|*/../*) return 1 ;;
+    esac
+    return 0
+}
+
+# _tn_hb_re PATH -- PATH as an AIDE regular expression (each "." escaped; the
+# other characters _tn_hb_path_ok lets through stand for themselves).
+_tn_hb_re() {
+    printf '%s\n' "$1" | sed 's/\./\\./g'
+}
+
+# _tn_hb_rules_text DATA_DIR CONFIG_DIR UNIT -- the audit rules file.
+_tn_hb_rules_text() {
+    printf '%s\n' \
+        "## Telcoin node host baseline (setup-node.sh --host-baseline); remove-node.sh removes this file." \
+        "-w ${1}/node-keys -p rwxa -k telcoin-keys" \
+        "-w ${2} -p wa -k telcoin-config" \
+        "-w ${3} -p wa -k telcoin-unit"
+}
+
+# _tn_hb_aide_text UNIT [BINARY] -- the AIDE config: the install dir, the start
+# scripts, the config dir and the unit (BINARY too, when the node binary lives
+# outside the install dir). Left out: the passphrase file and credential, the
+# Alloy ingest token (they change when rotated) and the temp files of the root
+# writers. Rules are anchored, so /opt/telcoin does not take in /opt/telcoin-source.
+_tn_hb_aide_text() {
+    local inst conf libexec unit bin=""
+    inst="$(_tn_hb_re "$DEFAULT_INSTALL_DIR")"
+    conf="$(_tn_hb_re "$DEFAULT_CONFIG_DIR")"
+    libexec="$(_tn_hb_re /usr/local/libexec/telcoin)"
+    unit="$(_tn_hb_re "$1")"
+    if [[ -n "${2:-}" ]]; then
+        bin="$(_tn_hb_re "$2")"
+    fi
+    printf '%s\n' \
+        "# Telcoin node host baseline (setup-node.sh --host-baseline); remove-node.sh removes this file." \
+        "# Check the node's files against the baseline: sudo aide --config=${TN_HB_AIDE_CONF} --check" \
+        "database_in=file:${TN_HB_AIDE_DB}" \
+        "database_out=file:${TN_HB_AIDE_DB}.new" \
+        "gzip_dbout=no" \
+        "report_url=stdout" \
+        "TnNode = p+u+g+ftype+n+s+l+sha256+sha512" \
+        "${inst}(/|\$) TnNode" \
+        "${libexec}(/|\$) TnNode" \
+        "${conf}(/|\$) TnNode" \
+        "!${conf}/(.*/)?bls-passphrase(\\.cred)?(\\.new)?\$" \
+        "!${conf}/alloy/ingest-token\$" \
+        "!${conf}/(.*/)?\\.tn\\.[^/]*\$" \
+        "=${unit}\$ TnNode"
+    if [[ -n "$bin" ]]; then
+        printf '%s\n' "=${bin}\$ TnNode"
+    fi
+}
+
+# _tn_hb_rules_loaded -- rc 0 when the kernel has the telcoin-keys watch loaded
+# (auditctl -l; needs root).
+_tn_hb_rules_loaded() {
+    local out=""
+    out="$(auditctl -l 2>/dev/null)" || return 1
+    [[ "$out" == *telcoin-keys* ]]
+}
+
+# _tn_hb_db_dir_ok [FN] -- rc 0 when /var/lib/aide passes tn_root_dir_ok and the
+# database and its .new file are each absent or a regular file owned by root (not
+# a symlink): a directory another account owns (aide-common makes it _aide:root
+# 0700) would let that account replace the baseline. rc 1 otherwise (said
+# through FN). Reads only.
+_tn_hb_db_dir_ok() {
+    local fn="${1:-}" p="${TN_ROOT_PREFIX:-}" f uid
+    if ! tn_root_dir_ok "${p}/var/lib/aide"; then
+        _tn_hb_say warn "AIDE: /var/lib/aide is not a directory owned and writable by root alone (aide-common makes it _aide:root, so the _aide account could replace the baseline); the baseline was not made. Give it to root (sudo chown root:root /var/lib/aide) or purge aide-common, then run: sudo ./setup-node.sh --host-baseline" "$fn"
+        return 1
+    fi
+    for f in "${p}${TN_HB_AIDE_DB}" "${p}${TN_HB_AIDE_DB}.new"; do
+        [[ -e "$f" || -L "$f" ]] || continue
+        uid="$(stat -c %u -- "$f" 2>/dev/null)" || uid=""
+        if [[ -L "$f" || ! -f "$f" || "$uid" != "0" ]]; then
+            _tn_hb_say warn "AIDE: ${f#"$p"} is a symlink, not a regular file, or not owned by root; the baseline was not made. Remove it, then try again." "$fn"
+            return 1
+        fi
+    done
+    return 0
+}
+
+# _tn_hb_aide_db init|update [FN] -- run aide --init or aide --update with the
+# node config, then rename the new database over the old one, as AIDE's own
+# workflow does (database_out, then database_in). aide --update exits 1 to 7
+# when it found differences (bits: added, removed, changed) and still writes the
+# new database; 14 and above are errors, after which a partial new database is
+# removed, never renamed. The warning carries the last line aide wrote on
+# stderr; the init warning names no command, since a failed install removes
+# the config again. rc 0 done; 1 failed (said through FN).
+_tn_hb_aide_db() {
+    local mode="$1" fn="${2:-}" p="${TN_ROOT_PREFIX:-}" db new rc=0 err="" nl
+    nl=$'\n'
+    db="${p}${TN_HB_AIDE_DB}"
+    new="${db}.new"
+    _tn_hb_db_dir_ok "$fn" || return 1
+    rm -f -- "$new" 2>/dev/null || true
+    # Only stderr is kept (2>&1 first, then stdout to /dev/null): aide reports there.
+    # shellcheck disable=SC2069
+    err="$(aide --config="${p}${TN_HB_AIDE_CONF}" "--${mode}" 2>&1 >/dev/null)" || rc=$?
+    if (( rc > 7 )) || [[ ! -f "$new" || -L "$new" ]]; then
+        rm -f -- "$new" 2>/dev/null || true
+        err="${err%"$nl"}"
+        err="${err##*"$nl"}"
+        err="${err#"${err%%[![:space:]]*}"}"
+        if [[ "$mode" == "init" ]]; then
+            _tn_hb_say warn "AIDE: aide --init failed (rc ${rc})${err:+: ${err}}" "$fn"
+        else
+            _tn_hb_say warn "AIDE: aide --${mode} failed (rc ${rc})${err:+: ${err}}; see: sudo aide --config=${TN_HB_AIDE_CONF} --${mode}" "$fn"
+        fi
+        return 1
+    fi
+    if ! mv -f -T -- "$new" "$db" 2>/dev/null; then
+        rm -f -- "$new" 2>/dev/null || true
+        _tn_hb_say warn "AIDE: could not move the new database into place as ${TN_HB_AIDE_DB}." "$fn"
+        return 1
+    fi
+    return 0
+}
+
+# _tn_hb_apt_install -- install auditd and aide without recommended packages
+# (aide's bring aide-common's daily whole-system check and a mail server). One
+# retry after apt-get update. rc of the last apt-get install.
+_tn_hb_apt_install() {
+    if DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends auditd aide >/dev/null 2>&1; then
+        return 0
+    fi
+    apt-get update -q >/dev/null 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends auditd aide >/dev/null 2>&1
+}
+
+# tn_host_baseline_install [FN] -- put the host baseline in place on a host with
+# the node installed (FN: a step|log|warn printer, see _tn_hb_say). Installs
+# auditd and aide with apt-get (no recommended packages) and checks what the
+# writes need (/etc/audit/rules.d, /etc/aide and /var/lib/aide, made root 0755
+# and 0700 when absent, and the owner of /var/lib/aide); then writes the AIDE
+# config (TN_HB_AIDE_CONF, root 0600), records HOST_BASELINE=true in .node-meta
+# and makes the AIDE database (TN_HB_AIDE_DB), so the baseline holds the marker;
+# last, writes the audit rules (TN_HB_AUDIT_RULES, root 0640) and loads them
+# with augenrules. Run as root under the update lock. Idempotent: a second run
+# writes the same files and makes the baseline again. Rules that do not load
+# now (no kernel audit, rules locked with -e 2) are a warning: auditd loads the
+# file at the next boot. rc 0 in place; 1 not in place (said through FN): no
+# apt-get, no node unit or node keys, a unit that holds the passphrase, a path
+# these files cannot name, or a failed install, write or database. A failure
+# after the AIDE config is written takes the whole baseline away again
+# (_tn_hb_install_undo), one an earlier run made included: no rules, config,
+# database or marker are left.
+tn_host_baseline_install() {
+    local fn="${1:-}" p="${TN_ROOT_PREFIX:-}" svc unit data bin="" conf="$DEFAULT_CONFIG_DIR" rc=0 v rules aidec
+    if ! command -v apt-get >/dev/null 2>&1; then
+        _tn_hb_say warn "The host baseline needs apt-get (Ubuntu or Debian); auditd and AIDE were not installed." "$fn"
+        return 1
+    fi
+    if ! svc="$(tn_resolve_service 2>/dev/null)"; then
+        _tn_hb_say warn "No node unit is installed, so the host baseline has nothing to watch; it was not made." "$fn"
+        return 1
+    fi
+    unit="/etc/systemd/system/${svc}.service"
+    if tn_has_embedded_passphrase "${p}${unit}"; then
+        _tn_hb_say warn "${unit} holds the BLS passphrase, which the AIDE baseline would hash; move it first with: sudo ./edit-config.sh --migrate-credential. The host baseline was not made." "$fn"
+        return 1
+    fi
+    data="$(meta_get DATA_DIR 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        _tn_hb_say warn "DATA_DIR is set more than once in .node-meta; keep one line, then try again. The host baseline was not made." "$fn"
+        return 1
+    fi
+    [[ $rc -eq 0 && -n "$data" ]] || data="$DEFAULT_DATA_DIR"
+    rc=0
+    bin="$(meta_get BINARY_PATH 2>/dev/null)" || bin=""
+    case "$bin" in
+        "${DEFAULT_INSTALL_DIR}"/*) bin="" ;;
+    esac
+    if [[ -n "$bin" && ! -f "${p}${bin}" ]]; then
+        bin=""
+    fi
+    for v in "$unit" "$data" "$conf" ${bin:+"$bin"}; do
+        if ! _tn_hb_path_ok "$v"; then
+            _tn_hb_say warn "${v} holds characters the audit rules and the AIDE config cannot name (letters, digits and . _ / - only); the host baseline was not made." "$fn"
+            return 1
+        fi
+    done
+    if [[ ! -d "${p}${data}/node-keys" ]]; then
+        _tn_hb_say warn "No node keys at ${data}/node-keys; the host baseline was not made." "$fn"
+        return 1
+    fi
+    # An AIDE directory another account owns is refused before anything is written.
+    if [[ -e "${p}/var/lib/aide" || -L "${p}/var/lib/aide" ]] && ! _tn_hb_db_dir_ok "$fn"; then
+        return 1
+    fi
+
+    _tn_hb_say step "Installing auditd and aide (no recommended packages)" "$fn"
+    if ! _tn_hb_apt_install; then
+        _tn_hb_say warn "apt-get could not install auditd and aide; the host baseline was not made. Try: sudo apt-get install --no-install-recommends auditd aide" "$fn"
+        return 1
+    fi
+    for v in augenrules auditctl aide; do
+        if ! command -v "$v" >/dev/null 2>&1; then
+            _tn_hb_say warn "${v} is missing after the install of auditd and aide; the host baseline was not made." "$fn"
+            return 1
+        fi
+    done
+
+    # Every prerequisite that can be checked is checked before anything is
+    # written: the audit rules directory, /etc/aide and /var/lib/aide (made when
+    # absent) and the owner of /var/lib/aide.
+    if [[ ! -d "${p}/etc/audit/rules.d" ]]; then
+        _tn_hb_say warn "auditd is installed but /etc/audit/rules.d is missing; the host baseline was not made." "$fn"
+        return 1
+    fi
+    if [[ ! -d "${p}/etc/aide" ]] && ! install -d -o root -g root -m 0755 -- "${p}/etc/aide" 2>/dev/null; then
+        _tn_hb_say warn "Could not create /etc/aide; the host baseline was not made." "$fn"
+        return 1
+    fi
+    if [[ ! -d "${p}/var/lib/aide" ]] && ! install -d -o root -g root -m 0700 -- "${p}/var/lib/aide" 2>/dev/null; then
+        _tn_hb_say warn "Could not create /var/lib/aide; the host baseline was not made." "$fn"
+        return 1
+    fi
+    _tn_hb_db_dir_ok "$fn" || return 1
+    rules="$(_tn_hb_rules_text "$data" "$conf" "$unit")"
+    aidec="$(_tn_hb_aide_text "$unit" "$bin")"
+
+    # The AIDE config first: a refusal here leaves nothing of this run behind.
+    _tn_hb_say step "Making the AIDE baseline of the node's files" "$fn"
+    if ! tn_write_root_file "${p}${TN_HB_AIDE_CONF}" 0600 <<< "$aidec"; then
+        _tn_hb_say warn "Could not write ${TN_HB_AIDE_CONF}; the host baseline was not made." "$fn"
+        return 1
+    fi
+    # From here on a failure takes away everything this run put in place
+    # (_tn_hb_install_undo). The audit rules come last, so a failed AIDE step
+    # never changes the rules the kernel has loaded.
+    if ! meta_set HOST_BASELINE true; then
+        _tn_hb_say warn "Could not record HOST_BASELINE=true in .node-meta." "$fn"
+        _tn_hb_install_undo "$fn"
+        return 1
+    fi
+    if ! _tn_hb_aide_db init "$fn"; then
+        _tn_hb_install_undo "$fn"
+        return 1
+    fi
+
+    _tn_hb_say step "Writing the audit rules ${TN_HB_AUDIT_RULES}" "$fn"
+    if ! tn_write_root_file "${p}${TN_HB_AUDIT_RULES}" 0640 <<< "$rules"; then
+        _tn_hb_say warn "Could not write ${TN_HB_AUDIT_RULES}." "$fn"
+        _tn_hb_install_undo "$fn"
+        return 1
+    fi
+    if augenrules --load >/dev/null 2>&1 && _tn_hb_rules_loaded; then
+        _tn_hb_say log "Audit rules loaded: watches telcoin-keys (${data}/node-keys), telcoin-config (${conf}), telcoin-unit (${unit})." "$fn"
+    else
+        _tn_hb_say warn "The audit rules in ${TN_HB_AUDIT_RULES} did not load now (no kernel audit on this host, or the loaded rules are locked with -e 2); auditd loads them at the next boot. Check with: sudo auditctl -l | grep telcoin" "$fn"
+    fi
+    _tn_hb_say log "AIDE baseline made: ${TN_HB_AIDE_DB}. Check the node's files against it with: sudo aide --config=${TN_HB_AIDE_CONF} --check" "$fn"
+    return 0
+}
+
+# _tn_hb_install_undo [FN] -- after a failure in tn_host_baseline_install once it
+# has written something: take the whole host baseline away again (_tn_hb_teardown:
+# the audit rules and their watches, the AIDE config and database, every
+# HOST_BASELINE line), so the host shows no baseline at all, and say so.
+_tn_hb_install_undo() {
+    _tn_hb_teardown "${1:-}"
+    _tn_hb_say warn "The host baseline was not made. Its audit rules, AIDE config and database and the HOST_BASELINE line are removed, so no part of it is left; the auditd and aide packages stay installed." "${1:-}"
+    return 0
+}
+
+# tn_host_baseline_refresh [FN] -- after an apply that changed the node's files
+# (update-node, edit-config): when .node-meta has HOST_BASELINE=true and aide is
+# installed, make the AIDE baseline again (aide --update, then the new database
+# replaces the old one). Nothing to do without the marker. A failure is a
+# warning through FN, never a failed apply: always returns 0.
+tn_host_baseline_refresh() {
+    local fn="${1:-}" mark="" rc=0
+    mark="$(meta_get HOST_BASELINE 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        _tn_hb_say warn "HOST_BASELINE is set more than once in .node-meta, so the AIDE baseline was not made again; keep one HOST_BASELINE=true line, then run: sudo ./setup-node.sh --host-baseline" "$fn"
+        return 0
+    fi
+    [[ $rc -eq 0 && "$mark" == "true" ]] || return 0
+    if ! command -v aide >/dev/null 2>&1; then
+        _tn_hb_say warn "HOST_BASELINE=true, but aide is not installed: the AIDE baseline was not made again. Put it back with: sudo ./setup-node.sh --host-baseline" "$fn"
+        return 0
+    fi
+    if [[ ! -f "${TN_ROOT_PREFIX:-}${TN_HB_AIDE_CONF}" ]]; then
+        _tn_hb_say warn "HOST_BASELINE=true, but ${TN_HB_AIDE_CONF} is missing: the AIDE baseline was not made again. Put it back with: sudo ./setup-node.sh --host-baseline" "$fn"
+        return 0
+    fi
+    if _tn_hb_aide_db update "$fn"; then
+        _tn_hb_say log "AIDE baseline made again after the change: ${TN_HB_AIDE_DB}" "$fn"
+    else
+        _tn_hb_say warn "The AIDE baseline still describes the files from before this change; the change itself is in place." "$fn"
+    fi
+    return 0
+}
+
+# _tn_hb_unwatch RULES -- drop each watch in RULES from the kernel with
+# auditctl -W and the same fields (only these watches: auditctl -D would delete
+# every rule on the host). rc 0 when auditctl is there and every -W worked.
+_tn_hb_unwatch() {
+    local line ok=0
+    command -v auditctl >/dev/null 2>&1 || return 1
+    while IFS= read -r line; do
+        case "$line" in
+            "-w "*)
+                # The fields are split on purpose: the paths hold no spaces (_tn_hb_path_ok).
+                # shellcheck disable=SC2086
+                auditctl -W ${line#-w } >/dev/null 2>&1 || ok=1
+                ;;
+        esac
+    done < "$1"
+    return "$ok"
+}
+
+# _tn_hb_rules_drop [FN] -- remove the audit rules file and drop its watches
+# from the kernel: augenrules --load after the removal (it loads rules.d without
+# the file), or, without augenrules, auditctl -W for each watch in the file. A
+# load or -W that fails is a warning through FN: the watches stay loaded until
+# the next boot. Nothing when the file is not there. Always returns 0.
+_tn_hb_rules_drop() {
+    local fn="${1:-}" f="${TN_ROOT_PREFIX:-}${TN_HB_AUDIT_RULES}"
+    [[ -e "$f" || -L "$f" ]] || return 0
+    if command -v augenrules >/dev/null 2>&1; then
+        rm -f -- "$f" 2>/dev/null || true
+        if ! augenrules --load >/dev/null 2>&1; then
+            _tn_hb_say warn "augenrules --load failed: the node's audit watches stay loaded until the next boot." "$fn"
+        fi
+    elif _tn_hb_unwatch "$f"; then
+        rm -f -- "$f" 2>/dev/null || true
+        _tn_hb_say log "augenrules is missing: the node's audit watches were dropped one by one with auditctl -W." "$fn"
+    else
+        rm -f -- "$f" 2>/dev/null || true
+        _tn_hb_say warn "augenrules is missing and auditctl -W could not drop the node's audit watches: they stay loaded until the next boot." "$fn"
+    fi
+    return 0
+}
+
+# _tn_hb_teardown [FN] -- the removal tn_host_baseline_remove and a failed
+# tn_host_baseline_install share: the audit rules and their watches
+# (_tn_hb_rules_drop), the AIDE config and both database files, and every
+# HOST_BASELINE line in .node-meta. A step that did not work is a warning
+# through FN; always returns 0.
+_tn_hb_teardown() {
+    local fn="${1:-}" p="${TN_ROOT_PREFIX:-}" meta
+    _tn_hb_rules_drop "$fn"
+    rm -f -- "${p}${TN_HB_AIDE_CONF}" "${p}${TN_HB_AIDE_DB}" "${p}${TN_HB_AIDE_DB}.new" 2>/dev/null || true
+    meta="$(node_meta_path 2>/dev/null)" || meta=""
+    if [[ -n "$meta" ]] && grep -q '^HOST_BASELINE=' "$meta" 2>/dev/null \
+        && ! meta_unset HOST_BASELINE >/dev/null 2>&1; then
+        _tn_hb_say warn "Could not remove HOST_BASELINE from .node-meta." "$fn"
+    fi
+    return 0
+}
+
+# tn_host_baseline_present -- rc 0 when any piece of the host baseline is on
+# this host: a HOST_BASELINE line in .node-meta, the audit rules file, the AIDE
+# config or one of its database files; 1 when none is. Reads only.
+tn_host_baseline_present() {
+    local p="${TN_ROOT_PREFIX:-}" f meta
+    meta="$(node_meta_path 2>/dev/null)" || meta=""
+    if [[ -n "$meta" ]] && grep -q '^HOST_BASELINE=' "$meta" 2>/dev/null; then
+        return 0
+    fi
+    for f in "${p}${TN_HB_AUDIT_RULES}" "${p}${TN_HB_AIDE_CONF}" "${p}${TN_HB_AIDE_DB}" "${p}${TN_HB_AIDE_DB}.new"; do
+        if [[ -e "$f" || -L "$f" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# tn_host_baseline_remove [FN] -- take the host baseline away (_tn_hb_teardown):
+# the audit rules file (then augenrules --load, which drops its watches), the
+# AIDE config and the database files made with it, and every HOST_BASELINE line
+# in .node-meta. Without augenrules, the watches are dropped with auditctl -W,
+# else they stay loaded until the next boot (a warning). The auditd and aide
+# packages, /etc/aide and /var/lib/aide stay. Prints nothing when none of it is
+# there (tn_host_baseline_present). A step that did not work is a warning
+# through FN; always returns 0.
+tn_host_baseline_remove() {
+    local fn="${1:-}"
+    tn_host_baseline_present || return 0
+    _tn_hb_say step "Removing the host baseline (audit rules and AIDE baseline)" "$fn"
+    _tn_hb_teardown "$fn"
+    _tn_hb_say log "Host baseline removed. The auditd and aide packages stay installed; remove them with: sudo apt-get purge auditd aide" "$fn"
+    return 0
+}
+
+# tn_host_baseline_status -- the host-baseline lines of tn_host_audit, in its
+# "ok|warn|info  text" form: the HOST_BASELINE marker, the audit rules file and
+# whether the kernel has them loaded (auditctl -l lists telcoin-keys; root
+# only), the AIDE config and the baseline database with its age (root only:
+# /var/lib/aide is 0700). No marker: one info line, rc 0; a .node-meta this
+# user cannot read: one "not checked" info line, rc 0; the marker on more than
+# one line: one warning, rc 1. Marker set: a missing piece is a warning, and rc
+# is 1 when anything warned. Reads only.
+tn_host_baseline_status() {
+    local p="${TN_ROOT_PREFIX:-}" mark="" warn=0 db mt now age fix meta rc=0
+    fix="make it again: sudo ./setup-node.sh --host-baseline"
+    meta="$(node_meta_path 2>/dev/null)" || meta=""
+    if [[ -n "$meta" && -e "$meta" && ! -r "$meta" ]]; then
+        printf '%-5s %s\n' info "host baseline: not checked (.node-meta is readable by root only)"
+        return 0
+    fi
+    mark="$(meta_get HOST_BASELINE 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        printf '%-5s %s\n' warn "host baseline: HOST_BASELINE is set more than once in .node-meta; keep one HOST_BASELINE=true line, then run: sudo ./setup-node.sh --host-baseline"
+        return 1
+    fi
+    if [[ $rc -ne 0 || "$mark" != "true" ]]; then
+        printf '%-5s %s\n' info "host baseline: off (sudo ./setup-node.sh --host-baseline adds auditd watches and an AIDE baseline)"
+        return 0
+    fi
+    printf '%-5s %s\n' ok "host baseline: HOST_BASELINE=true in .node-meta"
+    if [[ -f "${p}${TN_HB_AUDIT_RULES}" ]]; then
+        printf '%-5s %s\n' ok "audit rules: ${TN_HB_AUDIT_RULES}"
+        if [[ "$(id -u 2>/dev/null || true)" != "0" ]]; then
+            printf '%-5s %s\n' info "audit rules loaded: not checked (auditctl -l needs root)"
+        elif _tn_hb_rules_loaded; then
+            printf '%-5s %s\n' ok "audit rules loaded (auditctl -l lists telcoin-keys)"
+        else
+            printf '%-5s %s\n' warn "audit rules not loaded (auditctl -l lists no telcoin-keys): sudo augenrules --load, and check that auditd runs"
+            warn=1
+        fi
+    else
+        printf '%-5s %s\n' warn "audit rules: ${TN_HB_AUDIT_RULES} is missing; ${fix}"
+        warn=1
+    fi
+    if ! command -v aide >/dev/null 2>&1; then
+        printf '%-5s %s\n' warn "AIDE: aide is not installed; ${fix}"
+        warn=1
+    elif [[ ! -f "${p}${TN_HB_AIDE_CONF}" ]]; then
+        printf '%-5s %s\n' warn "AIDE: ${TN_HB_AIDE_CONF} is missing; ${fix}"
+        warn=1
+    fi
+    db="${p}${TN_HB_AIDE_DB}"
+    if [[ -d "${p}/var/lib/aide" && ! -x "${p}/var/lib/aide" ]]; then
+        printf '%-5s %s\n' info "AIDE baseline: not checked (/var/lib/aide is readable by root only)"
+    elif [[ -f "$db" && ! -L "$db" ]]; then
+        mt="$(stat -c %Y -- "$db" 2>/dev/null)" || mt=""
+        now="$(date +%s 2>/dev/null)" || now=""
+        if [[ "$mt" =~ ^[0-9]+$ && "$now" =~ ^[0-9]+$ ]] && (( now >= mt )); then
+            age="$(( (now - mt) / 86400 ))"
+            printf '%-5s %s\n' ok "AIDE baseline: ${TN_HB_AIDE_DB}, made ${age} day(s) ago (check: sudo aide --config=${TN_HB_AIDE_CONF} --check)"
+        else
+            printf '%-5s %s\n' ok "AIDE baseline: ${TN_HB_AIDE_DB} (check: sudo aide --config=${TN_HB_AIDE_CONF} --check)"
+        fi
+    else
+        printf '%-5s %s\n' warn "AIDE baseline: ${TN_HB_AIDE_DB} is missing; ${fix}"
+        warn=1
+    fi
     return "$warn"
 }
 
 # Chain-config pins: the sha256 of genesis.yaml, committee.yaml and
 # parameters.yaml each network runs. Testnet: chain-configs/testnet in the
 # telcoin-network repository at TESTNET_CHAIN_CONFIGS_TAG (the release
+# network-gated: testnet release history of the chain configs; no endpoint
 # DEFAULT_DOCKER_IMAGE runs; the three files are the same since v0.15.0-adiri).
 # Mainnet: empty until the genesis ceremony publishes the files and a signed
 # script release carries their hashes; while any of the three is empty, a
 # mainnet install or refresh refuses (tn_chain_configs_check). Devnet has none.
-readonly TESTNET_CHAIN_CONFIGS_TAG="v0.16.0-adiri"
+readonly TESTNET_CHAIN_CONFIGS_TAG="v0.16.0-adiri"  # network-gated: testnet constant: the tag of the testnet chain-config pins
 readonly TESTNET_GENESIS_SHA256="670c94e3816686bd4da5aedbfa994d4f362452eaf2552b2757f05226608188c2"
 readonly TESTNET_COMMITTEE_SHA256="009b6d7b568f7d04734b657080d55621eed70f68ecefe1284dd8cdd0f42f15ce"
 readonly TESTNET_PARAMETERS_SHA256="7c6a44712faef1dc47dbc5b4f21f62d1eeabf1f0d54d2cb600ad6c65d4eda091"
@@ -6149,6 +7210,7 @@ print_summary() {
 # caller can capture the selection via $(...). Returns 0 on selection, 1 on
 # cancel or error.
 #
+# network-gated: the testnet tag form; the picker offers the tags of its own NETWORK
 # Telcoin's testnet release tags (-adiri) sit on a branch parallel to main and
 # are the recommended default for testnet operators (per the dev team).
 # Main is acceptable for testnet (and is the right default for devnet) but is
@@ -6278,27 +7340,46 @@ pick_action() {
 # (tn_docker_repos_for: TN_TESTNET_IMAGE_REPOS on testnet, TN_DEVNET_IMAGE_REPOS
 # on devnet) and run by digest.
 
-# Image repository per network: testnet and mainnet TN_GHCR_IMAGE_REPO, where the
-# release pipeline publishes; devnet the Artifact Registry repository its fleet's
-# images are pushed to (TN_TESTNET_LEGACY_IMAGE_REPO). Devnet has no signed
-# releases: its images are named by digest only, from TN_DEVNET_IMAGE_REPOS, and
-# no newest-release pick runs there (tn_release_tag_final).
-readonly TN_MAINNET_IMAGE_REPO="$TN_GHCR_IMAGE_REPO"
+# Image repository per network: mainnet TN_MAINNET_IMAGE_REPO and testnet
+# TN_TESTNET_IMAGE_REPO, the packages the release pipeline publishes to; devnet the
+# Artifact Registry repository its fleet's images are pushed to
+# (TN_TESTNET_LEGACY_IMAGE_REPO). Devnet has no signed releases: its images are
+# named by digest only, from TN_DEVNET_IMAGE_REPOS (the dev package
+# TN_DEV_IMAGE_REPO among them), and no newest-release pick runs there
+# (tn_release_tag_final).
 readonly TN_DEVNET_IMAGE_REPO="$TN_TESTNET_LEGACY_IMAGE_REPO"
 
 # Every repository a testnet image may come from, space separated: the legacy
 # Artifact Registry repository of the releases before signed releases (and of
-# DEFAULT_DOCKER_IMAGE) and the one the release pipeline publishes to, which
-# tn_docker_repo_for prints. A signed release's IMAGE_DIGEST names one of them.
-# Mainnet takes only its own constant.
-readonly TN_TESTNET_IMAGE_REPOS="${GAR_IMAGE_BASE} ghcr.io/telcoin-association/telcoin-network"
+# DEFAULT_DOCKER_IMAGE), the old single ghcr.io package (TN_GHCR_LEGACY_IMAGE_REPO,
+# for recognising a container that runs from it, never for a new pull) and the
+# testnet package, which tn_docker_repo_for prints. Mainnet takes only its own
+# constant.
+readonly TN_TESTNET_IMAGE_REPOS="${GAR_IMAGE_BASE} ${TN_GHCR_LEGACY_IMAGE_REPO} ${TN_TESTNET_IMAGE_REPO}"
 # Every repository a devnet image may come from, space separated: the devnet
-# repository (tn_docker_repo_for prints it) and ghcr.io. The allow-list for the
-# digests the devnet fleet pins.
-readonly TN_DEVNET_IMAGE_REPOS="${GAR_IMAGE_BASE} ${TN_GHCR_IMAGE_REPO}"
+# repository (tn_docker_repo_for prints it), the old single ghcr.io package (for
+# recognising a container that runs from it, never for a new pull) and the dev
+# package TN_DEV_IMAGE_REPO. The allow-list for the digests the devnet fleet pins.
+readonly TN_DEVNET_IMAGE_REPOS="${GAR_IMAGE_BASE} ${TN_GHCR_LEGACY_IMAGE_REPO} ${TN_DEV_IMAGE_REPO}"
 
 # Release files live at <TN_RELEASE_BASE_URL>/<tag>/<file>.
 readonly TN_RELEASE_BASE_URL="https://github.com/Telcoin-Association/telcoin-network/releases/download"
+
+# The P2P committee allowlist sync tool (firewall-setup.sh --p2p-committee) comes
+# from a signed release of its own repository, checked against the same keys as
+# the node's (tn_p2p_allow_install): files at <TN_P2P_ALLOW_BASE_URL>/<tag>/<file>.
+# These scripts pin the tag and the sha256 of its tarball, so a binary that runs
+# as root on every validator changes only with a reviewed scripts release, never
+# by fetching "latest".
+readonly TN_P2P_ALLOW_BASE_URL="https://github.com/Telcoin-Association/tn-p2p-allow-sync/releases/download"
+readonly TN_P2P_ALLOW_VERSION="v0.1.1"
+# The sha256 of the TN_P2P_ALLOW_VERSION tarball, from the SHA256SUMS of its signed
+# release; without a pin the install refuses.
+readonly TN_P2P_ALLOW_TARBALL_SHA256="dadbee0ab2088d18c0c8e4224a503cf1b480507ba3904a96af9bbe24f4fa1713"
+# The installed binary (root 0755), and the config format firewall-setup.sh writes
+# for it (CONFIG_VERSION=), which its --version must name as its config-version.
+readonly TN_P2P_ALLOW_BIN="${TN_ROOT_PREFIX:-}/usr/local/libexec/telcoin/tn-p2p-allow-sync"
+readonly TN_P2P_ALLOW_CONFIG_VERSION="1"
 
 # The build account and its home (toolchain, cargo cache, target dir). Not under
 # /home, no login shell, member of no other group. Overridable for tests only.
@@ -6314,16 +7395,16 @@ readonly TN_RUSTUP_INIT_SHA256_X86_64="dda7234360b7f578ca8b0ddcb80145646fa61a67c
 readonly TN_RUSTUP_INIT_SHA256_AARCH64="15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433"
 readonly TN_RUST_TOOLCHAIN="1.94"
 
-# tn_docker_repo_for NETWORK -- print NETWORK's image repository: testnet the
-# ghcr.io repository the release pipeline publishes to; mainnet and devnet their
-# constants (TN_MAINNET_IMAGE_REPO, TN_DEVNET_IMAGE_REPO). This is the repository
-# messages and examples name; every repository NETWORK's images may come from is
-# tn_docker_repos_for's. rc 1 with the reason on stderr when the constant is
-# empty, and for any other NETWORK.
+# tn_docker_repo_for NETWORK -- print NETWORK's image repository: its constant,
+# TN_TESTNET_IMAGE_REPO, TN_MAINNET_IMAGE_REPO or TN_DEVNET_IMAGE_REPO. The
+# testnet and mainnet ones are the packages the release pipeline publishes to.
+# This is the repository messages and examples name; every repository NETWORK's
+# images may come from is tn_docker_repos_for's. rc 1 with the reason on stderr
+# when the constant is empty, and for any other NETWORK.
 tn_docker_repo_for() {
     local net="${1:-}" repo=""
     case "$net" in
-        testnet) repo="$TN_GHCR_IMAGE_REPO" ;;
+        testnet) repo="$TN_TESTNET_IMAGE_REPO" ;;
         mainnet) repo="$TN_MAINNET_IMAGE_REPO" ;;
         devnet) repo="$TN_DEVNET_IMAGE_REPO" ;;
         *)
@@ -6371,8 +7452,9 @@ tn_docker_network_ok() {
 # tn_docker_repo_ok NETWORK REPO -- rc 0 when REPO is one of the repositories
 # NETWORK's images may come from (tn_docker_repos_for): on testnet any in
 # TN_TESTNET_IMAGE_REPOS, on devnet any in TN_DEVNET_IMAGE_REPOS, on mainnet
-# TN_MAINNET_IMAGE_REPO alone. A REPO with whitespace in it is never one. rc 1
-# otherwise, and for a network without one.
+# TN_MAINNET_IMAGE_REPO alone. An exact match: a REPO with whitespace in it is
+# never one. This recognises what a node runs; a new pull asks
+# tn_docker_pull_repo_ok. rc 1 otherwise, and for a network without one.
 tn_docker_repo_ok() {
     local net="${1:-}" repo="${2:-}" repos
     [[ -n "$repo" && ! "$repo" =~ [[:space:]] ]] || return 1
@@ -6381,6 +7463,29 @@ tn_docker_repo_ok() {
         *" ${repo} "*) return 0 ;;
     esac
     return 1
+}
+
+# tn_docker_pull_repos_for NETWORK -- print every repository a new pull for
+# NETWORK may take an image from, space separated: tn_docker_repos_for's list
+# without TN_GHCR_LEGACY_IMAGE_REPO, which holds no release. rc 1, with the reason
+# on stderr, for a network without a repository.
+tn_docker_pull_repos_for() {
+    local net="${1:-}" repos r out=""
+    repos="$(tn_docker_repos_for "$net")" || return 1
+    for r in $repos; do
+        [[ "$r" != "$TN_GHCR_LEGACY_IMAGE_REPO" ]] || continue
+        out="${out:+${out} }${r}"
+    done
+    printf '%s\n' "$out"
+}
+
+# tn_docker_pull_repo_ok NETWORK REPO -- rc 0 when a new install, update or image
+# change on NETWORK may pull from REPO: tn_docker_repo_ok, and REPO is not
+# TN_GHCR_LEGACY_IMAGE_REPO. An exact match. rc 1 otherwise. Prints nothing.
+tn_docker_pull_repo_ok() {
+    local net="${1:-}" repo="${2:-}"
+    [[ "$repo" != "$TN_GHCR_LEGACY_IMAGE_REPO" ]] || return 1
+    tn_docker_repo_ok "$net" "$repo"
 }
 
 # tn_registry_token REPO -- print the anonymous pull token REPO's registry wants:
@@ -6653,18 +7758,15 @@ _tn_release_sig_ok() {
     _tn_gpg_status_verdict "$d/allow" <<< "$out"
 }
 
-# _tn_release_sums_names FILE TAG NETWORK -- rc 0 when FILE (SHA256SUMS) has only
-# "<64 hex>  <name>" lines naming exactly IMAGE_DIGEST, one
-# telcoin-network-TAG-<triple>.tar.gz and NETWORK's chain-configs/<dir>/
-# committee.yaml, genesis.yaml and parameters.yaml, each once. Prints the reason
-# on rc 1.
-_tn_release_sums_names() {
-    local f="$1" tag="$2" net="$3" cc line name mid n=0 tars=0 seen=" " re
-    case "$net" in
-        testnet) cc="chain-configs/testnet" ;;
-        mainnet) cc="chain-configs/mainnet" ;;
-        *) printf 'no release channel for network %s\n' "$net"; return 1 ;;
-    esac
+# _tn_release_sums_shape FILE PREFIX SUFFIX LABEL WHAT [NAME...] -- rc 0 when FILE
+# (SHA256SUMS) has only "<64 hex>  <name>" lines, each name once, that name
+# exactly the NAMEs and one tarball PREFIX<arch>SUFFIX (<arch> of a-z, 0-9 and _),
+# so SHA256SUMS holds one line more than there are NAMEs. Prints the reason on
+# rc 1: a name outside that set is "not part of a LABEL release", a list short of
+# it "must name exactly WHAT".
+_tn_release_sums_shape() {
+    local f="$1" pre="$2" suf="$3" label="$4" what="$5" line name mid want known n=0 tars=0 seen=" " re
+    shift 5
     re='^[0-9a-f]{64}  [A-Za-z0-9._/-]+$'
     while IFS= read -r line || [[ -n "$line" ]]; do
         if [[ ! "$line" =~ $re ]]; then
@@ -6676,26 +7778,46 @@ _tn_release_sums_names() {
             *" ${name} "*) printf 'SHA256SUMS names %s twice\n' "$name"; return 1 ;;
         esac
         seen="${seen}${name} "
-        case "$name" in
-            IMAGE_DIGEST|"${cc}/committee.yaml"|"${cc}/genesis.yaml"|"${cc}/parameters.yaml") ;;
-            *)
-                mid="${name#"telcoin-network-${tag}-"}"
-                mid="${mid%-unknown-linux-gnu.tar.gz}"
-                if [[ "$name" == "telcoin-network-${tag}-"*"-unknown-linux-gnu.tar.gz" && "$mid" =~ ^[a-z0-9_]+$ ]]; then
-                    tars=$((tars + 1))
-                else
-                    printf 'SHA256SUMS names %s, which is not part of a %s release\n' "$name" "$net"
-                    return 1
-                fi
-                ;;
-        esac
+        known=false
+        for want in "$@"; do
+            if [[ "$name" == "$want" ]]; then
+                known=true
+            fi
+        done
+        if [[ "$known" != "true" ]]; then
+            mid="${name#"$pre"}"
+            mid="${mid%"$suf"}"
+            if [[ "$name" == "$pre"*"$suf" && "$mid" =~ ^[a-z0-9_]+$ ]]; then
+                tars=$((tars + 1))
+            else
+                printf 'SHA256SUMS names %s, which is not part of a %s release\n' "$name" "$label"
+                return 1
+            fi
+        fi
         n=$((n + 1))
     done < "$f"
-    if [[ "$n" -ne 5 || "$tars" -ne 1 ]]; then
-        printf 'SHA256SUMS must name exactly IMAGE_DIGEST, the tarball and the three %s files\n' "$cc"
+    if [[ "$n" -ne $(($# + 1)) || "$tars" -ne 1 ]]; then
+        printf 'SHA256SUMS must name exactly %s\n' "$what"
         return 1
     fi
     return 0
+}
+
+# _tn_release_sums_names FILE TAG NETWORK -- rc 0 when FILE (SHA256SUMS) has only
+# "<64 hex>  <name>" lines naming exactly IMAGE_DIGEST, one
+# telcoin-network-TAG-<triple>.tar.gz and NETWORK's chain-configs/<dir>/
+# committee.yaml, genesis.yaml and parameters.yaml, each once. Prints the reason
+# on rc 1.
+_tn_release_sums_names() {
+    local f="$1" tag="$2" net="$3" cc
+    case "$net" in
+        testnet) cc="chain-configs/testnet" ;;
+        mainnet) cc="chain-configs/mainnet" ;;
+        *) printf 'no release channel for network %s\n' "$net"; return 1 ;;
+    esac
+    _tn_release_sums_shape "$f" "telcoin-network-${tag}-" "-unknown-linux-gnu.tar.gz" "$net" \
+        "IMAGE_DIGEST, the tarball and the three ${cc} files" \
+        IMAGE_DIGEST "${cc}/committee.yaml" "${cc}/genesis.yaml" "${cc}/parameters.yaml"
 }
 
 # _tn_release_sum FILE NAME -- the hash SHA256SUMS FILE gives NAME.
@@ -6713,38 +7835,28 @@ _tn_release_file_ok() {
     [[ "${got%% *}" == "$want" ]]
 }
 
-# _tn_release_fetch TAG NETWORK BASE_URL MODE [progress-fn] -- download and check
-# a release into a new staging directory (printed on stdout): SHA256SUMS and its
-# signature first (gpgv against lib/release-keys), then the names it lists, the
-# chain-config hashes against this script release's pins, IMAGE_DIGEST and, in
-# MODE full, this host's tarball, each against its line. rc 1 refused, 2
-# network or I/O, 3 TAG is not a NETWORK release tag or NETWORK is devnet,
-# which has no signed releases (nothing is downloaded). The staging directory
-# is removed on every failure.
-_tn_release_fetch() {
-    local tag="${1:-}" net="${2:-}" base="${3:-}" mode="${4:-full}" fn="${5:-}"
-    local parent stg why f want got triple tarball cc img sigrc unknown
-    if [[ "$net" == "devnet" ]]; then
-        _tn_c4_say warn "Devnet has no signed releases, so ${tag:-(empty)} names no release to fetch: devnet images run by digest." "$fn"
-        return 3
-    fi
-    if ! tn_release_tag_ok "$net" "$tag"; then
-        _tn_c4_say warn "${tag:-(empty)} is not a ${net:-(no network)} release tag ($(tn_release_tag_grammar))." "$fn"
-        return 3
-    fi
-    [[ -n "$base" ]] || base="${TN_RELEASE_BASE_URL}/${tag}"
-    base="${base%/}"
+# _tn_release_tools_ok [progress-fn] -- rc 0 when curl, gpg, gpgv and sha256sum,
+# which every release check needs, are installed; rc 2 naming the first missing.
+_tn_release_tools_ok() {
+    local f
     for f in curl gpg gpgv sha256sum; do
         if ! command -v "$f" >/dev/null 2>&1; then
-            _tn_c4_say warn "${f} is not installed; a release cannot be checked without it." "$fn"
+            _tn_c4_say warn "${f} is not installed; a release cannot be checked without it." "${1:-}"
             return 2
         fi
     done
-    triple="$(_tn_release_triple)" || triple=""
-    if [[ "$mode" == "full" && -z "$triple" ]]; then
-        _tn_c4_say warn "No release binary is published for this architecture ($(uname -m 2>/dev/null))." "$fn"
-        return 1
-    fi
+    return 0
+}
+
+# _tn_release_open TAG BASE_URL [progress-fn] -- the steps every signed release
+# shares, whatever it holds: a new staging directory (rel.<pid>.XXXXXX under
+# tn_staging_dir, printed on stdout), the keyring of lib/release-keys,
+# SHA256SUMS and SHA256SUMS.asc from BASE_URL (1 MiB and 60 s each) and the
+# signature over SHA256SUMS (_tn_release_sig_ok). TAG names the release in the
+# messages. rc 1 refused, 2 network or I/O; the staging directory is removed on
+# every failure.
+_tn_release_open() {
+    local tag="${1:-}" base="${2:-}" fn="${3:-}" parent stg why f sigrc unknown
     parent="$(tn_staging_dir)" || {
         _tn_c4_say warn "The staging directory is not a root-owned 0700 directory; nothing was downloaded." "$fn"
         return 1
@@ -6793,6 +7905,59 @@ _tn_release_fetch() {
     if [[ -n "$unknown" ]]; then
         _tn_c4_say warn "Release ${tag}: SHA256SUMS.asc also carries a signature by key ${unknown}, which is not in $(_tn_release_keys_dir), so that signature was not checked. The release is taken on the good signature by a listed key; update-scripts.sh brings newer keys." "$fn"
     fi
+    printf '%s\n' "$stg"
+}
+
+# _tn_release_fetch_asset DIR BASE_URL TAG NAME WHAT MAX_BYTES MAX_SECONDS
+# [progress-fn] -- download NAME, which the verified DIR/SHA256SUMS must list,
+# from BASE_URL into DIR (at most MAX_BYTES in MAX_SECONDS) and check it against
+# its line. WHAT names NAME when the list lacks it. rc 1 refused, 2 network or
+# I/O; DIR stays for the caller to remove.
+_tn_release_fetch_asset() {
+    local stg="$1" base="$2" tag="$3" name="$4" what="$5" max="$6" secs="$7" fn="${8:-}"
+    if [[ -z "$(_tn_release_sum "${stg}/SHA256SUMS" "$name")" ]]; then
+        _tn_c4_say warn "Release ${tag} has no ${what}." "$fn"
+        return 1
+    fi
+    if ! _tn_release_get "${base}/${name}" "${stg}/${name}" "$max" "$secs"; then
+        _tn_c4_say warn "Could not download ${base}/${name}." "$fn"
+        return 2
+    fi
+    if ! _tn_release_file_ok "$stg" "$name"; then
+        _tn_c4_say warn "Release ${tag}: ${name} does not match its SHA256SUMS line." "$fn"
+        return 1
+    fi
+    return 0
+}
+
+# _tn_release_fetch TAG NETWORK BASE_URL MODE [progress-fn] -- download and check
+# a node release into a new staging directory (printed on stdout): SHA256SUMS and
+# its signature first (_tn_release_open: gpgv against lib/release-keys), then the
+# names it lists, the chain-config hashes against this script release's pins,
+# IMAGE_DIGEST and, in MODE full, this host's tarball, each against its line. rc 1
+# refused, 2 network or I/O, 3 TAG is not a NETWORK release tag or NETWORK is
+# devnet, which has no signed releases (nothing is downloaded). The staging
+# directory is removed on every failure.
+_tn_release_fetch() {
+    local tag="${1:-}" net="${2:-}" base="${3:-}" mode="${4:-full}" fn="${5:-}"
+    local stg why f want got triple tarball cc img
+    if [[ "$net" == "devnet" ]]; then
+        _tn_c4_say warn "Devnet has no signed releases, so ${tag:-(empty)} names no release to fetch: devnet images run by digest." "$fn"
+        return 3
+    fi
+    if ! tn_release_tag_ok "$net" "$tag"; then
+        _tn_c4_say warn "${tag:-(empty)} is not a ${net:-(no network)} release tag ($(tn_release_tag_grammar))." "$fn"
+        return 3
+    fi
+    [[ -n "$base" ]] || base="${TN_RELEASE_BASE_URL}/${tag}"
+    base="${base%/}"
+    _tn_release_tools_ok "$fn" || return 2
+    triple="$(_tn_release_triple)" || triple=""
+    if [[ "$mode" == "full" && -z "$triple" ]]; then
+        _tn_c4_say warn "No release binary is published for this architecture ($(uname -m 2>/dev/null))." "$fn"
+        return 1
+    fi
+    stg="$(_tn_release_open "$tag" "$base" "$fn")" || return $?
     if ! why="$(_tn_release_sums_names "${stg}/SHA256SUMS" "$tag" "$net")"; then
         _tn_c4_say warn "Release ${tag}: ${why}." "$fn"
         _tn_release_cleanup "$stg"
@@ -6829,21 +7994,11 @@ _tn_release_fetch() {
     fi
     if [[ "$mode" == "full" ]]; then
         tarball="telcoin-network-${tag}-${triple}.tar.gz"
-        if [[ -z "$(_tn_release_sum "${stg}/SHA256SUMS" "$tarball")" ]]; then
-            _tn_c4_say warn "Release ${tag} has no ${triple} tarball." "$fn"
+        _tn_release_fetch_asset "$stg" "$base" "$tag" "$tarball" "${triple} tarball" 1073741824 1800 "$fn" || {
+            f=$?
             _tn_release_cleanup "$stg"
-            return 1
-        fi
-        if ! _tn_release_get "${base}/${tarball}" "${stg}/${tarball}" 1073741824 1800; then
-            _tn_c4_say warn "Could not download ${base}/${tarball}." "$fn"
-            _tn_release_cleanup "$stg"
-            return 2
-        fi
-        if ! _tn_release_file_ok "$stg" "$tarball"; then
-            _tn_c4_say warn "Release ${tag}: ${tarball} does not match its SHA256SUMS line." "$fn"
-            _tn_release_cleanup "$stg"
-            return 1
-        fi
+            return $f
+        }
     fi
     printf '%s\n' "$stg"
     return 0
@@ -6872,48 +8027,53 @@ tn_fetch_verified_release() {
 
 # tn_fetch_release_image TAG NETWORK [BASE_URL] [progress-fn] -- the release's
 # image by digest: IMAGE_DIGEST from a release checked as in
-# tn_fetch_verified_release (no tarball), which must name a repository NETWORK's
-# images may come from (tn_docker_image_allowed: on testnet any of
-# TN_TESTNET_IMAGE_REPOS). Prints <repo>@sha256:<digest>; the staging directory
-# is removed. rc as tn_fetch_verified_release; 1 also when the image is not
-# NETWORK's.
+# tn_fetch_verified_release (no tarball), which must name an image by digest of a
+# repository a new pull for NETWORK takes (tn_docker_image_allowed and
+# tn_docker_pull_repo_ok: on mainnet TN_MAINNET_IMAGE_REPO alone, on testnet
+# TN_TESTNET_IMAGE_REPO or the legacy Artifact Registry repository, never
+# TN_GHCR_LEGACY_IMAGE_REPO). Prints <repo>@sha256:<digest>; the staging
+# directory is removed. rc as tn_fetch_verified_release; 1 also when the image is
+# not NETWORK's, with a message that names it and the repository it must be from.
 tn_fetch_release_image() {
-    local tag="${1:-}" net="${2:-}" fn="${4:-}" stg img rc=0
+    local tag="${1:-}" net="${2:-}" fn="${4:-}" stg img want rc=0
     stg="$(_tn_release_fetch "$tag" "$net" "${3:-}" image "$fn")" || rc=$?
     [[ $rc -eq 0 ]] || return $rc
     img="$(cat -- "${stg}/IMAGE_DIGEST")" || img=""
     _tn_release_cleanup "$stg"
-    if ! TN_DOCKER_REQUIRE_DIGEST=1 tn_docker_image_allowed "$img" "$net"; then
-        _tn_c4_say warn "Release ${tag}: IMAGE_DIGEST names ${img}, which is not in a ${net} image repository these scripts accept." "$fn"
+    if ! TN_DOCKER_REQUIRE_DIGEST=1 tn_docker_image_allowed "$img" "$net" \
+        || ! tn_docker_pull_repo_ok "$net" "${img%%@*}"; then
+        want="$(tn_docker_pull_repos_for "$net" 2>/dev/null)" || want=""
+        _tn_c4_say warn "Release ${tag}: IMAGE_DIGEST names ${img:-nothing}, but a ${net} release image is <repository>@sha256:<digest> from ${want// / or }. The release is refused and nothing was pulled; report it to the node team." "$fn"
         return 1
     fi
     printf '%s\n' "$img"
 }
 
-# tn_release_extract_binary TARBALL OUT -- write the node binary from a verified
-# release TARBALL (telcoin-network-<tag>-<triple>.tar.gz) to OUT, mode 0755. The
-# tarball must list exactly telcoin-network, LICENSE-APACHE, LICENSE-MIT and
-# NOTICE under its top directory, the binary as a regular file; nothing else is
-# extracted and no owner or mode is taken from the archive. rc 1 refused, 2 I/O.
+# tn_release_extract_binary TARBALL OUT [BINARY] -- write BINARY (default
+# telcoin-network) from a verified release TARBALL (<project>-<tag>-<triple>.tar.gz)
+# to OUT, mode 0755. The tarball must list exactly BINARY, LICENSE-APACHE,
+# LICENSE-MIT and NOTICE under its top directory, the binary as a regular file;
+# nothing else is extracted and no owner or mode is taken from the archive. rc 1
+# refused, 2 I/O.
 tn_release_extract_binary() {
-    local tarball="${1:-}" out="${2:-}" dir listing want kind
+    local tarball="${1:-}" out="${2:-}" bin="${3:-telcoin-network}" dir listing want kind
     [[ -f "$tarball" && ! -L "$tarball" && -n "$out" && ! -L "$out" ]] || return 1
     dir="${tarball##*/}"
     dir="${dir%.tar.gz}"
     listing="$(tar -tzf "$tarball" 2>/dev/null)" || return 2
     listing="$(printf '%s\n' "$listing" | awk -v d="${dir}/" '$0 != d' | LC_ALL=C sort)"
-    want="$(printf '%s\n' "${dir}/LICENSE-APACHE" "${dir}/LICENSE-MIT" "${dir}/NOTICE" "${dir}/telcoin-network" | LC_ALL=C sort)"
+    want="$(printf '%s\n' "${dir}/LICENSE-APACHE" "${dir}/LICENSE-MIT" "${dir}/NOTICE" "${dir}/${bin}" | LC_ALL=C sort)"
     if [[ "$listing" != "$want" ]]; then
-        print_warn "${tarball##*/} must hold exactly telcoin-network, LICENSE-APACHE, LICENSE-MIT and NOTICE under ${dir}/." >&2
+        print_warn "${tarball##*/} must hold exactly ${bin}, LICENSE-APACHE, LICENSE-MIT and NOTICE under ${dir}/." >&2
         return 1
     fi
-    kind="$(tar -tvzf "$tarball" "${dir}/telcoin-network" 2>/dev/null | head -n 1)" || kind=""
+    kind="$(tar -tvzf "$tarball" "${dir}/${bin}" 2>/dev/null | head -n 1)" || kind=""
     if [[ "${kind:0:1}" != "-" ]]; then
-        print_warn "${dir}/telcoin-network in ${tarball##*/} is not a regular file." >&2
+        print_warn "${dir}/${bin} in ${tarball##*/} is not a regular file." >&2
         return 1
     fi
     rm -f -- "$out"
-    if ! ( umask 077; tar -xzOf "$tarball" "${dir}/telcoin-network" > "$out" ) 2>/dev/null; then
+    if ! ( umask 077; tar -xzOf "$tarball" "${dir}/${bin}" > "$out" ) 2>/dev/null; then
         rm -f -- "$out"
         return 2
     fi
@@ -6927,9 +8087,11 @@ tn_release_extract_binary() {
 # tn_release_version_ok TEXT NETWORK REF -- rc 0 when TEXT, a node binary's
 # --version output, fits NETWORK and REF: its "Version:" is REF's x.y.z (when
 # REF carries one), it has exactly one "Build Features:" line, which is empty on
+# network-gated: the testnet build features; a mainnet build must have none
 # mainnet and on testnet lists adiri and nothing but adiri and faucet (the adiri
 # feature turns faucet on). The reason goes to stderr on rc 1.
 tn_release_version_ok() {
+    # network-gated: has_adiri counts the testnet feature, checked in the testnet arm only
     local text="${1:-}" net="${2:-}" ref="${3:-}" want="" ver n feats f has_adiri=0 re
     local -a list
     re='([0-9]+[.][0-9]+[.][0-9]+)'
@@ -6959,15 +8121,17 @@ tn_release_version_ok() {
             [[ -z "$feats" ]] || IFS=',' read -r -a list <<< "$feats"
             for f in ${list[@]+"${list[@]}"}; do
                 case "$f" in
-                    adiri) has_adiri=1 ;;
+                    adiri) has_adiri=1 ;;  # network-gated: testnet arm: the testnet build feature
                     faucet) ;;
                     *)
+                        # network-gated: testnet arm: names the features a testnet build may have
                         print_warn "This build has the feature ${f}; a testnet build has adiri (and faucet) only." >&2
                         return 1
                         ;;
                 esac
             done
-            if [[ "$has_adiri" -ne 1 ]]; then
+            if [[ "$has_adiri" -ne 1 ]]; then  # network-gated: testnet arm: a testnet build needs the feature
+                # network-gated: testnet arm: names the feature a testnet build lacks
                 print_warn "This build lacks the adiri feature a testnet build needs (features: ${feats:-none})." >&2
                 return 1
             fi
@@ -7197,18 +8361,19 @@ tn_rustup_ensure() {
     return $rc
 }
 
-# tn_build_version BIN -- print BIN --version, run as the build account (30 s at
-# most) on a copy in a fresh directory of the build account's home. BIN must be
-# a regular file of the caller (root's staged copy, tn_stage_binary); anything
-# else is refused (rc 1) and never run.
+# tn_build_version BIN [NAME] -- print BIN --version, run as the build account (30 s
+# at most) on a copy named NAME (default telcoin-network, a plain file name) in a
+# fresh directory of the build account's home. BIN must be a regular file of the
+# caller (root's staged copy, tn_stage_binary); anything else is refused (rc 1)
+# and never run.
 tn_build_version() {
-    local bin="${1:-}" d out rc=0
-    [[ -f "$bin" && ! -L "$bin" ]] || return 1
+    local bin="${1:-}" name="${2:-telcoin-network}" d out rc=0
+    [[ -f "$bin" && ! -L "$bin" && "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 1
     [[ "$(stat -c '%u' -- "$bin" 2>/dev/null)" == "$(id -u)" ]] || return 1
     d="$(tn_as_build_user mktemp -d "${TN_BUILD_HOME}/probe.XXXXXX")" || return 2
     [[ "$d" == "${TN_BUILD_HOME}/probe."* && "$d" != *[[:space:]]* ]] || return 2
-    if tn_as_build_user sh -c 'cat > "$1" && chmod 0700 "$1"' sh "${d}/telcoin-network" < "$bin"; then
-        out="$(tn_as_build_user timeout 30 "${d}/telcoin-network" --version)" || rc=$?
+    if tn_as_build_user sh -c 'cat > "$1" && chmod 0700 "$1"' sh "${d}/${name}" < "$bin"; then
+        out="$(tn_as_build_user timeout 30 "${d}/${name}" --version)" || rc=$?
     else
         rc=2
     fi
@@ -7250,6 +8415,7 @@ _tn_release_keys_present() {
 # network's repository first, then the legacy one (TN_TESTNET_LEGACY_IMAGE_REPO),
 # each with its pull token. That fallback is the legacy case, a tag with no
 # signed release such as the releases made before signed releases
+# network-gated: legacy testnet tag; this fallback runs on testnet only
 # (v0.16.0-adiri); the newest-release pick (latest_docker_image) never takes it.
 # A release whose files fail verification is never replaced by the registry's
 # answer. Devnet has no signed releases, so a devnet tag is refused (rc 1)
@@ -7292,24 +8458,37 @@ tn_docker_image_for_tag() {
     return 1
 }
 
-# tn_docker_resolve_ref NETWORK ARG [progress-fn] -- the image ARG names, by
-# digest: a release tag of NETWORK, alone or as <repo>:<tag> of a repository
-# NETWORK's images may come from (tn_docker_repo_ok), resolved with
+# tn_docker_resolve_ref NETWORK ARG [progress-fn] -- the image ARG names for a new
+# pull, by digest: a release tag of NETWORK, alone or as <repo>:<tag> of a
+# repository a new pull for NETWORK takes (tn_docker_pull_repo_ok), resolved with
 # tn_docker_image_for_tag; or <repo>@sha256:<digest> of such a repository, taken
-# as given. Prints "<repo>@sha256:<digest> <tag>". For a digest given alone the
+# as given. TN_GHCR_LEGACY_IMAGE_REPO holds no release and is refused on every
+# network. Prints "<repo>@sha256:<digest> <tag>". For a digest given alone the
 # tag is the release .node-meta records for that digest (tn_docker_recorded_tag),
 # else empty, with a warning that the downgrade and oldest-release checks cannot
-# be applied. rc 1, with the reason on stderr, for anything else:
-# another repository, a tag that is not a release tag of NETWORK, latest, a
-# leading "-". Nothing is pulled.
+# be applied. On mainnet a digest given alone is refused unless .node-meta records
+# a mainnet release tag for it: only the signed release says which digest is a
+# mainnet release image, and the mainnet package may hold images no release names.
+# rc 1, with the reason on stderr, for anything else: another repository, a tag
+# that is not a release tag of NETWORK, latest, a leading "-". Nothing is pulled.
 tn_docker_resolve_ref() {
     local net="${1:-}" arg="${2:-}" fn="${3:-}" repo tag="" img=""
     repo="$(tn_docker_repo_for "$net")" || return 1
     case "$arg" in
+        "$TN_GHCR_LEGACY_IMAGE_REPO"@*|"$TN_GHCR_LEGACY_IMAGE_REPO":*)
+            if [[ "$net" == "devnet" ]]; then
+                print_warn "Image refused: ${arg}. No release was ever published to ${TN_GHCR_LEGACY_IMAGE_REPO}, so no image is pulled from it; give the devnet image by digest, <repository>@sha256:<digest>, from one of these repositories: $(tn_docker_pull_repos_for devnet 2>/dev/null)." >&2
+            else
+                print_warn "Image refused: ${arg}. No release was ever published to ${TN_GHCR_LEGACY_IMAGE_REPO}, so no image is pulled from it; ${net} images come from ${repo}. Give the ${net} release tag instead." >&2
+            fi
+            return 1
+            ;;
+    esac
+    case "$arg" in
         ""|-*) ;;
         *@sha256:*) img="$arg" ;;
         */*:*)
-            if [[ "${arg%:*}" != *@* ]] && tn_docker_repo_ok "$net" "${arg%:*}"; then
+            if [[ "${arg%:*}" != *@* ]] && tn_docker_pull_repo_ok "$net" "${arg%:*}"; then
                 tag="${arg##*:}"
             fi
             ;;
@@ -7323,9 +8502,10 @@ tn_docker_resolve_ref() {
         fi
         img="$(tn_docker_image_for_tag "$net" "$tag" "$fn")" || return 1
     fi
-    if [[ -z "$img" ]] || ! TN_DOCKER_REQUIRE_DIGEST=1 validate_docker_image "$img" "$net"; then
+    if [[ -z "$img" ]] || ! TN_DOCKER_REQUIRE_DIGEST=1 validate_docker_image "$img" "$net" \
+        || ! tn_docker_pull_repo_ok "$net" "${img%%@*}"; then
         if [[ "$net" == "devnet" ]]; then
-            print_warn "Image refused: ${arg:-(empty)}. A devnet node runs an image by digest, <repository>@sha256:<digest>, from one of these repositories: $(tn_docker_repos_for devnet 2>/dev/null)." >&2
+            print_warn "Image refused: ${arg:-(empty)}. A devnet node runs an image by digest, <repository>@sha256:<digest>, from one of these repositories: $(tn_docker_pull_repos_for devnet 2>/dev/null)." >&2
         else
             print_warn "Image refused: ${arg:-(empty)}. A node runs ${repo}@sha256:<digest>, or a ${net} release tag resolved to its digest." >&2
         fi
@@ -7337,6 +8517,10 @@ tn_docker_resolve_ref() {
     if [[ -z "$tag" ]]; then
         tag="$(tn_docker_recorded_tag "$img")" || tag=""
         tn_release_tag_ok "$net" "$tag" || tag=""
+        if [[ -z "$tag" && "$net" == "mainnet" ]]; then
+            print_warn "Image refused: on mainnet an image is named by its release tag, so the digest comes from the signed release; ${img##*@} is not the image of a mainnet release this node has installed. Give the mainnet release tag instead." >&2
+            return 1
+        fi
         if [[ -z "$tag" && "$net" == "devnet" ]]; then
             _tn_c4_say warn "${img} is given by digest alone, as every devnet image is, so the release it holds is unknown: the downgrade check cannot be applied to it." "$fn"
         elif [[ -z "$tag" ]]; then
@@ -7403,6 +8587,79 @@ tn_docker_release_tag_for() {
 tn_docker_holds_digest() {
     [[ "${1:-}" == *@sha256:* ]] || return 1
     docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$1" 2>/dev/null | grep -qxF -- "$1"
+}
+
+# tn_docker_image_network_ok NETWORK IMAGE [progress-fn] -- rc 0 when the node
+# binary in IMAGE (<repo>@sha256:<digest>, already pulled) was built for NETWORK.
+# IMAGE's /usr/local/bin/telcoin (the binary the release pipeline checks) runs
+# once with --version in a throwaway container with no network and no
+# capabilities, 60 s at most where timeout exists, and its "Build Features:"
+# line is judged as tn_release_version_ok judges a release binary's: exactly one
+# such line, listing nothing on mainnet and on testnet the testnet feature
+# (faucet allowed, nothing else). Devnet images are not checked: rc 0 with an
+# info line. rc 1, with a message that names IMAGE, the features found and
+# NETWORK, when the image does not run, does not finish in time, the line is
+# missing or doubled, or the features are not NETWORK's. Callers run it after
+# the pull and before any container starts or .node-meta names IMAGE, and stop
+# on rc 1.
+tn_docker_image_network_ok() {
+    local net="${1:-}" img="${2:-}" fn="${3:-}" out n feats want name limit="" rc=0
+    local -a tmo
+    case "$net" in
+        devnet)
+            _tn_c4_say info "Devnet images are not checked for their build features: ${img} is used as given." "$fn"
+            return 0
+            ;;
+        testnet|mainnet) ;;
+        *)
+            _tn_c4_say warn "No build-feature rule for network '${net}', so ${img:-the image} is not used." "$fn"
+            return 1
+            ;;
+    esac
+    if [[ "$img" != *@sha256:* || "$img" == -* || "$img" =~ [[:space:]] ]]; then
+        _tn_c4_say warn "Image refused: ${img:-(empty)} is not an image by digest, so its build features are not read and it is not used." "$fn"
+        return 1
+    fi
+    # The limit: timeout sends TERM at 60 s and KILL 5 s later. docker run passes
+    # the TERM on to the container, where --init puts an init process in front of
+    # the binary: a binary that is PID 1 itself ignores a TERM it has no handler
+    # for. A client killed by the KILL leaves its container running, so a run cut
+    # short (rc 124, or 137 after the KILL) removes the container by its name.
+    # Where timeout is missing (macOS ships none; it comes with coreutils) the run
+    # has no limit, and the check still runs.
+    name="tn-feature-check-$$-${RANDOM}"
+    tmo=()
+    if command -v timeout >/dev/null 2>&1; then
+        limit=60
+        tmo=(timeout -k 5 "$limit")
+    fi
+    out="$(${tmo[@]+"${tmo[@]}"} docker run --rm --init --name "$name" --pull=never --network none \
+        --cap-drop ALL --security-opt no-new-privileges --read-only --entrypoint /usr/local/bin/telcoin \
+        "$img" --version </dev/null 2>/dev/null 9>&-)" || rc=$?
+    if [[ -n "$limit" ]] && [[ $rc -eq 124 || $rc -eq 137 ]]; then
+        timeout -k 5 30 docker rm -f "$name" >/dev/null 2>&1 9>&- || true
+        _tn_c4_say warn "Image refused: ${img} did not finish --version within ${limit} seconds (docker run exited ${rc} under timeout), so its build features are not known. It is not used and nothing was changed; docker rm -f ${name} was run to remove its container. Check that Docker is running, then try again; if a ${net} release names this image, report it to the node team." "$fn"
+        return 1
+    fi
+    if [[ $rc -ne 0 ]]; then
+        _tn_c4_say warn "Could not run ${img} to read its build features (docker run exited ${rc}), so it is not used and nothing was changed. Check that Docker is running and holds the image, then try again." "$fn"
+        return 1
+    fi
+    n="$(printf '%s\n' "$out" | grep -c '^Build Features:')" || n=0
+    feats="$(printf '%s\n' "$out" | sed -n 's/^Build Features:[[:space:]]*//p' | tr -d '[:space:]')"
+    if [[ "$n" != "1" ]]; then
+        _tn_c4_say warn "Image refused: ${img} prints ${n} \"Build Features:\" lines with --version, not one, so whether it is a ${net} image cannot be told. It is not used and nothing was changed; if a ${net} release names this image, report it to the node team." "$fn"
+        return 1
+    fi
+    if ! tn_release_version_ok "$out" "$net" "" >/dev/null 2>&1; then
+        want="none"
+        # network-gated: names the testnet build features in the testnet refusal only
+        [[ "$net" != "testnet" ]] || want="adiri, and faucet at most"
+        feats="${feats//,/, }"
+        _tn_c4_say warn "Image refused: ${img} was built with the features ${feats:-none}, and a ${net} image has ${want}, so it is not a ${net} image. It is not used and nothing was changed; if a ${net} release names this image, report it to the node team." "$fn"
+        return 1
+    fi
+    return 0
 }
 
 # _tn_tag_sig_check DIR TAG -- check the signature on release tag TAG in the git
@@ -7656,6 +8913,142 @@ tn_release_stage() {
     printf '%s\n' "$out"
 }
 
+# _tn_p2p_allow_triple -- the target triple of the tn-p2p-allow-sync release for
+# this host's architecture: a static musl binary, published for x86_64 only. rc 1
+# elsewhere.
+_tn_p2p_allow_triple() {
+    case "$(uname -m 2>/dev/null)" in
+        x86_64|amd64) printf 'x86_64-unknown-linux-musl\n' ;;
+        *) return 1 ;;
+    esac
+}
+
+# _tn_p2p_allow_version_ok TEXT VERSION -- rc 0 when TEXT, a tn-p2p-allow-sync
+# --version output, is the release these scripts pin and speaks their formats:
+# its first line is "tn-p2p-allow-sync VERSION" (the tag without its v), it has
+# one "config-version N" line with N the TN_P2P_ALLOW_CONFIG_VERSION that
+# firewall-setup.sh writes, and one "snapshot-versions" line whose comma- or
+# space-separated list holds 1, the tn_admissionSnapshot version nodes serve.
+# The reason goes to stderr on rc 1.
+_tn_p2p_allow_version_ok() {
+    local text="${1:-}" ver="${2:-}" first n v
+    first=""
+    IFS= read -r first <<< "$text" || true
+    if [[ "$first" != "tn-p2p-allow-sync ${ver}" ]]; then
+        print_warn "The tn-p2p-allow-sync binary's --version starts with '${first}', not 'tn-p2p-allow-sync ${ver}'." >&2
+        return 1
+    fi
+    n="$(grep -c '^config-version ' <<< "$text")" || n=0
+    v="$(sed -n 's/^config-version //p' <<< "$text")"
+    if [[ "$n" != "1" || "$v" != "$TN_P2P_ALLOW_CONFIG_VERSION" ]]; then
+        print_warn "The tn-p2p-allow-sync binary does not read config version ${TN_P2P_ALLOW_CONFIG_VERSION}, the one these scripts write (its --version needs one 'config-version ${TN_P2P_ALLOW_CONFIG_VERSION}' line)." >&2
+        return 1
+    fi
+    n="$(grep -c '^snapshot-versions ' <<< "$text")" || n=0
+    v="$(sed -n 's/^snapshot-versions //p' <<< "$text")"
+    if [[ "$n" != "1" || ! "$v" =~ ^[0-9]+([ ,][0-9]+)*$ ]]; then
+        print_warn "The tn-p2p-allow-sync binary's --version needs one 'snapshot-versions' line listing the snapshot versions it reads." >&2
+        return 1
+    fi
+    case ",${v// /,}," in
+        *,1,*) ;;
+        *)
+            print_warn "The tn-p2p-allow-sync binary does not read snapshot version 1, the one nodes serve (it reads ${v})." >&2
+            return 1
+            ;;
+    esac
+    return 0
+}
+
+# _tn_p2p_allow_install_from DIR BASE_URL TAG PIN TRIPLE [progress-fn] -- the steps
+# of _tn_p2p_allow_install after the signature, on the verified SHA256SUMS in DIR:
+# it names exactly the tarball, whose line must carry PIN before the tarball is
+# downloaded and checked against that line; the tarball holds the binary,
+# LICENSE-APACHE, LICENSE-MIT and NOTICE and nothing else; the binary answers
+# --version as the build account with TAG's version and the formats these
+# scripts use; then it is installed. rc as _tn_p2p_allow_install; DIR stays for
+# the caller to remove.
+_tn_p2p_allow_install_from() {
+    local stg="$1" base="$2" tag="$3" pin="$4" triple="$5" fn="${6:-}" name tarball why got ver rc=0
+    name="tn-p2p-allow-sync ${tag}"
+    tarball="tn-p2p-allow-sync-${tag}-${triple}.tar.gz"
+    if ! why="$(_tn_release_sums_shape "${stg}/SHA256SUMS" "tn-p2p-allow-sync-${tag}-" "-unknown-linux-musl.tar.gz" \
+        tn-p2p-allow-sync "the tarball")"; then
+        _tn_c4_say warn "Release ${name}: ${why}." "$fn"
+        return 1
+    fi
+    got="$(_tn_release_sum "${stg}/SHA256SUMS" "$tarball")"
+    if [[ -n "$got" && "$got" != "$pin" ]]; then
+        _tn_c4_say warn "Release ${name}: SHA256SUMS gives ${tarball} the sha256 ${got}, but these scripts pin ${pin}. Update the scripts (update-scripts.sh) before installing it." "$fn"
+        return 1
+    fi
+    _tn_release_fetch_asset "$stg" "$base" "$name" "$tarball" "${triple} tarball" 67108864 600 "$fn" || return $?
+    tn_release_extract_binary "${stg}/${tarball}" "${stg}/tn-p2p-allow-sync" tn-p2p-allow-sync || {
+        rc=$?
+        _tn_c4_say warn "Release ${name}: the binary could not be taken out of ${tarball}." "$fn"
+        return $rc
+    }
+    tn_build_user_ensure "$fn" || return $?
+    # stdin closed: an interactive caller's terminal is no input for the probe
+    if ! ver="$(tn_build_version "${stg}/tn-p2p-allow-sync" tn-p2p-allow-sync 2>/dev/null < /dev/null)" || [[ -z "$ver" ]]; then
+        _tn_c4_say warn "The tn-p2p-allow-sync binary of release ${name} did not answer --version (run as ${TN_BUILD_USER})." "$fn"
+        return 1
+    fi
+    _tn_p2p_allow_version_ok "$ver" "${tag#v}" || return 1
+    tn_install_root_binary "${stg}/tn-p2p-allow-sync" "$TN_P2P_ALLOW_BIN" || return $?
+    return 0
+}
+
+# _tn_p2p_allow_install TAG PIN BASE_URL [progress-fn] -- install release TAG of
+# the P2P committee allowlist sync tool as TN_P2P_ALLOW_BIN, root 0755, from its
+# signed release at BASE_URL (default <TN_P2P_ALLOW_BASE_URL>/TAG), provided its
+# tarball has sha256 PIN. Each step runs only once the one before it passed: TAG
+# is a release tag and PIN is set; SHA256SUMS and its signature go into a new
+# root-only staging directory and are checked like a node release's
+# (_tn_release_open: the keys of lib/release-keys, the same gpgv status policy);
+# then _tn_p2p_allow_install_from (the one tarball, its sha256 against its line
+# and PIN, its member list, the binary's --version run as the build account,
+# tn_install_root_binary). The staging directory is removed on return, and a
+# failure at any step leaves an installed binary as it was. rc 0 installed; 1
+# refused (a bad tag, no pin, an architecture without a release, a bad
+# signature, a sums, pin, member or --version mismatch); 2 network or I/O.
+_tn_p2p_allow_install() {
+    local tag="${1:-}" pin="${2:-}" base="${3:-}" fn="${4:-}" name triple stg rc=0
+    name="tn-p2p-allow-sync ${tag}"
+    if [[ ! "$tag" =~ ^v[0-9]+[.][0-9]+[.][0-9]+(-rc[0-9]+)?$ ]]; then
+        _tn_c4_say warn "'${tag}' is not a tn-p2p-allow-sync release tag (vX.Y.Z or vX.Y.Z-rcN); nothing was installed." "$fn"
+        return 1
+    fi
+    if [[ -z "$pin" ]]; then
+        _tn_c4_say warn "These scripts pin no sha256 for the ${name} tarball yet, so it cannot be installed; update the scripts (update-scripts.sh). Nothing was downloaded." "$fn"
+        return 1
+    fi
+    if [[ ! "$pin" =~ ^[0-9a-f]{64}$ ]]; then
+        _tn_c4_say warn "The sha256 these scripts pin for the ${name} tarball is not 64 lowercase hex digits; nothing was downloaded." "$fn"
+        return 1
+    fi
+    if ! triple="$(_tn_p2p_allow_triple)"; then
+        _tn_c4_say warn "No tn-p2p-allow-sync release is published for this architecture ($(uname -m 2>/dev/null)); there is one for x86_64 only." "$fn"
+        return 1
+    fi
+    [[ -n "$base" ]] || base="${TN_P2P_ALLOW_BASE_URL}/${tag}"
+    base="${base%/}"
+    _tn_release_tools_ok "$fn" || return 2
+    stg="$(_tn_release_open "$name" "$base" "$fn")" || return $?
+    _tn_p2p_allow_install_from "$stg" "$base" "$tag" "$pin" "$triple" "$fn" || rc=$?
+    _tn_release_cleanup "$stg"
+    [[ $rc -eq 0 ]] || return $rc
+    _tn_c4_say info "Installed ${name} as ${TN_P2P_ALLOW_BIN#"${TN_ROOT_PREFIX:-}"}." "$fn"
+    return 0
+}
+
+# tn_p2p_allow_install [progress-fn] -- install the release these scripts pin,
+# TN_P2P_ALLOW_VERSION with tarball sha256 TN_P2P_ALLOW_TARBALL_SHA256, from
+# GitHub (_tn_p2p_allow_install). rc as _tn_p2p_allow_install.
+tn_p2p_allow_install() {
+    _tn_p2p_allow_install "$TN_P2P_ALLOW_VERSION" "$TN_P2P_ALLOW_TARBALL_SHA256" "" "${1:-}"
+}
+
 # tn_staged_cleanup PATH -- remove the staging directory that holds PATH (a path
 # tn_stage_binary printed). Anything outside the staging directory is left alone.
 tn_staged_cleanup() {
@@ -7737,11 +9130,13 @@ fi
 # these (edit there). This mirror only guarantees the constants are set so the helpers
 # below — and the always-run status views — don't trip the inherited `set -u` if the
 # env file is briefly missing mid-update. `:=` is a no-op when the var is already set.
+# network-gated: default of the VPN hub endpoint; only setup-vpn reads it, behind require_testnet
 : "${TN_WG_HUB_ENDPOINT:=34.20.198.253:51820}"
 : "${TN_WG_HUB_PUBKEY:=hqIDskzaOS5t6DE91VX+V9Z4NJjKlNufl4kQr/KuF1k=}"
 : "${TN_OVERLAY_CIDR:=10.100.0.0/16}"
 : "${TN_OVERLAY_RESERVED_NETS:=0 1 2 9}"
 : "${TN_OVERLAY_EXTERNAL_BAND_HINT:=10.100.20.0/24}"
+# network-gated: default of the monitor source; apply_kuma_rule adds its rule only when is_testnet_like, else deletes it
 : "${TN_KUMA_SRC:=104.155.184.201/32}"
 : "${TN_KUMA_PORT:=43174}"
 # Optional, comma-separated extra CIDRs allowed to TCP-probe the health port (TN_KUMA_PORT)
@@ -7749,6 +9144,7 @@ fi
 # node sits behind a GCP LB. Empty by default, so generic operators see NO change; the devnet
 # deployment sets it (devnet-firewall.sh) to let LB backends pass. See apply_lb_hc_rule.
 : "${TN_LB_HC_RANGES:=}"
+# network-gated: default of the testnet log hub; obs_effective_push_url gives it only when NETWORK=testnet
 : "${OBS_PUSH_URL_TESTNET:=https://obs.adiri.telcoin.network/loki/api/v1/push}"
 : "${TN_ALLOY_IMAGE:=grafana/alloy:v1.5.1}"
 : "${TN_ALLOY_NATIVE_VERSION:=1.5.1}"
@@ -7758,9 +9154,11 @@ fi
 # -----------------------------------------------------------------------------
 
 # is_testnet — soft check for use INSIDE the interactive setup flow (NETWORK is
+# network-gated: documents is_testnet; no endpoint
 # already set there). Returns 0 on the Adiri testnet.
 is_testnet() { [[ "${NETWORK:-}" == "testnet" ]]; }
 
+# network-gated: documents is_testnet_like; no endpoint
 # is_testnet_like — soft check for the hard gate below. Returns 0 on the Adiri
 # testnet OR on devnet. Devnet shares the same opt-in add-on surface as testnet
 # (observability/health), so require_testnet treats it as allowed. The interactive
@@ -7772,6 +9170,7 @@ is_testnet_like() { [[ "${NETWORK:-}" == "testnet" || "${NETWORK:-}" == "devnet"
 require_testnet() {
     if ! is_testnet_like; then
         print_error "Testnet-only feature. This node's NETWORK is '${NETWORK:-unset}'."
+        # network-gated: refusal message off testnet: says where the add-ons are offered
         print_info  "The VPN / observability / healthcheck add-ons are offered only on the Adiri testnet."
         exit 1
     fi
@@ -8007,6 +9406,7 @@ validate_cidr() {
 }
 
 # validate_overlay_ip <a.b.c.d> — an IPv4 inside 10.100.0.0/16, host octet 1..254,
+# network-gated: names the reserved overlay net of the testnet core nodes; no endpoint
 # NOT in a reserved /24 (hub/adiri/devnet/maintainers). The core team assigns one
 # from the external band (10.100.20.0/24+); see lib/testnet-addons.env.
 validate_overlay_ip() {
@@ -8056,10 +9456,13 @@ get_ssh_port() {
 # For a CIDR, split on '/', require a decimal mask without leading zeros, and
 # dispatch by family: IPv4 with mask 8..32, or IPv6 with mask 8..128. For a bare
 # address: IPv4 or IPv6. An IPv4 octet with a leading zero (010.0.0.1) is refused,
-# as ufw refuses it. A /0 mask or the unspecified address (0.0.0.0, ::) means
-# "anywhere" and is refused, and so is any mask shorter than /8. Generalizes the
-# IPv4-only validate_cidr for the operator-chosen health and SSH sources. Returns
-# 0 if valid.
+# as ufw refuses it. An IPv6 address is hex groups only (validate_ipv6, the
+# grammar tn-p2p-allow-sync parses P2P_ALLOW_FROM with): a dotted IPv4 tail
+# (::ffff:192.0.2.1) is refused, because firewall-setup.sh's fw_allow_src_dropped
+# knows an IPv4-mapped host only in hex (::ffff:c000:201). A /0 mask or the
+# unspecified address (0.0.0.0, ::) means "anywhere" and is refused, and so is
+# any mask shorter than /8. Generalizes the IPv4-only validate_cidr for the
+# operator-chosen health and SSH sources. Returns 0 if valid.
 validate_health_src() {
     local src="${1:-}" ip mask
     # Never "anywhere": no /0 mask and no unspecified address.
@@ -8069,12 +9472,12 @@ validate_health_src() {
     ip="${src%%/*}"
     if validate_ipv4 "$ip"; then
         [[ ".${ip}" == *.0[0-9]* ]] && return 1
-    elif ! validate_ipv6 "$ip"; then
+    elif [[ "$ip" == *.* ]] || ! validate_ipv6 "$ip"; then
         return 1
     fi
     [[ "$src" == */* ]] || return 0
     mask="${src#*/}"
-    [[ "$mask" =~ ^[1-9][0-9]{0,2}$ ]] || return 1
+    [[ "$mask" =~ ^[123456789][0123456789]{0,2}$ ]] || return 1
     (( mask >= 8 )) || return 1
     if validate_ipv4 "$ip"; then
         (( mask <= 32 ))
@@ -8992,6 +10395,7 @@ _tn_help_lists() {
 }
 
 # tn_node_has_flag SPEC FLAG — rc 0 when `node --help` of SPEC lists FLAG (say
+# network-gated: testnet release history; no endpoint
 # --bootstrap-peers, new in v0.15.0-adiri), 1 when it does not, 4 when the probe
 # could not run (no such binary, docker failed).
 tn_node_has_flag() {
@@ -9010,6 +10414,10 @@ tn_node_has_flag() {
 # tn_keytool_has SPEC WORD [SUBCMD...] — rc 0 when `keytool SUBCMD... --help` of
 # SPEC lists WORD, an option (--rpc-http) or a subcommand (set-rpc); 1 when it does
 # not or the subcommand is unknown to this release; 4 when the probe could not run.
+# A probe that exits 1 or 2 is the release's answer only when the output is clap's
+# own (its help or an error, both with a "Usage:" line naming keytool); any other
+# output, such as a privilege-drop wrapper or docker failing with 1, is rc 4: an
+# unreadable answer is not a "no".
 tn_keytool_has() {
     local spec="${1:-}" word="${2:-}" out rc
     [[ $# -ge 2 && -n "$word" ]] || return 1
@@ -9018,7 +10426,12 @@ tn_keytool_has() {
     out="$(_tn_runner_probe "$spec" keytool "$@" --help 2>&1)" || rc=$?
     case "$rc" in
         0) ;;
-        1|2) return 1 ;;
+        1|2)
+            case "$out" in
+                *Usage:*keytool*) return 1 ;;
+            esac
+            return 4
+            ;;
         *) return 4 ;;
     esac
     _tn_help_lists "$word" "$out"
@@ -9323,6 +10736,7 @@ tn_keytool() {
 # node-info.yaml readers (COMMON_VERSION >= 1.6.0)
 # -----------------------------------------------------------------------------
 #
+# network-gated: testnet release history; no endpoint
 # keytool writes node-info.yaml beside the node keys. v0.15.0-adiri and later
 # write p2p_info.workers as a list with one entry per worker; v0.14.0 and older
 # write a single p2p_info.worker map. Both shapes are read, with awk only (no
@@ -9535,6 +10949,7 @@ tn_node_has_observer_flag() {
 
 # tn_node_strip_observer_flag <file> — idempotently remove the `--observer` flag
 # from a node launch file (start wrapper or legacy docker unit). Releases after
+# network-gated: testnet release history of --observer; no endpoint
 # v0.15.0-adiri reject the flag outright, so an old wrapper must lose it before the
 # node is restarted on a new binary or image.
 #   * flag absent (per tn_node_has_observer_flag): rc 0, file untouched;
@@ -9593,9 +11008,12 @@ tn_node_strip_observer_flag() {
 # tn_target_drops_observer <text...> — rc 0 when the release named by <text> no
 # longer needs `--observer` in the launch line, so stripping it is safe. <text> is
 # any tag / image / version string (all args joined with spaces), e.g.
+# network-gated: example targets in the testnet form; no endpoint
 # `v0.15.0-adiri`, `us-docker.pkg.dev/...:v0.14.0-adiri` or `main telcoin-network
+# network-gated: testnet release history of --observer; no endpoint
 # 0.16.0`. The FIRST x.y.z in it is compared against 0.15.0: v0.15.0-adiri still
 # accepts `--observer` as a hidden no-op and the first release after it,
+# network-gated: testnet release history of --observer; no endpoint
 # v0.16.0-adiri, rejects it when it parses its arguments (`unexpected argument
 # '--observer'`), so stripping from 0.15.0 upward is always safe. With no x.y.z
 # at all (branch name, bare SHA, digest) the target is assumed to be the newest
@@ -9632,6 +11050,7 @@ prompt_testnet_addons() {
     echo ""
     print_step "Health monitoring"
     print_info "Exposes a TCP health endpoint (port ${TN_KUMA_PORT:-43174}) probed by the"
+    # network-gated: monitor address in the testnet add-on prompt (prompt_testnet_addons returns unless is_testnet)
     print_info "Association uptime monitor (${TN_KUMA_SRC:-104.155.184.201/32}) so we can alert you if your node drops."
     print_info "You can also allow your own monitoring hosts later: firewall-setup.sh -> Manage node ports."
     if ! ufw_installed || ! ufw_active; then
@@ -9646,7 +11065,7 @@ prompt_testnet_addons() {
     echo ""
     print_step "Centralized logging"
     print_info "Ships your node's logs to the Association's Loki so we can help you debug."
-    print_info "Needs a per-operator ingest token (you'll paste it, hidden, at the end of setup)."
+    print_info "Needs the hub's ingest token from the Association (you'll paste it, hidden, at the end of setup)."
     if confirm "Enable log shipping?"; then
         ENABLE_OBSERVABILITY="true"
     fi
@@ -9720,7 +11139,7 @@ step_testnet_addons() {
         print_step "Centralized telemetry — ${what} (Alloy)"
         if declare -F obs_enable >/dev/null 2>&1; then
             local token=""
-            print_info "Paste the per-operator obs ingest token (hidden input; leave blank to skip)."
+            print_info "Paste the obs ingest token from the Association (hidden input; leave blank to skip)."
             print_info "One token covers both logs and metrics."
             read -r -s -p "  Obs ingest token: " token; echo ""
             if [[ -n "$token" ]]; then
@@ -9753,5 +11172,8 @@ step_testnet_addons() {
 # non-zero, which under the inherited `set -e` aborts every caller right here.
 if [[ -f "${__COMMON_DIR}/observability.sh" ]]; then
     source "${__COMMON_DIR}/observability.sh"
+fi
+if [[ -f "${__COMMON_DIR}/alerts.sh" ]]; then
+    source "${__COMMON_DIR}/alerts.sh"
 fi
 : # ensure common.sh always sources with status 0

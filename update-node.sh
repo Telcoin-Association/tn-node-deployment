@@ -20,9 +20,11 @@
 # file is backed up first and restored if the update rolls back.
 #
 # Before APPLY stops a node that is voting in the current committee, it waits
-# for the epoch to close and settle when the boundary is within five minutes,
-# so the node is not down for the epoch change. The wait is capped at 30
-# minutes. A rollback restart never waits.
+# for the epoch to close and settle when the boundary is within the restart
+# margin (five minutes for the six-hour epochs of mainnet and testnet; derived
+# from the epoch length, up to 15 minutes), so the node is not down for the epoch
+# change. The wait is capped at TN_EPOCH_WAIT_MAX (30 minutes by default). A
+# rollback restart never waits.
 #
 # ONE-WAY UPDATES: when the node runs a release older than v0.16.0 and the
 # target is v0.16.0 or newer (or a branch or a commit), APPLY cannot be undone
@@ -48,6 +50,7 @@
 #   sudo bash update-node.sh --allow-downgrade  # testnet: allow a release older
 #                                             # than the running one
 #
+# network-gated: the testnet tag form, beside the mainnet one
 # Updates take release tags only (vX.Y.Z-adiri on testnet, vX.Y.Z on mainnet),
 # never a branch or a commit id. A source build checks the tag out (refused when
 # origin's tag moved, or when its signature is bad), builds it as the
@@ -89,7 +92,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
         tn_restore_backup tn_install_root_binary tn_release_stage tn_source_build \
         tn_docker_resolve_ref tn_docker_local_digest tn_release_tags_sort tn_release_tag_newer \
         tn_release_newest_tag tn_registry_tags tn_release_tag_final tn_release_tag_grammar \
-        _tn_guard_network >/dev/null; then
+        _tn_guard_network tn_docker_image_network_ok >/dev/null; then
     _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this update-node.sh: run update-scripts.sh and try again."
     case " $* " in
         *" --json "*) printf '{"event":"error","msg":"%s"}\n{"event":"done","ok":false,"msg":"%s"}\n' "$_tn_old" "$_tn_old" ;;
@@ -107,7 +110,7 @@ unset _tn_old
 # point of the two-phase design. Restore the intended semantics.
 set +e
 
-readonly SCRIPT_VERSION="2.0.1"
+readonly SCRIPT_VERSION="2.1.0"
 # GAR_TAGS_URL is provided by lib/common.sh (sourced above). Re-declaring it
 # readonly here threw "GAR_TAGS_URL: readonly variable" to stderr, which the UI
 # surfaced as "update checks aren't available on this host".
@@ -129,9 +132,15 @@ else
 fi
 readonly VERIFY_TIMEOUT_EXPLICIT
 # The newest release that migrates the consensus store one way on its first
-# start (v0.16.0: epoch packs v1 -> v2); older releases cannot open the
-# migrated data dir. Raise it when a release does.
-readonly STORAGE_MIGRATION_FLOOR="0.16.0"
+# start, per network; older releases cannot open the migrated data dir. Raise a
+# network's floor when one of its releases does. Testnet: v0.16.0 (epoch packs
+# v1 -> v2). Mainnet and devnet: none (empty), as MIN_SOURCE_VERSION_MAINNET is
+# for the source floor: their version lines start below v0.16.0 and no release
+# of theirs migrates one way yet, so no update there is one way and no downgrade
+# is refused for the storage reason. Read through storage_migration_floor.
+readonly STORAGE_MIGRATION_FLOOR_TESTNET="0.16.0"
+readonly STORAGE_MIGRATION_FLOOR_MAINNET=""
+readonly STORAGE_MIGRATION_FLOOR_DEVNET=""
 # Health window for such an update: the first start migrates before it answers.
 readonly STORAGE_MIGRATION_VERIFY_SECONDS=600
 # Set by storage_migration_begin on each apply: true when this update is one way.
@@ -282,7 +291,7 @@ existing_update_refusal() {
     path="$(existing_binary_path)"
     svc="${SERVICE_NAME:-telcoin}"
     if [[ "$JSON_MODE" == "true" ]]; then
-        json_event error "install method 'existing': this node runs ${path}, which update-node.sh does not replace. To update it, stop the node, replace that file with the new release binary and start the node again (systemctl stop ${svc}; install -m 0755 <new binary> ${path}; systemctl start ${svc}). On a committee node, run only the install step while the node runs, then restart with edit-config.sh, menu item 12 (Restart node), which waits for the epoch boundary. Check a downloaded release first: gpgv --keyring <the keys in lib/release-keys, gpg --dearmor> SHA256SUMS.asc SHA256SUMS; sha256sum -c --ignore-missing SHA256SUMS; then the binary's --version must name the release."
+        json_event error "install method 'existing': this node runs ${path}, which update-node.sh does not replace. To update it, stop the node, replace that file with the new release binary and start the node again (systemctl stop ${svc}; install -m 0755 <new binary> ${path}; systemctl start ${svc}). On a committee node, run only the install step while the node runs, then restart with edit-config.sh, menu item 14 (Restart node), which waits for the epoch boundary. Check a downloaded release first: gpgv --keyring <the keys in lib/release-keys, gpg --dearmor> SHA256SUMS.asc SHA256SUMS; sha256sum -c --ignore-missing SHA256SUMS; then the binary's --version must name the release."
         return 0
     fi
     print_error "Install method is 'existing': this node runs ${path}, which update-node.sh does not replace."
@@ -291,8 +300,9 @@ existing_update_refusal() {
     print_info "  sudo install -m 0755 <new binary> ${path}"
     print_info "  sudo systemctl start ${svc}"
     print_info "On a committee node, run only the install line instead (it replaces the file while the"
-    print_info "node runs), then restart with edit-config.sh, menu item 12 (Restart node), which waits"
+    print_info "node runs), then restart with edit-config.sh, menu item 14 (Restart node), which waits"
     print_info "for the epoch boundary: sudo bash ~/telcoin-node-scripts/edit-config.sh"
+    # network-gated: example tag in the testnet form, shown on every network
     print_info "Check a release before installing it (TAG is the release, such as vX.Y.Z-adiri):"
     print_info "  base=${TN_RELEASE_BASE_URL:-https://github.com/Telcoin-Association/telcoin-network/releases/download}/TAG"
     print_info "  curl -fsSL -O \"\$base/SHA256SUMS\" -O \"\$base/SHA256SUMS.asc\" -O \"\$base/telcoin-network-TAG-x86_64-unknown-linux-gnu.tar.gz\""
@@ -914,6 +924,7 @@ apply_root_dir_refusal() {
 # observer_strip_needed <file> <target text...> -- rc 0 when the launch file
 # <file> still passes the retired --observer flag AND the update target (a tag,
 # image or version string; see tn_target_drops_observer) no longer accepts it.
+# network-gated: release history of --observer; no endpoint
 # v0.15.0-adiri takes the flag as a hidden no-op and later releases refuse to
 # start with it, so the apply paths strip it before restarting. No output.
 observer_strip_needed() {
@@ -959,28 +970,50 @@ installed_source_ref() {
     return 0
 }
 
-# storage_migrating_upgrade <running> <target> -- rc 0 when going from <running>
-# to <target> crosses STORAGE_MIGRATION_FLOOR one way: the target is at or above
-# it (no x.y.z, such as a branch or a commit, counts as newest) and the running
-# release is below it (no x.y.z counts as unknown, and so as older). Each side is
-# judged on its first x.y.z, so pass docker images as name:tag (${image##*/}) or
-# a registry host:port would be read as a version.
+# storage_migration_floor [NETWORK] -- print NETWORK's storage migration floor
+# (x.y.z: STORAGE_MIGRATION_FLOOR_TESTNET, _MAINNET or _DEVNET), or an empty line
+# when NETWORK has none. NETWORK defaults to this node's (_tn_guard_network:
+# detect_network, or NETWORK=devnet in .node-meta). A node whose network cannot
+# be told takes the testnet floor, the one every network had before the floors
+# were split. Always rc 0.
+storage_migration_floor() {
+    local net="${1:-}"
+    if [[ -z "$net" ]]; then
+        net="$(_tn_guard_network 2>/dev/null)" || net=""
+    fi
+    case "$net" in
+        mainnet) printf '%s\n' "$STORAGE_MIGRATION_FLOOR_MAINNET" ;;
+        devnet) printf '%s\n' "$STORAGE_MIGRATION_FLOOR_DEVNET" ;;
+        *) printf '%s\n' "$STORAGE_MIGRATION_FLOOR_TESTNET" ;;
+    esac
+}
+
+# storage_migrating_upgrade <running> <target> [NETWORK] -- rc 0 when going from
+# <running> to <target> crosses NETWORK's storage migration floor one way
+# (storage_migration_floor; NETWORK defaults to this node's): the target is at or
+# above it (no x.y.z, such as a branch or a commit, counts as newest) and the
+# running release is below it (no x.y.z counts as unknown, and so as older). A
+# network without a floor never has a one-way update (rc 1). Each side is judged
+# on its first x.y.z, so pass docker images as name:tag (${image##*/}) or a
+# registry host:port would be read as a version.
 storage_migrating_upgrade() {
-    local ver_re run_v new_v
+    local ver_re run_v new_v floor
     ver_re='([0-9]+\.[0-9]+\.[0-9]+)'
     run_v=""
     new_v=""
+    floor="$(storage_migration_floor "${3:-}")"
+    [[ -n "$floor" ]] || return 1
     if [[ "${2:-}" =~ $ver_re ]]; then
         new_v="${BASH_REMATCH[1]}"
     fi
-    if [[ -n "$new_v" ]] && ! version_gte "$new_v" "$STORAGE_MIGRATION_FLOOR"; then
+    if [[ -n "$new_v" ]] && ! version_gte "$new_v" "$floor"; then
         return 1
     fi
     if [[ "${1:-}" =~ $ver_re ]]; then
         run_v="${BASH_REMATCH[1]}"
     fi
     [[ -n "$run_v" ]] || return 0
-    ! version_gte "$run_v" "$STORAGE_MIGRATION_FLOOR"
+    ! version_gte "$run_v" "$floor"
 }
 
 # update_verify_window -- the post-restart health window in seconds: an explicit
@@ -1375,6 +1408,17 @@ update_wait_say() {
     return 0
 }
 
+# update_baseline_refresh -- after an apply that verified: make the host baseline
+# again (tn_host_baseline_refresh, a no-op without HOST_BASELINE=true in .node-meta
+# or with a lib/common.sh that lacks it). Its warnings are events in --json mode,
+# before the done event. Never fails.
+update_baseline_refresh() {
+    if declare -F tn_host_baseline_refresh >/dev/null 2>&1; then
+        tn_host_baseline_refresh update_wait_say
+    fi
+    return 0
+}
+
 # update_quorum_guard -- the committee check before a stop (tn_committee_down_guard):
 # rc 1 (with the reason) when stopping this node now would leave the committee one
 # member short of a halt, or the count cannot be made on a staked mainnet node.
@@ -1519,7 +1563,9 @@ docker_current_tag() {
 # digest. A release tag of NETWORK, alone or as <repo>:<tag> of the network's
 # repository, resolves to that release's digest (tn_docker_image_for_tag: the
 # signed release's IMAGE_DIGEST, else on testnet the registry's); a
-# <repo>@sha256:<digest> reference is taken as given. Sets DOCKER_TARGET_IMAGE and
+# <repo>@sha256:<digest> reference is taken as given, except on mainnet, where a
+# digest alone is taken only when .node-meta records it as the image of a mainnet
+# release this node installed. Sets DOCKER_TARGET_IMAGE and
 # DOCKER_TARGET_TAG (empty for a digest given alone), through
 # tn_docker_resolve_ref. rc 1, with the reason on stderr, for anything else:
 # another repository, a tag that is not a release tag of NETWORK, latest, a
@@ -1534,13 +1580,30 @@ docker_resolve_target() {
     return 0
 }
 
-# docker_pull_target IMAGE CURRENT TAG -- pull IMAGE (a digest reference) with the
-# log in a fresh file, check that Docker holds it under that digest (RepoDigests),
-# and write the pending state: OLD_IMAGE CURRENT, NEW_IMAGE IMAGE, PULLED_IMAGE_ID,
-# OLD_REF/NEW_REF the running and target release tags when known. rc 1 with the
-# reason reported (update_wait_say) on any failure.
+# docker_floor_check ARG NETWORK -- update_floor_check for a Docker target, before
+# it is resolved or pulled: a release tag, alone or as <repo>:<tag>, as given; a
+# digest given alone by the release .node-meta records for it
+# (tn_docker_recorded_tag). Anything else is not checked here: tn_docker_resolve_ref
+# refuses what is not a release tag of NETWORK, and warns that the check cannot be
+# applied to a digest with no recorded release.
+docker_floor_check() {
+    local ref="${1:-}"
+    if [[ "$ref" == *@sha256:* ]]; then
+        ref="$(tn_docker_recorded_tag "$ref" 2>/dev/null)" || return 0
+    fi
+    tn_release_tag_ok "${2:-}" "${ref##*:}" || return 0
+    update_floor_check "$ref" "${2:-}"
+}
+
+# docker_pull_target IMAGE CURRENT TAG NETWORK -- pull IMAGE (a digest reference)
+# with the log in a fresh file, check that Docker holds it under that digest
+# (RepoDigests) and that its binary was built for NETWORK
+# (tn_docker_image_network_ok), and write the pending state: OLD_IMAGE CURRENT,
+# NEW_IMAGE IMAGE, PULLED_IMAGE_ID, OLD_REF/NEW_REF the running and target
+# release tags when known. rc 1 with the reason reported (update_wait_say) on any
+# failure; nothing is written to the pending state then.
 docker_pull_target() {
-    local img="$1" current="$2" tag="${3:-}" old_tag pull_log pulled_id state
+    local img="$1" current="$2" tag="${3:-}" net="${4:-}" old_tag pull_log pulled_id state
     if ! pull_log="$(build_log_file)"; then
         update_wait_say warn "Could not create a log file for the image pull; nothing pulled."
         return 1
@@ -1554,6 +1617,10 @@ docker_pull_target() {
     rm -f -- "$pull_log"
     if ! tn_docker_holds_digest "$img"; then
         update_wait_say warn "Docker does not hold ${img} under that digest after the pull (digest mismatch); nothing was prepared."
+        return 1
+    fi
+    if ! tn_docker_image_network_ok "$net" "$img" update_wait_say; then
+        update_wait_say warn "The image ${img} is not a ${net:-known network} image (see above); nothing was prepared and the node was not touched."
         return 1
     fi
     # Image ID of what was pulled: apply checks the restarted container runs it.
@@ -1589,6 +1656,7 @@ prepare_docker_update() {
         print_error "Could not read current Docker image from the ${SERVICE_NAME} launch config (wrapper or unit)"
         return 1
     }
+    docker_floor_check "$arg" "$net" || return 1
     docker_resolve_target "$arg" "$net" || return 1
     update_downgrade_check "$(docker_current_tag "$current")" "$DOCKER_TARGET_TAG" || return 1
     print_info "Current image: ${current}"
@@ -1598,23 +1666,24 @@ prepare_docker_update() {
         print_info "Cancelled."
         return 1
     fi
-    docker_pull_target "$DOCKER_TARGET_IMAGE" "$current" "$DOCKER_TARGET_TAG" || return 1
+    docker_pull_target "$DOCKER_TARGET_IMAGE" "$current" "$DOCKER_TARGET_TAG" "$net" || return 1
     print_ok "Image pulled. Service still running on ${current}."
     print_ok "Pending update saved: $(pending_state_path)"
 }
 
 # docker_record_meta IMAGE TAG -- after a verified Docker update, .node-meta names
 # what runs: DOCKER_IMAGE IMAGE, DOCKER_IMAGE_DIGEST its digest, RELEASE_TAG TAG
-# (removed when TAG is empty: an image given by digest alone). A failed write warns.
+# (none when TAG is empty: an image given by digest alone). The old RELEASE_TAG goes
+# first and TAG last, each write only once the one before it succeeded, so a failed
+# or interrupted write leaves the digest with no release (unknown), never with the
+# release of another image. A failed write warns.
 docker_record_meta() {
     local ok=true
-    meta_set DOCKER_IMAGE "${1:-}" >/dev/null 2>&1 || ok=false
-    meta_set DOCKER_IMAGE_DIGEST "${1##*@}" >/dev/null 2>&1 || ok=false
-    if [[ -n "${2:-}" ]]; then
-        meta_set RELEASE_TAG "$2" >/dev/null 2>&1 || ok=false
-    else
-        meta_unset RELEASE_TAG >/dev/null 2>&1 || ok=false
-    fi
+    meta_unset RELEASE_TAG >/dev/null 2>&1 \
+        && meta_set DOCKER_IMAGE "${1:-}" >/dev/null 2>&1 \
+        && meta_set DOCKER_IMAGE_DIGEST "${1##*@}" >/dev/null 2>&1 \
+        && { [[ -z "${2:-}" ]] || meta_set RELEASE_TAG "$2" >/dev/null 2>&1; } \
+        || ok=false
     if [[ "$ok" != "true" ]]; then
         update_wait_say warn "Could not record the new image in .node-meta (DOCKER_IMAGE, DOCKER_IMAGE_DIGEST, RELEASE_TAG)."
     fi
@@ -1692,6 +1761,7 @@ apply_docker_update() {
     if verify_health_after_restart && verify_running_image_id "$pulled_image_id" && verify_consensus_participation; then
         clear_pending_state
         docker_record_meta "$new_image" "$new_ref"
+        update_baseline_refresh
         if ! systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
             print_warn "Service is not enabled for auto-start on reboot."
             print_info "  Enable it: systemctl enable ${SERVICE_NAME}"
@@ -1764,12 +1834,14 @@ update_fail() {
 # form compares as that final). Either without an x.y.z: rc 0, nothing to compare;
 # a RUNNING without one, when TARGET has one, is said in a warning. A downgrade is refused
 # (rc 1): an error event and a done event carrying "downgrade":true and
-# "storage_downgrade" (true when RUNNING is at or above STORAGE_MIGRATION_FLOOR and
-# TARGET below it: the older release cannot open the migrated data dir) in --json
-# mode, [ERROR] lines otherwise. --allow-downgrade, which only an interactive run on
+# "storage_downgrade" (true when RUNNING is at or above the node's storage
+# migration floor, storage_migration_floor, and TARGET below it: the older
+# release cannot open the migrated data dir; never on a network without a floor,
+# mainnet and devnet today) in --json mode, [ERROR] lines otherwise.
+# --allow-downgrade, which only an interactive run on
 # testnet takes, lets it through with a warning.
 update_downgrade_check() {
-    local run="${1:-}" new="${2:-}" re rv nv rt nt storage=false msg net
+    local run="${1:-}" new="${2:-}" re rv nv rt nt storage=false msg net floor
     re='([0-9]+[.][0-9]+[.][0-9]+)'
     if [[ ! "$run" =~ $re ]]; then
         if [[ "$new" =~ $re ]]; then
@@ -1787,20 +1859,21 @@ update_downgrade_check() {
     if ! tn_release_tag_newer "$rt" "$nt"; then
         return 0
     fi
-    if version_gte "$rv" "$STORAGE_MIGRATION_FLOOR" && ! version_gte "$nv" "$STORAGE_MIGRATION_FLOOR"; then
+    floor="$(storage_migration_floor)"
+    if [[ -n "$floor" ]] && version_gte "$rv" "$floor" && ! version_gte "$nv" "$floor"; then
         storage=true
     fi
     net="$(detect_network 2>/dev/null)" || net=""
     if [[ "$ALLOW_DOWNGRADE" == "true" && "$JSON_MODE" != "true" && "$net" == "testnet" ]]; then
         print_warn "Downgrade from ${run} to ${new}, allowed by --allow-downgrade."
         if [[ "$storage" == "true" ]]; then
-            print_warn "${new} cannot open a data dir that v${STORAGE_MIGRATION_FLOOR} or later has migrated: restore a snapshot taken before that migration first."
+            print_warn "${new} cannot open a data dir that v${floor} or later has migrated: restore a snapshot taken before that migration first."
         fi
         return 0
     fi
     msg="${new} is older than the running ${run}: downgrades are refused."
     if [[ "$storage" == "true" ]]; then
-        msg="${msg} ${new} is below v${STORAGE_MIGRATION_FLOOR} and cannot open the data dir the running release has migrated."
+        msg="${msg} ${new} is below v${floor} and cannot open the data dir the running release has migrated."
     fi
     msg="${msg} Nothing was changed."
     if [[ "$JSON_MODE" == "true" ]]; then
@@ -1916,6 +1989,7 @@ binary_prepare() {
         update_fail "${refusal} Nothing was changed."
         return 1
     fi
+    update_floor_check "$tag" "$net" || return 1
     running="$(installed_source_ref)"
     update_downgrade_check "$running" "$tag" || return 1
     update_wait_say log "Running release: ${running:-unknown}; target: ${tag}"
@@ -1972,6 +2046,7 @@ prepare_source_build() {
     local new_ref="$1" network cargo_features
     print_header "Prepare Update -- Source Build"
 
+    # network-gated: documents the testnet build feature (tn_cargo_features_for)
     # The network decides the build features (adiri on testnet, none on
     # mainnet) and which tags are releases. It must be known before the checkout
     # moves or cargo runs: a build for the wrong network refuses to start on
@@ -1984,6 +2059,7 @@ prepare_source_build() {
     if [[ -n "$cargo_features" ]]; then
         print_info "Network: ${network} -- building with ${cargo_features}"
     else
+        # network-gated: message of a mainnet build: names the testnet feature it leaves out
         print_info "Network: ${network} -- building without the adiri feature"
     fi
     binary_prepare source "$new_ref" "$network" || return 1
@@ -2193,6 +2269,7 @@ apply_source_update() {
         # Record the now-running release so the UI reports the installed binary's
         # version (not the source checkout, which has moved to new_ref).
         record_installed_ref "$new_ref"
+        update_baseline_refresh
         if ! systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
             print_warn "Service is not enabled for auto-start on reboot."
             print_info "  Enable it: systemctl enable ${SERVICE_NAME}"
@@ -2707,6 +2784,22 @@ update_ref_refusal() {
     return 1
 }
 
+# update_floor_check <ref> <network> -- hold an update target to the oldest
+# release these scripts support on <network> (tn_ref_min_check): rc 1, with the
+# reason reported (update_fail), when it is older; a warning when it cannot be
+# checked (not a release tag); rc 0 otherwise. Every prepare calls it once the
+# target is final, before anything is fetched, built or written.
+update_floor_check() {
+    local msg="" rc=0
+    msg="$(tn_ref_min_check "${1:-}" "${2:-}")" || rc=$?
+    case "$rc" in
+        0) ;;
+        1) update_fail "${msg} Nothing was changed."; return 1 ;;
+        *) update_wait_say warn "$msg" ;;
+    esac
+    return 0
+}
+
 # latest_source_ref [DIR] -- the newest final release tag of this node's network on
 # origin, for --check (source installs; DIR defaults to TN_SOURCE_DIR). origin's tags are fetched into refs/tn-remote-tags/
 # (pruned; local tags are never moved), and the highest one by tn_release_tag_key
@@ -2933,6 +3026,7 @@ json_prepare_docker() {
     # A release tag (alone or on this network's repository) resolves to its digest
     # (the signed release's IMAGE_DIGEST); a digest reference must be this network's
     # repository. Nothing else is pulled. Devnet takes a digest reference only.
+    docker_floor_check "$arg" "$net" || return 1
     if ! docker_resolve_target "$arg" "$net"; then
         if [[ "$net" == "devnet" ]]; then
             json_event error "image refused: ${arg} is not a devnet image by digest (<repository>@sha256:<digest>; devnet has no signed releases); nothing pulled"; return 1
@@ -2941,7 +3035,7 @@ json_prepare_docker() {
     fi
     cur_tag="$(docker_current_tag "$current")"
     update_downgrade_check "$cur_tag" "$DOCKER_TARGET_TAG" || return 1
-    if ! docker_pull_target "$DOCKER_TARGET_IMAGE" "$current" "$DOCKER_TARGET_TAG"; then
+    if ! docker_pull_target "$DOCKER_TARGET_IMAGE" "$current" "$DOCKER_TARGET_TAG" "$net"; then
         json_event error "the image ${DOCKER_TARGET_IMAGE} was not prepared (see the warning above)"; return 1
     fi
     # The UI cannot ask at apply time, so a one-way target is announced here.
@@ -3073,6 +3167,7 @@ json_apply_source() {
         # Record the now-running release so the UI reports the installed binary's
         # version (not the source checkout, which has moved to new_ref).
         record_installed_ref "$new_ref"
+        update_baseline_refresh
         json_emit "{\"event\":\"done\",\"ok\":true,\"phase\":\"apply\",\"new_ref\":\"$(json_escape "$new_ref")\",\"new_version\":\"$(json_escape "$new_version")\"$(update_vote_field)}"
         return 0
     fi
@@ -3173,6 +3268,7 @@ json_apply_docker() {
     if [[ "$verify_ok" == "true" ]]; then
         clear_pending_state
         docker_record_meta "$new_image" "$new_ref"
+        update_baseline_refresh
         json_emit "{\"event\":\"done\",\"ok\":true,\"phase\":\"apply\",\"new_image\":\"$(json_escape "$new_image")\"$(update_vote_field)}"
         return 0
     fi
@@ -3325,8 +3421,9 @@ main() {
             --allow-dirty) ALLOW_DIRTY=true; shift ;;
             --allow-downgrade) ALLOW_DOWNGRADE=true; shift ;;
             -h|--help)
-                # The header block only: everything up to its closing rule.
-                awk 'NR == 1 { next } /^# =+$/ { if (++rules == 2) exit; next } { sub(/^# ?/, ""); print }' "$0"
+                # The header block only: everything up to its closing rule, without
+                # the network-gated: marker lines (tools/check-network-hits.sh).
+                awk 'NR == 1 { next } /^# =+$/ { if (++rules == 2) exit; next } /^#[ \t]*network-gated:/ { next } { sub(/^# ?/, ""); print }' "$0"
                 if [[ "$JSON_MODE" == "true" ]]; then
                     json_emit '{"event":"done","ok":true,"phase":"help","msg":"usage printed on stderr"}'
                 fi

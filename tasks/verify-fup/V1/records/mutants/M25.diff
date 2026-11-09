@@ -1,0 +1,453 @@
+600,603d599
+<         mainnet)
+<             repo="$(tn_docker_repo_for mainnet 2>/dev/null)" || repo="<repository>"
+<             printf '%s@sha256:<digest>' "$repo"
+<             ;;
+3002,3448d2997
+<         mainnet)
+<             # Refused while this release does not offer mainnet (tn_mainnet_enabled);
+<             # run_json_mode calls this first, before anything touches the box.
+<             tn_mainnet_enabled \
+<                 || setup_fail "Mainnet is not enabled in this script release (lib/common.sh TN_MAINNET_ENABLED); nothing on this host was changed."
+<             NETWORK="mainnet"; CHAIN_ID="$MAINNET_CHAIN_ID"; CHAIN_NAME="$MAINNET_CHAIN_NAME"
+<             RPC_URL="${MAINNET_RPC_URL:-}"; EXPLORER_URL="${MAINNET_EXPLORER:-}" ;;
+<         devnet)
+<             NETWORK="devnet"; CHAIN_ID="$DEVNET_CHAIN_ID"; CHAIN_NAME="$DEVNET_CHAIN_NAME"
+<             RPC_URL="${DEVNET_RPC_URL:-}"; EXPLORER_URL="${DEVNET_EXPLORER:-}" ;;
+<         *) setup_fail "unsupported network: ${1} (expected testnet, mainnet or devnet)" ;;
+<     esac
+< }
+< 
+< # json_refuse_installed PHASE -- a --json keygen or finalize never runs over an
+< # installed node (its unit exists): nothing is written, the run stops. run_json_mode
+< # asks before it takes the lock, and the phase asks again under the lock.
+< json_refuse_installed() {
+<     local unit="${TN_ROOT_PREFIX:-}/etc/systemd/system/${SERVICE_NAME}.service"
+<     if [[ -e "$unit" || -L "$unit" ]]; then
+<         setup_fail "A node is already installed (${unit} exists), so --phase=${1} does not run. Use edit-config.sh to change it, or remove-node.sh first."
+<     fi
+<     return 0
+< }
+< 
+< json_phase_keygen() {
+<     json_refuse_installed keygen
+<     json_event step "Running preflight checks and installing dependencies"
+<     step_preflight
+<     json_event step "Applying node configuration"
+<     step_config
+<     json_event step "Creating system infrastructure"
+<     step_create_infrastructure
+<     json_event step "Generating node keys"
+<     step_generate_keys
+< 
+<     local info="${DATA_DIR}/node-info.yaml" info_content=""
+<     [[ -f "$info" ]] && info_content="$(json_escape "$(cat "$info")")"
+<     json_done "{\"event\":\"done\",\"ok\":true,\"phase\":\"keygen\",\"node_type\":\"observer\",\"node_info_path\":\"$(json_escape "$info")\",\"keys_dir\":\"$(json_escape "${DATA_DIR}/node-keys")\",\"node_info\":\"${info_content}\",\"msg\":\"keys generated -- BACK THEM UP before finalizing\"}"
+< }
+< 
+< # finalize_same_as_keygen FLAG VALUE RECORDED -- stop when a finalize flag and the
+< # value keygen recorded in .node-meta are both set and differ: the keys, the image or
+< # binary and the data dir keygen used are the ones finalize must run.
+< finalize_same_as_keygen() {
+<     if [[ -n "$2" && -n "$3" && "$2" != "$3" ]]; then
+<         setup_fail "--${1} ${2} differs from ${3}, which keygen recorded in ${CONFIG_DIR}/.node-meta; finalize with the keygen value (or leave the flag out), or run keygen again. Nothing was changed."
+<     fi
+< }
+< 
+< # Finalize is a new process. The install method, the data dir and the docker image or
+< # binary come from its flags or, for any the flags leave out, from what keygen recorded
+< # in .node-meta; a flag that differs from the recorded value stops it. --data-dir is
+< # compared only when it is not the default, which is what an absent flag leaves.
+< # Stops when the node would have nothing to run, before anything is written.
+< finalize_install_inputs() {
+<     local meta="${CONFIG_DIR}/.node-meta" rec=""
+<     # The passphrase form keygen recorded wins over a flag: the stored file is that one.
+<     local pm=""
+<     setup_meta_read pm PASSPHRASE_METHOD "$meta"
+<     [[ "$pm" == "loadcredential" ]] && pm=stdin
+<     PASSPHRASE_METHOD="${pm:-$PASSPHRASE_METHOD}"
+<     case "$PASSPHRASE_METHOD" in
+<         credential) [[ -f "${CONFIG_DIR}/bls-passphrase.cred" ]] || setup_fail "PASSPHRASE_METHOD=credential but ${CONFIG_DIR}/bls-passphrase.cred is missing: run --phase=keygen first." ;;
+<         stdin) [[ -f "${CONFIG_DIR}/bls-passphrase" ]] || setup_fail "PASSPHRASE_METHOD=stdin but ${CONFIG_DIR}/bls-passphrase is missing: run --phase=keygen first." ;;
+<         *) setup_fail "No stored BLS passphrase recorded in ${meta} (PASSPHRASE_METHOD): run --phase=keygen first." ;;
+<     esac
+<     setup_meta_read rec INSTALL_METHOD "$meta"
+<     finalize_same_as_keygen install-method "$INSTALL_METHOD" "$rec"
+<     INSTALL_METHOD="${INSTALL_METHOD:-$rec}"
+<     setup_meta_read rec DATA_DIR "$meta"
+<     if [[ "$DATA_DIR" != "$DEFAULT_DATA_DIR" ]]; then
+<         finalize_same_as_keygen data-dir "$DATA_DIR" "$rec"
+<     fi
+<     DATA_DIR="${rec:-$DATA_DIR}"
+<     if ! validate_setup_path "$DATA_DIR"; then
+<         setup_fail "DATA_DIR=${DATA_DIR} in ${meta} is not an absolute path of letters, digits and . _ / - only."
+<     fi
+<     # Values read back from .node-meta get the checks the flags got: the image and the
+<     # binary path go into the root-run start wrapper.
+<     case "$INSTALL_METHOD" in
+<         ""|source|docker|existing|release) ;;
+<         *) setup_fail "INSTALL_METHOD=${INSTALL_METHOD} in ${meta} is not source, release, docker or existing." ;;
+<     esac
+<     if [[ "$INSTALL_METHOD" == "docker" ]]; then
+<         setup_meta_read rec DOCKER_IMAGE "$meta"
+<         finalize_same_as_keygen docker-image "$DOCKER_IMAGE" "$rec"
+<         DOCKER_IMAGE="${DOCKER_IMAGE:-$rec}"
+<         if [[ -z "$DOCKER_IMAGE" ]]; then
+<             setup_fail "No docker image to run: pass --docker-image, or run --phase=keygen first (it records the image in ${meta})."
+<         fi
+<         if ! validate_docker_image "$DOCKER_IMAGE"; then
+<             setup_fail "DOCKER_IMAGE=${DOCKER_IMAGE} in ${meta} is not an image reference such as $(_setup_image_example); pass --docker-image."
+<         fi
+<         return 0
+<     fi
+<     setup_meta_read rec BINARY_PATH "$meta"
+<     finalize_same_as_keygen binary-path "$BINARY_PATH" "$rec"
+<     BINARY_PATH="${BINARY_PATH:-$rec}"
+<     if [[ -n "$BINARY_PATH" ]] && ! validate_setup_path "$BINARY_PATH"; then
+<         setup_fail "BINARY_PATH=${BINARY_PATH} in ${meta} may hold only letters, digits and . _ / -, because the start wrapper runs it; pass --binary-path."
+<     fi
+<     if [[ "$INSTALL_METHOD" == "existing" ]]; then
+<         if [[ -z "$BINARY_PATH" ]]; then
+<             setup_fail "No node binary to run: pass --binary-path PATH, or run --phase=keygen first (it records the binary in ${meta})."
+<         fi
+<         check_binary_path
+<     fi
+<     return 0
+< }
+< 
+< json_phase_finalize() {
+<     local v hb=false
+<     json_refuse_installed finalize
+<     finalize_install_inputs
+<     # The node binds to these; an empty one would start a node with no listener.
+<     for v in "$PRIMARY_LISTENER_MULTIADDR" "$WORKER_LISTENER_MULTIADDR"; do
+<         if [[ -z "$v" ]] || ! validate_multiaddr "$v"; then
+<             setup_fail "finalize needs --listener-primary and --listener-worker, each a /ip4/<addr>/udp/<port>/quic-v1 (or /ip6/...) multiaddr; got '${v}'."
+<         fi
+<     done
+<     finalize_node_extra_flags
+<     json_event step "Writing configuration"
+<     step_write_config
+<     json_event step "Creating service and starting node"
+<     step_create_service
+<     # install-caddy.sh (step_public_rpc) takes the lock itself.
+<     setup_release_lock
+<     if [[ -n "$PUBLIC_RPC_DOMAIN" ]]; then
+<         json_event step "Enabling public RPC for ${PUBLIC_RPC_DOMAIN}"
+<         step_public_rpc
+<     fi
+<     step_host_baseline
+<     if [[ "$HOST_BASELINE_STATE" == "installed" ]]; then
+<         hb=true
+<     fi
+<     json_done "{\"event\":\"done\",\"ok\":true,\"phase\":\"finalize\",\"node_type\":\"observer\",\"service\":\"${SERVICE_NAME}\",\"rpc_port\":\"${RPC_PORT}\",\"operator_guide\":\"$(json_escape "$TN_OPERATOR_GUIDE_URL")\",\"public_rpc\":$(public_rpc_json),\"host_baseline\":${hb},\"msg\":\"${SERVICE_NAME} finalized and started -- following consensus as a full node; staking to validate is optional (see docs)\"}"
+< }
+< 
+< # The public RPC this run set up, as finalize's done event carries it: "enabled" is
+< # true only when step_public_rpc finished the enable (Caddy serves the domain and
+< # node-info.yaml advertises it); domain, http and ws are the configured values
+< # (.node-meta PUBLIC_RPC_DOMAIN, PUBLIC_RPC_URL, PUBLIC_WS_URL), null when unset.
+< public_rpc_json() {
+<     local enabled=false
+<     if [[ "$PUBLIC_RPC_STATE" == "enabled" ]]; then
+<         enabled=true
+<     fi
+<     printf '{"enabled":%s,"domain":%s,"http":%s,"ws":%s}' "$enabled" \
+<         "$(json_str_or_null "$PUBLIC_RPC_DOMAIN")" \
+<         "$(json_str_or_null "$PUBLIC_RPC_URL")" \
+<         "$(json_str_or_null "$PUBLIC_WS_URL")"
+< }
+< 
+< # The install inputs, checked before check_root so a bad one stops the run before it
+< # touches the box: the install method (keygen needs one; finalize can read keygen's
+< # back from .node-meta), --build-ref (keygen of a source install needs one) and
+< # --docker-image, both held to the network's oldest supported release.
+< json_check_install_flags() {
+<     case "$INSTALL_METHOD" in
+<         ""|source|release|docker|existing) ;;
+<         *) setup_fail "unknown --install-method ${INSTALL_METHOD} (expected source, release, docker or existing)" ;;
+<     esac
+<     if [[ "$JSON_PHASE" == "keygen" && -z "$INSTALL_METHOD" ]]; then
+<         setup_fail "--install-method is missing (expected source, release, docker or existing)"
+<     fi
+<     # Devnet has no signed releases, so nothing there is installed from a release
+<     # tag: --release-tag is refused outright, and so are the source and release
+<     # installs that need one. A devnet node runs its image by digest (--docker-image
+<     # <repository>@sha256:<digest>) or an existing binary. All refused here, before
+<     # anything touches the box (Docker's apt repository included).
+<     if [[ "$NETWORK" == "devnet" ]]; then
+<         if [[ -n "$RELEASE_TAG" ]]; then
+<             setup_fail "--release-tag ${RELEASE_TAG} is refused on devnet: devnet has no signed releases. Run the devnet image by digest instead: --install-method docker --docker-image $(_setup_image_example). Nothing on this host was changed."
+<         fi
+<         if [[ "$JSON_PHASE" == "keygen" ]] && [[ "$INSTALL_METHOD" == "source" || "$INSTALL_METHOD" == "release" ]]; then
+<             setup_fail "--install-method ${INSTALL_METHOD} is refused on devnet: it needs a signed release, and devnet has none. Use --install-method docker --docker-image $(_setup_image_example), or --install-method existing. Nothing on this host was changed."
+<         fi
+<         if [[ "$JSON_PHASE" == "keygen" && "$INSTALL_METHOD" == "docker" && -z "$DOCKER_IMAGE" ]]; then
+<             setup_fail "A devnet Docker install needs --docker-image $(_setup_image_example): devnet has no signed release to take the newest image from. Nothing on this host was changed."
+<         fi
+<     fi
+<     if [[ "$JSON_PHASE" == "keygen" && -z "$RELEASE_TAG" ]] && [[ "$INSTALL_METHOD" == "source" || "$INSTALL_METHOD" == "release" ]]; then
+<         setup_fail "No --release-tag (or --build-ref) supplied for a ${INSTALL_METHOD} install."
+<     fi
+<     # Source builds and release installs take a release tag of the network only: no
+<     # branch, no commit id (tn_release_tag_ok).
+<     if [[ -n "$RELEASE_TAG" ]]; then
+<         if ! tn_release_tag_ok "$NETWORK" "$RELEASE_TAG"; then
+<             setup_fail "${RELEASE_TAG} is not a ${NETWORK} release tag ($(tn_release_tag_grammar)); branches and commit ids are refused."
+<         fi
+<         check_release_floor "$RELEASE_TAG"
+<     fi
+<     # Docker on a network with no image repository, or on mainnet before a mainnet
+<     # release can be verified, is refused here, before anything touches the box.
+<     if [[ "$INSTALL_METHOD" == "docker" ]] && ! tn_docker_network_ok "$NETWORK"; then
+<         setup_fail "A Docker install is refused on ${NETWORK} (see above); nothing on this host was changed."
+<     fi
+<     if [[ -n "$DOCKER_IMAGE" ]]; then
+<         if [[ -n "$RELEASE_TAG" ]]; then
+<             setup_fail "Give --docker-image or --release-tag, not both."
+<         fi
+<         if ! validate_docker_image "$DOCKER_IMAGE" "$NETWORK"; then
+<             if [[ "$NETWORK" == "devnet" ]]; then
+<                 setup_fail "invalid --docker-image ${DOCKER_IMAGE} -- give a devnet image by digest (<repository>@sha256:<digest>, the repository one of: ${TN_DEVNET_IMAGE_REPOS:-}), such as $(_setup_image_example)"
+<             fi
+<             setup_fail "invalid --docker-image ${DOCKER_IMAGE} -- give this network's image by digest (<repository>@sha256:<digest>), such as $(_setup_image_example), or its release tag with --release-tag"
+<         fi
+<     fi
+<     return 0
+< }
+< 
+< # check_root for a --json run, which must say why it stops: check_root exits 1 with
+< # only an [ERROR] line on stderr, which would leave the UI a bare "setup exited early".
+< # So ask it in a subshell first, and when it says no (exit 1), send the reason as an
+< # error event before the done, as edit-config's edit_require_root does. Then the real
+< # check_root.
+< json_require_root() {
+<     local rc=0
+<     (check_root) >/dev/null 2>&1 || rc=$?
+<     if [[ "$rc" -eq 1 ]]; then
+<         setup_fail "setup-node.sh must run as root"
+<     fi
+<     check_root
+< }
+< 
+< # What a keygen needs and would otherwise find missing only in step_generate_keys, after
+< # the preflight (for a source install, a 20-40 minute build): the execution address, the
+< # four multiaddrs and the BLS passphrase (TN_SETUP_PASS, from --passphrase-stdin or
+< # TN_BLS_PASSPHRASE), which must pass tn_passphrase_ok for the network. The form of the
+< # others is checked in init_node_inputs; step_generate_keys keeps its own checks as a
+< # safety net. Finalize needs none of them.
+< json_check_keygen_inputs() {
+<     local pair flag var
+<     [[ "$JSON_PHASE" == "keygen" ]] || return 0
+<     if [[ -z "$VALIDATOR_ADDRESS" ]]; then
+<         setup_fail "--address is missing: keygen needs the node's execution address (0x followed by 40 hex digits)."
+<     fi
+<     for pair in --external-primary:PRIMARY_MULTIADDR --external-worker:WORKER_MULTIADDR \
+<                 --listener-primary:PRIMARY_LISTENER_MULTIADDR --listener-worker:WORKER_LISTENER_MULTIADDR; do
+<         flag="${pair%%:*}"
+<         var="${pair#*:}"
+<         if [[ -z "${!var}" ]]; then
+<             setup_fail "${flag} is missing: keygen needs all four multiaddrs (--external-primary, --external-worker, --listener-primary, --listener-worker)."
+<         fi
+<     done
+<     if [[ -z "$TN_SETUP_PASS" ]]; then
+<         setup_fail "No BLS key passphrase: keygen takes it on standard input with --passphrase-stdin, or from TN_BLS_PASSPHRASE."
+<     fi
+<     if ! tn_passphrase_ok "$TN_SETUP_PASS" "$NETWORK"; then
+<         setup_fail "$(setup_passphrase_rule "$NETWORK")"
+<     fi
+<     if [[ "$PASSPHRASE_METHOD" == "stdin" && "$NETWORK" != "testnet" && "$NETWORK" != "devnet" ]]; then
+<         setup_fail "--passphrase-method stdin is not taken on ${NETWORK}: the passphrase is kept only as an encrypted credential there."
+<     fi
+<     return 0
+< }
+< 
+< # Every input is checked before check_root, so a bad phase, network or release ref, or
+< # a keygen input left out, stops the run before it touches the box.
+< run_json_mode() {
+<     case "$JSON_PHASE" in
+<         keygen|finalize) ;;
+<         *) setup_fail "unknown or missing --phase (expected keygen|finalize)" ;;
+<     esac
+<     json_set_network "$JSON_NETWORK_INPUT"
+<     json_check_install_flags
+<     json_check_keygen_inputs
+<     json_require_root
+<     # An installed node is refused before the lock, whose layout migration would
+<     # otherwise change an older install first; the phase checks again under the lock.
+<     json_refuse_installed "$JSON_PHASE"
+<     setup_take_lock
+<     export TN_ASSUME_YES=true   # non-interactive: auto-accept confirms (no stdin)
+<     case "$JSON_PHASE" in
+<         keygen)   json_phase_keygen ;;
+<         finalize) json_phase_finalize ;;
+<     esac
+< }
+< 
+< # =============================================================================
+< # MAIN
+< # =============================================================================
+< 
+< main() {
+<     # TN_SETUP_PASS holds TN_BLS_PASSPHRASE's value, moved out of the environment
+<     # at the top of this file before any command ran.
+<     local arg
+<     # --json is found before anything prints: from here on stdout carries JSON
+<     # events only, and json_on_exit ends the run with a done event when nothing
+<     # else did (a missing value, a bad flag, not root, a failed step).
+<     for arg in "$@"; do
+<         if [[ "$arg" == "--json" ]]; then
+<             JSON_MODE=true
+<         fi
+<     done
+<     if json_mode; then
+<         json_setup_fds
+<     fi
+<     # json_on_exit owns the EXIT trap and releases the update lock (setup_take_lock).
+<     TN_EXIT_TRAP_OWNED=1
+<     trap json_on_exit EXIT
+<     # A signal ends the run through the EXIT trap with the usual status (128 +
+<     # the signal number), and a --json run's done event names the signal. A
+<     # trap runs once the current command returns.
+<     trap 'SETUP_SIGNAL=TERM; exit 143' TERM
+<     trap 'SETUP_SIGNAL=INT; exit 130' INT
+<     trap 'SETUP_SIGNAL=HUP; exit 129' HUP
+< 
+<     while [[ $# -gt 0 ]]; do
+<         # Every option below that ends in `shift 2` needs a value. As the last argument it
+<         # has none and `shift 2` fails (a silent exit under the inherited `set -e`), so
+<         # stop here with a clear message instead. No value of these starts with "-", so
+<         # such a word is the next option, not a value. (--rpc-public may stand alone.)
+<         case "$1" in
+<             --phase|--network|--install-method|--passphrase-method|--address|--build-ref|\
+<             --docker-image|--binary-path|--external-primary|--external-worker|--release-tag|\
+<             --listener-primary|--listener-worker|--public-ip|--public-rpc-url|\
+<             --public-ws-url|--rpc-http|--rpc-ws|--rpc-domain|--advertised-name|--data-dir|\
+<             --service-user|--service-group|--genesis-dir|--log-target|--bind-pcrs)
+<                 if [[ $# -lt 2 || "$2" == -* ]]; then
+<                     setup_fail "$1 requires a value"
+<                 fi
+<                 ;;
+<             # An empty value is a mistake here too, not a way of saying "none".
+<             --bootstrap-peers|--state-export-keep)
+<                 if [[ $# -lt 2 || -z "$2" || "$2" == -* ]]; then
+<                     setup_fail "$1 requires a value"
+<                 fi
+<                 ;;
+<         esac
+<         case "$1" in
+<             --json)                shift ;;   # found by the scan above
+<             --phase)               JSON_PHASE="${2:-}"; shift 2 ;;
+<             --phase=*)             JSON_PHASE="${1#*=}"; shift ;;
+<             --network)             JSON_NETWORK_INPUT="${2:-}"; shift 2 ;;
+<             --install-method)      INSTALL_METHOD="${2:-}"; shift 2 ;;
+<             --passphrase-method)   PASSPHRASE_METHOD="${2:-}"; shift 2 ;;
+<             --address)             VALIDATOR_ADDRESS="${2:-}"; shift 2 ;;
+<             --build-ref)           JSON_BUILD_REF="${2:-}"; shift 2 ;;
+<             --release-tag)         RELEASE_TAG="${2:-}"; shift 2 ;;
+<             --allow-dirty)         ALLOW_DIRTY=true; shift ;;
+<             --docker-image)        DOCKER_IMAGE="${2:-}"; shift 2 ;;
+<             # The node binary for --install-method existing: an absolute path to an
+<             # executable file. Skips the search and the prompt in _preflight_existing.
+<             --binary-path)         BINARY_PATH="${2:-}"; shift 2 ;;
+<             --external-primary)    PRIMARY_MULTIADDR="${2:-}"; shift 2 ;;
+<             --external-worker)     WORKER_MULTIADDR="${2:-}"; shift 2 ;;
+<             --listener-primary)    PRIMARY_LISTENER_MULTIADDR="${2:-}"; shift 2 ;;
+<             --listener-worker)     WORKER_LISTENER_MULTIADDR="${2:-}"; shift 2 ;;
+<             # Public IP: the P2P multiaddr IP in --json mode (as before) and, for public RPC,
+<             # the inbound IP the A record points at (passed to install-caddy.sh --public-ip).
+<             --public-ip)           PUBLIC_IP="${2:-}"; RPC_INBOUND_IP="${2:-}"; shift 2 ;;
+<             # Public RPC via Caddy (see the header). --rpc-public keeps the value form that Node
+<             # Manager UI releases before 1.9.0 send (`--rpc-public true|false`, any case); a
+<             # bare --rpc-public means true. Only true asks for public RPC, which needs
+<             # --rpc-domain (without one: a warning, RPC stays private) -- false is a no-op,
+<             # exactly as before.
+<             --rpc-public)
+<                 case "$(printf '%s' "${2:-}" | tr '[:upper:]' '[:lower:]')" in
+<                     true|yes|1)  RPC_PUBLIC_REQUESTED=true; shift 2 ;;
+<                     false|no|0)  shift 2 ;;
+<                     *)           RPC_PUBLIC_REQUESTED=true; shift ;;
+<                 esac ;;
+<             --public-rpc-url)      PUBLIC_RPC_URL="${2:-}"; shift 2 ;;
+<             --public-ws-url)       PUBLIC_WS_URL="${2:-}"; shift 2 ;;
+<             --rpc-http)            ADVERTISE_RPC_HTTP="${2:-}"; shift 2 ;;
+<             --rpc-ws)              ADVERTISE_RPC_WS="${2:-}"; shift 2 ;;
+<             --rpc-domain)          PUBLIC_RPC_DOMAIN="$(normalize_rpc_domain "${2:-}")"; RPC_DOMAIN_GIVEN=true; shift 2 ;;
+<             --rpc-domain=*)        PUBLIC_RPC_DOMAIN="$(normalize_rpc_domain "${1#*=}")"; RPC_DOMAIN_GIVEN=true; shift ;;
+<             --no-public-rpc)       NO_PUBLIC_RPC=true; shift ;;
+<             --advertised-name)     ADVERTISED_NAME="${2:-}"; shift 2 ;;
+<             --data-dir)            DATA_DIR="${2:-$DATA_DIR}"; shift 2 ;;
+<             --service-user)        SERVICE_USER="${2:-}"; shift 2 ;;
+<             --service-group)       SERVICE_GROUP="${2:-}"; shift 2 ;;
+<             --genesis-dir)         TN_GENESIS_DIR="${2:-}"; shift 2 ;;
+<             # Opt in to the healthcheck TCP listener (bakes --healthcheck into the launch
+<             # command via tn_node_launch_flags). Overrides the ENABLE_HEALTHCHECK_MONITOR
+<             # default; needed in --json/finalize where prompt_testnet_addons is skipped.
+<             --enable-healthcheck-monitor) ENABLE_HEALTHCHECK_MONITOR=true; shift ;;
+<             # Optional node flags, checked by init_node_extra_flags (NODE FLAGS in the header).
+<             --bootstrap-peers)     BOOTSTRAP_PEERS_SRC="${2:-}"; shift 2 ;;
+<             --enable-state-export) STATE_EXPORT_ENABLE=true; shift ;;
+<             --state-export-keep)   STATE_EXPORT_KEEP="${2:-}"; shift 2 ;;
+<             --passphrase-stdin)    PASSPHRASE_STDIN=true; shift ;;
+<             --log-target)          LOG_TARGET="${2:-}"; shift 2 ;;
+<             --allow-quorum-risk)   TN_ALLOW_QUORUM_RISK=1; shift ;;
+<             --allow-no-tpm)        ALLOW_NO_TPM=true; shift ;;
+<             --bind-pcrs)           BIND_PCRS="${2:-}"; shift 2 ;;
+<             --audit)               AUDIT_ONLY=true; shift ;;
+<             --host-baseline)       HOST_BASELINE=true; shift ;;
+<             -h|--help)
+<                 # The header block only: everything up to its closing rule.
+<                 awk 'NR == 1 { next } /^# =+$/ { if (++rules == 2) exit; next } { sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
+<                 if json_mode; then
+<                     json_done '{"event":"done","ok":true,"msg":"usage printed on stderr"}'
+<                 fi
+<                 exit 0
+<                 ;;
+<             # Ignored, with a warning on stderr (so a --json stdout stays pure JSON).
+<             *) print_warn "Unknown argument: $1" >&2; shift ;;
+<         esac
+<     done
+< 
+<     if [[ "$AUDIT_ONLY" == "true" ]]; then
+<         TN_SETUP_PASS=""
+<         tn_host_audit
+<         exit $?
+<     fi
+<     # --host-baseline over an installed node: the baseline alone, nothing else.
+<     if [[ "$HOST_BASELINE" == "true" ]] && ! json_mode && tn_resolve_service >/dev/null 2>&1; then
+<         TN_SETUP_PASS=""
+<         setup_host_baseline_only
+<         exit $?
+<     fi
+<     case "${LOG_TARGET:-}" in
+<         ""|journal|file) ;;
+<         *) setup_fail "--log-target takes journal or file, not ${LOG_TARGET}." ;;
+<     esac
+< 
+<     setup_read_passphrase       # --passphrase-stdin is read here, once
+<     init_public_rpc_flags       # bad public-RPC flags or URLs stop here, before any work
+<     init_install_flags
+<     init_node_inputs
+<     init_node_extra_flags
+< 
+<     if json_mode; then
+<         run_json_mode
+<         exit $?
+<     fi
+< 
+<     step_welcome
+<     step_preflight
+<     step_config
+<     step_create_infrastructure
+<     step_generate_keys
+<     step_write_config
+<     step_create_service
+<     # Public RPC and the add-ons run their own scripts, which take the lock themselves.
+<     setup_release_lock
+<     step_public_rpc
+<     step_testnet_addons
+<     step_host_baseline
+<     step_final_summary
+< }
+< 
+< main "$@"

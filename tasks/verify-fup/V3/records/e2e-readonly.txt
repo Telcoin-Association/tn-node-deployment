@@ -1,0 +1,38 @@
+--- E14 rotate
+  [OK]  Running as root
+
+>>> Detecting operating system...
+  [OK]  OS: ubuntu 24.04 (package manager: apt)
+
+>>> Rotating the ingest token
+  [WARN] tn_write_root_file: cannot create a temp file in /etc/telcoin/alloy
+
+  [ERROR] Could not write the ingest token file /etc/telcoin/alloy/ingest-token as root:telcoin-alloy 0640.
+
+
+  [ERROR] The new token could not be put in place; putting the previous files back (Alloy was not restarted).
+
+  [WARN] tn_write_root_file: cannot create a temp file in /etc/telcoin/alloy
+
+  [ERROR] Could not put /etc/telcoin/alloy/ingest-token back.
+
+  [WARN] tn_write_root_file: cannot create a temp file in /etc/telcoin/alloy
+
+  [ERROR] Could not put /etc/telcoin/alloy/telcoin-alloy.env back.
+
+  [WARN] tn_write_root_file: cannot create a temp file in /etc/telcoin/alloy
+
+  [ERROR] Could not put /etc/telcoin/alloy/config.alloy back.
+
+--- E14 disable rc=0 json:
+{"event":"done","ok":true,"applied":["logs:disabled"],"network":"testnet","msg":"observability updated"}
+stderr:
+  [OK]  Running as root
+
+>>> Detecting operating system...
+  [OK]  OS: ubuntu 24.04 (package manager: apt)
+
+>>> Disabling observability (logs + metrics shipping)
+  [OK]  Telemetry shipper stopped + disabled (telcoin-alloy.service).
+  ->  The ingest token file was shredded; enabling logs or metrics again asks for the token.
+  ->  The node keeps writing JSON logs / serving --metrics locally (harmless). remove-node.sh removes all obs files.

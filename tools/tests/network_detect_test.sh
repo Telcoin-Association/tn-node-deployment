@@ -4,7 +4,8 @@
 # the source prepare's build features: CRLF .node-meta, the genesis chain id
 # fallback, a duplicated or unknown NETWORK (fail closed, no git, no cargo),
 # image_network (devnet from NETWORK=devnet in .node-meta) and the devnet image
-# paths that use it (pending NEW_IMAGE, fetch_docker_tags, json_prepare_docker),
+# paths that use it (pending NEW_IMAGE, fetch_docker_tags, json_prepare_docker and
+# the interactive prepare_docker_update, whose build-feature check gets it),
 # duplicated INSTALL_METHOD and BINARY_PATH, the build log and the build
 # output check.
 #
@@ -116,6 +117,88 @@ check "duplicate NETWORK: nothing printed" "" "$OUT"
 check "duplicate NETWORK: named on stderr" yes "$(has "$ERR" "NETWORK is set 2 times")"
 
 # -----------------------------------------------------------------------------
+# The mainnet gate (TN_MAINNET_ENABLED): the interactive menu's option 2 and
+# setup-node's --network mainnet refuse while it is 0. $T/on holds a copy of
+# lib/common.sh with the constant set to 1, standing for the launch release;
+# each case runs in a child bash, as this shell has the library loaded already.
+# -----------------------------------------------------------------------------
+check "TN_MAINNET_ENABLED is 0 in this release" "0" "${TN_MAINNET_ENABLED-unset}"
+run tn_mainnet_enabled
+check_rc "tn_mainnet_enabled: rc 1 while it is 0" 1 "$RC"
+mkdir -p "$T/off" "$T/on"
+ln -s "$TN_TEST_REPO/lib" "$T/off/lib"
+cp -R "$TN_TEST_REPO/lib" "$T/on/lib"
+sed 's/^readonly TN_MAINNET_ENABLED=0$/readonly TN_MAINNET_ENABLED=1/' "$TN_TEST_REPO/lib/common.sh" > "$T/on/lib/common.sh"
+check "the launch copy sets TN_MAINNET_ENABLED=1" yes \
+    "$(grep -qx 'readonly TN_MAINNET_ENABLED=1' "$T/on/lib/common.sh" && echo yes || echo no)"
+for d in off on; do
+    cp "$TN_TEST_REPO/setup-node.sh" "$T/$d/setup-node-run.sh"
+    grep -v '^main "\$@"$' "$TN_TEST_REPO/setup-node.sh" > "$T/$d/setup-node.sh"
+done
+
+# pick DIR INPUT -- select_network from DIR's library with INPUT (printf %b) on
+# stdin: what it printed, then "picked: NETWORK|CHAIN_ID|CHAIN_NAME|RPC_URL|EXPLORER_URL".
+pick() {
+    # shellcheck disable=SC2016
+    printf '%b' "$2" | "$BASH" -c 'source "$1/lib/common.sh" >/dev/null 2>&1; set +e
+        select_network
+        printf "picked: %s|%s|%s|%s|%s\n" "$NETWORK" "$CHAIN_ID" "$CHAIN_NAME" "$RPC_URL" "$EXPLORER_URL"' _ "$1" 2>&1
+}
+TESTNET_PICK="picked: testnet|2017|adiri|https://rpc.adiri.tel|https://telscan.io"
+MAINNET_PICK="picked: mainnet|487|telcoin|https://rpc.telcoin.network|https://telscan.io"
+# "2", then one line for the Enter prompt, then "1": no "Please enter 1 or 2."
+# shows that the Enter prompt took the second line. Every input ends in "1", so
+# the menu returns whatever it does with "2" (at end of input it would ask forever).
+OUT="$(pick "$T/off" '2\nx\n1\n')"
+check "menu, disabled: option 2 is coming soon" yes "$(has "$OUT" "-- for production (coming soon)")"
+check "menu, disabled: 2 says mainnet has not launched" yes "$(has "$OUT" "Mainnet has not launched yet.")"
+check "menu, disabled: 2 waits for Enter, then asks again" no "$(has "$OUT" "Please enter 1 or 2.")"
+check_has "menu, disabled: 2 then 1 gives testnet" "$TESTNET_PICK" "$OUT"
+# The same input: "x" and "1" stay unread when 2 is taken.
+OUT="$(pick "$T/on" '2\nx\n1\n')"
+check_has "menu, enabled: 2 gives mainnet" "$MAINNET_PICK" "$OUT"
+check "menu, enabled: no coming soon" no "$(has "$OUT" "coming soon")"
+check "menu, enabled: no not-launched note" no "$(has "$OUT" "has not launched")"
+OUT="$(pick "$T/on" '1\n')"
+check_has "menu, enabled: 1 still gives testnet" "$TESTNET_PICK" "$OUT"
+
+# jsn DIR NETWORK -- setup-node's json_set_network NETWORK from DIR's copy in
+# --json mode: the JSON events, then "set: ..." as pick prints it when it returns.
+jsn() {
+    # shellcheck disable=SC2016
+    "$BASH" -c 'source "$1/setup-node.sh" >/dev/null 2>&1; set +e
+        JSON_MODE=true; exec 3>&1
+        json_set_network "$2"
+        printf "set: %s|%s|%s|%s|%s\n" "$NETWORK" "$CHAIN_ID" "$CHAIN_NAME" "$RPC_URL" "$EXPLORER_URL"' _ "$1" "$2" 2>/dev/null
+}
+MAINNET_OFF="Mainnet is not enabled in this script release (lib/common.sh TN_MAINNET_ENABLED); nothing on this host was changed."
+run jsn "$T/off" mainnet
+check_rc "json_set_network mainnet, disabled: rc 1" 1 "$RC"
+check_has "json_set_network mainnet, disabled: error event" "{\"event\":\"error\",\"msg\":\"${MAINNET_OFF}\"}" "$OUT"
+check_has "json_set_network mainnet, disabled: done event" "{\"event\":\"done\",\"ok\":false,\"msg\":\"${MAINNET_OFF}\"}" "$OUT"
+check "json_set_network mainnet, disabled: no network set" no "$(has "$OUT" "set: ")"
+run jsn "$T/off" testnet
+check_has "json_set_network testnet, disabled: testnet" "set: testnet|2017|adiri|https://rpc.adiri.tel|https://telscan.io" "$OUT"
+run jsn "$T/on" mainnet
+check_rc "json_set_network mainnet, enabled: rc 0" 0 "$RC"
+check_has "json_set_network mainnet, enabled: the mainnet values" "set: mainnet|487|telcoin|https://rpc.telcoin.network|https://telscan.io" "$OUT"
+
+# The whole script: --network mainnet stops at the gate, before the install
+# flags are even read (the launch copy goes on to ask for --install-method).
+rm -rf "$T/fx-setup"
+mkdir -p "$T/fx-setup"
+OUT="$(TN_ROOT_PREFIX="$T/fx-setup" "$BASH" "$T/off/setup-node-run.sh" --json --phase=keygen --network mainnet </dev/null 2>/dev/null)"
+RC=$?
+check_rc "setup-node --json --network mainnet, disabled: rc 1" 1 "$RC"
+check "setup-node --json --network mainnet, disabled: ends with the refusal" \
+    "{\"event\":\"done\",\"ok\":false,\"msg\":\"${MAINNET_OFF}\"}" "$(printf '%s\n' "$OUT" | tail -n 1)"
+check "setup-node --json --network mainnet, disabled: nothing written" "" "$(find "$T/fx-setup" -mindepth 1 2>/dev/null)"
+OUT="$(TN_ROOT_PREFIX="$T/fx-setup" "$BASH" "$T/on/setup-node-run.sh" --json --phase=keygen --network mainnet </dev/null 2>/dev/null)"
+check "setup-node --json --network mainnet, enabled: past the gate" \
+    "{\"event\":\"done\",\"ok\":false,\"msg\":\"--install-method is missing (expected source, release, docker or existing)\"}" \
+    "$(printf '%s\n' "$OUT" | tail -n 1)"
+
+# -----------------------------------------------------------------------------
 # image_network: the network of a Docker image change (_tn_guard_network):
 # detect_network's, or devnet from NETWORK=devnet in .node-meta (detect_network
 # itself stays rc 1 there). Nothing else is guessed.
@@ -158,7 +241,7 @@ pk() {  # pk NAME EXPECTED-RC IMAGE
     check_rc "$1" "$2" "$rc"
 }
 meta $'NETWORK=devnet\n'
-pk "pending NEW_IMAGE, devnet: a ghcr digest" 0 "${GH}@sha256:${D64}"
+pk "pending NEW_IMAGE, devnet: a digest of the old single ghcr package (recognised)" 0 "${GH}@sha256:${D64}"
 pk "pending NEW_IMAGE, devnet: a legacy-repository digest" 0 "${R}@sha256:${D64}"
 pk "pending NEW_IMAGE, devnet: another repository refused" 1 "docker.io/library/busybox@sha256:${D64}"
 pk "pending NEW_IMAGE, devnet: a devnet tag refused" 1 "${R}:v0.2.0-devnet"
@@ -188,8 +271,10 @@ rc=0; out="$(loud_tags testnet)" || rc=$?
 check "fetch_docker_tags testnet (control): the stub's final testnet tag" "0 v0.17.0-adiri" "$rc $out"
 check "fetch_docker_tags testnet (control): the registry asked" yes "$(exists "$T/loud.log")"
 
-# json_prepare_docker on a devnet host: a digest from TN_DEVNET_IMAGE_REPOS goes on
-# to the pull; a tag (devnet or testnet) or another repository is refused first.
+# json_prepare_docker on a devnet host: a digest of the devnet repository or of
+# the dev package goes on to the pull; a tag (devnet or testnet), another
+# repository or the old single ghcr package (recognised, never pulled) is refused
+# first. On a testnet host the dev package is refused.
 # jpd_stubbed ARG -- json_prepare_docker with the running image and the pull
 # stubbed (in run's subshell, so the real functions stay for later cases).
 jpd_stubbed() {
@@ -206,9 +291,17 @@ jpd() {  # jpd ARG -> JSON events in $T/json.log; RC
     exec 3>&-
 }
 meta $'NETWORK=devnet\n'
-jpd "${GH}@sha256:${D64}"
-check "json prepare, devnet: a ghcr digest reaches the pull" "1 ${GH}@sha256:${D64} " "$RC $(cat "$T/pulled" 2>/dev/null)"
-for bad in v0.2.0-devnet "${R}:v0.2.0-devnet" v0.17.0-adiri "docker.io/library/busybox@sha256:${D64}"; do
+jpd "${R}@sha256:${D64}"
+check "json prepare, devnet: a devnet repository digest reaches the pull" "1 ${R}@sha256:${D64} " "$RC $(cat "$T/pulled" 2>/dev/null)"
+GD="ghcr.io/telcoin-association/tn-dev"
+jpd "${GD}@sha256:${D64}"
+check "json prepare, devnet: a dev package digest reaches the pull" "1 ${GD}@sha256:${D64} " "$RC $(cat "$T/pulled" 2>/dev/null)"
+meta $'NETWORK=testnet\n'
+jpd "${GD}@sha256:${D64}"
+check "json prepare, testnet: the dev package refused before any pull" "1 yes no" \
+    "$RC $(has "$(cat "$T/json.log")" "is not a testnet release tag or this network's image by digest") $(exists "$T/pulled")"
+meta $'NETWORK=devnet\n'
+for bad in v0.2.0-devnet "${R}:v0.2.0-devnet" v0.17.0-adiri "docker.io/library/busybox@sha256:${D64}" "${GH}@sha256:${D64}"; do
     jpd "$bad"
     check "json prepare, devnet: ${bad} refused before any pull" "1 yes no" \
         "$RC $(has "$(cat "$T/json.log")" "is not a devnet image by digest") $(exists "$T/pulled")"
@@ -217,6 +310,82 @@ meta $'NETWORK=foo\n'
 jpd "${GH}@sha256:${D64}"
 check "json prepare, network unknown: refused before any pull" "1 yes no" \
     "$RC $(has "$(cat "$T/json.log")" "cannot tell which network") $(exists "$T/pulled")"
+# docker_pull_target (update-node's Docker prepare, interactive and --json): after
+# the pull and its digest check the image's build features are checked for the
+# node's network (tn_docker_image_network_ok, stubbed here: FEAT_RC=1 refuses),
+# before the pending state is written; a refusal writes none and the --json
+# prepare ends with an error event (the exit trap then sends done).
+dpt_stubbed() {
+    detect_current_docker_image() { printf '%s@sha256:%s\n' "$R" "$(printf '%s' "$D64" | tr 0 b)"; }
+    build_log_file() { printf '%s\n' "$T/pull.log"; }
+    docker() { printf '%s\n' "$*" >> "$T/order.log"; }
+    tn_docker_holds_digest() { echo held >> "$T/order.log"; return 0; }
+    tn_docker_image_network_ok() { printf 'check %s %s\n' "$1" "$2" >> "$T/order.log"; return "${FEAT_RC:-0}"; }
+    write_pending_state() { echo pending >> "$T/order.log"; cat > "$T/pending"; }
+    storage_migration_begin() { :; }
+    json_prepare_docker "$1"
+}
+dpt() {  # dpt ARG -> JSON events in $T/json.log; the calls in $T/order.log; RC
+    rm -f "$T/pending"
+    : > "$T/order.log"
+    exec 3>"$T/json.log"
+    JSON_MODE=true
+    run dpt_stubbed "$1"
+    JSON_MODE=false
+    exec 3>&-
+}
+order() { grep -v '^image inspect' "$T/order.log" | tr '\n' '|' | sed 's/|$//'; }
+meta $'NETWORK=testnet\n'
+dpt "${R}@sha256:${D64}"
+check "docker prepare: pull, digest check, feature check, then the pending state" \
+    "0 pull ${R}@sha256:${D64}|held|check testnet ${R}@sha256:${D64}|pending" "$RC $(order)"
+check "docker prepare: the pending state names the new image" yes "$(has "$(cat "$T/pending" 2>/dev/null)" "NEW_IMAGE=${R}@sha256:${D64}")"
+FEAT_RC=1
+dpt "${R}@sha256:${D64}"
+check "docker prepare, feature check refuses: rc 1, no pending state" "1 no" "$RC $(exists "$T/pending")"
+check "docker prepare, feature check refuses: nothing after the check" \
+    "pull ${R}@sha256:${D64}|held|check testnet ${R}@sha256:${D64}" "$(order)"
+check "docker prepare, feature check refuses: a warn event says nothing was prepared" yes \
+    "$(has "$(cat "$T/json.log")" "\"event\":\"warn\",\"msg\":\"The image ${R}@sha256:${D64} is not a testnet image (see above); nothing was prepared and the node was not touched.\"")"
+check "docker prepare, feature check refuses: then an error event" yes \
+    "$(has "$(cat "$T/json.log")" "\"event\":\"error\",\"msg\":\"the image ${R}@sha256:${D64} was not prepared (see the warning above)\"")"
+check "docker prepare, feature check refuses: no done ok event" no "$(has "$(cat "$T/json.log")" '"ok":true')"
+unset FEAT_RC
+meta $'NETWORK=devnet\n'
+dpt "${R}@sha256:${D64}"
+check "docker prepare, devnet: the check is asked for devnet" "0 yes" "$RC $(has "$(order)" "check devnet ${R}@sha256:${D64}")"
+# The interactive prepare (prepare_docker_update) hands the node's network to
+# docker_pull_target too: the check is asked for "<network> <image>", and a good
+# image leaves the pending state.
+ipd_stubbed() {
+    detect_current_docker_image() { printf '%s@sha256:%s\n' "$R" "$(printf '%s' "$D64" | tr 0 b)"; }
+    build_log_file() { printf '%s\n' "$T/pull.log"; }
+    docker() { printf '%s\n' "$*" >> "$T/order.log"; }
+    tn_docker_holds_digest() { echo held >> "$T/order.log"; return 0; }
+    tn_docker_image_network_ok() { printf 'check %s %s\n' "$1" "$2" >> "$T/order.log"; return "${FEAT_RC:-0}"; }
+    write_pending_state() { echo pending >> "$T/order.log"; cat > "$T/pending"; }
+    confirm() { return 0; }
+    prepare_docker_update "$1"
+}
+ipd() {  # ipd ARG -> OUT, ERR, RC; the calls in $T/order.log
+    rm -f "$T/pending"
+    : > "$T/order.log"
+    run ipd_stubbed "$1"
+}
+for net in testnet devnet; do
+    meta "NETWORK=${net}"$'\n'
+    ipd "${R}@sha256:${D64}"
+    check "interactive docker prepare, ${net}: pull, digest check, the check for ${net}, then the pending state" \
+        "0 pull ${R}@sha256:${D64}|held|check ${net} ${R}@sha256:${D64}|pending" "$RC $(order)"
+    check "interactive docker prepare, ${net}: the pending state names the new image" yes \
+        "$(has "$(cat "$T/pending" 2>/dev/null)" "NEW_IMAGE=${R}@sha256:${D64}")"
+done
+meta $'NETWORK=testnet\n'
+FEAT_RC=1
+ipd "${R}@sha256:${D64}"
+check "interactive docker prepare, the check refuses: rc 1, no pending state" "1 no" "$RC $(exists "$T/pending")"
+unset FEAT_RC
+unset -f dpt_stubbed dpt order ipd_stubbed ipd
 unset -f jpd_stubbed jpd loud_tags pk
 
 # -----------------------------------------------------------------------------
@@ -316,5 +485,84 @@ run tn_built_binary_ok "$T/built-dir" "$(id -u)"
 check_rc "built binary: directory refused" 1 "$RC"
 run tn_built_binary_ok "$T/built" 4242
 check_rc "built binary: another owner refused" 1 "$RC"
+
+# ---- LIB-B: check_internet probes the node's own network ----------------------------
+# A recording curl answers only for the URLs in CURL_OK. check_internet exits, so
+# it runs in a subshell and the log file carries what it did.
+CURL_OK=""
+curl() {
+    local u
+    for u in "$@"; do :; done
+    printf '%s\n' "$u" >> "$T/curl.log"
+    case " $CURL_OK " in
+        *" $u "*) return 0 ;;
+    esac
+    return 7
+}
+SAVED_NETWORK="${NETWORK:-}"
+# net_probe NETWORK -- one check_internet: RC, PROBED (the URLs curl was given, in
+# order) and its output in ci.out.
+net_probe() {
+    rm -f "$T/curl.log"
+    NETWORK="$1"
+    RC=0
+    ( check_internet ) > "$T/ci.out" 2>&1 || RC=$?
+    PROBED="$(cat "$T/curl.log" 2>/dev/null || true)"
+}
+CURL_OK="$MAINNET_RPC_URL"
+net_probe mainnet
+check_rc "check_internet: mainnet answers" 0 "$RC"
+check "check_internet: mainnet probes its own RPC only" "$MAINNET_RPC_URL" "$PROBED"
+CURL_OK="https://1.1.1.1"
+net_probe mainnet
+check "check_internet: mainnet RPC down, then 1.1.1.1" "$(printf '%s\n%s' "$MAINNET_RPC_URL" https://1.1.1.1)" "$PROBED"
+check_lacks "check_internet: mainnet never probes adiri" "adiri" "$PROBED"
+CURL_OK="$DEVNET_RPC_URL"
+net_probe devnet
+check "check_internet: devnet probes the devnet RPC" "$DEVNET_RPC_URL" "$PROBED"
+CURL_OK="$TESTNET_RPC_URL"
+net_probe testnet
+check "check_internet: testnet probes the testnet RPC" "$TESTNET_RPC_URL" "$PROBED"
+CURL_OK=""
+net_probe testnet
+check_rc "check_internet: nothing answers: exit 1" 1 "$RC"
+check "check_internet: nothing answers: said so" yes "$(grep -qF 'No internet connection detected.' "$T/ci.out" && echo yes || echo no)"
+CURL_OK="https://1.1.1.1"
+net_probe ""
+check_rc "check_internet: NETWORK empty fails closed" 1 "$RC"
+check "check_internet: NETWORK empty: curl not called" "" "$PROBED"
+check "check_internet: NETWORK empty: the message names NETWORK" yes "$(grep -qF 'NETWORK must be testnet, mainnet or devnet (it is empty)' "$T/ci.out" && echo yes || echo no)"
+net_probe adiri
+check_rc "check_internet: unknown NETWORK fails closed" 1 "$RC"
+check "check_internet: unknown NETWORK: curl not called" "" "$PROBED"
+unset -f curl
+NETWORK="$SAVED_NETWORK"
+# setup-node's preflight sets NETWORK (the prompt, or --network in a --json run)
+# before its connectivity check runs.
+check "setup-node: the network is chosen before check_internet" yes "$(awk '
+    /^step_preflight\(\) \{/ { f = 1 }
+    f && /^}/ { exit }
+    f && /^[[:space:]]*json_mode \|\| select_network/ { s = NR }
+    f && /^[[:space:]]*check_internet[[:space:]]*$/ { c = NR }
+    END { print (s && c && s < c) ? "yes" : "no" }' "$TN_TEST_REPO/setup-node.sh")"
+
+# ---- LIB-B: setup-node's image example names the node's own network ------------------
+sed -n '/^_setup_image_example() {/,/^}/p' "$TN_TEST_REPO/setup-node.sh" > "$T/img.sh"
+# shellcheck source=/dev/null
+. "$T/img.sh"
+SAVED_NETWORK="${NETWORK:-}"
+NETWORK=mainnet
+img="$(_setup_image_example)"
+check "image example: mainnet is the mainnet repository by digest" "$(tn_docker_repo_for mainnet)@sha256:<digest>" "$img"
+check "image example: mainnet is the tn-mainnet package" "ghcr.io/telcoin-association/tn-mainnet@sha256:<digest>" "$img"
+check_lacks "image example: mainnet names no testnet package" "tn-testnet" "$img"
+check_lacks "image example: mainnet names not the old single package" "telcoin-association/telcoin-network" "$img"
+check_lacks "image example: mainnet names no adiri image" "adiri" "$img"
+check_lacks "image example: mainnet is not the testnet default" "$DEFAULT_DOCKER_IMAGE" "$img"
+NETWORK=testnet
+check "image example: testnet unchanged" "$DEFAULT_DOCKER_IMAGE" "$(_setup_image_example)"
+NETWORK=devnet
+check "image example: devnet unchanged" "${TN_DEVNET_IMAGE_REPO}@sha256:<digest>" "$(_setup_image_example)"
+NETWORK="$SAVED_NETWORK"
 
 finish

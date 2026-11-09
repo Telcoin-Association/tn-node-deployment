@@ -443,3 +443,140 @@ fact sat on; the decision was written from the facts file, not from `git grep <s
 citation at that tag (`git -C <wt> show <tag>:<path>` or `git grep -n '<string>' <tag>`) beside
 the one at main. The facts units record both or say "absent at the tag". A wording decision that
 contrasts two releases is itself a fact to verify, and the verifier's brief lists the tag check.
+
+## Follow-ups round (2026-11-03, scripts-v2.1.0): toolchains, lints and agent rounds
+
+### The `bash:3.2` image is busybox, not macOS
+
+**Symptom:** every fixture passed locally under bash 5.3, `bash:3.2` and `ubuntu:24.04`, and the
+CI job "fixture tests (macOS bash 3.2)" was red on three successive tips: a library line used
+GNU `stat -c %Y` (the shared test library's BSD shim maps `-c` formats to `-f` and lacked `%Y`,
+so macOS printed an empty mtime), and a fixture passed a multi-line value through `awk -v`,
+which BSD awk refuses.
+
+**Rule:** the macOS runner is the only BSD-userland gate; the three local environments do not
+cover it. Grep every new `stat -c`, `awk -v` with newlines, `sed -i`, `date -d`, `readlink -f`
+and `sha256sum` in fixtures and in library lines a fixture exercises; keep the test library's
+shim table complete (`tools/tests/lib.sh`, now with `%Y`); watch the macOS job after every push
+and read its FAIL lines, not only the local counts. A `check_has` on the whole line prints the
+actual output in the CI log; a yes/no `check` hides it. The update lock is the other BSD
+difference: macOS has no `flock`, so the library takes its mkdir fallback and removes the lock
+directory on release; a fixture that infers "the lock was taken" from what persists after the
+run passes only with flock. Record the lock kind from inside the locked call instead, and run
+the fixture once in `bash:3.2` with `flock` removed (`rm -f /usr/bin/flock`) to see the fallback.
+
+### Verifier harness files are tracked scripts: CI lints them
+
+**Symptom:** V2's committed reproduction scripts had no shebang and one harness called a
+wrapped tool before its function was defined, so the shellcheck job would have gone red on the
+records commit.
+
+**Rule:** every verifier brief says that its `tasks/verify-fup/<name>/*.sh` files pass
+`shellcheck --severity=error` under 0.9 and 0.11, `bash -n` under 5.3 and 3.2 and
+`tools/check-bash32.sh`, with a shebang; the orchestrator runs those lints on the records before
+cherry-picking them.
+
+### A tree-wide lint applies to the orchestrator's own commits
+
+**Symptom:** a one-line comment I wrote named a testnet host, the new network-hits lint failed
+on the tree, and the fixture that runs the lint over the repository would have failed CI.
+
+**Rule:** once a tree-wide lint lands, the quick gate runs it before every push, including the
+orchestrator's seam fixes; comment lines count.
+
+### Commit messages go through a file, never a chained heredoc
+
+**Symptom:** six commits lost their subject lines because the agent wrote
+`git commit -F - <<'MSG' && …`: the heredoc's first line became part of the command.
+
+**Rule:** write the message to a file and `git commit -F <file>`; check `git log --format=%s`
+before handing back. The orchestrator amends on cherry-pick when it happens anyway.
+
+### An independent verifier per package, then a round back to the implementer, paid again
+
+Six verifiers over nine packages found one latent fail-open path (a Docker image given by
+digest skipped the mainnet rule in setup-node), one regression (a push-URL override lost on
+rotate and partial disable), a boot-persistence gap in the firewall limit, a probe-wrapper
+failure read as a negative answer, and twenty-odd warnings, after the implementers' own 4,000
+checks had passed. Sending each list back to the implementer that owns the file (with its
+checkpoint and worktree still in place) cost one short round per package and kept one owner per
+file; the orchestrator fixed only the seams between packages.
+
+### Cherry-pick order within a batch does not matter; conflicts at file tails do
+
+Packages that append test blocks to the same fixture file conflict trivially at the tail; a
+"# PKG" block header and a note to append before `finish` made every one a keep-both
+resolution. The order of cherry-picks only changes which side is HEAD.
+
+## Round 2 on PR #59 (2026-11-04): a `printf | grep -q` check under an inherited pipefail
+
+**Symptom:** `remove_test.sh` under `bash:3.2` reported `FAIL legacy key shredded` with
+`missing line: shred -u -- …/bls.key` while the very same line was the first line of the
+output it printed, plus `tools/tests/lib.sh: line 182: printf: write error: Broken pipe`.
+One run in ten; never on the host.
+
+**Cause:** the fixture sources `remove-node.sh`, which sources `lib/common.sh`, which sets
+`pipefail`. `check_has` ran `printf '%s\n' "$3" | grep -qxF -- "$2"`: grep matched the first
+line and exited, printf got EPIPE on the rest, and with pipefail the pipeline failed.
+
+**Rule:** a test helper that feeds a `grep -q` never uses a pipe; use a here-string
+(`grep -qxF -- "$2" <<< "$3"`) or a file. More generally, assume every fixture runs with
+pipefail inherited from the library it exercises, and grep the test library for
+`| grep -q` after adding a helper.
+
+## Round 2 on PR #59 (2026-11-04/05): budgets, refused report files, load flakes
+
+### Package sizes were wrong by a factor of two
+
+**Symptom:** the three main implementers finished at 430k (SIG), 458k (IMG) and 312k (UPS)
+tokens against a "well under 250k" budget; the two V7 verifiers at 366k and 401k. None stopped
+to checkpoint and hand back; all finished green.
+
+**Rule:** a package that touches three self-contained scripts plus their fixtures (SIG) or six
+call sites plus UI twins (IMG) is two packages. Split by file ownership before spawning
+(release-scripts + install.sh / update-scripts + cut-release; library + UI / call sites), and
+give a verifier one package, not two. When an agent is over budget at hand-back, spawn a fresh
+agent for its fix round from the integration tip instead of resuming it (IMG-2 did this).
+
+### A verifier may be refused its own report file; plan the hand-back
+
+**Symptom:** both V7 verifiers had `Write` refused for `tasks/verify-r2/<name>/REPORT.md`
+("report-file rule") while their harness scripts wrote fine; V8 wrote its report without issue.
+They returned the full text in the final answer and the orchestrator saved it unchanged.
+
+**Rule:** every verifier brief says what to do when Write is refused (return the complete text,
+never work around it), and the orchestrator budgets the save: one heredoc per report, then lint
+and commit the records together.
+
+### Fixture flakes under host load are not package failures
+
+**Symptom:** with four agents running fixture suites at once (load average around 20),
+`host_baseline_test`, `docker_image_test` and `remove_test` each failed one run and passed every
+rerun; the macOS CI job failed one check with an empty captured output on a commit whose code
+had been green before and was green after.
+
+**Rule:** a single failing run under load is rerun alone before anything is changed; a CI
+failure on a commit that touches no code the failing fixture exercises is confirmed against the
+next push before it is investigated. Record the flake, not a fix.
+
+### An agent that mounts `$PWD` into a container must be in its worktree
+
+**Symptom:** a backgrounded subshell in IMG lost its `cd` and ran two container fixture suites
+against the main checkout (another stream's tree) instead of the worktree; read-only, but the
+results were for the wrong tree and had to be discarded.
+
+**Rule:** in agent briefs, every docker command uses the worktree's absolute path
+(`-v /home/.../tnd-r2-<pkg>:/w`), never `$PWD`, and a hand-back names the tree each count was
+measured on.
+
+### A new real call in a library path reaches every fixture that does not stub it
+
+**Symptom:** IMG-2 moved the image pull and the build-feature check into setup-node's finalize
+path. Two cases of `setup_passphrase_test.sh`, which had never needed a `docker` stub because
+finalize never called docker before, ran a real `docker pull` of `DEFAULT_DOCKER_IMAGE` on the
+host (the image was already there; no container started).
+
+**Rule:** when a change adds a call to a real tool (docker, gpg, systemctl, curl) on a path that
+fixtures drive end to end, run the whole suite once with a sentinel on `PATH` that logs and
+exits 1 for that tool, before the real environment sees the change; V7-IMG's `t_leak.sh` is the
+pattern. A fixture that still reaches the sentinel needs a stub, not a note.

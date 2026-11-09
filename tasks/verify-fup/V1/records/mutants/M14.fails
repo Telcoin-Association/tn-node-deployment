@@ -1,0 +1,3 @@
+FAIL  C4 mainnet digest recorded with tag 'v0.16.0-adiri' (not a mainnet release): refused
+FAIL  C4 mainnet digest recorded with tag 'v1.0.0-rc1' (not a mainnet release): refused
+FAIL  C6 testnet digest recorded with a mainnet tag: as before

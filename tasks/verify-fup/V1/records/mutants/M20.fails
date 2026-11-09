@@ -1,0 +1,3 @@
+FAIL  E1 mainnet probes the mainnet RPC only
+FAIL  E2 mainnet RPC down: falls back to 1.1.1.1, never the testnet RPC
+FAIL  E4 setup-node interactive: network chosen, then the mainnet RPC probed

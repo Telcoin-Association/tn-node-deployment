@@ -1,5 +1,11 @@
 # scripts-v2.0.0 (October 2026)
 
+> Note (November 2026): `scripts-v2.0.0` was never tagged, and the SSH-signature scheme this
+> note describes (`MANIFEST.sig`, `lib/allowed_signers`) never signed a release; it is retired.
+> The first signed script release is `scripts-v2.1.0` (serial 1), signed with OpenPGP by the
+> release keys in `lib/release-keys/` (`MANIFEST.asc`); see
+> [scripts-v2.1.0.md](scripts-v2.1.0.md). The rest of this note is kept as history.
+
 `scripts-v2.0.0` is the first tagged and signed release of the node scripts, and the one that
 prepares them for mainnet. After it, root owns everything the node runs from and the service
 account owns only the data dir. The BLS passphrase lives in an encrypted systemd credential and
