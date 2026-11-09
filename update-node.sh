@@ -291,7 +291,7 @@ existing_update_refusal() {
     path="$(existing_binary_path)"
     svc="${SERVICE_NAME:-telcoin}"
     if [[ "$JSON_MODE" == "true" ]]; then
-        json_event error "install method 'existing': this node runs ${path}, which update-node.sh does not replace. To update it, stop the node, replace that file with the new release binary and start the node again (systemctl stop ${svc}; install -m 0755 <new binary> ${path}; systemctl start ${svc}). On a committee node, run only the install step while the node runs, then restart with edit-config.sh, menu item 12 (Restart node), which waits for the epoch boundary. Check a downloaded release first: gpgv --keyring <the keys in lib/release-keys, gpg --dearmor> SHA256SUMS.asc SHA256SUMS; sha256sum -c --ignore-missing SHA256SUMS; then the binary's --version must name the release."
+        json_event error "install method 'existing': this node runs ${path}, which update-node.sh does not replace. To update it, stop the node, replace that file with the new release binary and start the node again (systemctl stop ${svc}; install -m 0755 <new binary> ${path}; systemctl start ${svc}). On a committee node, run only the install step while the node runs, then restart with edit-config.sh, menu item 14 (Restart node), which waits for the epoch boundary. Check a downloaded release first: gpgv --keyring <the keys in lib/release-keys, gpg --dearmor> SHA256SUMS.asc SHA256SUMS; sha256sum -c --ignore-missing SHA256SUMS; then the binary's --version must name the release."
         return 0
     fi
     print_error "Install method is 'existing': this node runs ${path}, which update-node.sh does not replace."
@@ -300,7 +300,7 @@ existing_update_refusal() {
     print_info "  sudo install -m 0755 <new binary> ${path}"
     print_info "  sudo systemctl start ${svc}"
     print_info "On a committee node, run only the install line instead (it replaces the file while the"
-    print_info "node runs), then restart with edit-config.sh, menu item 12 (Restart node), which waits"
+    print_info "node runs), then restart with edit-config.sh, menu item 14 (Restart node), which waits"
     print_info "for the epoch boundary: sudo bash ~/telcoin-node-scripts/edit-config.sh"
     # network-gated: example tag in the testnet form, shown on every network
     print_info "Check a release before installing it (TAG is the release, such as vX.Y.Z-adiri):"

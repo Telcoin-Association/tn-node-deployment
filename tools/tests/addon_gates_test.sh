@@ -65,6 +65,150 @@ check "vhs 0::/1 refused" 1 "$(vh 0::/1)"
 check "vhs 2000::/3 refused" 1 "$(vh 2000::/3)"
 check "vhs 2001:db8::/8 ok" 0 "$(vh 2001:db8::/8)"
 check "vhs 2001:db8::1/129 refused" 1 "$(vh 2001:db8::1/129)"
+# An IPv6 source is hex groups only: fw_allow_src_dropped knows an IPv4-mapped
+# host only in hex, so a dotted tail stays refused here (validate_ipv6 takes it).
+check "vhs ::ffff:a00:1 ok (mapped, hex)" 0 "$(vh ::ffff:a00:1)"
+check "vhs 2001:db8::1/64 ok" 0 "$(vh 2001:db8::1/64)"
+check "vhs ::ffff:10.0.0.1 refused (dotted tail)" 1 "$(vh ::ffff:10.0.0.1)"
+check "vhs ::ffff:169.254.1.1 refused (dotted tail)" 1 "$(vh ::ffff:169.254.1.1)"
+check "vhs ::0.0.0.0 refused (dotted tail)" 1 "$(vh ::0.0.0.0)"
+check "vhs 64:ff9b::192.0.2.0/120 refused (dotted tail)" 1 "$(vh 64:ff9b::192.0.2.0/120)"
+check "vhs 2001:db8::1::5 refused" 1 "$(vh 2001:db8::1::5)"
+check "vhs 1:2:3 refused" 1 "$(vh 1:2:3)"
+check "vhs 1:2:3/64 refused" 1 "$(vh 1:2:3/64)"
+check "vhs fe80::1%eth0 refused" 1 "$(vh fe80::1%eth0)"
+check "vhs [2001:db8::1] refused" 1 "$(vh '[2001:db8::1]')"
+check "vhs 12345::/64 refused" 1 "$(vh 12345::/64)"
+
+# --- validate_ipv6: the grammar of Rust's Ipv6Addr::from_str ----------------
+# tn-p2p-allow-sync parses P2P_ALLOW_FROM with Ipv6Addr::from_str and refuses the
+# whole config file on one entry it cannot parse, so the scripts take exactly
+# what it takes. Each row is "RC ADDRESS", 0 accepted and 1 refused; every row
+# agrees with Ipv6Addr::from_str (checked with rustc 1.97).
+v6() { if validate_ipv6 "$1"; then echo 0; else echo 1; fi; }
+v6_rows() {
+    cat <<'ROWS'
+0 ::1
+0 ::
+0 2001:db8::1
+0 2001:DB8::A
+0 ::ffff:10.0.0.1
+0 ::FFFF:10.0.0.1
+0 fe80::1
+0 1:2:3:4:5:6:7:8
+0 ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+0 0:0:0:0:0:0:0:0
+0 2001:0db8:0000:0000:0000:0000:0000:0001
+0 1::
+0 1:2:3:4:5:6:7::
+0 ::2:3:4:5:6:7:8
+0 1:2:3:4:5:6::8
+0 1::8
+0 64:ff9b::192.0.2.1
+0 ::0.0.0.0
+0 ::255.255.255.255
+0 ::192.0.2.1
+0 1:2:3:4:5:6:1.2.3.4
+0 ::1:2:3:4:5:1.2.3.4
+0 1:2:3:4:5::1.2.3.4
+0 ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255
+1 1:2:3
+1 1:2:3:4:5:6:7
+1 1:2:3:4:5:6:7:8:9
+1 1::2::3
+1 2001:db8::1::5
+1 ::1::
+1 1::2::
+1 :::
+1 ::::
+1 1:::2
+1 :1::
+1 1::2:
+1 :1
+1 1:
+1 :1:2:3:4:5:6:7:8
+1 1:2:3:4:5:6:7:8:
+1 1:2:3:4::5:6:7:8
+1 1:2:3:4:5:6:7:8::
+1 ::1:2:3:4:5:6:7:8
+1 12345::1
+1 00000::1
+1 1:2:3:4:5:6:7:12345
+1 g::1
+1 fe80::1%eth0
+1 fe80::1%1
+1 [::1]
+1 [::1]:80
+1 ::1/128
+1 2001:db8::/32
+1 1.2.3.4
+1 ::ffff:256.0.0.1
+1 ::ffff:01.2.3.4
+1 ::ffff:1.2.3.04
+1 ::ffff:00.2.3.4
+1 ::ffff:1.2.3
+1 ::ffff:1.2.3.4.5
+1 ::ffff:1.2.3.4:5
+1 ::ffff:1.2.3.
+1 1.2.3.4::
+1 1.2.3.4::1
+1 :1.2.3.4
+1 1:2:3:4:5:6:7:1.2.3.4
+1 1:2:3:4:5:6::1.2.3.4
+1 ::1:2:3:4:5:6:1.2.3.4
+1 ::1.2::3
+1 ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.2555
+ROWS
+}
+while read -r want addr; do
+    [[ -n "$want" ]] || continue
+    check "validate_ipv6 ${addr}" "$want" "$(v6 "$addr")"
+done <<<"$(v6_rows)"
+check "validate_ipv6 empty refused" 1 "$(v6 '')"
+check "validate_ipv6 leading space refused" 1 "$(v6 ' ::1')"
+check "validate_ipv6 trailing space refused" 1 "$(v6 '::1 ')"
+check "validate_ipv6 trailing newline refused" 1 "$(v6 $'::1\n')"
+check "validate_ipv6 inner newline refused" 1 "$(v6 $'2001:db8::\n1')"
+# Longer than 45 characters, the longest form, is refused before any regex runs:
+# bash's string operations make the grammar quadratic on a long input.
+long="ab:"
+while [[ ${#long} -lt 60000 ]]; do long="${long}${long}"; done
+start=$SECONDS
+rc="$(v6 "::${long}1")"
+check "validate_ipv6 a ${#long}-character input refused at once" "1 fast" \
+    "$rc $( (( SECONDS - start <= 1 )) && echo fast || echo slow)"
+
+# --- the same grammar in en_US.UTF-8 ----------------------------------------
+# In a glibc UTF-8 locale such as en_US.UTF-8, a range like [0-9] or [a-f] also
+# matches look-alikes the tool refuses (full-width digits and letters,
+# Arabic-Indic digits, Latin-1 letters, superscripts), so the classes list their
+# characters one by one. Every row above holds there too, and a look-alike is a
+# clean refusal: rc 1 and nothing on stderr.
+if command -v locale >/dev/null 2>&1 && locale -a 2>/dev/null | grep -qiE '^en_US\.utf-?8$'; then
+    u8() { (LC_ALL=en_US.UTF-8; "$@" 2>&1); }
+    bad=""
+    while read -r want addr; do
+        [[ -n "$want" ]] || continue
+        [[ "$(u8 v6 "$addr")" == "$want" ]] || bad="${bad} ${addr}"
+    done <<<"$(v6_rows)"
+    check "validate_ipv6 en_US.UTF-8: every row above" "" "$bad"
+    fw8="$(printf '\357\274\230')"   # full-width 8
+    fwa="$(printf '\357\275\201')"   # full-width a
+    ar1="$(printf '\331\241')"        # Arabic-Indic 1
+    ar4="$(printf '\331\244')"        # Arabic-Indic 4
+    eac="$(printf '\303\251')"        # e acute
+    sup2="$(printf '\302\262')"       # superscript 2
+    for a in "2001:db${fw8}::1" "::${fwa}" "::${ar1}" "::ffff:1.2.3.${ar4}" "::${eac}" "::${sup2}"; do
+        check "validate_ipv6 en_US.UTF-8: ${a} refused" 1 "$(u8 v6 "$a")"
+    done
+    for a in "2001:db${fw8}::1" "2001:db8::${eac}" "2001:db8::/3${ar1}" "192.0.2.${ar4}" "192.0.2.0/2${fw8}"; do
+        check "vhs en_US.UTF-8: ${a} refused" 1 "$(u8 vh "$a")"
+    done
+    check "vhs en_US.UTF-8: 2001:db8::/32 ok" 0 "$(u8 vh 2001:db8::/32)"
+    check "vhs en_US.UTF-8: 192.0.2.0/24 ok" 0 "$(u8 vh 192.0.2.0/24)"
+else
+    skip "validate_ipv6 and validate_health_src in en_US.UTF-8" "no en_US.UTF-8 locale"
+fi
 
 # --- apply_kuma_rule on testnet ---------------------------------------------
 printf 'NETWORK=testnet\nKUMA_EXTRA_SRC=198.51.100.7 0.0.0.0/0\n' > "$META"

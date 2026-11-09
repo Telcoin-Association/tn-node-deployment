@@ -50,8 +50,9 @@
 # has to put them back. Backups are root-only copies in /var/backups/telcoin.
 #
 # The run holds the update lock (the one update-node.sh, edit-config.sh and
-# setup-node.sh take) from the confirmation to the end, and waits for the restart
-# window (tn_wait_restart_window) right before it stops the legacy node.
+# setup-node.sh take) from the confirmation to its last change, and waits for the
+# restart window (tn_wait_restart_window) right before it stops the legacy node.
+# A P2P committee allowlist resync after that takes the lock itself.
 #
 # Downtime is expected and acceptable (stop -> migrate -> start). The node
 # rejoins consensus at the next epoch boundary when it is in committee.
@@ -1114,6 +1115,35 @@ restart_ui_if_present() {
 }
 
 # =============================================================================
+# STEP 11.7 -- RESYNC THE P2P COMMITTEE ALLOWLIST
+# =============================================================================
+# The migration rewrote RPC_PORT in .node-meta, which the P2P committee allowlist
+# (firewall-setup.sh --p2p-committee) reads the node's snapshot through. With
+# P2P_COMMITTEE=on there, bring it in step: firewall-setup.sh --p2p-committee
+# sync, run once this run has released the update lock, because that run takes
+# the lock itself (the report after it changes nothing). A no-op while
+# P2P_COMMITTEE is off. NON-FATAL by design, like the two steps above: the ERR
+# trap is still armed, so every command is guarded, and a failed sync is a
+# warning naming the command to run.
+resync_committee_allowlist() {
+    local mode rc=0
+    mode="$(meta_get P2P_COMMITTEE 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        print_warn "P2P_COMMITTEE is set more than once in .node-meta, so the P2P committee allowlist was not synced with the new layout; remove the extra lines, then run: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee sync"
+        return 0
+    fi
+    [[ "$mode" == "on" ]] || return 0
+    print_step "Syncing the P2P committee allowlist with the new layout..."
+    tn_release_update_lock 2>/dev/null || true
+    rc=0
+    bash "${SCRIPT_DIR}/firewall-setup.sh" --p2p-committee sync < /dev/null || rc=$?
+    if [[ $rc -ne 0 && $rc -ne 3 ]]; then
+        print_warn "The P2P committee allowlist was not synced with the new layout (firewall-setup.sh exit ${rc}); run: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee sync"
+    fi
+    return 0
+}
+
+# =============================================================================
 # STEP 12 -- REPORT
 # =============================================================================
 report() {
@@ -1152,7 +1182,7 @@ report() {
 # =============================================================================
 main() {
     detect_legacy        # step 1 (may exit 0 if already migrated / declined)
-    migrate_take_lock    # held to the end; the EXIT trap releases it
+    migrate_take_lock    # held to step 11.7; the EXIT trap releases it
     snapshot             # step 2 (arms rollback)
     stop_legacy          # step 3 (waits for the restart window first)
     relocate_dir "$LEGACY_CONFIG_DIR" "$UNIFIED_CONFIG_DIR" CONFIG_MOVED config   # step 4
@@ -1169,6 +1199,7 @@ main() {
     remove_legacy_units   # step 10.5 (non-fatal; only after a verified start)
     open_consensus_ports  # step 11 (non-fatal; validator-capable P2P ports)
     restart_ui_if_present # step 11.5 (non-fatal; refresh local Node Manager UI)
+    resync_committee_allowlist # step 11.7 (non-fatal; releases the lock first)
     report                # step 12
 }
 

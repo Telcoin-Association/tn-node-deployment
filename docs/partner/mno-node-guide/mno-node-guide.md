@@ -449,6 +449,14 @@ It also writes `/etc/telcoin/p2p-limit.nft` and enables `telcoin-p2p-limit.servi
 - The two values are not stored, so a later enable without them, the Node Manager UI's included, goes back to 20 and 40.
 - `1) View current firewall status` shows a `New-flow limit:` line under the P2P ports, and whether the limit comes back at boot.
 
+A validator can go further with the P2P committee allowlist: `sudo bash ~/telcoin-node-scripts/firewall-setup.sh --p2p-committee on` lets only the peers its own node lists reach the P2P ports, which are the committees, the validators the node tracks for a coming seat and its trusted and bootstrap peers, plus the bootstrap peers' addresses and any `--p2p-from` list, and drops every other source before `ufw`.
+A timer brings the list in step with the committee every 5 minutes through a small signed tool, `tn-p2p-allow-sync`, which the scripts download, verify against the release keys and install themselves.
+The allowlist takes the place of the new-flow limit, and `--p2p-committee off` puts the earlier rules and the limit back at once.
+It needs a node release that serves the admission snapshot; until then `on` refuses and changes nothing.
+A validator must send from the address it advertises in `node-info.yaml`: behind NAT, on a host with several addresses or with IPv6 temporary addresses, its packets can come from another address, and peers in committee mode drop them.
+`--p2p-committee status`, `check-node.sh` and the Node Manager UI's firewall card show its state; hubs and observers leave it off.
+The README covers the [P2P committee allowlist](https://github.com/Telcoin-Association/tn-node-deployment/blob/main/README.md#p2p-committee-allowlist) in full.
+
 `3) Manage SSH access` hardens sshd through a drop-in, `/etc/ssh/sshd_config.d/00-telcoin-hardening.conf`.
 `1) Disable password authentication (keys only)` writes `PasswordAuthentication no` and `KbdInteractiveAuthentication no`, and `2) Disable root login` writes `PermitRootLogin no`.
 The script checks the result with `sshd -t` and puts the previous configuration back if sshd rejects it.
@@ -504,7 +512,7 @@ A step that fails only warns, `The host baseline was not made (see above); the n
 The scripts make the AIDE baseline again after each change they apply, so their own writes do not show up as differences:
 
 - `update-node.sh` after an update that passed its checks;
-- `edit-config.sh` after an edit whose restart came back healthy, after `12) Restart node`, and after a passphrase change, `--reseal` or `--migrate-credential`;
+- `edit-config.sh` after an edit whose restart came back healthy, after `14) Restart node`, and after a passphrase change, `--reseal` or `--migrate-credential`;
 - `install-caddy.sh`, `firewall-setup.sh`, `setup-vpn.sh` and `setup-observability.sh` after a change that went through.
 
 A refused or failed change, or a rollback, leaves the baseline as it was.
@@ -766,7 +774,7 @@ sudo install -m 0755 <new binary> <binary path>
 sudo systemctl start telcoin
 ```
 
-On a committee node, run only the `install` line, which replaces the file while the node runs, then restart with `edit-config.sh` menu item `12) Restart node`, which runs the quorum check and waits for the epoch boundary.
+On a committee node, run only the `install` line, which replaces the file while the node runs, then restart with `edit-config.sh` menu item `14) Restart node`, which runs the quorum check and waits for the epoch boundary.
 A signed-release install (`--install-method release`) does all of this for you.
 After any update, run `sudo bash ~/telcoin-node-scripts/check-node.sh`.
 
@@ -826,7 +834,7 @@ It prints a line that starts `Waiting for epoch <N> to close before restarting`,
 Nodes outside the committee, staked validators between seats included, are not delayed, and a restart that rolls back a failed change never waits.
 
 To skip the wait, pass `--no-epoch-wait` (`update-node.sh` and `edit-config.sh`) or set `TN_SKIP_EPOCH_WAIT=1` through `sudo`, for example `sudo TN_SKIP_EPOCH_WAIT=1 bash ~/telcoin-node-scripts/update-node.sh`.
-On a committee node, check the time to the next boundary with `check-node.sh` before a restart that does not wait (see [The epoch section](#the-epoch-section)), or restart with `edit-config.sh` menu item `12) Restart node`, which waits.
+On a committee node, check the time to the next boundary with `check-node.sh` before a restart that does not wait (see [The epoch section](#the-epoch-section)), or restart with `edit-config.sh` menu item `14) Restart node`, which waits.
 
 If a committee node is stopped at the epoch boundary anyway, it repairs its epoch records when it starts again and logs warnings that need no action (see [Service and keys](#service-and-keys)).
 It still misses the epoch votes while it is down, so keep to the wait.
@@ -862,9 +870,11 @@ sudo bash ~/telcoin-node-scripts/edit-config.sh
 | `8) Bootstrap peers` | A peers map in place of the genesis list (see [Optional node flags](#optional-node-flags)), or none. |
 | `9) State export` | Off, every epoch's export, or the last N epochs. |
 | `10) Private forward targets` | `allow_private_forward_targets` in `parameters.yaml`; private networks only. |
-| `11) Refresh chain configs` | Pulls the latest genesis, committee and parameters and checks them against the pinned hashes. |
-| `12) Restart node` | |
-| `13) Exit` | |
+| `11) Admission mode` | The node's connection admission mode, `open`, `grace` or `closed`, in `network-config`, for node releases that read it. |
+| `12) Trusted nodes` | The trusted hubs a closed node admits, or none. |
+| `13) Refresh chain configs` | Pulls the latest genesis, committee and parameters and checks them against the pinned hashes. |
+| `14) Restart node` | With the P2P committee allowlist on, it also brings the allowlist in step with an edit saved for a later restart. |
+| `15) Exit` | |
 
 Before the first change to a file, it copies the file into `/var/backups/telcoin/` (root only) and prints the copy's path and SHA-256.
 After an edit it asks `Restart the node now to apply changes?`; No keeps the change for the next restart.
@@ -904,7 +914,7 @@ When it has, the script runs `keytool verify` as the service account, with the p
 A passphrase that does not open the BLS key stops the action with `... does not open the BLS key in <data dir> (keytool verify, exit N); nothing was changed. Use the passphrase the key was created with.`
 On a release without the command, the script logs `keytool verify is not in this release; skipped` and goes on as before, so there the passphrase is stored without a check against the key.
 
-`11) Refresh chain configs` takes the network from `.node-meta`, refuses files that do not match the SHA-256 pins that ship with the scripts (new pins arrive with a signed scripts release), and refuses unless the node's genesis and the new one declare the same chain ID.
+`13) Refresh chain configs` takes the network from `.node-meta`, refuses files that do not match the SHA-256 pins that ship with the scripts (new pins arrive with a signed scripts release), and refuses unless the node's genesis and the new one declare the same chain ID.
 On a source build checked out at a release tag, `git pull` fails and the refresh stops with `git pull failed in /opt/telcoin-source. Chain configs unchanged.`
 
 Two cautions:
@@ -1164,7 +1174,7 @@ The keys, the passphrase credential and the rest of the configuration are shredd
 Do not delete the keys of a staked validator unless you hold a tested backup.
 Testnet add-ons are removed without a question.
 Private alerts are removed without a question too, before the node stops, so the heartbeat does not report the stop as a failure; pause or delete the node's monitor afterwards, because a push monitor alerts on silence.
-The host baseline and the P2P new-flow limit go with the last node on the server; while another node unit remains, both stay for it.
+The host baseline, the P2P new-flow limit and the P2P committee allowlist go with the last node on the server; while another node unit remains, they stay for it.
 If you keep the service user, it asks before it removes the `telcoin-log` group.
 A removal that stopped part way can be finished: run the script again, and it lists the files left behind and asks before it removes them.
 Menu option `2) Wipe chain data only (keeps keys and config)` keeps the keys and configuration and makes the node resync from scratch.
@@ -1676,7 +1686,7 @@ If an explicit URL differs from the domain, setup warns that `rpc-enable` will r
 |---|---|
 | `install-caddy.sh` | `--phase=rpc-status`, `rpc-check-dns`, `rpc-enable`, `rpc-disable` and the dashboard phases `status`, `check-dns`, `enable`, `disable`, with or without `--json`. Outside a terminal and without `--json`, `rpc-enable` needs `--yes`. The dashboard password comes on standard input with `--password-stdin` and needs at least 16 characters. |
 | `update-node.sh` | `--json --check`, `--json --prepare --ref <tag>`, `--json --apply --yes [--no-epoch-wait] [--allow-quorum-risk]`, `--json --discard`. `--ref` takes a release tag of the network or, on a Docker install, the network's image by digest; it cannot start with `-`. A failed apply rolls back; its `done` line carries `"ok":false` and a boolean `rolled_back` (`true` when the rollback succeeded), and `"voting":false` when the node did not take part in consensus. An apply whose node was still catching up when the consensus check ran out of time ends `"ok":true` with `"voting":false` (see [Update the node](#update-the-node)). A one-way apply (see [One-way updates](#one-way-updates)) never rolls back: its failed `done` carries `"rolled_back":false` and `"storage_migration":true`, and `--json --check` adds the same boolean, `true` when updating to `latest_ref` is one-way. A `--json --discard` after such an apply had started the new release keeps the launch files, sends a `warn` event, and its `done` carries `"storage_migration":true`. A refused downgrade's `done` carries `"downgrade":true`. |
-| `firewall-setup.sh` | `--enable` or `--reset`, with `--ssh-from`, `--p2p-from`, `--ssh-anywhere` or `--p2p-anywhere`; `--json --status`, `--json --enable`, `--json --port <49590/udp\|49594/udp\|43174/tcp> <on\|off>`. `--json --status` adds `p2p_ports`, one object per P2P port with `port`, `proto`, `label` and `allowed` (`null` while `ufw` is off), and `p2p_new_flow_limit` with `active`, `rate`, `burst` and whether the limit comes back at boot (`persistent`). Exit 0 is done, 1 refused with nothing changed, 2 a step failed and the previous rules are back, 3 the put-back failed too (the message names the saved rule files). |
+| `firewall-setup.sh` | `--enable` or `--reset`, with `--ssh-from`, `--p2p-from`, `--ssh-anywhere` or `--p2p-anywhere`; `--json --status`, `--json --enable`, `--json --port <49590/udp\|49594/udp\|43174/tcp> <on\|off>`. `--json --status` adds `p2p_ports`, one object per P2P port with `port`, `proto`, `label` and `allowed` (`null` while `ufw` is off), and `p2p_new_flow_limit` with `active`, `rate`, `burst` and whether the limit comes back at boot (`persistent`), and ends with `p2p_committee`, the P2P committee allowlist (`enabled`, `persistent`, `timer` and `reason`, then the allowlist's state while it is on). Exit 0 is done, 1 refused with nothing changed, 2 a step failed and the previous rules are back, 3 the put-back failed too (the message names the saved rule files). `--p2p-committee on\|off\|sync\|status` turns the allowlist on and off, syncs it and reports it, on the server only, and takes no other flag. |
 | `edit-config.sh` | `--set <field>=<value>`, with or without `--json`, for the fields in [Change the configuration](#change-the-configuration); `--reseal`; `--no-epoch-wait`, `--allow-quorum-risk`. |
 | `check-node.sh` | `--audit` (see [Check the host hardening](#check-the-host-hardening)), `--network-rpc <URL>`, `--address <0x...>`. |
 | `update-scripts.sh` | `--check` reports the installed and the newest scripts release without installing anything; exit 0, 1 or 2 (see [Keep the scripts current](#keep-the-scripts-current)). |

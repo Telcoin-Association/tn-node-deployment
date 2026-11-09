@@ -732,6 +732,110 @@ _rm_p2p_limit() {
     return 0
 }
 
+# _rm_p2p_allow -- remove firewall-setup.sh's P2P committee allowlist, at its
+# fixed paths and without running firewall-setup.sh or the tool: stop
+# telcoin-p2p-allow-sync.timer, telcoin-p2p-allow-sync.service and
+# telcoin-p2p-allow.service (the timer first, so no sync starts) and remove
+# their unit files. Then, in a real state directory /var/lib/telcoin-p2p-allow,
+# take the tool's own lock as firewall-setup.sh --p2p-committee off does (its
+# lock file on fd 8, created 0600 when missing, opened only when missing or a
+# regular file, never through a symlink; flock -w 30), so a run in progress ends
+# first and none loads the table again after the delete. Holding it: delete the
+# nftables table inet tn_p2p_allow when nft lists it, or, when the listing
+# fails, when a unit, the state dir or the binary was found (with none of them
+# there is no sign of a table, and the delete would only print a result that
+# says nothing); remove the tool binary
+# /usr/local/libexec/telcoin/tn-p2p-allow-sync (never through a symlinked
+# libexec dir), and last the state directory. That directory goes only when it
+# is a real directory, and it stays when nft refused the delete, so the leftover
+# check finds it and a later run tries again. When the lock cannot be taken (a
+# run held it for 30 seconds, it cannot be opened, or flock is missing), the
+# table and the state directory stay the same way, said, and the binary still
+# goes, as off removes it. With no state directory, or a symlink there, there is
+# no lock to take and the table is deleted without it. Never fails.
+_rm_p2p_allow() {
+    local r="$TN_RM_ROOT" u f any=false tables keep=false try=false held=false old_umask
+    local dir=/var/lib/telcoin-p2p-allow bin=/usr/local/libexec/telcoin/tn-p2p-allow-sync
+    for u in telcoin-p2p-allow-sync.timer telcoin-p2p-allow-sync.service telcoin-p2p-allow.service; do
+        f="/etc/systemd/system/${u}"
+        [[ -e "${r}${f}" || -L "${r}${f}" ]] || continue
+        any=true
+        # the sync service has no [Install] section, so it is only stopped
+        if [[ "$u" == telcoin-p2p-allow-sync.service ]]; then
+            systemctl stop "$u" >/dev/null 2>&1 || true
+        else
+            systemctl disable --now "$u" >/dev/null 2>&1 || true
+        fi
+        rm -f -- "${r}${f}" 2>/dev/null || true
+        print_ok "Removed ${f}"
+    done
+    if [[ "$any" == "true" ]]; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+    # keep: the table and the state dir stay, for a later removal to try again
+    if [[ -d "${r}${dir}" && ! -L "${r}${dir}" ]]; then
+        keep=true
+        if ! command -v flock >/dev/null 2>&1; then
+            print_warn "flock is not installed, so ${dir}/lock cannot be taken: the nftables table inet tn_p2p_allow and ${dir} stay for a later removal to try again; install util-linux, then run this again."
+        else
+            # umask 077 creates a missing lock 0600, as the tool creates it.
+            # Only a missing lock or a regular file is opened: a FIFO would
+            # block the open, and a failed exec redirection prints a raw shell
+            # error (and ends the script in POSIX mode).
+            old_umask="$(umask)"
+            umask 077
+            if [[ -L "${r}${dir}/lock" ]] || { [[ -e "${r}${dir}/lock" ]] && [[ ! -f "${r}${dir}/lock" ]]; } \
+                || ! { exec 8>>"${r}${dir}/lock"; } 2>/dev/null; then
+                umask "$old_umask"
+                print_warn "${dir}/lock cannot be opened, so the nftables table inet tn_p2p_allow and ${dir} stay for a later removal to try again; check what ${dir}/lock is, then run this again."
+            else
+                umask "$old_umask"
+                if flock -w 30 8; then
+                    held=true
+                    keep=false
+                else
+                    exec 8>&-
+                    print_warn "A tn-p2p-allow-sync run held ${dir}/lock for 30 seconds, so the nftables table inet tn_p2p_allow and ${dir} stay for a later removal to try again; run this again when it has finished."
+                fi
+            fi
+        fi
+    fi
+    if [[ "$keep" != "true" ]] && command -v nft >/dev/null 2>&1; then
+        if tables="$(nft list tables 2>/dev/null)"; then
+            if grep -qx 'table inet tn_p2p_allow' <<< "$tables"; then
+                try=true
+            fi
+        elif [[ "$any" == "true" || -e "${r}${dir}" || -L "${r}${dir}" || -e "${r}${bin}" || -L "${r}${bin}" ]]; then
+            # a listing that fails says nothing about the table, so the delete is
+            # tried where the allowlist left something else behind
+            try=true
+        fi
+        if [[ "$try" == "true" ]]; then
+            if nft -f - >/dev/null 2>&1 <<< $'table inet tn_p2p_allow\ndelete table inet tn_p2p_allow'; then
+                print_ok "Deleted the P2P committee allowlist (nftables table inet tn_p2p_allow)"
+            else
+                keep=true
+                print_warn "Could not delete the nftables table inet tn_p2p_allow, so ${dir} stays for a later removal to try again; remove the table with: sudo nft delete table inet tn_p2p_allow"
+            fi
+        fi
+    fi
+    if [[ ! -L "${r}/usr/local/libexec/telcoin" ]] && [[ -e "${r}${bin}" || -L "${r}${bin}" ]]; then
+        rm -f -- "${r}${bin}" 2>/dev/null || true
+        print_ok "Removed ${bin}"
+    fi
+    if [[ -L "${r}${dir}" ]]; then
+        print_warn "${dir} is a symlink: it is left in place. Check where it points and remove it by hand."
+    elif [[ -d "${r}${dir}" && "$keep" != "true" ]]; then
+        rm -rf -- "${r}${dir}" 2>/dev/null || true
+        print_ok "Removed ${dir}"
+    fi
+    if [[ "$held" == "true" ]]; then
+        flock -u 8 >/dev/null 2>&1 || true
+        exec 8>&-
+    fi
+    return 0
+}
+
 # remove_node_host_files -- remove the host files every node install shares:
 # the start scripts in /usr/local/libexec/telcoin (and that directory when it is
 # empty; a symlink there is left alone with a warning, nothing is removed
@@ -741,10 +845,12 @@ _rm_p2p_limit() {
 # the journald drop-in 50-telcoin.conf, the needrestart rule 50-telcoin.conf,
 # the apt rule 52telcoin-no-reboot, the release staging directory
 # /var/lib/telcoin-staging, the source-build account tn-build (its processes
-# stopped first; a failed userdel is a warning) with its home /var/lib/tn-build.
-# /run/telcoin stays: it holds the update lock every node operation takes, and
-# /run is emptied at reboot. The caller runs it only when no other node install
-# remains. Every path is under TN_RM_ROOT (see the top of this file).
+# stopped first; a failed userdel is a warning) with its home /var/lib/tn-build,
+# and firewall-setup.sh's P2P new-flow limit and P2P committee allowlist
+# (_rm_p2p_limit, _rm_p2p_allow). /run/telcoin stays: it holds the update lock
+# every node operation takes, and /run is emptied at reboot. The caller runs it
+# only when no other node install remains. Every path is under TN_RM_ROOT (see
+# the top of this file).
 remove_node_host_files() {
     local r="$TN_RM_ROOT" lx m f
     local -a files=()
@@ -770,6 +876,8 @@ remove_node_host_files() {
     done
     # The P2P new-flow limit firewall-setup.sh keeps for this node, and its boot unit.
     _rm_p2p_limit
+    # The P2P committee allowlist: its units, table, tool binary and state.
+    _rm_p2p_allow
     if [[ ! -L "$lx" ]]; then
         rmdir "$lx" 2>/dev/null || true
     fi
@@ -815,6 +923,12 @@ rm_leftovers_present() {
             return 0
         fi
     done
+    # the P2P committee allowlist's timer and its state directory count too, the
+    # directory only when it is a real one (a symlink there is never removed)
+    if [[ -e "${r}/etc/systemd/system/telcoin-p2p-allow-sync.timer" || -L "${r}/etc/systemd/system/telcoin-p2p-allow-sync.timer" ]] \
+        || [[ -d "${r}/var/lib/telcoin-p2p-allow" && ! -L "${r}/var/lib/telcoin-p2p-allow" ]]; then
+        return 0
+    fi
     if [[ -d "${r}/usr/local/libexec/telcoin" && ! -L "${r}/usr/local/libexec/telcoin" ]]; then
         for m in source docker; do
             f="$(tn_start_script_path "$m")" || continue
@@ -868,6 +982,12 @@ remove_leftovers() {
     done
     if [[ -e "${r}/var/backups/telcoin" || -L "${r}/var/backups/telcoin" ]]; then
         shown+=("/var/backups/telcoin")
+    fi
+    if [[ -e "${r}/etc/systemd/system/telcoin-p2p-allow-sync.timer" || -L "${r}/etc/systemd/system/telcoin-p2p-allow-sync.timer" ]]; then
+        shown+=("/etc/systemd/system/telcoin-p2p-allow-sync.timer (the P2P committee allowlist, its units and its nftables table)")
+    fi
+    if [[ -d "${r}/var/lib/telcoin-p2p-allow" && ! -L "${r}/var/lib/telcoin-p2p-allow" ]]; then
+        shown+=("/var/lib/telcoin-p2p-allow (the P2P committee allowlist's state)")
     fi
     if [[ -e "${r}/etc/systemd/system/telcoin-p2p-limit.service" || -L "${r}/etc/systemd/system/telcoin-p2p-limit.service" ]]; then
         shown+=("/etc/systemd/system/telcoin-p2p-limit.service (the P2P new-flow limit, and its nftables table)")
