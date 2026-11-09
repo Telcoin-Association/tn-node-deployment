@@ -816,14 +816,14 @@ eval "$(sed -n '/^fw_baseline_refresh() {$/,/^}$/p' "$T/fw/firewall-setup.sh")"
 # --- the installed binary is judged by the install's own --version check ----------------
 fixture; run fw_committee_on; simulate_apply
 : > "$INSTALLS"
-TN_P2P_STUB_VERSION_TEXT="tn-p2p-allow-sync 0.1.0
+TN_P2P_STUB_VERSION_TEXT="tn-p2p-allow-sync ${TN_P2P_ALLOW_VERSION#v}
 commit 0123456789abcdef0123456789abcdef01234567
 target x86_64-unknown-linux-musl
 snapshot-versions 1
 config-version 2" run fw_committee_sync
 check "sync: the pinned version with config-version 2 is replaced" "install fw_baseline_say" "$(cat "$INSTALLS")"
 : > "$INSTALLS"
-TN_P2P_STUB_VERSION_TEXT="tn-p2p-allow-sync 0.1.0
+TN_P2P_STUB_VERSION_TEXT="tn-p2p-allow-sync ${TN_P2P_ALLOW_VERSION#v}
 commit 0123456789abcdef0123456789abcdef01234567
 config-version 1" run fw_committee_sync
 check "sync: no snapshot-versions line is replaced" "install fw_baseline_say" "$(cat "$INSTALLS")"

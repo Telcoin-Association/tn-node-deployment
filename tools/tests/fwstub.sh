@@ -75,8 +75,10 @@
 # $REC.stdin (else that file is left empty and nothing is read), replacing what
 # the last call wrote, and appends its arguments on one line to $REC.log.
 # Without REC only --version runs; anything else exits 2. --version prints the
-# five lines of a release (tn-p2p-allow-sync $TN_P2P_STUB_VERSION, default 0.1.0,
-# then commit, target, snapshot-versions 1, config-version 1), or
+# five lines of a release (tn-p2p-allow-sync $TN_P2P_STUB_VERSION, by default the
+# version lib/common.sh pins in TN_P2P_ALLOW_VERSION, read when the stand-in is
+# written, so an unchanged stand-in is a current binary; then commit, target,
+# snapshot-versions 1, config-version 1), or
 # $TN_P2P_STUB_VERSION_TEXT whenever that is set, and exits
 # $TN_P2P_STUB_RC_VERSION (default 0). Every other call is keyed by its command:
 # SYNC, CHECK, STATUS, STATUS_JSON (status --json), RENDER or CAPTURE_FLOOR; an
@@ -663,7 +665,14 @@ elif printf '%s\n' "$prog" | grep -qx 'delete table inet tn_p2p'; then
 fi
 exit 0
 STUB
-    cat > "$bin/tn-p2p-allow-sync" <<'STUB'
+    # the pinned release's version, baked into the stand-in's default --version
+    local pin
+    pin=$(sed -n 's/^readonly TN_P2P_ALLOW_VERSION="v\(.*\)"$/\1/p' "${TN_TEST_REPO:?tools/tests/lib.sh sets it}/lib/common.sh")
+    if [ -z "$pin" ]; then
+        echo "fwstub.sh: lib/common.sh has no readonly TN_P2P_ALLOW_VERSION=\"v...\" line" >&2
+        return 2
+    fi
+    sed "s|@TN_P2P_PIN@|$pin|" > "$bin/tn-p2p-allow-sync" <<'STUB'
 #!/bin/sh
 # tn-p2p-allow-sync stand-in (tools/tests/fwstub.sh): records each call, answers
 # from the TN_P2P_STUB_* knobs.
@@ -714,7 +723,7 @@ if [ "$key" = VERSION ]; then
     if [ -n "${TN_P2P_STUB_VERSION_TEXT+x}" ]; then
         [ -z "$TN_P2P_STUB_VERSION_TEXT" ] || printf '%s\n' "$TN_P2P_STUB_VERSION_TEXT"
     else
-        printf 'tn-p2p-allow-sync %s\n' "${TN_P2P_STUB_VERSION:-0.1.0}"
+        printf 'tn-p2p-allow-sync %s\n' "${TN_P2P_STUB_VERSION:-@TN_P2P_PIN@}"
         printf 'commit 0123456789abcdef0123456789abcdef01234567\n'
         printf 'target x86_64-unknown-linux-musl\nsnapshot-versions 1\nconfig-version 1\n'
     fi
