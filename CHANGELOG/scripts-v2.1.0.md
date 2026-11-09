@@ -619,7 +619,7 @@ For validators it replaces the signed address manifest #41 proposed; hubs and ob
 - In committee mode `ufw` keeps its open P2P rules and any per-source rules, and the new-flow limit `inet tn_p2p` (table, boot copy and unit) is removed, because an accept at priority -20 does not stop the limit chain at -10; the limit reports reason `committee`.
   There is no rule for established flows: the table matches addresses only, so a committee-mode validator completes connections only with listed sources.
 - `P2P_ALLOW_FROM` becomes static entries of the table while `ufw` stays open; the config writer refuses a multicast, link-local or unspecified host in it and writes a repeated P2P port once.
-- The tool comes from a signed release of `Telcoin-Association/tn-p2p-allow-sync` pinned in `lib/common.sh` (`TN_P2P_ALLOW_VERSION` `v0.1.0`, `TN_P2P_ALLOW_TARBALL_SHA256`), checked against `lib/release-keys` like a node release and installed as `/usr/local/libexec/telcoin/tn-p2p-allow-sync` (root 0755).
+- The tool comes from a signed release of `Telcoin-Association/tn-p2p-allow-sync` pinned in `lib/common.sh` (`TN_P2P_ALLOW_VERSION` `v0.1.1`, `TN_P2P_ALLOW_TARBALL_SHA256`), checked against `lib/release-keys` like a node release and installed as `/usr/local/libexec/telcoin/tn-p2p-allow-sync` (root 0755).
 - Three units: `telcoin-p2p-allow.service` loads the last-good program at boot with `/usr/sbin/nft -f`, the nft the tool runs, written literally, after `ufw` and before the node (a no-op without `current.nft`); `telcoin-p2p-allow-sync.service` runs one sync in a sandbox that keeps `CAP_NET_ADMIN` alone, reaches `localhost` only and cannot see `/etc/telcoin` (`SuccessExitStatus=3 4`); `telcoin-p2p-allow-sync.timer` starts it 2 minutes after boot and 5 minutes after each run.
 - The state dir `/var/lib/telcoin-p2p-allow` (root 0700, outside `/etc/telcoin` so a sync touches nothing auditd or AIDE watch) holds the scripts' `config` and the tool's `floor`, `current.nft`, `state.json`, `status` and `lock`; `tn_root_dir_ok` refuses it group-writable.
   The scripts never hold the tool's lock while the tool runs, and the timer never takes the update lock.
@@ -711,7 +711,7 @@ For validators it replaces the signed address manifest #41 proposed; hubs and ob
 | `/etc/systemd/system/telcoin-p2p-allow.service`, `telcoin-p2p-allow-sync.service`, `telcoin-p2p-allow-sync.timer` (root 0644) | The allowlist's boot unit, sync service and timer |
 | nftables table `inet tn_p2p_allow` | The allowlist: sets `allow_v4`, `allow_v6`, `static_v4`, `static_v6`, counters `tn_accept_p2p_listed` and `tn_drop_p2p_unlisted` |
 | `P2P_COMMITTEE` in `.node-meta` | `on` or `off`, the committee mode `firewall-setup.sh --p2p-committee` records |
-| `TN_P2P_ALLOW_VERSION`, `TN_P2P_ALLOW_TARBALL_SHA256` in `lib/common.sh` | The pinned tool release (`v0.1.0`) and its tarball sha256 |
+| `TN_P2P_ALLOW_VERSION`, `TN_P2P_ALLOW_TARBALL_SHA256` in `lib/common.sh` | The pinned tool release (`v0.1.1`) and its tarball sha256 |
 | `p2p_committee` in `firewall-setup.sh --json --status` | The allowlist's state for the UI |
 
 ## New environment variables
@@ -747,7 +747,7 @@ For validators it replaces the signed address manifest #41 proposed; hubs and ob
 7. Private alerts are opt-in on every network: nothing changes until you run
    `sudo bash ~/telcoin-node-scripts/setup-alerts.sh`. A host that enables them and later updates
    the scripts runs the `setup-alerts.sh --refresh` that update-scripts prints.
-8. The P2P committee allowlist is opt-in for validators: this release pins `tn-p2p-allow-sync` v0.1.0, and nothing changes until `firewall-setup.sh --p2p-committee on` is run on a node release that serves `tn_admissionSnapshot`.
+8. The P2P committee allowlist is opt-in for validators: this release pins `tn-p2p-allow-sync` v0.1.1, and nothing changes until `firewall-setup.sh --p2p-committee on` is run on a node release that serves `tn_admissionSnapshot`.
 
 ## Refusals and warnings you may now see
 
@@ -812,7 +812,7 @@ Each tracker stays open with what is left on it, except #60, which this release 
 - #40: 2-of-N release signatures wait for a second release key; then `TN_SIG_THRESHOLD` rises in
   the three verifiers. The release key expires 2028-10-16, so the extended key must ship in a
   script release before then.
-- #41: the P2P committee allowlist replaces the signed address manifest for validators; this release pins `tn-p2p-allow-sync` v0.1.0 (`TN_P2P_ALLOW_TARBALL_SHA256`).
+- #41: the P2P committee allowlist replaces the signed address manifest for validators; this release pins `tn-p2p-allow-sync` v0.1.1 (`TN_P2P_ALLOW_TARBALL_SHA256`).
   Its first CI run after the pin confirms the counters across reloads on the runner kernel, the sync unit's sandbox on systemd 255 and the boot unit's first load (`ProtectKernelModules=`).
   Still open: a validator that sends from an address its record does not carry (the static list is the mitigation), the genesis `committee.yaml` that feeds the floor on a node without a peers file (writable by the service user), the x86_64-only release and the pace of a release-key rotation, and a resync after a `setup-node.sh` re-run; provider-edge ACLs, `notrack` and the `DOCKER-USER` block stay separate items.
 - #43: disk encryption and process memory hygiene; nothing runs `aide --check` on a schedule.

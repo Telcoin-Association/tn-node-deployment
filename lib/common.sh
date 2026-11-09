@@ -7372,10 +7372,10 @@ readonly TN_RELEASE_BASE_URL="https://github.com/Telcoin-Association/telcoin-net
 # as root on every validator changes only with a reviewed scripts release, never
 # by fetching "latest".
 readonly TN_P2P_ALLOW_BASE_URL="https://github.com/Telcoin-Association/tn-p2p-allow-sync/releases/download"
-readonly TN_P2P_ALLOW_VERSION="v0.1.0"
+readonly TN_P2P_ALLOW_VERSION="v0.1.1"
 # The sha256 of the TN_P2P_ALLOW_VERSION tarball, from the SHA256SUMS of its signed
 # release; without a pin the install refuses.
-readonly TN_P2P_ALLOW_TARBALL_SHA256="e28b8cb7414028f84e52aabd94e162e2fc294a83c8232e1e05f26bcc13c8080c"
+readonly TN_P2P_ALLOW_TARBALL_SHA256="dadbee0ab2088d18c0c8e4224a503cf1b480507ba3904a96af9bbe24f4fa1713"
 # The installed binary (root 0755), and the config format firewall-setup.sh writes
 # for it (CONFIG_VERSION=), which its --version must name as its config-version.
 readonly TN_P2P_ALLOW_BIN="${TN_ROOT_PREFIX:-}/usr/local/libexec/telcoin/tn-p2p-allow-sync"

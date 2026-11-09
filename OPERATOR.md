@@ -571,8 +571,8 @@ The firewall does not depend on the admission mode, though: it filters by the sn
 - The firewall is on (`ufw` active, section 2.6) and `nftables` is installed (`sudo apt-get install nftables`), which puts `nft` at `/usr/sbin/nft`, the path the tool runs.
 - The node runs a release that serves `tn_admissionSnapshot`, is synced, and holds an authoritative snapshot: right after a restart it may not have its committee window yet, and `on` refuses until it has.
 - The host is x86_64, the one architecture the tool is published for.
-- These scripts pin the tool's release: `TN_P2P_ALLOW_VERSION` (`v0.1.0`) and `TN_P2P_ALLOW_TARBALL_SHA256` in `lib/common.sh`.
-  Both are set; a later script release moves them together (`v0.1.1` is being prepared).
+- These scripts pin the tool's release: `TN_P2P_ALLOW_VERSION` (`v0.1.1`) and `TN_P2P_ALLOW_TARBALL_SHA256` in `lib/common.sh`.
+  Both are set; a later script release moves them together.
 
 ```bash
 sudo bash ~/telcoin-node-scripts/firewall-setup.sh --p2p-committee on
@@ -589,7 +589,7 @@ Then it enables the boot unit and the timer, keeps the open P2P `ufw` rules, rem
 Every refusal changes nothing and exits 1, with a message that says why.
 
 - No node, `ufw` not active, no executable `/usr/sbin/nft` (the path the tool runs; the message names it), no `nft` on `PATH`, no `systemctl` or `flock`, a bad `TN_P2P_NEW_FLOW_RATE` or `TN_P2P_NEW_FLOW_BURST`, an unusable `P2P_ALLOW_FROM`, or the update lock held by another script.
-- The tool could not be installed: `tn-p2p-allow-sync v0.1.0 is not installed, so P2P committee mode was not turned on; nothing was changed.`, after the reason (no pin, another architecture, a bad signature, a sums, pin, member or `--version` mismatch); a failed download exits 2.
+- The tool could not be installed: `tn-p2p-allow-sync v0.1.1 is not installed, so P2P committee mode was not turned on; nothing was changed.`, after the reason (no pin, another architecture, a bad signature, a sums, pin, member or `--version` mismatch); a failed download exits 2.
   An installed binary stays as it was.
 - The snapshot is not authoritative: `P2P committee mode was not turned on: <reason>. Nothing was changed.`
   The first table must come from a full view of the committee, because there is no last-good set to fall back on yet.
