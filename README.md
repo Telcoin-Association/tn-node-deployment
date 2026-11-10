@@ -144,7 +144,7 @@ All scripts are interactive and guide you through each step. Work through these 
 curl --proto '=https' --tlsv1.2 -fsSL https://install.telcoin.network | bash
 ```
 
-The installer downloads one signed release of these scripts, checks its `MANIFEST.asc` with `gpgv` against the release keys built into the installer and every file against its `MANIFEST` hash, and only then puts the files in `~/telcoin-node-scripts`. When any check fails nothing is installed, and an existing install stays as it was. To replace an existing install without the prompt, end the line with `| bash -s -- --yes`. It needs curl or wget, tar, `base64`, a SHA-256 tool and `gpgv`, which stock Ubuntu has (otherwise `sudo apt-get install -y gpgv`; on macOS `brew install gnupg`). This is the only install path: a copy of `install.sh` taken from the `main` branch names no release and refuses to run, and a plain `git clone` of `main` is not a verified release. See [How updates are verified](#how-updates-are-verified).
+The installer downloads one signed release of these scripts, checks its `MANIFEST.asc` with `gpgv` against the release keys built into the installer and every file against its `MANIFEST` hash, and only then puts the files in `~/telcoin-node-scripts`. When any check fails nothing is installed, and an existing install stays as it was. To replace an existing install without the prompt, end the line with `| bash -s -- --yes`. It needs curl or wget, tar, `base64`, a SHA-256 tool and `gpgv`, which stock Ubuntu has (otherwise `sudo apt-get install -y gpgv`; on macOS `brew install gnupg`). This is the only install path: `install.sh` installs only the signed release its `TN_SCRIPTS_TAG` names, so the copy on `main` installs the latest release and never the tip of `main`, and a plain `git clone` of `main` is not a verified release. See [How updates are verified](#how-updates-are-verified).
 
 **2. Run the guided setup**
 ```bash
@@ -2365,7 +2365,7 @@ A host on update-scripts 1.1.72 or older runs its old updater once: that run tak
 update-scripts 2.0.0 through the old sidecar channel (hashes from main, unsigned) and
 relaunches it, and the new updater fetches `lib/allowed_signers` once through its sidecar,
 then installs the rest from the signed manifest. install.sh is now pinned to one tag and
-carries the signer list; the copy on main refuses to run ("names no release"). Install with
+carries the signer list; the copy on main names the latest release. Install with
 `curl --proto '=https' --tlsv1.2 -fsSL https://install.telcoin.network | bash`. The steps that
 follow the update on an existing testnet node are in
 [Before you update](CHANGELOG/scripts-v2.0.0.md#before-you-update); the full release note is

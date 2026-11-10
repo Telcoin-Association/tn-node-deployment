@@ -25,7 +25,7 @@
 
 set -euo pipefail
 
-readonly TN_SCRIPTS_TAG=""   # written by tools/release-scripts.sh
+readonly TN_SCRIPTS_TAG="scripts-v2.1.0"   # written by tools/release-scripts.sh
 readonly TN_ARCHIVE_BASE="https://github.com/Telcoin-Association/tn-node-deployment/archive/refs/tags"
 readonly TN_INSTALLER_URL="https://install.telcoin.network"
 readonly INSTALL_DIR="${HOME}/telcoin-node-scripts"
