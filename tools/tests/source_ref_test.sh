@@ -4,10 +4,12 @@
 # tags before git runs, a tag re-pointed upstream, a dirty tree without --allow-dirty
 # (testnet only), and on mainnet a tag whose signature cannot be checked (a signer
 # whose key is not shipped among them: _tn_tag_sig_check rc 4 naming its key id, so
-# testnet builds it with a warning); it fetches a tag origin added. update-node.sh refuses a branch or commit ref and a downgrade
+# testnet builds it with a warning; the last unsigned testnet release, v0.17.0-adiri,
+# with a log line instead, and a bad signature on it still refuses); it fetches a tag
+# origin added. update-node.sh refuses a branch or commit ref and a downgrade
 # (with "downgrade" and "storage_downgrade" in the --json done event) before any git.
-# The storage migration floor is the network's (storage_migration_floor: testnet
-# v0.16.0, none on mainnet and devnet), so a mainnet update or downgrade is never
+# The storage migration floors are the network's (storage_migration_floor: testnet
+# v0.16.0 and v0.17.0, none on mainnet and devnet), so a mainnet update or downgrade is never
 # one way or refused for the storage reason.
 # tn_rustup_ensure never runs a rustup-init whose sha256 is not the pinned one (curl
 # shim). tn_source_build runs rustup and cargo through tn_as_build_user with an empty
@@ -212,20 +214,21 @@ JSON_MODE=false
 ALLOW_DOWNGRADE=false
 unset -f installed_source_ref
 
-# The storage migration floor by network (storage_migration_floor): testnet
-# v0.16.0, none on mainnet and devnet; a node whose network cannot be told keeps
-# the testnet floor. Without a floor no update is one way and no downgrade is
-# refused for the storage reason.
-check "storage floor: testnet" "0.16.0" "$(storage_migration_floor testnet)"
+# The storage migration floors by network (storage_migration_floor): testnet
+# v0.16.0 (epoch packs) and v0.17.0 (MDBX to tndb), none on mainnet and devnet; a
+# node whose network cannot be told keeps the testnet floors. An update that
+# crosses either floor is one way. Without a floor no update is one way and no
+# downgrade is refused for the storage reason.
+check "storage floor: testnet" "0.16.0 0.17.0" "$(storage_migration_floor testnet)"
 check "storage floor: mainnet has none" "" "$(storage_migration_floor mainnet)"
 check "storage floor: devnet has none" "" "$(storage_migration_floor devnet)"
-check "storage floor: an unknown network keeps the testnet floor" "0.16.0" "$(storage_migration_floor foo)"
+check "storage floor: an unknown network keeps the testnet floor" "0.16.0 0.17.0" "$(storage_migration_floor foo)"
 printf 'NETWORK=mainnet\n' > "$META"
 check "storage floor: this node's network (mainnet)" "" "$(storage_migration_floor)"
 printf 'NETWORK=devnet\n' > "$META"
 check "storage floor: this node's network (devnet, from .node-meta)" "" "$(storage_migration_floor)"
 printf 'NETWORK=testnet\n' > "$META"
-check "storage floor: this node's network (testnet)" "0.16.0" "$(storage_migration_floor)"
+check "storage floor: this node's network (testnet)" "0.16.0 0.17.0" "$(storage_migration_floor)"
 smu() {  # smu NAME RUNNING TARGET NETWORK EXPECTED-RC
     local rc=0
     storage_migrating_upgrade "$2" "$3" "$4" || rc=$?
@@ -233,7 +236,13 @@ smu() {  # smu NAME RUNNING TARGET NETWORK EXPECTED-RC
 }
 smu "one way: testnet v0.15.0 to v0.16.0" v0.15.0-adiri v0.16.0-adiri testnet 0
 smu "one way: testnet, the running release unknown" "" v0.16.0-adiri testnet 0
-smu "not one way: testnet v0.16.0 to v0.17.0" v0.16.0-adiri v0.17.0-adiri testnet 1
+smu "one way: testnet v0.16.0 to v0.17.0 (MDBX to tndb)" v0.16.0-adiri v0.17.0-adiri testnet 0
+smu "one way: testnet v0.15.0 to v0.17.0 (both floors)" v0.15.0-adiri v0.17.0-adiri testnet 0
+smu "one way: testnet v0.16.0 to a v0.17.0 release candidate" v0.16.0-adiri v0.17.0-adiri-rc1 testnet 0
+smu "one way: testnet v0.16.0 to a branch or commit" v0.16.0-adiri main testnet 0
+smu "not one way: testnet v0.16.0 to v0.16.1" v0.16.0-adiri v0.16.1-adiri testnet 1
+smu "not one way: testnet v0.17.0 to v0.17.1" v0.17.0-adiri v0.17.1-adiri testnet 1
+smu "not one way: testnet v0.17.0 to a branch or commit" v0.17.0-adiri main testnet 1
 smu "not one way: testnet, both below the floor" v0.14.0-adiri v0.15.0-adiri testnet 1
 smu "not one way: mainnet v0.1.3 to v0.2.0" v0.1.3 v0.2.0 mainnet 1
 smu "not one way: mainnet, the running release unknown" "" v0.2.0 mainnet 1
@@ -258,6 +267,18 @@ printf 'NETWORK=testnet\n' > "$META"
 dg "testnet: v0.16.0 to v0.15.0 refused" v0.16.0-adiri v0.15.0-adiri 1
 check "testnet downgrade across the floor: the storage reason" "yes yes" \
     "$(grep -q '"storage_downgrade":true' "$T/json.log" && echo yes || echo no) $(grep -q 'is below v0.16.0 and cannot open the data dir' "$T/json.log" && echo yes || echo no)"
+: > "$T/json.log"
+dg "testnet: v0.17.0 to v0.16.0 refused" v0.17.0-adiri v0.16.0-adiri 1
+check "testnet downgrade across v0.17.0: the storage reason, that floor named" "yes yes" \
+    "$(grep -q '"storage_downgrade":true' "$T/json.log" && echo yes || echo no) $(grep -q 'is below v0.17.0 and cannot open the data dir' "$T/json.log" && echo yes || echo no)"
+: > "$T/json.log"
+dg "testnet: v0.17.0 to v0.15.0 refused" v0.17.0-adiri v0.15.0-adiri 1
+check "testnet downgrade across both floors: the oldest one named" "yes yes" \
+    "$(grep -q '"storage_downgrade":true' "$T/json.log" && echo yes || echo no) $(grep -q 'is below v0.16.0 and cannot open the data dir' "$T/json.log" && echo yes || echo no)"
+: > "$T/json.log"
+dg "testnet: v0.17.1 to v0.17.0 refused" v0.17.1-adiri v0.17.0-adiri 1
+check "testnet downgrade above both floors: not the storage reason" yes \
+    "$(grep -q '"downgrade":true,"storage_downgrade":false' "$T/json.log" && echo yes || echo no)"
 JSON_MODE=false
 unset -f smu
 
@@ -510,6 +531,23 @@ check "checkouts leave nothing in staging" yes "$(stg_empty)"
 latest_source_ref "$SRC" >/dev/null 2>&1
 check "latest_source_ref: newest unmoved tag, moved tag flagged" "v0.18.0-adiri true" "$LATEST_SOURCE_REF $SOURCE_TAG_MOVED"
 
+# The unsigned-release exception (removed with v0.17.1-adiri): v0.17.0-adiri on
+# testnet, a tag whose signature cannot be checked (here: no release key), builds
+# with a log line instead of the warning (the reason, which differs where gpg is
+# missing, is not compared); another testnet tag still warns, and on
+# mainnet it is no release tag. The checkout drops its own v0.17.0-adiri first, so
+# origin's (re-pointed above) is fetched and taken.
+G -C "$SRC" tag -d v0.17.0-adiri >/dev/null 2>&1
+co "the last unsigned testnet release, no release key: checked out" testnet v0.17.0-adiri false 0 "$(commit_of v0.17.0-adiri)"
+check "the last unsigned release: the log line" yes \
+    "$(has "$(cat "$T/co.out")" 'Tag v0.17.0-adiri is the last unsigned testnet release; building it without a release signature (')"
+check "the last unsigned release: not the warning" no "$(has "$(cat "$T/co.out")" 'is not verified')"
+co "another unsigned testnet tag, no release key: checked out with the warning, as before" testnet v0.18.0-adiri false 0 "$(commit_of v0.18.0-adiri)"
+check "another unsigned testnet tag: the warning" yes "$(has "$(cat "$T/co.out")" 'Tag v0.18.0-adiri is not verified (')"
+check "another unsigned testnet tag: no exception named" no "$(has "$(cat "$T/co.out")" 'last unsigned')"
+H5="$(head_of)"
+co "mainnet: the last unsigned testnet release is no mainnet tag (rc 3)" mainnet v0.17.0-adiri false 3 "$H5"
+
 # --- the source picker offers release tags only ---------------------------------------
 P="$T/pick"
 G init -q "$P"
@@ -578,5 +616,28 @@ check "testnet, another key: the warning names the key" yes \
 H4="$(head_of)"
 co "mainnet unsigned tag with a release key present: refused" mainnet v1.0.0 false 1 "$H4"
 check "signature checks leave nothing in staging" yes "$(stg_empty)"
+# The unsigned-release exception with a release key present: the unsigned
+# v0.17.0-adiri (rc 4, no signature by a release key) builds with the log line,
+# and the same tag with a bad signature (signed by the release key, then its
+# message changed: BADSIG, rc 1) is refused on testnet like any other.
+co "the last unsigned testnet release, a release key present: checked out" testnet v0.17.0-adiri false 0 "$(commit_of v0.17.0-adiri)"
+check "the last unsigned release, a release key present: the log line" yes \
+    "$(has "$(cat "$T/co.out")" "Tag v0.17.0-adiri is the last unsigned testnet release; building it without a release signature (the tag carries no signature by a release key).")"
+co "another unsigned testnet tag, a release key present: the warning, as before" testnet v0.18.0-adiri false 0 "$(commit_of v0.18.0-adiri)"
+check "another unsigned testnet tag, a release key present: the warning" yes \
+    "$(has "$(cat "$T/co.out")" 'Tag v0.18.0-adiri is not verified (the tag carries no signature by a release key); building it anyway')"
+GNUPGHOME="$GH" G -C "$W" -c gpg.program=gpg -c "user.signingkey=$FA" tag -f -s v0.17.0-adiri -m signed-a 'v0.16.0-adiri^{commit}' >/dev/null 2>&1
+BAD="$(G -C "$W" cat-file tag v0.17.0-adiri | sed 's/^signed-a$/changed after signing/' | G -C "$W" hash-object -t tag -w --stdin)"
+G -C "$W" update-ref refs/tags/v0.17.0-adiri "$BAD"
+G -C "$W" push -q -f origin refs/tags/v0.17.0-adiri 2>/dev/null
+G -C "$SRC" tag -d v0.17.0-adiri >/dev/null 2>&1
+H6="$(head_of)"
+co "the last unsigned testnet release with a bad signature: refused" testnet v0.17.0-adiri false 1 "$H6"
+check "bad signature: the refusal says so" yes \
+    "$(has "$(cat "$T/co.out")" 'Tag v0.17.0-adiri: the tag signature is not good (BADSIG). Nothing was checked out.')"
+check "bad signature: no exception named" no "$(has "$(cat "$T/co.out")" 'last unsigned')"
+rc=0; out="$(_tn_tag_sig_check "$SRC" v0.17.0-adiri)" || rc=$?
+check "bad signature: _tn_tag_sig_check rc 1" "1 the tag signature is not good (BADSIG)" "$rc $out"
+check "the exception's checks leave nothing in staging" yes "$(stg_empty)"
 : "$H0$H3"
 finish

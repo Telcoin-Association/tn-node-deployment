@@ -518,7 +518,20 @@ check "docker --json apply, one way: done not rolled back, one way" yes "$(has "
 check "docker --json apply, one way: nothing restored" "0 0" \
     "$(count_of "$(cat "$CALLS")" launch_restore_all) $(count_of "$(cat "$CALLS")" tn_restore_backup)"
 
+# v0.16.0-adiri to v0.17.0-adiri crosses the v0.17.0 floor (MDBX to tndb): one way.
 a_setup "$(printf '%s\n' "$DOCKER_PREPARED" | sed 's/^OLD_REF=.*/OLD_REF=v0.16.0-adiri/')"
+STORAGE_MIGRATION=false
+json_on
+json_apply_docker > /dev/null 2>&1
+RC=$?
+json_off
+check_rc "docker --json apply, v0.16.0 to v0.17.0, check failed: rc 1" 1 "$RC"
+check_has "docker --json apply, v0.16.0 to v0.17.0: the key is in the state at the start" "start_service key=true" "$(cat "$CALLS")"
+check "docker --json apply, v0.16.0 to v0.17.0: done not rolled back, one way" yes "$(has "$J" '"rolled_back":false,"storage_migration":true')"
+check "docker --json apply, v0.16.0 to v0.17.0: nothing restored" "0 0" \
+    "$(count_of "$(cat "$CALLS")" launch_restore_all) $(count_of "$(cat "$CALLS")" tn_restore_backup)"
+
+a_setup "$(printf '%s\n' "$DOCKER_PREPARED" | sed -e 's/^OLD_REF=.*/OLD_REF=v0.17.0-adiri/' -e 's/^NEW_REF=.*/NEW_REF=v0.17.1-adiri/')"
 json_on
 json_apply_docker > /dev/null 2>&1
 json_off
