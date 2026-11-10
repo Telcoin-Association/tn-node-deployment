@@ -225,7 +225,7 @@ curl --proto '=https' --tlsv1.2 -fsSL https://install.telcoin.network | bash
 The installer is pinned to one signed script release (a `scripts-v*` tag).
 It checks that release's `MANIFEST.asc` with `gpgv` against the release keys built into the installer and every file against its `MANIFEST` hash, and only then puts the files in `~/telcoin-node-scripts`; on any failure nothing is installed and an existing install stays as it was.
 It needs curl or wget, tar, `base64`, `sha256sum` (or `shasum`) and `gpgv`. Stock Ubuntu has them all; where `gpgv` is missing, run `sudo apt-get install -y gpgv` (on macOS, `brew install gnupg`).
-There is no raw GitHub fallback: the `install.sh` on `main` names no release and refuses to run.
+There is no raw GitHub fallback: `install.sh` installs only the signed release it names (the copy on `main` names the latest one), never the tip of `main`.
 
 If `~/telcoin-node-scripts` already exists, the installer asks `Re-install and overwrite? [y/N]`; `| bash -s -- --yes` answers yes without the prompt, and the old copy is restored if the new install fails.
 To check a release by hand instead, see section 4.10.
