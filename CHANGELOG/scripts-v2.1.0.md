@@ -442,6 +442,7 @@ The signed-release fetch is split into shared helpers (`_tn_release_tools_ok`, `
 `tn_p2p_allow_install` installs the pinned tool release, and `tn_release_extract_binary` and `tn_build_version` take the binary's name.
 `validate_ipv6` follows the grammar of Rust's `Ipv6Addr::from_str`, which `tn-p2p-allow-sync` parses `P2P_ALLOW_FROM` with, instead of taking any string of hex digits and colons, in every locale (a full-width or Arabic-Indic digit is refused under en_US.UTF-8 too): a typo in an IPv6 entry of `--ssh-from` or `--p2p-from` is refused before anything is written, and the source lists refuse a dotted IPv4 tail (`::ffff:192.0.2.1`; write `::ffff:c000:201`).
 `_tn_root_layout_dir` pads a numeric mode to five digits, so an inherited setgid bit is cleared and `/var/lib/telcoin-p2p-allow` ends 0700, not the 02700 the tool refuses.
+`v0.17.0-adiri` is the last Adiri release cut without the signed pipeline (an annotated tag and a registry image, no GitHub release), and `tn_release_unsigned_ok` takes it on testnet only, through `TN_UNSIGNED_RELEASE_TAG`: a source build of it takes the unsigned tag with a log line instead of the warning, and still refuses a bad signature; its image (`tn_docker_image_for_tag`, and `latest_docker_image` when it is the newest release) is the digest the registry serves, from the testnet package and then the legacy repository, with no signed release asked for and never the pinned default. A release install of it is refused as before (no tarball), and mainnet, devnet and every other tag are unchanged.
 
 ### Host baseline (#43)
 
@@ -831,3 +832,4 @@ Each tracker stays open with what is left on it, except #60, which this release 
   `committee_peers` comes from the bootstrap peers map, the right source only when that map lists the committee.
   A node-side check of the trusted nodes map would replace edit-config's shape check (block YAML only, where setup takes any map).
   The Node Manager UI, check-node and update-node do not handle the settings yet, and whether 60 seconds of watching suits every node is open.
+- The unsigned-release exception for `v0.17.0-adiri` (`TN_UNSIGNED_RELEASE_TAG`, `tn_release_unsigned_ok` in `lib/common.sh`) is removed with `v0.17.1-adiri`, the first Adiri release through the signed pipeline.

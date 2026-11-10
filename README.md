@@ -2101,6 +2101,15 @@ See [Private alerts](#private-alerts-every-network) and
   `tn_node_supports_admission` is the release gate; its floor `MIN_ADMISSION_VERSION` is 0.17.0 and waits for the node team to confirm it.
 - The signed-release fetch serves a second repository: `tn_p2p_allow_install` installs the pinned `tn-p2p-allow-sync` release (`TN_P2P_ALLOW_VERSION`, `TN_P2P_ALLOW_TARBALL_SHA256`) as `/usr/local/libexec/telcoin/tn-p2p-allow-sync`, checked against `lib/release-keys` like a node release; the node path's results are unchanged.
   The tarball pin is set to that release's sha256; without a pin the install refuses.
+- An unsigned-release exception, on testnet only, removed again with `v0.17.1-adiri`:
+  `v0.17.0-adiri` (`TN_UNSIGNED_RELEASE_TAG`, `tn_release_unsigned_ok`) is the last Adiri release
+  cut without the signed pipeline, as an annotated tag and a registry image with no GitHub
+  release. A source build of it takes the unsigned tag with a log line instead of the warning,
+  and a bad signature on it still refuses. Its Docker image (`--release-tag`, `--docker-image`,
+  an update ref, and the newest-release pick when it is the newest release) is the digest the
+  registry serves, from the testnet package and then the legacy repository, and no signed release
+  is asked for. A release install has no exception, since no tarball is published; mainnet,
+  devnet and every other tag are unchanged.
 
 Full release note: [CHANGELOG/scripts-v2.1.0.md](CHANGELOG/scripts-v2.1.0.md).
 
