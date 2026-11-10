@@ -256,6 +256,24 @@ done
 jo "release: running release not recorded: update" release "" v0.17.0-adiri true
 jo "source: no marker (an older release), checkout at the newest: update" source "" v0.17.0-adiri true
 jo "source: a running value with an x.y.z only compares as that final" source 0.17.0 v0.17.0-adiri false
+# --check's storage_migration, with update-node.sh's own storage_migrating_upgrade
+# in place of the stub above, on a testnet node: an update that crosses a floor
+# (v0.16.0, epoch packs; v0.17.0, MDBX to tndb) is one way, one above both is not.
+eval "$(sed -n '/^storage_migrating_upgrade() {/,/^}/p' "$T/h/update-node.sh")"
+printf 'NETWORK=testnet\n' > "$META"
+jm() {  # jm NAME METHOD RUNNING LATEST EXPECTED-STORAGE-MIGRATION
+    RUN_REF="$3"
+    NEW_REF="$4"
+    : > "$T/check.json"
+    json_check "$2" >/dev/null 2>&1
+    check "$1" "$5" "$(sed -n 's/.*"storage_migration":\([a-z]*\).*/\1/p' "$T/check.json")"
+}
+for m in release source; do
+    jm "${m} --check: v0.16.0 to v0.17.0 is one way" "$m" v0.16.0-adiri v0.17.0-adiri true
+    jm "${m} --check: v0.15.0 to v0.16.0 is one way" "$m" v0.15.0-adiri v0.16.0-adiri true
+    jm "${m} --check: v0.17.0 to v0.17.1 is not" "$m" v0.17.0-adiri v0.17.1-adiri false
+done
+unset -f jm
 
 # docker_record_meta on a real .node-meta (the library's meta_set, taken from its
 # source since the stub above was unset, and meta_unset; tn_write_root_file

@@ -114,7 +114,7 @@ warning); it is a release file, not an updater entry.
   refused: `Image refused: <image> did not finish --version within 60 seconds (docker run exited
   <rc> under timeout), so its build features are not known. ...`
 - The storage migration floor is per network (update-node): `STORAGE_MIGRATION_FLOOR_TESTNET` is
-  0.16.0, and mainnet and devnet have none, so an update there is never one-way and a downgrade
+  0.16.0 (and 0.17.0, see update-node 2.1.0), and mainnet and devnet have none, so an update there is never one-way and a downgrade
   there is never refused for the storage reason (`"storage_downgrade":false`). Before, every
   network had the 0.16.0 floor, so any mainnet `v0.1.x` image counted as below it.
 - `setup-node --json --phase=finalize` holds the Docker image keygen recorded in `.node-meta` to
@@ -198,6 +198,14 @@ warning); it is a release file, not an updater entry.
 - The release floor on every prepare path and the mainnet digest rule (#46, #51).
 - The storage migration floor by network and the image feature check on the Docker prepare paths
   (#46; see [Image packages per network](#image-packages-per-network-and-the-image-feature-check-46)).
+- `v0.17.0-adiri` is a one-way storage migration on testnet: its first start moves the consensus
+  database from MDBX into tndb and deletes the MDBX files, and `v0.16.0-adiri` would start on it
+  with empty consensus tables. `STORAGE_MIGRATION_FLOOR_TESTNET` now lists `0.16.0 0.17.0`, and an
+  update that crosses either floor is one-way: `v0.16.0-adiri` to `v0.17.0-adiri` gets the
+  one-way warning, the snapshot question, the 600-second check and no automatic rollback, and
+  `--check` and the `done` event report `"storage_migration":true`. A downgrade below either
+  floor is refused for the storage reason. Mainnet and devnet keep no floor: no mainnet release
+  has a store to migrate yet.
 - After each verified apply on a host with `HOST_BASELINE=true`, it makes the AIDE baseline again
   before "Update complete" (or the `done` event). A failure is a warning and never fails the
   apply (#43).

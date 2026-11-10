@@ -26,18 +26,20 @@
 # change. The wait is capped at TN_EPOCH_WAIT_MAX (30 minutes by default). A
 # rollback restart never waits.
 #
-# ONE-WAY UPDATES: when the node runs a release older than v0.16.0 and the
-# target is v0.16.0 or newer (or a branch or a commit), APPLY cannot be undone
-# by swapping the binary or image back. The new release migrates the consensus
-# store in the data dir on its first start, and older releases cannot open it
-# afterwards. Snapshot the data dir first. APPLY says so (and warns when free
-# disk is under twice the largest consensus-db/epochs/epoch-N), asks you to
-# confirm, and waits up to 600 seconds for the node to answer. If that check
-# fails, APPLY does not roll back: the node keeps running (it may still be
-# migrating), the unit, start script and node.env stay as APPLY wrote them, and
-# the script prints how to restore the snapshot. Once the new release has
-# started, --discard keeps those launch files too. A node whose running release
-# cannot be read counts as older.
+# ONE-WAY UPDATES: when the node runs a release older than a storage migration
+# floor and the target is that release or newer (or a branch or a commit), APPLY
+# cannot be undone by swapping the binary or image back. On testnet the floors
+# are v0.16.0 (epoch packs v1 -> v2) and v0.17.0 (the consensus database moves
+# from MDBX to tndb). The new release migrates the consensus store in the data
+# dir on its first start, and older releases cannot open it afterwards (or, past
+# v0.17.0, open it with empty consensus tables). Snapshot the data dir first.
+# APPLY says so (and warns when free disk is under twice the largest
+# consensus-db/epochs/epoch-N), asks you to confirm, and waits up to 600 seconds
+# for the node to answer. If that check fails, APPLY does not roll back: the
+# node keeps running (it may still be migrating), the unit, start script and
+# node.env stay as APPLY wrote them, and the script prints how to restore the
+# snapshot. Once the new release has started, --discard keeps those launch
+# files too. A node whose running release cannot be read counts as older.
 #
 # USAGE:
 #   sudo bash update-node.sh
@@ -131,14 +133,18 @@ else
     readonly VERIFY_TIMEOUT_SECONDS=45
 fi
 readonly VERIFY_TIMEOUT_EXPLICIT
-# The newest release that migrates the consensus store one way on its first
-# start, per network; older releases cannot open the migrated data dir. Raise a
-# network's floor when one of its releases does. Testnet: v0.16.0 (epoch packs
-# v1 -> v2). Mainnet and devnet: none (empty), as MIN_SOURCE_VERSION_MAINNET is
-# for the source floor: their version lines start below v0.16.0 and no release
-# of theirs migrates one way yet, so no update there is one way and no downgrade
-# is refused for the storage reason. Read through storage_migration_floor.
-readonly STORAGE_MIGRATION_FLOOR_TESTNET="0.16.0"
+# The releases that migrate the consensus store one way on their first start,
+# per network, oldest first and space-separated; an older release cannot open
+# the data dir one of them has migrated. Add a network's release here when one
+# migrates. Testnet: v0.16.0 (epoch packs v1 -> v2) and v0.17.0 (the consensus
+# database moves from MDBX to tndb and the MDBX files are deleted; v0.16.0 would
+# start on it with empty consensus tables). Mainnet and devnet: none (empty), as
+# MIN_SOURCE_VERSION_MAINNET is for the source floor: their version lines start
+# below v0.16.0 and no release of theirs migrates one way yet (a mainnet node
+# starts on the storage its first release ships), so no update there is one way
+# and no downgrade is refused for the storage reason. Read through
+# storage_migration_floor.
+readonly STORAGE_MIGRATION_FLOOR_TESTNET="0.16.0 0.17.0"
 readonly STORAGE_MIGRATION_FLOOR_MAINNET=""
 readonly STORAGE_MIGRATION_FLOOR_DEVNET=""
 # Health window for such an update: the first start migrates before it answers.
@@ -936,16 +942,19 @@ observer_strip_needed() {
 }
 
 # =============================================================================
-# ONE-WAY STORAGE MIGRATION (v0.16.0 and later)
+# ONE-WAY STORAGE MIGRATION (testnet v0.16.0 and v0.17.0)
 #
 # The first start of v0.16.0 or later migrates the consensus store
 # (<data_dir>/consensus-db/epochs, epoch packs v1 -> v2) and older releases
-# cannot open it afterwards. Swapping the binary or image back is then no
-# rollback, so an update across that line warns first, waits longer for the
-# first start, and never rolls back on its own: only a data dir snapshot taken
-# before the update can undo it. Once the new release has started, the unit,
-# the start script and node.env stay as the apply wrote them: a failed check
-# keeps them (storage_migration_verify_failed), and so does a later --discard
+# cannot open it afterwards. The first start of v0.17.0 or later moves the
+# consensus database from MDBX into tndb (<data_dir>/consensus-db/tndb) and
+# deletes the MDBX files, so v0.16.0 would start with empty consensus tables.
+# Swapping the binary or image back is then no rollback, so an update across
+# either line warns first, waits longer for the first start, and never rolls
+# back on its own: only a data dir snapshot taken before the update can undo it.
+# Once the new release has started, the unit, the start script and node.env stay
+# as the apply wrote them: a failed check keeps them
+# (storage_migration_verify_failed), and so does a later --discard
 # (storage_migration_mark_started records STORAGE_MIGRATION_STARTED in the
 # pending state; see discard_pending).
 # =============================================================================
@@ -970,12 +979,12 @@ installed_source_ref() {
     return 0
 }
 
-# storage_migration_floor [NETWORK] -- print NETWORK's storage migration floor
-# (x.y.z: STORAGE_MIGRATION_FLOOR_TESTNET, _MAINNET or _DEVNET), or an empty line
-# when NETWORK has none. NETWORK defaults to this node's (_tn_guard_network:
-# detect_network, or NETWORK=devnet in .node-meta). A node whose network cannot
-# be told takes the testnet floor, the one every network had before the floors
-# were split. Always rc 0.
+# storage_migration_floor [NETWORK] -- print NETWORK's storage migration floors
+# (x.y.z, oldest first, space-separated: STORAGE_MIGRATION_FLOOR_TESTNET,
+# _MAINNET or _DEVNET), or an empty line when NETWORK has none. NETWORK defaults
+# to this node's (_tn_guard_network: detect_network, or NETWORK=devnet in
+# .node-meta). A node whose network cannot be told takes the testnet floors, as
+# every network had the testnet floor before the floors were split. Always rc 0.
 storage_migration_floor() {
     local net="${1:-}"
     if [[ -z "$net" ]]; then
@@ -989,31 +998,35 @@ storage_migration_floor() {
 }
 
 # storage_migrating_upgrade <running> <target> [NETWORK] -- rc 0 when going from
-# <running> to <target> crosses NETWORK's storage migration floor one way
+# <running> to <target> crosses one of NETWORK's storage migration floors one way
 # (storage_migration_floor; NETWORK defaults to this node's): the target is at or
-# above it (no x.y.z, such as a branch or a commit, counts as newest) and the
-# running release is below it (no x.y.z counts as unknown, and so as older). A
+# above that floor (no x.y.z, such as a branch or a commit, counts as newest) and
+# the running release is below it (no x.y.z counts as unknown, and so as older). A
 # network without a floor never has a one-way update (rc 1). Each side is judged
 # on its first x.y.z, so pass docker images as name:tag (${image##*/}) or a
 # registry host:port would be read as a version.
 storage_migrating_upgrade() {
-    local ver_re run_v new_v floor
+    local ver_re run_v new_v floors floor
     ver_re='([0-9]+\.[0-9]+\.[0-9]+)'
     run_v=""
     new_v=""
-    floor="$(storage_migration_floor "${3:-}")"
-    [[ -n "$floor" ]] || return 1
+    floors="$(storage_migration_floor "${3:-}")"
+    [[ -n "$floors" ]] || return 1
     if [[ "${2:-}" =~ $ver_re ]]; then
         new_v="${BASH_REMATCH[1]}"
-    fi
-    if [[ -n "$new_v" ]] && ! version_gte "$new_v" "$floor"; then
-        return 1
     fi
     if [[ "${1:-}" =~ $ver_re ]]; then
         run_v="${BASH_REMATCH[1]}"
     fi
-    [[ -n "$run_v" ]] || return 0
-    ! version_gte "$run_v" "$floor"
+    for floor in $floors; do
+        if [[ -n "$new_v" ]] && ! version_gte "$new_v" "$floor"; then
+            continue
+        fi
+        if [[ -z "$run_v" ]] || ! version_gte "$run_v" "$floor"; then
+            return 0
+        fi
+    done
+    return 1
 }
 
 # update_verify_window -- the post-restart health window in seconds: an explicit
@@ -1834,14 +1847,14 @@ update_fail() {
 # form compares as that final). Either without an x.y.z: rc 0, nothing to compare;
 # a RUNNING without one, when TARGET has one, is said in a warning. A downgrade is refused
 # (rc 1): an error event and a done event carrying "downgrade":true and
-# "storage_downgrade" (true when RUNNING is at or above the node's storage
-# migration floor, storage_migration_floor, and TARGET below it: the older
+# "storage_downgrade" (true when RUNNING is at or above one of the node's storage
+# migration floors, storage_migration_floor, and TARGET below it: the older
 # release cannot open the migrated data dir; never on a network without a floor,
 # mainnet and devnet today) in --json mode, [ERROR] lines otherwise.
 # --allow-downgrade, which only an interactive run on
 # testnet takes, lets it through with a warning.
 update_downgrade_check() {
-    local run="${1:-}" new="${2:-}" re rv nv rt nt storage=false msg net floor
+    local run="${1:-}" new="${2:-}" re rv nv rt nt storage=false msg net floor="" f
     re='([0-9]+[.][0-9]+[.][0-9]+)'
     if [[ ! "$run" =~ $re ]]; then
         if [[ "$new" =~ $re ]]; then
@@ -1859,10 +1872,14 @@ update_downgrade_check() {
     if ! tn_release_tag_newer "$rt" "$nt"; then
         return 0
     fi
-    floor="$(storage_migration_floor)"
-    if [[ -n "$floor" ]] && version_gte "$rv" "$floor" && ! version_gte "$nv" "$floor"; then
-        storage=true
-    fi
+    # The oldest floor crossed: the first migration the target cannot open.
+    for f in $(storage_migration_floor); do
+        if version_gte "$rv" "$f" && ! version_gte "$nv" "$f"; then
+            storage=true
+            floor="$f"
+            break
+        fi
+    done
     net="$(detect_network 2>/dev/null)" || net=""
     if [[ "$ALLOW_DOWNGRADE" == "true" && "$JSON_MODE" != "true" && "$net" == "testnet" ]]; then
         print_warn "Downgrade from ${run} to ${new}, allowed by --allow-downgrade."

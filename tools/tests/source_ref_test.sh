@@ -8,8 +8,8 @@
 # with a log line instead, and a bad signature on it still refuses); it fetches a tag
 # origin added. update-node.sh refuses a branch or commit ref and a downgrade
 # (with "downgrade" and "storage_downgrade" in the --json done event) before any git.
-# The storage migration floor is the network's (storage_migration_floor: testnet
-# v0.16.0, none on mainnet and devnet), so a mainnet update or downgrade is never
+# The storage migration floors are the network's (storage_migration_floor: testnet
+# v0.16.0 and v0.17.0, none on mainnet and devnet), so a mainnet update or downgrade is never
 # one way or refused for the storage reason.
 # tn_rustup_ensure never runs a rustup-init whose sha256 is not the pinned one (curl
 # shim). tn_source_build runs rustup and cargo through tn_as_build_user with an empty
@@ -214,20 +214,21 @@ JSON_MODE=false
 ALLOW_DOWNGRADE=false
 unset -f installed_source_ref
 
-# The storage migration floor by network (storage_migration_floor): testnet
-# v0.16.0, none on mainnet and devnet; a node whose network cannot be told keeps
-# the testnet floor. Without a floor no update is one way and no downgrade is
-# refused for the storage reason.
-check "storage floor: testnet" "0.16.0" "$(storage_migration_floor testnet)"
+# The storage migration floors by network (storage_migration_floor): testnet
+# v0.16.0 (epoch packs) and v0.17.0 (MDBX to tndb), none on mainnet and devnet; a
+# node whose network cannot be told keeps the testnet floors. An update that
+# crosses either floor is one way. Without a floor no update is one way and no
+# downgrade is refused for the storage reason.
+check "storage floor: testnet" "0.16.0 0.17.0" "$(storage_migration_floor testnet)"
 check "storage floor: mainnet has none" "" "$(storage_migration_floor mainnet)"
 check "storage floor: devnet has none" "" "$(storage_migration_floor devnet)"
-check "storage floor: an unknown network keeps the testnet floor" "0.16.0" "$(storage_migration_floor foo)"
+check "storage floor: an unknown network keeps the testnet floor" "0.16.0 0.17.0" "$(storage_migration_floor foo)"
 printf 'NETWORK=mainnet\n' > "$META"
 check "storage floor: this node's network (mainnet)" "" "$(storage_migration_floor)"
 printf 'NETWORK=devnet\n' > "$META"
 check "storage floor: this node's network (devnet, from .node-meta)" "" "$(storage_migration_floor)"
 printf 'NETWORK=testnet\n' > "$META"
-check "storage floor: this node's network (testnet)" "0.16.0" "$(storage_migration_floor)"
+check "storage floor: this node's network (testnet)" "0.16.0 0.17.0" "$(storage_migration_floor)"
 smu() {  # smu NAME RUNNING TARGET NETWORK EXPECTED-RC
     local rc=0
     storage_migrating_upgrade "$2" "$3" "$4" || rc=$?
@@ -235,7 +236,13 @@ smu() {  # smu NAME RUNNING TARGET NETWORK EXPECTED-RC
 }
 smu "one way: testnet v0.15.0 to v0.16.0" v0.15.0-adiri v0.16.0-adiri testnet 0
 smu "one way: testnet, the running release unknown" "" v0.16.0-adiri testnet 0
-smu "not one way: testnet v0.16.0 to v0.17.0" v0.16.0-adiri v0.17.0-adiri testnet 1
+smu "one way: testnet v0.16.0 to v0.17.0 (MDBX to tndb)" v0.16.0-adiri v0.17.0-adiri testnet 0
+smu "one way: testnet v0.15.0 to v0.17.0 (both floors)" v0.15.0-adiri v0.17.0-adiri testnet 0
+smu "one way: testnet v0.16.0 to a v0.17.0 release candidate" v0.16.0-adiri v0.17.0-adiri-rc1 testnet 0
+smu "one way: testnet v0.16.0 to a branch or commit" v0.16.0-adiri main testnet 0
+smu "not one way: testnet v0.16.0 to v0.16.1" v0.16.0-adiri v0.16.1-adiri testnet 1
+smu "not one way: testnet v0.17.0 to v0.17.1" v0.17.0-adiri v0.17.1-adiri testnet 1
+smu "not one way: testnet v0.17.0 to a branch or commit" v0.17.0-adiri main testnet 1
 smu "not one way: testnet, both below the floor" v0.14.0-adiri v0.15.0-adiri testnet 1
 smu "not one way: mainnet v0.1.3 to v0.2.0" v0.1.3 v0.2.0 mainnet 1
 smu "not one way: mainnet, the running release unknown" "" v0.2.0 mainnet 1
@@ -260,6 +267,18 @@ printf 'NETWORK=testnet\n' > "$META"
 dg "testnet: v0.16.0 to v0.15.0 refused" v0.16.0-adiri v0.15.0-adiri 1
 check "testnet downgrade across the floor: the storage reason" "yes yes" \
     "$(grep -q '"storage_downgrade":true' "$T/json.log" && echo yes || echo no) $(grep -q 'is below v0.16.0 and cannot open the data dir' "$T/json.log" && echo yes || echo no)"
+: > "$T/json.log"
+dg "testnet: v0.17.0 to v0.16.0 refused" v0.17.0-adiri v0.16.0-adiri 1
+check "testnet downgrade across v0.17.0: the storage reason, that floor named" "yes yes" \
+    "$(grep -q '"storage_downgrade":true' "$T/json.log" && echo yes || echo no) $(grep -q 'is below v0.17.0 and cannot open the data dir' "$T/json.log" && echo yes || echo no)"
+: > "$T/json.log"
+dg "testnet: v0.17.0 to v0.15.0 refused" v0.17.0-adiri v0.15.0-adiri 1
+check "testnet downgrade across both floors: the oldest one named" "yes yes" \
+    "$(grep -q '"storage_downgrade":true' "$T/json.log" && echo yes || echo no) $(grep -q 'is below v0.16.0 and cannot open the data dir' "$T/json.log" && echo yes || echo no)"
+: > "$T/json.log"
+dg "testnet: v0.17.1 to v0.17.0 refused" v0.17.1-adiri v0.17.0-adiri 1
+check "testnet downgrade above both floors: not the storage reason" yes \
+    "$(grep -q '"downgrade":true,"storage_downgrade":false' "$T/json.log" && echo yes || echo no)"
 JSON_MODE=false
 unset -f smu
 
