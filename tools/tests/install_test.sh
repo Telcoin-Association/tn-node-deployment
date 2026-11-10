@@ -168,9 +168,15 @@ REL="$T/rel"
 make_release "$TAG" 100 "$REL"
 pack "$REL" "$TAG"
 
-# --- the repository copy names no release -------------------------------------
+# --- a copy that names no release -----------------------------------------------
+# The tree's install.sh names a release from the first release commit on
+# (tools/release-scripts.sh writes TN_SCRIPTS_TAG into it), so the untagged copy
+# is made here by blanking that line, not taken from the tree as it is.
+UNTAGGED="$T/install-untagged.sh"
+awk '/^readonly TN_SCRIPTS_TAG=/ { print "readonly TN_SCRIPTS_TAG=\"\""; next } { print }' "$INSTALLER" > "$UNTAGGED"
+check "untagged copy: the tag line is blank" "1" "$(grep -c '^readonly TN_SCRIPTS_TAG=""$' "$UNTAGGED")"
 mkdir -p "$HOME_DIR"
-run_installer "$INSTALLER"
+run_installer "$UNTAGGED"
 check_rc "untagged copy: exits 1" 1 "$RC"
 check "untagged copy: no download" "" "$(cat "$T/curl.log")"
 check "untagged copy: nothing installed" "absent" "$([[ -e "$HOME_DIR/telcoin-node-scripts" ]] && echo present || echo absent)"
