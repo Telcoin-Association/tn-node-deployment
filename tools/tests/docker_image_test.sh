@@ -23,7 +23,10 @@
 # tn_docker_image_for_tag (signed digest first, the registry's on testnet only
 # when no signed release exists, asking the testnet package and then the legacy
 # repository, never on mainnet, never after a failed verification; a devnet tag
-# refused before any download), tn_docker_resolve_ref (devnet: digests only; the
+# refused before any download), the unsigned-release exception
+# (tn_release_unsigned_ok: v0.17.0-adiri on testnet only, by the registry's digest
+# in tn_docker_image_for_tag and latest_docker_image with no signed release asked
+# for; another tag and mainnet as before), tn_docker_resolve_ref (devnet: digests only; the
 # other network's package and the old single package refused on every network),
 # tn_docker_release_tag_for on devnet (the .node-meta record only, no registry
 # call), tn_docker_holds_digest and, against a docker shim that prints a canned
@@ -531,8 +534,10 @@ check_rc "local digest: leading dash refused" 1 "$rc"
 
 # --- tn_docker_image_for_tag / tn_docker_resolve_ref / tn_docker_holds_digest ----------
 # The registry digest of v0.17.0-adiri; the signed-release path is shimmed below.
+# v0.17.0-adiri is the unsigned-release exception (tn_release_unsigned_ok, below),
+# so the cases of a release tag with a signed release use v0.16.0-adiri.
 printf 'sha256:%s\n' "$D64" > "$REC/digest.v0.17.0-adiri"
-rc=0; out="$(tn_docker_image_for_tag testnet v0.17.0-adiri 2>"$T/err")" || rc=$?
+rc=0; out="$(tn_docker_image_for_tag testnet v0.16.0-adiri 2>"$T/err")" || rc=$?
 check "for_tag, no release key, testnet: the registry digest" "0 ${R}@sha256:${D64}" "$rc $out"
 check_has "for_tag, no release key: warns that no signed release confirms it" "1" "$(grep -c 'no signed release confirms' "$T/err")"
 rc=0; out="$(tn_docker_image_for_tag testnet v0.17.0-adiri-hotfix 2>/dev/null)" || rc=$?
@@ -553,13 +558,13 @@ check "for_tag: a named testnet release candidate resolves" "0 ${R}@sha256:${D2}
 : > "$T/keys/k.asc"
 FETCH_RC=0
 tn_fetch_release_image() { [[ "$FETCH_RC" -eq 0 ]] || return "$FETCH_RC"; printf '%s@sha256:%s\n' "$R" "$D64" | tr 0 f; }
-rc=0; out="$(tn_docker_image_for_tag testnet v0.17.0-adiri 2>/dev/null)" || rc=$?
+rc=0; out="$(tn_docker_image_for_tag testnet v0.16.0-adiri 2>/dev/null)" || rc=$?
 check "for_tag, release key: the signed release's digest wins" "0 $(printf '%s@sha256:%s' "$R" "$D64" | tr 0 f)" "$rc $out"
 FETCH_RC=2
-rc=0; out="$(tn_docker_image_for_tag testnet v0.17.0-adiri 2>/dev/null)" || rc=$?
+rc=0; out="$(tn_docker_image_for_tag testnet v0.16.0-adiri 2>/dev/null)" || rc=$?
 check "for_tag: no signed release published (rc 2), testnet: registry digest" "0 ${R}@sha256:${D64}" "$rc $out"
 FETCH_RC=1
-rc=0; out="$(tn_docker_image_for_tag testnet v0.17.0-adiri 2>/dev/null)" || rc=$?
+rc=0; out="$(tn_docker_image_for_tag testnet v0.16.0-adiri 2>/dev/null)" || rc=$?
 check "for_tag: a release that fails verification is never replaced" "1 " "$rc $out"
 # The registry fallback, with its lookups recorded: tn_registry_digest logs
 # "<repository> <tag>" to $REC/reg.log and answers with a digest only while
@@ -584,27 +589,106 @@ check "for_tag, mainnet, rc 2: no registry lookup" "" "$(regs)"
 check "for_tag, mainnet, rc 2: no registry call" "0" "$(grep -c 'ghcr.io\|pkg.dev' "$REC/curl.log")"
 check_lacks "for_tag, mainnet, rc 2: no registry digest offered" "the registry serves" "$(cat "$T/err")"
 : > "$REC/reg.log"
-rc=0; out="$(reg_for_tag testnet v0.17.0-adiri 2>/dev/null)" || rc=$?
+rc=0; out="$(reg_for_tag testnet v0.16.0-adiri 2>/dev/null)" || rc=$?
 check "for_tag, testnet, rc 2: the testnet package answers first" "0 ${GH}@sha256:${D64}" "$rc $out"
-check "for_tag, testnet, rc 2: only the testnet package asked" "${GH} v0.17.0-adiri" "$(regs)"
+check "for_tag, testnet, rc 2: only the testnet package asked" "${GH} v0.16.0-adiri" "$(regs)"
 rm -f "$REC/reg.answer"
 : > "$REC/reg.log"
-rc=0; out="$(reg_for_tag testnet v0.17.0-adiri 2>"$T/err")" || rc=$?
+rc=0; out="$(reg_for_tag testnet v0.16.0-adiri 2>"$T/err")" || rc=$?
 check "for_tag, testnet, rc 2, no registry answers: refused" "1 " "$rc $out"
 check "for_tag, testnet, rc 2: the testnet package, then the legacy repository, nothing else" \
-    "${GH} v0.17.0-adiri|${R} v0.17.0-adiri" "$(regs)"
+    "${GH} v0.16.0-adiri|${R} v0.16.0-adiri" "$(regs)"
 check_has "for_tag, testnet: the refusal names both repositories" "1" \
-    "$(grep -cF "The registry gave no digest for v0.17.0-adiri in ${GH} or ${R}." "$T/err")"
+    "$(grep -cF "The registry gave no digest for v0.16.0-adiri in ${GH} or ${R}." "$T/err")"
 rm -f "$T/keys/k.asc"
 : > "$REC/reg.log"
-rc=0; out="$(reg_for_tag testnet v0.17.0-adiri 2>/dev/null)" || rc=$?
+rc=0; out="$(reg_for_tag testnet v0.16.0-adiri 2>/dev/null)" || rc=$?
 check "for_tag, no release key, testnet: the same two repositories, in order" \
-    "1 ${GH} v0.17.0-adiri|${R} v0.17.0-adiri" "$rc $(regs)"
+    "1 ${GH} v0.16.0-adiri|${R} v0.16.0-adiri" "$rc $(regs)"
 : > "$REC/reg.answer"; : > "$REC/reg.log"
 rc=0; out="$(reg_for_tag mainnet v1.0.0 2>/dev/null)" || rc=$?
 check "for_tag, no release key, mainnet: refused, no registry lookup" "1 " "$rc $(regs)"
 rm -f "$REC/reg.answer"
 : > "$T/keys/k.asc"
+# The unsigned-release exception (removed with v0.17.1-adiri): TN_UNSIGNED_RELEASE_TAG
+# on testnet only. Its image comes by the registry's digest (the testnet package,
+# then the legacy repository) with a log line instead of the fallback warning, and
+# the signed release is never asked for, not even with a release key present and a
+# release that would verify. The newest-release pick takes the same path when it
+# is the newest release, and offers nothing rather than the pinned default when no
+# registry answers. Mainnet never takes it; every other tag is as above.
+uok() { local rc=0; tn_release_unsigned_ok "$1" "$2" || rc=$?; printf '%s' "$rc"; }
+check "TN_UNSIGNED_RELEASE_TAG" "v0.17.0-adiri" "$TN_UNSIGNED_RELEASE_TAG"
+check "unsigned exception: testnet v0.17.0-adiri" "0" "$(uok testnet v0.17.0-adiri)"
+check "unsigned exception: no other testnet tag (v0.16.0-adiri, v0.17.1-adiri, an rc, empty)" "1 1 1 1" \
+    "$(uok testnet v0.16.0-adiri) $(uok testnet v0.17.1-adiri) $(uok testnet v0.17.0-adiri-rc1) $(uok testnet '')"
+check "unsigned exception: never mainnet, devnet or no network" "1 1 1" \
+    "$(uok mainnet v0.17.0-adiri) $(uok devnet v0.17.0-adiri) $(uok '' v0.17.0-adiri)"
+unset -f uok
+with_reg() {  # with_reg CMD ARGS... -- CMD with tn_registry_digest logged, answering while $REC/reg.answer exists
+    tn_registry_digest() {
+        printf '%s %s\n' "$1" "$2" >> "$REC/reg.log"
+        [ -f "$REC/reg.answer" ] || return 1
+        printf 'sha256:%s\n' "$D64"
+    }
+    "$@"
+}
+tn_fetch_release_image() {
+    printf 'fetch %s %s\n' "$1" "$2" >> "$REC/fetch.log"
+    [[ "$FETCH_RC" -eq 0 ]] || return "$FETCH_RC"
+    printf '%s@sha256:%s\n' "$GH" "$D64" | tr 0 f
+}
+FETCH_RC=0
+: > "$REC/reg.answer"; : > "$REC/reg.log"; : > "$REC/fetch.log"
+rc=0; out="$(with_reg tn_docker_image_for_tag testnet v0.17.0-adiri 2>"$T/err")" || rc=$?
+check "unsigned exception, for_tag: the registry's digest, the testnet package first" "0 ${GH}@sha256:${D64}" "$rc $out"
+check "unsigned exception, for_tag: only the testnet package asked" "${GH} v0.17.0-adiri" "$(regs)"
+check "unsigned exception, for_tag: no signed release asked for (a release key is present)" "" "$(cat "$REC/fetch.log")"
+check_has "unsigned exception, for_tag: the log line" \
+    "Release v0.17.0-adiri is the last unsigned testnet release and has no signed files; using the digest the registry serves for v0.17.0-adiri." "$(cat "$T/err")"
+check_lacks "unsigned exception, for_tag: not the fallback warning" "no signed image digest to read" "$(cat "$T/err")"
+rm -f "$REC/reg.answer"; : > "$REC/reg.log"
+rc=0; out="$(with_reg tn_docker_image_for_tag testnet v0.17.0-adiri 2>"$T/err")" || rc=$?
+check "unsigned exception, for_tag, no registry answers: refused" "1 " "$rc $out"
+check "unsigned exception, for_tag: the testnet package, then the legacy repository" \
+    "${GH} v0.17.0-adiri|${R} v0.17.0-adiri" "$(regs)"
+: > "$REC/reg.answer"; : > "$REC/reg.log"; : > "$REC/fetch.log"
+rc=0; out="$(with_reg tn_docker_image_for_tag mainnet v0.17.0-adiri 2>/dev/null)" || rc=$?
+check "unsigned exception, mainnet: not a mainnet release tag (rc 3)" "3 " "$rc $out"
+check "unsigned exception, mainnet: nothing fetched, no registry lookup" "|" "$(cat "$REC/fetch.log")|$(regs)"
+FETCH_RC=2
+rc=0; out="$(with_reg tn_docker_image_for_tag testnet v0.17.1-adiri 2>"$T/err")" || rc=$?
+check "another unsigned testnet tag: the signed release asked first, then the registry" \
+    "0 ${GH}@sha256:${D64} fetch v0.17.1-adiri testnet" "$rc $out $(cat "$REC/fetch.log")"
+check_has "another unsigned testnet tag: the fallback warning" "1" "$(grep -c 'v0.17.1-adiri has no signed image digest to read' "$T/err")"
+FETCH_RC=1; : > "$REC/fetch.log"; : > "$REC/reg.log"
+rc=0; out="$(with_reg tn_docker_image_for_tag testnet v0.17.1-adiri 2>/dev/null)" || rc=$?
+check "another testnet tag whose release fails verification: refused, no registry lookup" "1 |" "$rc $out|$(regs)"
+# The newest-release pick, with v0.17.0-adiri the newest testnet release on GitHub.
+printf '[{"tag_name":"v0.17.0-adiri","draft":false,"prerelease":true,"assets":[]},{"tag_name":"v0.16.0-adiri","draft":false,"prerelease":true}]' > "$REC/releases.json"
+FETCH_RC=2; : > "$REC/fetch.log"; : > "$REC/reg.log"
+rc=0; out="$(with_reg latest_docker_image testnet 2>"$T/err")" || rc=$?
+check "unsigned exception, latest: the registry's digest of v0.17.0-adiri" "0 ${GH}@sha256:${D64}" "$rc $out"
+check "unsigned exception, latest: no signed release asked for, the testnet package asked" \
+    "|${GH} v0.17.0-adiri" "$(cat "$REC/fetch.log")|$(regs)"
+check_lacks "unsigned exception, latest: not the pinned default" "$DEFAULT_DOCKER_IMAGE" "$(cat "$T/err")"
+rm -f "$REC/reg.answer"; : > "$REC/reg.log"
+rc=0; out="$(with_reg latest_docker_image testnet 2>"$T/err")" || rc=$?
+check "unsigned exception, latest, no registry answers: nothing, not the pinned default" "1 " "$rc $out"
+check "unsigned exception, latest, no registry answers: both repositories asked" \
+    "${GH} v0.17.0-adiri|${R} v0.17.0-adiri" "$(regs)"
+: > "$REC/reg.answer"; : > "$REC/reg.log"
+rc=0; out="$(with_reg latest_docker_image mainnet 2>/dev/null)" || rc=$?
+check "unsigned exception, latest, mainnet: no mainnet release, nothing" "1 |" "$rc $out|$(regs)"
+printf '[{"tag_name":"v0.17.1-adiri","draft":false,"prerelease":true}]' > "$REC/releases.json"
+: > "$REC/fetch.log"; : > "$REC/reg.log"
+rc=0; out="$(with_reg latest_docker_image testnet 2>/dev/null)" || rc=$?
+check "another unsigned newest release: the pinned default, as before, no registry lookup" \
+    "0 ${DEFAULT_DOCKER_IMAGE} fetch v0.17.1-adiri testnet|" "$rc $out $(cat "$REC/fetch.log")|$(regs)"
+printf '[]' > "$REC/releases.json"
+rm -f "$REC/reg.answer"
+unset -f with_reg
+FETCH_RC=0
 unset -f reg_for_tag regs
 FETCH_RC=0
 # Devnet has no signed releases: a devnet tag names no image and is refused
