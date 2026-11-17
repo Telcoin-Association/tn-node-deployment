@@ -5,14 +5,20 @@
 # Builds one partner document, chosen by name, or every one of them with --all:
 #   mno-node-guide            the guide for mobile network operators
 #   technical-specification   the Telcoin Network technical specification
+#   testnet-node-requirements what a testnet node needs
+#   mainnet-node-requirements what a mainnet node needs
+# The last two are one-pagers: a single page with no cover and no contents
+# (toc-depth: 0).
 #
 # Each document lives in its own directory, docs/partner/<doc>/:
 #   <doc>.md        the source; its single "# " heading is the title
-#   metadata.yaml   cover fields, plus toc-depth, contact and (spec) confidentiality
-#   template.html   pandoc HTML5 template: cover, contents, body
+#   metadata.yaml   version, date and any cover fields, plus toc-depth (0 on a
+#                   one-pager), contact and (spec) confidentiality
+#   template.html   pandoc HTML5 template: cover, contents, body; a one-pager
+#                   has no cover and no contents
 #   theme.css       WeasyPrint paged-media stylesheet
 #   <doc>.pdf       the generated PDF, committed
-# docs/partner/assets/ (fonts, logos, covers) is shared by both documents. It is
+# docs/partner/assets/ (fonts, logos, covers) is shared by every document. It is
 # vendored, so the build never hits the network.
 #
 # pandoc turns the Markdown into HTML with the document's template and metadata,
@@ -25,8 +31,8 @@
 #
 # Before rendering, the Markdown is linted for things that must never reach a
 # partner: personal addresses, removed flags and scripts, repo-relative links,
-# and (guide only) "legacy" material. Presentation settings come from the
-# document's metadata.yaml; the partner-safety policy (contact address,
+# and (guide and one-pagers) "legacy" material. Presentation settings come from
+# the document's metadata.yaml; the partner-safety policy (contact address,
 # forbidden text, page bounds) stays in this script, so no metadata edit can
 # switch a check off. The committed PDF is only replaced when a source file
 # changed (or with --force), so a pandoc/WeasyPrint upgrade that shifts bytes
@@ -37,9 +43,11 @@
 # associative arrays or mapfile) so it runs on stock macOS too.
 #
 # USAGE:
-#   bash tools/build-partner-pdf.sh <mno-node-guide|technical-specification|--all>
+#   bash tools/build-partner-pdf.sh <document|--all>
 #                                   [--html-only] [--open] [--force]
 #   bash tools/build-partner-pdf.sh --help
+# where <document> is mno-node-guide, technical-specification,
+# testnet-node-requirements or mainnet-node-requirements.
 # =============================================================================
 
 set -euo pipefail
@@ -59,6 +67,10 @@ docs/partner/assets/.
 Documents:
   mno-node-guide            The guide for mobile network operators.
   technical-specification   The Telcoin Network technical specification.
+  testnet-node-requirements What a testnet node needs.
+  mainnet-node-requirements What a mainnet node needs.
+                            These two are a single page each, with no cover and
+                            no contents (toc-depth: 0).
   --all                     Every document in turn. Keeps going after a failure and
                             exits 1 at the end if any document failed.
 
@@ -95,7 +107,7 @@ _usage_error() {
 }
 
 # The partner documents, in --all order. Keep in step with the case "$DOC" below.
-declare -a DOCS=(mno-node-guide technical-specification)
+declare -a DOCS=(mno-node-guide technical-specification testnet-node-requirements mainnet-node-requirements)
 
 DOC=""
 ALL=0
@@ -155,30 +167,43 @@ if [[ -z "$DOC" ]]; then
     _usage_error "name the document to build (${DOCS[*]}), or pass --all"
 fi
 
-# Per-document lint switches. Policy, not presentation, so they live here rather
-# than in metadata.yaml.
-#   LINT_LEGACY            fail on the word "legacy" (the guide carries no legacy-
-#                          install material; the spec, an EVM document, may say
-#                          "legacy transactions")
+# Per-document lint switches and page bounds. Policy, not presentation, so they
+# live here rather than in metadata.yaml.
+#   LINT_LEGACY            fail on the word "legacy" (the guide and the one-pagers
+#                          carry no legacy-install material; the spec, an EVM
+#                          document, may say "legacy transactions")
 #   CONTACT_IN_MD          the Markdown must name CONTACT (the spec's contact is
 #                          the cover mailto: from metadata.yaml)
 #   NEED_CONFIDENTIALITY   metadata.yaml must set a confidentiality label
+#   MIN_PAGES, MAX_PAGES   the PDF's page count must lie within these bounds; a
+#                          one-pager must be exactly one page
 case "$DOC" in
     mno-node-guide)
         LINT_LEGACY=1
         CONTACT_IN_MD=1
         NEED_CONFIDENTIALITY=0
+        MIN_PAGES=15
+        MAX_PAGES=150
         ;;
     technical-specification)
         LINT_LEGACY=0
         CONTACT_IN_MD=0
         NEED_CONFIDENTIALITY=1
+        MIN_PAGES=15
+        MAX_PAGES=150
+        ;;
+    testnet-node-requirements|mainnet-node-requirements)
+        LINT_LEGACY=1
+        CONTACT_IN_MD=1
+        NEED_CONFIDENTIALITY=0
+        MIN_PAGES=1
+        MAX_PAGES=1
         ;;
     *)
         _usage_error "unknown document: ${DOC} (known: ${DOCS[*]})"
         ;;
 esac
-readonly DOC LINT_LEGACY CONTACT_IN_MD NEED_CONFIDENTIALITY
+readonly DOC LINT_LEGACY CONTACT_IN_MD NEED_CONFIDENTIALITY MIN_PAGES MAX_PAGES
 
 readonly PARTNER_DIR="docs/partner"
 readonly ASSETS_DIR="${PARTNER_DIR}/assets"
@@ -191,8 +216,6 @@ readonly CSS="${DOC_DIR}/theme.css"
 readonly BUILD_DIR="${DOC_DIR}/build"
 readonly PDF="${DOC_DIR}/${DOC}.pdf"
 readonly CONTACT="devs@telcoin.org"
-readonly MIN_PAGES=15
-readonly MAX_PAGES=150
 readonly MAX_CODE_LINE=90
 
 # Scratch output is named after the source, so a PARTNER_MD test build never
@@ -440,7 +463,7 @@ for pat in "${FORBIDDEN[@]}"; do
     fi
 done
 if [[ $LINT_LEGACY -eq 1 ]] && hits="$(grep -n -i -w -e "legacy" "$MD")"; then
-    _lint_error "${MD} mentions 'legacy' (drop legacy material from the partner guide):"
+    _lint_error "${MD} mentions 'legacy' (drop legacy material from this document):"
     printf '%s\n' "$hits" | sed 's/^/    line /' >&2
 fi
 if [[ $CONTACT_IN_MD -eq 1 ]] && ! grep -q -F -e "$CONTACT" "$MD"; then
@@ -469,9 +492,9 @@ META_CONTACT="$(_meta "$META" contact)"
 CONFIDENTIALITY="$(_meta "$META" confidentiality)"
 readonly TOC_DEPTH META_CONTACT CONFIDENTIALITY
 case "$TOC_DEPTH" in
-    1|2|3) ;;
-    "") _lint_error "${META} has no 'toc-depth:' line (contents depth, 1 to 3)" ;;
-    *)  _lint_error "${META} sets toc-depth '${TOC_DEPTH}'; it must be 1, 2 or 3" ;;
+    0|1|2|3) ;;
+    "") _lint_error "${META} has no 'toc-depth:' line (contents depth, 0 to 3; 0 for no contents)" ;;
+    *)  _lint_error "${META} sets toc-depth '${TOC_DEPTH}'; it must be 0 (no contents), 1, 2 or 3" ;;
 esac
 if [[ -z "$META_CONTACT" ]]; then
     _lint_error "${META} has no 'contact:' line; partner documents use ${CONTACT}"
@@ -501,11 +524,16 @@ if ! _stage_css "$CSS" "${BUILD_DIR}/theme.css"; then
     echo "error: could not stage ${CSS} into ${BUILD_DIR}/ (missing asset?)" >&2
     exit 1
 fi
+# toc-depth 0 means no contents and no section numbers.
+declare -a TOC_ARGS=()
+case "$TOC_DEPTH" in
+    1|2|3) TOC_ARGS=(--number-sections --toc --toc-depth="$TOC_DEPTH") ;;
+esac
 if ! pandoc "$MD" \
         --from=gfm --to=html5 --standalone \
         --template="$TEMPLATE" \
         --metadata-file="$META" \
-        --shift-heading-level-by=-1 --number-sections --toc --toc-depth="$TOC_DEPTH" \
+        --shift-heading-level-by=-1 ${TOC_ARGS[@]+"${TOC_ARGS[@]}"} \
         --syntax-highlighting=none \
         --css=theme.css -V asset-dir=../../assets \
         --fail-if-warnings \
@@ -561,10 +589,16 @@ facts="$(_pdf_facts "$PDF_NEW")"
 pages="${facts%% *}"
 has_mailto="${facts##* }"
 if [[ -z "$pages" || "$pages" -lt $MIN_PAGES || "$pages" -gt $MAX_PAGES ]]; then
+    expected="${MIN_PAGES} to ${MAX_PAGES}"
+    detail="outside ${expected}"
+    if [[ $MIN_PAGES -eq $MAX_PAGES ]]; then
+        expected="exactly ${MIN_PAGES}"
+        detail="expected ${expected}"
+    fi
     if [[ $OVERRIDE -eq 1 ]]; then
-        echo "warn: ${PDF_NEW} has ${pages:-0} pages (outside ${MIN_PAGES} to ${MAX_PAGES}; ignored for PARTNER_MD)" >&2
+        echo "warn: ${PDF_NEW} has ${pages:-0} pages (${detail}; ignored for PARTNER_MD)" >&2
     else
-        echo "error: ${PDF_NEW} has ${pages:-0} pages; expected ${MIN_PAGES} to ${MAX_PAGES}" >&2
+        echo "error: ${PDF_NEW} has ${pages:-0} pages; expected ${expected}" >&2
         exit 1
     fi
 fi
