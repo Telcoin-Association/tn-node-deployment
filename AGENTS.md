@@ -18,11 +18,14 @@ any path under `common/` or `devnet-genesis/` is absent at runtime for a real op
 
 `OPERATOR.md` at the repo root is the operator runbook; `README.md` is the reference.
 The partner documents are the guide for mobile network operators
-(`docs/partner/mno-node-guide/mno-node-guide.md`) and the Telcoin Network Technical
-Specification (`docs/partner/technical-specification/technical-specification.md`), each the
-source of the branded PDF beside it. When a change alters operator-visible behaviour (flags,
-prompts, paths, ports), update `OPERATOR.md`, the README and the partner guide together, then
-rebuild the PDF (see "Partner documents" below).
+(`docs/partner/mno-node-guide/mno-node-guide.md`), the Telcoin Network Technical
+Specification (`docs/partner/technical-specification/technical-specification.md`) and the
+node requirements one-pagers for the Adiri testnet
+(`docs/partner/testnet-node-requirements/testnet-node-requirements.md`) and for mainnet
+(`docs/partner/mainnet-node-requirements/mainnet-node-requirements.md`), each the source of
+the branded PDF beside it. When a change alters operator-visible behaviour (flags,
+prompts, paths, ports), update `OPERATOR.md`, the README and the partner guide together, and
+the one-pagers where they repeat it, then rebuild the PDFs (see "Partner documents" below).
 
 ## The boundary rule
 
@@ -455,20 +458,26 @@ runs the whole path on a VM with systemd.
 - `docs/partner/technical-specification/` is the Telcoin Network Technical Specification
   handed to partners. It describes the protocol as of the telcoin-network release named by
   `protocol:` in its `metadata.yaml`; refresh it with every protocol release.
+- `docs/partner/testnet-node-requirements/` is "Adiri testnet node requirements", a one-page
+  summary of the guide for prospective operators of an Adiri testnet node.
+- `docs/partner/mainnet-node-requirements/` is "Mainnet node requirements", the same page for
+  a mainnet node.
 
 Each directory holds `<name>.md` (the source), `<name>.pdf` (generated, never edited by hand,
 committed), `metadata.yaml` (version, date, subtitle, contact and `toc-depth`; the
-specification also sets `protocol` and `confidentiality`), `template.html` and `theme.css`.
+specification also sets `protocol` and `confidentiality`, the one-pagers `badge`),
+`template.html` and `theme.css`.
 The shared `docs/partner/assets/` is vendored: the fonts (Geist and Geist Mono under
-`fonts/geist/` for the guide, Inter under `fonts/inter/` for the specification, all under the
-SIL Open Font License 1.1 with their licence files beside them), the logos (the two white
-wordmarks `telcoin-network-light.svg` and `telcoin-association-white.svg` for dark
-backgrounds, the two `-dark` ones for light backgrounds) and `covers/`. Record the provenance
-of every vendored file in `docs/partner/assets/README.md`.
+`fonts/geist/` for the guide and the one-pagers, Inter under `fonts/inter/` for the
+specification, all under the SIL Open Font License 1.1 with their licence files beside
+them), the logos (the two white wordmarks `telcoin-network-light.svg` and
+`telcoin-association-white.svg` for dark backgrounds, the two `-dark` ones for light
+backgrounds) and `covers/`. Record the provenance of every vendored file in
+`docs/partner/assets/README.md`.
 
 - Rebuild with `bash tools/build-partner-pdf.sh <name>` after changing a document's Markdown,
   `metadata.yaml`, `template.html` or `theme.css`, and with `--all` after a change under
-  `assets/`, which can move both PDFs. Preview the HTML without WeasyPrint using
+  `assets/`, which can move every PDF. Preview the HTML without WeasyPrint using
   `--html-only --open`. Scratch output goes to `docs/partner/<name>/build/`, which is
   gitignored. Where WeasyPrint cannot run natively, build in the `tn-pdf-tools` container
   from the repo root (its toolchain is in the reference-toolchain item below):
@@ -481,20 +490,44 @@ of every vendored file in `docs/partner/assets/README.md`.
   build warns when the Markdown changed and the metadata did not.
 - The document title is the single `#` heading in the Markdown. Do not add a `title:` key
   to `metadata.yaml`, and keep no prose between the `#` heading and the first `##`.
-- The build refuses partner-unsafe text in either document, in the Markdown and (when
+- A one-pager is a single A4 page with no cover and no contents: its `metadata.yaml` sets
+  `toc-depth: 0`, and the build fails unless the PDF is exactly one page. The guide and the
+  specification keep their bounds of 15 to 150 pages.
+- The two one-pager directories hold byte-identical copies of `template.html` and of
+  `theme.css`: edit one, copy it to the other and check with `cmp`. Every difference between
+  the networks lives in the Markdown and `metadata.yaml`, the header's `badge:` label included.
+- A one-pager's Markdown carries three raw-HTML hooks, described at the top of `theme.css`:
+  `<div class="wide">` (the full-width block with the hardware table), `<div class="columns">`
+  (the two columns) and `<div class="col-break"></div>` (starts the right column). The page is
+  full: an added line usually tips it to two pages and fails the build. Fit by cutting words,
+  never by shrinking type below the floors in `theme.css`, and read the rendered page
+  (`pdftoppm -png -r 110`) after every change, because a longer table cell squeezes its
+  neighbours.
+- The guide is the one-pagers' source of truth. A change to its "Before you start" facts
+  (hardware, operating system, ports, networks and endpoints), or to any other statement a
+  one-pager repeats, updates both one-pagers in the same change, bumps their `version` and
+  `date` and rebuilds them.
+- The mainnet page states only what the scripts already enforce and marks everything
+  undecided "set at launch"; it invents no figure. Neither page prints what moves with each
+  release: the node version, the scripts version, which node release starts signed releases
+  or the oldest supported node release.
+- The build refuses partner-unsafe text in any document, in the Markdown and (when
   `pdftotext` is present) in the PDF text: `--observer`, `migrate-node-naming`,
   `setup-observer.sh`, `setup-validator.sh`, personal addresses and repo-relative links.
-  The guide may not say "legacy" either, because partner readers never see legacy installs;
-  the specification may, since EVM legacy transactions are part of the protocol.
-- The only contact in either document is `devs@telcoin.org`, the script's `CONTACT`. Each
-  `metadata.yaml` must set `contact` to it, the guide's Markdown must mention it, and the
-  specification carries it only on its cover. The build fails on any other value.
+  The guide and the one-pagers may not say "legacy" either, because partner readers never
+  see legacy installs; the specification may, since EVM legacy transactions are part of the
+  protocol.
+- The only contact in any document is `devs@telcoin.org`, the script's `CONTACT`. Each
+  `metadata.yaml` must set `contact` to it, the Markdown of the guide and of each one-pager
+  must mention it, and the specification carries it only on its cover. The build fails on
+  any other value.
 - Links to repository files are absolute URLs under `https://github.com/Telcoin-Association/`
   (for this repo, `https://github.com/Telcoin-Association/tn-node-deployment/blob/main/`),
   because the PDF has no repo around it. Cross-references inside a document are heading
   links such as `[Back up the keys now](#back-up-the-keys-now)`, and the build fails on one
   that matches no heading. Headings and prose carry no manual numbers; pandoc numbers the
-  chapters at build time.
+  chapters at build time when `toc-depth` is 1 to 3, and `toc-depth: 0` (a one-pager)
+  means no contents and no numbers.
 - Commit the PDF together with the sources that produced it. If only the toolchain changed
   (a pandoc or WeasyPrint upgrade), the script keeps the committed PDF and warns "toolchain
   drift"; pass `--force` to overwrite it deliberately. Same inputs and same toolchain give
