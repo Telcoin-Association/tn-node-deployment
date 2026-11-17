@@ -423,12 +423,14 @@ caddy_wait_say() {
     return 0
 }
 
-# caddy_baseline_refresh -- at the end of an rpc-enable or rpc-disable that went
-# through (.node-meta, the node launch and node-info.yaml written, the restart back):
+# caddy_baseline_refresh -- at the end of an rpc-enable, rpc-disable, rpc-advertise or
+# rpc-unadvertise that went through (.node-meta, the node launch and node-info.yaml
+# written, the restart back):
 # make the host baseline again (tn_host_baseline_refresh, a no-op without
 # HOST_BASELINE=true in .node-meta or with a lib/common.sh that lacks it). Its
 # warnings go through caddy_wait_say, so they are events before the done event in
-# --json runs. The dashboard site changes no file the baseline covers. Never fails.
+# --json runs. The dashboard and gateway sites change no file the baseline covers.
+# Never fails.
 caddy_baseline_refresh() {
     if declare -F tn_host_baseline_refresh >/dev/null 2>&1; then
         tn_host_baseline_refresh caddy_wait_say
