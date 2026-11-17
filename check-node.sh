@@ -2202,9 +2202,13 @@ _cn_gw_listener() {
     case " ${bound} " in
         *" ${want} "*) print_ok "Gateway ${name} listener on ${want}"; return 0 ;;
     esac
-    if [[ "${want%:*}" == "0.0.0.0" && " ${bound} " == *" *:${port} "* ]]; then
-        print_ok "Gateway ${name} listener on ${want}"
-        return 0
+    # A wildcard listener: ss shows 0.0.0.0:P, *:P or, dual-stack, [::]:P.
+    if [[ "${want%:*}" == "0.0.0.0" ]]; then
+        case " ${bound} " in
+            *" *:${port} "*|*" [::]:${port} "*)
+                print_ok "Gateway ${name} listener on ${want}"
+                return 0 ;;
+        esac
     fi
     if [[ -z "$bound" ]]; then
         print_error "Gateway ${name} listener: nothing listens on ${want}, the address in gateway.meta"
@@ -2216,19 +2220,20 @@ _cn_gw_listener() {
 
 # check_gateway -- the worker gateway on this host (setup-gateway.sh, every
 # network), run when tn_gateway_installed. gw_status (lib/gateway.sh) prints its
-# own lines and returns the number of issues it found (the unit not enabled or not
-# active, the image not held, GET /health on the probe listener not answering 200,
-# no Caddy gateway block with FRONT=caddy); they count in HEALTH_ISSUES. This adds
-# what gw_status does not check: the /ready state as information (a 503 while the
-# node is down or still syncing is not an issue), each listener bound where
-# gateway.meta says, the unit's ExecStart image equal to gateway.meta's IMAGE and,
-# in same-host mode, a --healthcheck on the node's launch line at gateway.meta's
-# HEALTH_PORT. With an older lib/common.sh or lib/gateway.sh the section is
-# skipped with one line, and only when this host has a gateway.
+# own lines and returns the number of issues it found (the unit missing, differing
+# from gateway.meta, not enabled or not active, the image not held, GET /health on
+# the probe listener not answering 200, no Caddy gateway block with FRONT=caddy);
+# they count in HEALTH_ISSUES. It also says when /ready is not 200 (information:
+# the node may be down or syncing) and, without root, reads the unit file instead
+# of gateway.meta. This adds what gw_status does not check, from its GW_ST_*
+# values (so it needs no root either): each listener bound where gw_status says
+# while the gateway runs and, in same-host mode, a --healthcheck on the node's
+# launch line at the port of the gateway's readiness URL. With an older
+# lib/common.sh or lib/gateway.sh the section is skipped with one line, and only
+# when this host has a gateway.
 check_gateway() {
-    local n=0 meta mode image hport unit exec_img bind rc=0 ss_out pair
-    if ! have_fns tn_gateway_installed tn_gateway_meta_path tn_gateway_meta_get \
-            tn_node_health_bind gw_status gw_unit_path; then
+    local n=0 hport bind rc=0 ss_out pair
+    if ! have_fns tn_gateway_installed tn_node_health_bind gw_status; then
         if have_fns tn_gateway_installed; then
             tn_gateway_installed || return 0
         else
@@ -2245,45 +2250,21 @@ check_gateway() {
     HEALTH_ISSUES=$(( HEALTH_ISSUES + n ))
 
     if [[ "${GW_ST_ACTIVE:-}" != "true" ]]; then
-        print_info "Gateway /ready and listeners: not checked (the gateway is not running)"
+        print_info "Gateway listeners: not checked (the gateway is not running)"
+    elif ! command -v ss >/dev/null 2>&1; then
+        print_info "Gateway listeners: not checked (ss not found)"
     else
-        if [[ "${GW_ST_READY:-}" == "true" ]]; then
-            print_info "Gateway /ready: 200 (worker 0 accepts transactions)"
-        else
-            print_info "Gateway /ready: not ready (503 while the node is down or still syncing; not an issue by itself)"
-        fi
-        if ! command -v ss >/dev/null 2>&1; then
-            print_info "Gateway listeners: not checked (ss not found)"
-        else
-            ss_out="$(ss -ltn 2>/dev/null)"
-            for pair in "listen ${GW_ST_LISTEN:-}" "probe ${GW_ST_PROBE:-}" "metrics ${GW_ST_METRICS:-}"; do
-                _cn_gw_listener "${pair%% *}" "${pair#* }" "$ss_out" || (( ++HEALTH_ISSUES ))
-            done
-        fi
+        ss_out="$(ss -ltn 2>/dev/null)"
+        for pair in "listen ${GW_ST_LISTEN:-}" "probe ${GW_ST_PROBE:-}" "metrics ${GW_ST_METRICS:-}"; do
+            _cn_gw_listener "${pair%% *}" "${pair#* }" "$ss_out" || (( ++HEALTH_ISSUES ))
+        done
     fi
 
-    meta="$(tn_gateway_meta_path)"
-    if [[ ! -r "$meta" ]]; then
-        print_info "gateway.meta is readable by root only: the unit's image and the node's --healthcheck were not checked (run with sudo)"
-        return 0
-    fi
-    mode="$(tn_gateway_meta_get MODE 2>/dev/null)" || mode=""
-    image="$(tn_gateway_meta_get IMAGE 2>/dev/null)" || image=""
-    hport="$(tn_gateway_meta_get HEALTH_PORT 2>/dev/null)" || hport=""
-    unit="$(gw_unit_path)"
-    if [[ ! -r "$unit" ]]; then
-        print_info "Gateway unit ${unit} not found, so its image was not compared with gateway.meta"
-    else
-        exec_img="$(awk '/^ExecStart=/ { for (i = 1; i <= NF; i++) if ($i ~ /@sha256:/) { print $i; exit } }' "$unit" 2>/dev/null)"
-        if [[ -n "$image" && "$exec_img" == "$image" ]]; then
-            print_ok "Gateway unit runs gateway.meta's image (${image})"
-        else
-            print_error "The gateway unit's ExecStart image (${exec_img:-none found}) is not gateway.meta's IMAGE (${image:-not set}); run: sudo bash setup-gateway.sh --refresh"
-            (( ++HEALTH_ISSUES ))
-        fi
-    fi
-
-    [[ "$mode" == "same-host" ]] || return 0
+    [[ "${GW_ST_MODE:-}" == "same-host" ]] || return 0
+    # The health port of http://H:K/health/workers, the gateway's readiness URL.
+    hport="${GW_ST_UPSTREAM_READINESS:-}"
+    hport="${hport##*:}"
+    hport="${hport%%/*}"
     bind="$(tn_node_health_bind 2>/dev/null)" || rc=$?
     if [[ $rc -eq 2 ]]; then
         print_error "Same-host gateway, but no node launch file was found to read --healthcheck from"
@@ -2292,7 +2273,7 @@ check_gateway() {
         print_error "Same-host gateway, but the node's launch line has no --healthcheck${hport:+ ${hport}}: the gateway cannot tell when worker 0 is ready"
         (( ++HEALTH_ISSUES ))
     elif [[ -n "$hport" && "${bind##*:}" != "$hport" ]]; then
-        print_error "The node's --healthcheck is on ${bind}, but the gateway's readiness URL uses port ${hport} (gateway.meta HEALTH_PORT); re-run setup-gateway.sh --enable so it reads the node's port"
+        print_error "The node's --healthcheck is on ${bind}, but the gateway's readiness URL uses port ${hport} (${GW_ST_UPSTREAM_READINESS}); re-run setup-gateway.sh --enable so it reads the node's port"
         (( ++HEALTH_ISSUES ))
     else
         print_ok "Node launch line has --healthcheck ${bind} for the gateway's readiness URL"
@@ -2310,7 +2291,7 @@ check_gateway() {
 # RPC URL and no ws URL is reported as information. Failures count in
 # HEALTH_ISSUES; an older lib/common.sh skips the section with one line.
 check_gateway_upstream() {
-    local from="" up="" frc=0 urc=0 list s rpc_port launch rpc_bind="" brc=0 bind="" hrc=0 ni http ws
+    local from="" up="" frc=0 urc=0 list s rpc_port launch rpc_bind="" brc=0 bind="" hb_port="" hrc=0 ni http ws
     if ! have_fns tn_gateway_from_list tn_gateway_from_rules_ok tn_node_health_bind \
             tn_node_launch_target tn_launch_flag_get; then
         from="$(meta_get GATEWAY_ALLOW_FROM 2>/dev/null || true)"
@@ -2367,7 +2348,7 @@ check_gateway_upstream() {
         esac
         bind="$(tn_node_health_bind 2>/dev/null)" || hrc=$?
         case $hrc in
-            0) bind="${bind%:*}" ;;
+            0) hb_port="${bind##*:}"; bind="${bind%:*}" ;;
             1) bind="none" ;;
             *) bind="unknown" ;;
         esac
@@ -2384,13 +2365,13 @@ check_gateway_upstream() {
                     if grep -qxF "# >>> tn-rpc >>>" "${TN_ROOT_PREFIX:-}/etc/caddy/Caddyfile" 2>/dev/null; then
                         print_info "RPC listens on ${rpc_bind}; the public-RPC Caddy block fronts it"
                     else
-                        print_error "The node's RPC listens on ${rpc_bind} with no GATEWAY_UPSTREAM and no public-RPC Caddy block; run: sudo bash edit-config.sh --set gateway_upstream=off"
+                        print_error "The node's RPC listens on ${rpc_bind} with no GATEWAY_UPSTREAM and no public-RPC Caddy block; make it private: run sudo bash edit-config.sh, choose 'RPC access', then '1) Private' (RPC on 127.0.0.1)"
                         (( ++HEALTH_ISSUES ))
                     fi
                     ;;
             esac
-            if [[ "$bind" == "0.0.0.0" ]]; then
-                print_error "The node's --healthcheck listens on 0.0.0.0 with no GATEWAY_UPSTREAM; run: sudo bash edit-config.sh --set gateway_upstream=off"
+            if [[ "$bind" == "0.0.0.0" || "$bind" == "::" || "$bind" == "[::]" ]]; then
+                print_error "The node's --healthcheck listens on ${bind} with no GATEWAY_UPSTREAM, and no edit-config.sh item changes it: set --healthcheck 127.0.0.1:${hb_port} on the node command in ${launch}, then restart the node"
                 (( ++HEALTH_ISSUES ))
             elif [[ "$rpc_bind" != "0.0.0.0" && "$rpc_bind" != "::" && "$rpc_bind" != "[::]" ]]; then
                 print_ok "RPC (${rpc_bind}) and --healthcheck (${bind}) are not on 0.0.0.0 (no GATEWAY_UPSTREAM)"
