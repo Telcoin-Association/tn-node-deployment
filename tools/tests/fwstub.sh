@@ -10,7 +10,13 @@
 # etc/ufw/user.rules (one normalized rule per line), etc/ufw/ufw.conf
 # (ENABLED=yes|no) and etc/default/ufw (DEFAULT_INPUT_POLICY). Every call is
 # appended to $UFW_LOG. UFW_FAIL_AT=N makes call N fail; UFW_FAIL_FROM=N makes
-# every call from N on fail. `status` prints a ufw-like table.
+# every call from N on fail. `status` prints a ufw-like table. By default a rule
+# is stored and deleted as written. UFW_NORMALIZE=1 stores the source of
+# `allow from SRC ...` and matches that of `delete allow from SRC ...` the way
+# the real ufw does (ufw 0.36, Ubuntu 24.04): an IPv4 host without /32, an IPv4
+# CIDR by its network address, so a delete of 10.0.0.7 removes the rule added
+# as 10.0.0.7/32 and `status` shows 10.0.0.0/24 for 10.0.0.5/24 (IPv6 is left
+# as written). $UFW_LOG still records the call as made.
 #
 # sshd: `-t` exits $SSHD_T_RC (default 0); `-T` prints the effective value of
 # every keyword the fixture sets, first value wins, reading
@@ -108,7 +114,30 @@ if [ -n "${UFW_FAIL_FROM:-}" ] && [ "$n" -ge "$UFW_FAIL_FROM" ]; then exit 1; fi
 mkdir -p "$R/etc/ufw" "$R/etc/default"
 rules="$R/etc/ufw/user.rules"
 touch "$rules"
-case "$*" in
+# norm_src SRC -- SRC as ufw stores it (IPv4 only; anything else as written).
+norm_src() {
+    local s="$1" m o1 o2 o3 o4 v
+    case "$s" in
+        *.*.*.*/32) printf '%s\n' "${s%/32}" ;;
+        *.*.*.*/*)
+            m="${s#*/}"
+            IFS=. read -r o1 o2 o3 o4 <<< "${s%/*}"
+            v=$(( ((o1 << 24) | (o2 << 16) | (o3 << 8) | o4) & ((0xFFFFFFFF << (32 - m)) & 0xFFFFFFFF) ))
+            printf '%d.%d.%d.%d/%s\n' $(( (v >> 24) & 255 )) $(( (v >> 16) & 255 )) $(( (v >> 8) & 255 )) $(( v & 255 )) "$m" ;;
+        *) printf '%s\n' "$s" ;;
+    esac
+}
+line="$*"
+if [ -n "${UFW_NORMALIZE:-}" ]; then
+    case "$line" in
+        "allow from "*|"delete allow from "*)
+            pre="${line%%from *}from "
+            rest="${line#*from }"
+            src="${rest%% *}"
+            line="${pre}$(norm_src "$src")${rest#"$src"}" ;;
+    esac
+fi
+case "$line" in
     status*)
         if grep -q '^ENABLED=yes' "$R/etc/ufw/ufw.conf" 2>/dev/null; then
             echo "Status: active"
@@ -131,11 +160,10 @@ case "$*" in
     "default allow outgoing") : ;;
     "delete "*)
         # ${*#...} would strip each word, not the joined line: join first.
-        r="$*"
-        r="${r#delete }"
+        r="${line#delete }"
         grep -vxF -- "$r" "$rules" > "$rules.tmp"; mv "$rules.tmp" "$rules" ;;
     allow*|limit*)
-        grep -qxF -- "$*" "$rules" || printf '%s\n' "$*" >> "$rules" ;;
+        grep -qxF -- "$line" "$rules" || printf '%s\n' "$line" >> "$rules" ;;
 esac
 exit 0
 STUB

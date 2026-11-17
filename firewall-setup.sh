@@ -516,10 +516,12 @@ fw_src_list() {
 # --ssh-from / --p2p-from / --gateway-from value of this run, else SSH_ALLOW_FROM /
 # P2P_ALLOW_FROM / GATEWAY_ALLOW_FROM in .node-meta, else nothing (anywhere for
 # ssh and p2p, no gateway source for gw). --ssh-anywhere / --p2p-anywhere /
-# --gateway-from none print nothing, and so does gw on a host with no node. rc 1
-# on an invalid entry or a key set more than once (message on stderr).
+# --gateway-from none print nothing, and so does gw on a host with no node. On a
+# host with a worker gateway and no node (FW_GW_ONLY) the stored SSH list is
+# SSH_ALLOW_FROM in gateway.meta. rc 1 on an invalid entry or a key set more than
+# once (message on stderr).
 fw_sources() {
-    local kind="$1" given anywhere key flag stored rc=0
+    local kind="$1" given anywhere key flag stored rc=0 where=".node-meta"
     case "$kind" in
         ssh) given="$FW_SSH_FROM"; anywhere="$FW_SSH_ANYWHERE"; key="SSH_ALLOW_FROM"; flag="--ssh-from" ;;
         p2p) given="$FW_P2P_FROM"; anywhere="$FW_P2P_ANYWHERE"; key="P2P_ALLOW_FROM"; flag="--p2p-from" ;;
@@ -538,12 +540,16 @@ fw_sources() {
             print_error "${key} is set more than once in .node-meta; remove the extra lines or pass ${flag} again." >&2
             return 1
         fi
+    elif [[ "$kind" == "ssh" && "$FW_GW_ONLY" == "true" ]]; then
+        # No node here, only a worker gateway: its gateway.meta keeps the SSH list.
+        where="the worker gateway's gateway.meta"
+        stored="$(tn_gateway_meta_get "$key")" || return 1
     else
         stored="$(addon_meta_get "$key")" || return 1
     fi
     [[ -n "$stored" ]] || return 0
     if ! fw_src_list "$stored"; then
-        print_error "${key} in .node-meta holds an invalid entry; pass ${flag} again." >&2
+        print_error "${key} in ${where} holds an invalid entry; pass ${flag} again." >&2
         return 1
     fi
 }
@@ -566,6 +572,60 @@ fw_src_deletable() {
     [[ "$mask" =~ ^[1-9][0-9]{0,2}$ ]] && (( mask <= max ))
 }
 
+# fw_src_canon SRC -- print SRC in the form ufw stores a rule source in, so two
+# spellings of one source compare equal. ufw 0.36 (Ubuntu 24.04) adds, shows and
+# deletes a source in that form: an IPv4 host without /32, an IPv4 CIDR by its
+# network address (10.0.0.5/24 is 10.0.0.0/24), an IPv6 host without /128 and
+# every IPv6 address compressed in lower case; the host bits of an IPv6 CIDR stay
+# (ufw keeps them). A delete spelled either way removes the same rule. The IPv6
+# form printed here is the expanded one (eight groups, no leading zeros): a key
+# to compare, not ufw's text. Anything else prints as given. rc 0.
+fw_src_canon() {
+    local s="${1:-}" ip mask="" o1 o2 o3 o4 v head tail g out="" i k
+    local -a hs=() ts=()
+    ip="${s%%/*}"
+    [[ "$s" == */* ]] && mask="${s#*/}"
+    if [[ -n "$mask" && ! "$mask" =~ ^[0-9]{1,3}$ ]]; then
+        printf '%s\n' "$s"
+    elif validate_ipv4 "$ip" && (( 10#${mask:-32} <= 32 )); then
+        IFS=. read -r o1 o2 o3 o4 <<< "$ip"
+        v=$(( (10#$o1 << 24) | (10#$o2 << 16) | (10#$o3 << 8) | 10#$o4 ))
+        mask=$(( 10#${mask:-32} ))
+        v=$(( v & ((0xFFFFFFFF << (32 - mask)) & 0xFFFFFFFF) ))
+        out="$(( (v >> 24) & 255 )).$(( (v >> 16) & 255 )).$(( (v >> 8) & 255 )).$(( v & 255 ))"
+        [[ "$mask" -eq 32 ]] || out="${out}/${mask}"
+        printf '%s\n' "$out"
+    elif [[ "$ip" != *.* ]] && validate_ipv6 "$ip" && (( 10#${mask:-128} <= 128 )); then
+        head="$ip" tail=""
+        if [[ "$ip" == *::* ]]; then head="${ip%%::*}"; tail="${ip#*::}"; fi
+        [[ -z "$head" ]] || IFS=: read -r -a hs <<< "$head"
+        [[ -z "$tail" ]] || IFS=: read -r -a ts <<< "$tail"
+        k=$(( 8 - ${#hs[@]} - ${#ts[@]} ))
+        for g in ${hs[@]+"${hs[@]}"}; do out="${out}:$(printf '%x' "$(( 16#$g ))")"; done
+        for (( i = 0; i < k; i++ )); do out="${out}:0"; done
+        for g in ${ts[@]+"${ts[@]}"}; do out="${out}:$(printf '%x' "$(( 16#$g ))")"; done
+        out="${out#:}"
+        mask=$(( 10#${mask:-128} ))
+        [[ "$mask" -eq 128 ]] || out="${out}/${mask}"
+        printf '%s\n' "$out"
+    else
+        printf '%s\n' "$s"
+    fi
+}
+
+# fw_src_in SRC ITEM... -- 0 when SRC is one of the ITEMs as ufw compares rule
+# sources (fw_src_canon on both sides), so a stale-source delete never removes a
+# rule a kept source still needs.
+fw_src_in() {
+    local c n
+    c="$(fw_src_canon "${1:-}")"
+    shift
+    for n in "$@"; do
+        [[ "$(fw_src_canon "$n")" == "$c" ]] && return 0
+    done
+    return 1
+}
+
 # fw_stale_sources ssh|p2p|gw -- print, one per line, the sources of the stored
 # list (SSH_ALLOW_FROM / P2P_ALLOW_FROM / GATEWAY_ALLOW_FROM) that this run's
 # --ssh-from / --p2p-from / --gateway-from list, or --ssh-anywhere /
@@ -574,7 +634,7 @@ fw_src_deletable() {
 # warned about and gives nothing. Run after FW_SSH_SRCS / FW_P2P_SRCS /
 # FW_GW_SRCS are filled.
 fw_stale_sources() {
-    local kind="$1" given anywhere key stored s n keep rc=0
+    local kind="$1" given anywhere key stored s rc=0 where=".node-meta"
     local -a now=()
     case "$kind" in
         ssh)
@@ -591,22 +651,23 @@ fw_stale_sources() {
     if [[ "$kind" == "gw" ]]; then
         stored="$(tn_gateway_from_list 2>/dev/null)" || rc=$?
         [[ "$rc" -eq 1 ]] && return 0
+    elif [[ "$kind" == "ssh" && "$FW_GW_ONLY" == "true" ]]; then
+        where="the worker gateway's gateway.meta"
+        stored="$(tn_gateway_meta_get "$key" 2>/dev/null)" || rc=2
     elif ! stored="$(addon_meta_get "$key" 2>/dev/null)"; then
         rc=2
     fi
     if [[ "$rc" -ne 0 ]]; then
-        print_warn "${key} is set more than once in .node-meta, so the rules of the sources it held stay; check them with: sudo ufw status numbered" >&2
+        print_warn "${key} is set more than once in ${where}, so the rules of the sources it held stay; check them with: sudo ufw status numbered" >&2
         return 0
     fi
     while IFS= read -r s; do
         s="${s//[[:space:]]/}"
         [[ -n "$s" ]] || continue
         fw_src_deletable "$s" || continue
-        keep=false
-        for n in ${now[@]+"${now[@]}"}; do
-            [[ "$n" == "$s" ]] && keep=true
-        done
-        [[ "$keep" == "true" ]] || printf '%s\n' "$s"
+        # The same source under another spelling (10.0.0.7 and 10.0.0.7/32) is
+        # kept: ufw would delete the rule the new list just confirmed.
+        fw_src_in "$s" ${now[@]+"${now[@]}"} || printf '%s\n' "$s"
     done <<< "$(printf '%s\n' "$stored" | tr ',' '\n')"
     return 0
 }
@@ -648,13 +709,17 @@ fw_gw_rule_present() {
 # apply_lb_hc_rule) keeps a rule from SRC on this network: on testnet and devnet
 # the monitor (TN_KUMA_SRC), KUMA_EXTRA_SRC and TN_LB_HC_RANGES. A worker gateway
 # source that is also one of those keeps its health-port rule when it leaves
-# GATEWAY_ALLOW_FROM.
+# GATEWAY_ALLOW_FROM. Compared as ufw compares sources (fw_src_in), so
+# a monitor address written with /32 and a gateway source written without it
+# are the same source.
 fw_health_keeps() {
     local src="$1" k list
     is_testnet_like && [[ "$FW_GW_ONLY" != "true" ]] || return 1
     list="${TN_KUMA_SRC} $(kuma_extra_list 2>/dev/null || true) ${TN_LB_HC_RANGES:-}"
     for k in ${list//,/ }; do
-        [[ "${k//[[:space:]]/}" == "$src" ]] && return 0
+        k="${k//[[:space:]]/}"
+        [[ -n "$k" ]] || continue
+        fw_src_in "$src" "$k" && return 0
     done
     return 1
 }
@@ -2188,6 +2253,40 @@ fw_ssh_ports() {
     done <<< "$(printf '%s\n' "$ports" | sort -un)"
 }
 
+# fw_gw_upstream_guard RESET -- refuse (fw_error, rc 1) a run that would leave the
+# node's wildcard binds without their guard. While .node-meta GATEWAY_UPSTREAM is
+# set (edit-config.sh --set gateway_upstream), the node's RPC and health listener
+# are bound to every interface for those worker gateways, and only the ufw rules
+# of GATEWAY_ALLOW_FROM under the default-deny policy keep everyone else out. So
+# --reset is refused (it turns ufw off while it re-applies the rules), and so is
+# a --gateway-from list, or none, that leaves out a host GATEWAY_UPSTREAM names
+# (compared as ufw compares sources, fw_src_in). A plain --enable re-applies the
+# stored list and passes. Run once FW_GW_SRCS is filled. rc 0 otherwise.
+fw_gw_upstream_guard() {
+    local do_reset="${1:-}" up u miss="" list reset=false
+    [[ "$FW_GW_ONLY" != "true" ]] || return 0
+    [[ "$do_reset" == "--reset" || "$do_reset" == "reset" ]] && reset=true
+    [[ "$reset" == "true" || -n "$FW_GW_FROM" || "$FW_GW_NONE" == "true" ]] || return 0
+    if ! up="$(addon_meta_get GATEWAY_UPSTREAM 2>/dev/null)"; then
+        fw_error "GATEWAY_UPSTREAM is set more than once in .node-meta; remove the extra lines and run this again. Nothing was changed."
+        return 1
+    fi
+    up="${up//[[:space:]]/}"
+    [[ -n "$up" ]] || return 0
+    if [[ "$reset" == "true" ]]; then
+        list="$(printf '%s\n' ${FW_GW_SRCS[@]+"${FW_GW_SRCS[@]}"} | paste -sd, -)"
+        fw_error "--reset is refused while GATEWAY_UPSTREAM is set (${up}): a reset turns ufw off while it re-applies the rules, and the node's RPC and health listener are bound to every interface for that worker gateway. Run instead, in order: sudo bash ${SCRIPT_DIR}/edit-config.sh --set gateway_upstream=off; sudo bash ${SCRIPT_DIR}/firewall-setup.sh --reset; sudo bash ${SCRIPT_DIR}/firewall-setup.sh --enable --gateway-from ${list:-<list>}; sudo bash ${SCRIPT_DIR}/edit-config.sh --set gateway_upstream=${up}. A plain --enable is allowed. Nothing was changed."
+        return 1
+    fi
+    while IFS= read -r u; do
+        [[ -n "$u" ]] || continue
+        fw_src_in "$u" ${FW_GW_SRCS[@]+"${FW_GW_SRCS[@]}"} || miss="${miss:+${miss},}${u}"
+    done <<< "$(printf '%s\n' "$up" | tr ',' '\n')"
+    [[ -n "$miss" ]] || return 0
+    fw_error "GATEWAY_UPSTREAM in .node-meta names ${miss}: the node's RPC and health listener are bound to every interface for that worker gateway, and this run would delete its rules. First run: sudo bash ${SCRIPT_DIR}/edit-config.sh --set gateway_upstream=off (or =<a new upstream list>), then this again. Nothing was changed."
+    return 1
+}
+
 # fw_preflight -- check everything apply_recommended_firewall needs before it
 # changes anything: ufw present, sshd ports valid, SSH, P2P and worker gateway
 # source lists valid (--gateway-from only with a node here, and with a gateway
@@ -2195,9 +2294,12 @@ fw_ssh_ports() {
 # every P2P port valid, and on mainnet an SSH source list (or --ssh-anywhere).
 # Fills FW_SSH_PORTS, FW_SSH_SRCS, FW_P2P_SRCS, FW_GW_SRCS and FW_GW_RPC_PORT, and
 # sets FW_COMMITTEE_ACTIVE from P2P_COMMITTEE in .node-meta (refused when the key
-# is set more than once). rc 1 with an error (fw_error) when anything is wrong.
+# is set more than once). With GATEWAY_UPSTREAM set, a reset and a gateway list
+# that drops an upstream host are refused (fw_gw_upstream_guard). RESET is
+# apply_recommended_firewall's argument. rc 1 with an error (fw_error) when
+# anything is wrong.
 fw_preflight() {
-    local list s port label rc
+    local do_reset="${1:-}" list s port label rc
     if ! command -v ufw >/dev/null 2>&1; then
         fw_error "ufw is not installed; nothing was changed."
         return 1
@@ -2256,6 +2358,7 @@ fw_preflight() {
             return 1
         fi
     fi
+    fw_gw_upstream_guard "$do_reset" || return 1
     FW_SSH_STALE=()
     FW_P2P_STALE=()
     FW_GW_STALE=()
@@ -2487,7 +2590,8 @@ view_status() {
         # Uptime Kuma health monitoring is a testnet add-on (the Telcoin Association
         # monitor probes testnet and devnet nodes); on any other network the port
         # stays closed by design, so only an open one is worth a line (the worker
-        # gateway sources below are the exception).
+        # gateway sources below are the exception, unless the port is also open to
+        # Anywhere).
         local gw_list gw_rpc gs
         gw_list="$(fw_sources gw 2>/dev/null)" || gw_list="unusable"
         echo ""
@@ -2500,6 +2604,9 @@ view_status() {
                     closed)     print_error "TCP ${UPTIME_KUMA_PORT} is CLOSED -- health monitoring will fail" ;;
                 esac
             fi
+        elif ufw_active && [[ "$(kuma_rule_state)" == "anywhere" ]]; then
+            # Open to every address: worth the warning even with gateway sources.
+            print_warn "Health port TCP ${UPTIME_KUMA_PORT} is open, although no monitor uses it on this network; Manage node ports (or --enable) closes it"
         elif [[ -n "$gw_list" && "$gw_list" != "unusable" ]]; then
             print_info "Health port TCP ${UPTIME_KUMA_PORT}: no monitor uses it on this network; only the worker gateway sources below reach it"
         elif ufw_active && [[ "$(kuma_rule_state)" != "closed" ]]; then
@@ -2619,7 +2726,7 @@ view_status() {
 apply_recommended_firewall() {
     local do_reset="${1:-}"
     local nodes keep_web=false web_was_open=false snap
-    fw_preflight || return 1
+    fw_preflight "$do_reset" || return 1
     nodes=$(detect_installed_nodes)
     # Before a reset wipes the rules: is Caddy serving the public edge on this box, and
     # does the running firewall already let it in?
@@ -2756,7 +2863,8 @@ fw_apply_rules() {
     # overlay ranges added above stay.
     if [[ "$do_reset" != "--reset" && "$do_reset" != "reset" ]]; then
         for s in ${FW_SSH_STALE[@]+"${FW_SSH_STALE[@]}"}; do
-            case " ${fixed[*]-} " in *" ${s} "*) continue ;; esac
+            # ufw deletes 35.235.240.1/20 as the IAP range 35.235.240.0/20.
+            fw_src_in "$s" ${fixed[@]+"${fixed[@]}"} && continue
             for p in "${FW_SSH_PORTS[@]}"; do
                 fw_try "ufw delete allow from ${s} to any port ${p} proto tcp" ufw delete allow from "$s" to any port "$p" proto tcp || return 1
             done
@@ -2784,10 +2892,27 @@ fw_apply_rules() {
 # fw_persist_sources -- record the source lists given on this run in .node-meta
 # (SSH_ALLOW_FROM, P2P_ALLOW_FROM, GATEWAY_ALLOW_FROM as comma lists;
 # --ssh-anywhere / --p2p-anywhere / --gateway-from none remove the key), so a
-# later enable keeps them. Call fw_meta_lock first. rc 1
-# when a write failed (warned).
+# later enable keeps them. On a host with a worker gateway and no node
+# (FW_GW_ONLY) only the SSH list is kept, as SSH_ALLOW_FROM in gateway.meta (it
+# goes with the gateway: setup-gateway.sh --remove deletes that file). Call
+# fw_meta_lock first. rc 1 when a write failed (warned).
 fw_persist_sources() {
-    local rc=0 v
+    local rc=0 v gm
+    if [[ "$FW_GW_ONLY" == "true" ]]; then
+        gm="$(tn_gateway_meta_path)"
+        if [[ -n "$FW_SSH_FROM" ]]; then
+            v="$(printf '%s\n' ${FW_SSH_SRCS[@]+"${FW_SSH_SRCS[@]}"} | paste -sd, -)"
+            meta_set SSH_ALLOW_FROM "$v" "$gm" || rc=1
+        elif [[ "$FW_SSH_ANYWHERE" == "true" ]]; then
+            meta_unset SSH_ALLOW_FROM "$gm" || rc=1
+        fi
+        if [[ "$rc" -ne 0 ]]; then
+            print_warn "The SSH source list could not be saved in ${gm}; give the same flags again on the next run." >&2
+        elif [[ -n "$FW_SSH_FROM" ]]; then
+            print_info "The SSH source list is kept in ${gm}; setup-gateway.sh --remove removes it with the gateway." >&2
+        fi
+        return "$rc"
+    fi
     if [[ -n "$FW_SSH_FROM" ]]; then
         v="$(printf '%s\n' ${FW_SSH_SRCS[@]+"${FW_SSH_SRCS[@]}"} | paste -sd, -)"
         meta_set SSH_ALLOW_FROM "$v" || rc=1
@@ -2813,8 +2938,13 @@ fw_persist_sources() {
 }
 
 # fw_wants_meta_write -- 0 when this run will change a stored source list, or
-# P2P_COMMITTEE (--p2p-committee on or off).
+# P2P_COMMITTEE (--p2p-committee on or off). On a host with a worker gateway and
+# no node (FW_GW_ONLY), only the SSH list, which gateway.meta keeps.
 fw_wants_meta_write() {
+    if [[ "$FW_GW_ONLY" == "true" ]]; then
+        [[ -n "$FW_SSH_FROM" || "$FW_SSH_ANYWHERE" == "true" ]]
+        return
+    fi
     [[ -n "$FW_SSH_FROM" || -n "$FW_P2P_FROM" || "$FW_SSH_ANYWHERE" == "true" || "$FW_P2P_ANYWHERE" == "true" \
         || -n "$FW_GW_FROM" || "$FW_GW_NONE" == "true" \
         || "$FW_COMMITTEE_VERB" == "on" || "$FW_COMMITTEE_VERB" == "off" ]] || return 1
@@ -2825,7 +2955,8 @@ fw_wants_meta_write() {
 # "Manage node ports" change holds it around ufw, the new-flow limit and its boot
 # copy, so two runs never interleave (fw_on_exit releases it; the interactive
 # paths release it when their change is done). When this run will write
-# .node-meta, also migrate an old ownership layout (addon_meta_write_begin). rc 1
+# .node-meta, also migrate an old ownership layout (addon_meta_write_begin; not
+# for gateway.meta on a host with no node, which has no node layout). rc 1
 # when refused: another run holds the lock (said; an error event in --json mode),
 # or the migration refused.
 fw_meta_lock() {
@@ -2836,6 +2967,7 @@ fw_meta_lock() {
         return 1
     fi
     fw_wants_meta_write || return 0
+    [[ "$FW_GW_ONLY" != "true" ]] || return 0
     addon_meta_write_begin
 }
 

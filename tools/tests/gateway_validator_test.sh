@@ -27,7 +27,19 @@
 #                  scripts made before the gateway existed (recorded below from
 #                  origin/main 2813343, testnet and mainnet);
 #   the gateway    a host with a gateway and no node: --enable opens SSH and,
-#   host           with the gateway's Caddy fence, 80/443, and nothing else.
+#   host           with the gateway's Caddy fence, 80/443, and nothing else;
+#                  on mainnet gateway.meta keeps SSH_ALLOW_FROM (a replaced list
+#                  loses its old source, a plain --enable re-applies it,
+#                  --ssh-anywhere clears it);
+#   spellings      with the fwstub ufw normalizing sources as the real ufw does
+#                  (UFW_NORMALIZE=1), a source given again as 10.0.0.7 for
+#                  10.0.0.7/32, or as a CIDR's network address, keeps its rules
+#                  (gateway, SSH and P2P lists, and the monitor's health rule);
+#   the upstream   with GATEWAY_UPSTREAM set, --gateway-from none, a list
+#                  without the upstream host and --reset are refused before any
+#                  ufw call; a list keeping it, and a plain --enable, run;
+#   status screen  a health port open to Anywhere is warned about on mainnet
+#                  with gateway sources too.
 #
 #   bash tools/tests/run.sh tools/tests/gateway_validator_test.sh
 #   docker run --rm -v "$PWD:/w" -w /w bash:3.2 bash tools/tests/run.sh tools/tests/gateway_validator_test.sh
@@ -558,5 +570,104 @@ printf 'example.org {\n    reverse_proxy 127.0.0.1:3000\n}\n' > "$R/etc/caddy/Ca
 rc=0
 NODE=0 CALL=caddy_serves_public_edge bash "$T/fw/driver.sh" > /dev/null 2>&1 < /dev/null || rc=$?
 check_rc "caddy_serves_public_edge: a foreign Caddyfile -> false" 1 "$rc"
+
+# ---- one source, two spellings: the stale delete keeps it (UFW_NORMALIZE: the real ufw) ---
+# ufw stores 10.0.0.7/32 as 10.0.0.7 and 10.0.0.5/24 as 10.0.0.0/24, and deletes
+# by that form: deleting the old spelling would remove the rule just confirmed.
+nrules() { grep -cxE "$1" "$RULES"; }
+tree devnet "GATEWAY_ALLOW_FROM=10.164.0.7/32"
+printf '%s\n%s\n' "$(rule 10.164.0.7 8545)" "$(rule 10.164.0.7 "$KP")" >> "$RULES"
+UFW_NORMALIZE=1 drun --enable --gateway-from 10.164.0.7
+check_rc "spelling, gateway /32 -> bare: rc 0" 0 "$RC"
+check "spelling, gateway /32 -> bare: both rules stay" 2 "$(nrules "allow from 10[.]164[.]0[.]7 to any port (8545|${KP}) proto tcp")"
+check_lacks "spelling, gateway /32 -> bare: no delete" "delete allow from 10.164.0.7" "$(cat "$UFW_LOG")"
+check "spelling, gateway /32 -> bare: the record" "GATEWAY_ALLOW_FROM=10.164.0.7" "$(metakey GATEWAY_ALLOW_FROM)"
+tree devnet "GATEWAY_ALLOW_FROM=10.164.0.5/24"
+printf '%s\n%s\n' "$(rule 10.164.0.0/24 8545)" "$(rule 10.164.0.0/24 "$KP")" >> "$RULES"
+UFW_NORMALIZE=1 drun --enable --gateway-from 10.164.0.0/24
+check_rc "spelling, CIDR host bits -> network: rc 0" 0 "$RC"
+check "spelling, CIDR host bits -> network: both rules stay" 2 "$(nrules "allow from 10[.]164[.]0[.]0/24 to any port (8545|${KP}) proto tcp")"
+# The monitor's health rule (TN_KUMA_SRC is written with /32) is kept for a
+# gateway source written without it.
+tree testnet "GATEWAY_ALLOW_FROM=${TN_KUMA_SRC%/32}"
+UFW_NORMALIZE=1 drun --enable --gateway-from "$A"
+check_rc "spelling, gateway source = monitor: rc 0" 0 "$RC"
+check "spelling, gateway source = monitor: the monitor's health rule stays" 1 "$(nrules "$(rule "${TN_KUMA_SRC%/32}" "$KP")")"
+check "spelling, gateway source = monitor: its RPC rule goes" 0 "$(nrules "$(rule "${TN_KUMA_SRC%/32}" 8545)")"
+# The same compare serves the SSH and P2P lists (one function): no SSH lockout.
+tree mainnet SSH_ALLOW_FROM=203.0.113.7/32 P2P_ALLOW_FROM=198.51.100.9/32
+printf '%s\n' "$(rule 203.0.113.7 22)" "allow from 198.51.100.9 to any port 49590 proto udp" \
+    "allow from 198.51.100.9 to any port 49594 proto udp" > "$RULES"
+UFW_NORMALIZE=1 drun --enable --ssh-from 203.0.113.7 --p2p-from 198.51.100.9
+check_rc "spelling, SSH and P2P /32 -> bare: rc 0" 0 "$RC"
+check "spelling, SSH /32 -> bare: the SSH rule stays" 1 "$(nrules "$(rule 203.0.113.7 22)")"
+check "spelling, P2P /32 -> bare: both P2P rules stay" 2 "$(nrules "allow from 198[.]51[.]100[.]9 to any port 4959[04] proto udp")"
+check "spelling, SSH and P2P: no delete of either source" "no no" \
+    "$(has "delete allow from 203.0.113.7" "$(cat "$UFW_LOG")") $(has "delete allow from 198.51.100.9" "$(cat "$UFW_LOG")")"
+
+# ---- GATEWAY_UPSTREAM set: the gateway's rules stay, and --reset is refused ----------------
+tree devnet "GATEWAY_ALLOW_FROM=${A}" "GATEWAY_UPSTREAM=${A}"
+printf '%s\n%s\n' "$(rule "$A" 8545)" "$(rule "$A" "$KP")" >> "$RULES"
+BEFORE="$(snapshot)"
+for v in none "$B"; do
+    drun --enable --gateway-from "$v"
+    check "upstream set, --gateway-from ${v}: exits 1" 1 "$RC"
+    check "upstream set, --gateway-from ${v}: says the binds and the way" "yes yes yes" \
+        "$(has "names ${A}" "$OUT") $(has "bound to every interface" "$OUT") $(has "edit-config.sh --set gateway_upstream=off" "$OUT")"
+    check "upstream set, --gateway-from ${v}: no mutating ufw call" "" "$(mutating)"
+    check "upstream set, --gateway-from ${v}: tree as it was" "$BEFORE" "$(snapshot)"
+done
+drun --json --enable --gateway-from none
+check "upstream set, --json --gateway-from none: exits 1, done ok:false" "1 yes" \
+    "$RC $(has '"event":"done","ok":false' "$OUT")"
+check "upstream set, --json: tree as it was" "$BEFORE" "$(snapshot)"
+drun --enable --gateway-from "${A}/32,${B}"
+check_rc "upstream set, a list keeping it (as /32): rc 0" 0 "$RC"
+check "upstream set, a list keeping it: recorded" "GATEWAY_ALLOW_FROM=${A}/32,${B}" "$(metakey GATEWAY_ALLOW_FROM)"
+drun --enable
+check_rc "upstream set, plain --enable: rc 0" 0 "$RC"
+BEFORE="$(snapshot)"
+for v in "--reset" "--reset --gateway-from ${A}"; do
+    # shellcheck disable=SC2086
+    drun $v
+    check "upstream set, ${v}: exits 1" 1 "$RC"
+    check "upstream set, ${v}: names the sequence" "yes yes yes" \
+        "$(has "--reset is refused while GATEWAY_UPSTREAM is set" "$OUT") $(has "gateway_upstream=off" "$OUT") $(has "gateway_upstream=${A}." "$OUT")"
+    check "upstream set, ${v}: no mutating ufw call" "" "$(mutating)"
+    check "upstream set, ${v}: tree as it was" "$BEFORE" "$(snapshot)"
+done
+tree devnet "GATEWAY_ALLOW_FROM=${A}" "GATEWAY_UPSTREAM=${A}" "GATEWAY_UPSTREAM=${A}"
+drun --reset
+check "upstream twice: --reset exits 1" "1 yes" "$RC $(has "GATEWAY_UPSTREAM is set more than once" "$OUT")"
+
+# ---- a gateway host with no node: gateway.meta keeps the SSH list --------------------------
+tree -
+mkdir -p "$GWD"
+printf 'GATEWAY_META_VERSION=1\nNETWORK=mainnet\nMODE=standalone\nFRONT=none\n' > "$GWMETA"
+gwkey() { grep "^$1=" "$GWMETA" 2>/dev/null; }
+NODE=0 drun --enable --ssh-from 198.51.100.4
+check_rc "gateway host mainnet --ssh-from: rc 0" 0 "$RC"
+check "gateway host: SSH_ALLOW_FROM in gateway.meta" "SSH_ALLOW_FROM=198.51.100.4" "$(gwkey SSH_ALLOW_FROM)"
+check "gateway host: the other gateway.meta keys stay" "MODE=standalone FRONT=none" "$(gwkey MODE) $(gwkey FRONT)"
+check "gateway host: no .node-meta written" no "$(if [[ -e "$META" ]]; then echo yes; else echo no; fi)"
+NODE=0 drun --enable --ssh-from 198.51.100.5
+check_rc "gateway host, a new SSH list: rc 0" 0 "$RC"
+check_has "gateway host, a new SSH list: the old source's rule deleted" "delete $(rule 198.51.100.4 22)" "$(cat "$UFW_LOG")"
+check_lacks "gateway host, a new SSH list: no rule of the old source" "from 198.51.100.4 " "$(cat "$RULES")"
+check "gateway host, a new SSH list: recorded" "SSH_ALLOW_FROM=198.51.100.5" "$(gwkey SSH_ALLOW_FROM)"
+NODE=0 drun --enable
+check_rc "gateway host mainnet, plain --enable: rc 0 (the stored list)" 0 "$RC"
+check_has "gateway host, plain --enable: the stored source's rule" "$(rule 198.51.100.5 22)" "$(cat "$RULES")"
+NODE=0 drun --enable --ssh-anywhere
+check_rc "gateway host --ssh-anywhere: rc 0" 0 "$RC"
+check "gateway host --ssh-anywhere: SSH_ALLOW_FROM gone, NETWORK kept" " NETWORK=mainnet" "$(gwkey SSH_ALLOW_FROM) $(gwkey NETWORK)"
+check_has "gateway host --ssh-anywhere: SSH open" "allow 22/tcp" "$(cat "$RULES")"
+
+# ---- the status screen: an open health port is warned about with gateway sources too --------
+tree mainnet SSH_ALLOW_FROM=203.0.113.7 "GATEWAY_ALLOW_FROM=${A}"
+printf 'allow %s/tcp\n' "$KP" >> "$RULES"
+VIEW="$(CALL=view_status bash "$T/fw/driver.sh" 2>/dev/null < /dev/null | sed 's/\x1b\[[0-9;]*m//g')"
+check "status screen, mainnet, health port open to Anywhere with gateway sources: warned" yes \
+    "$(has "Health port TCP ${KP} is open, although no monitor uses it" "$VIEW")"
 
 finish
