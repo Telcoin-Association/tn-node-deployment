@@ -635,12 +635,13 @@ fw_gw_rpc_port() {
     printf '%s\n' "$port"
 }
 
-# fw_gw_rule_present SRC PORT -- 0 when ufw lists `allow from SRC to any port PORT
-# proto tcp` (the "PORT/tcp ALLOW SRC" line of `ufw status`).
+# fw_gw_rule_present SRC PORT -- 0 when ufw is active and lists `allow from SRC to
+# any port PORT proto tcp`, matched as tn_gateway_from_rules_ok matches it (a host
+# shown without /32, a CIDR shown by its network address), so the status screen
+# and the expected rules agree with edit-config.sh's gateway_upstream check.
 fw_gw_rule_present() {
-    ufw status 2>/dev/null | awk -v to="${2}/tcp" -v src="$1" '
-        $1 == to && $2 == "ALLOW" && ($3 == src || ($3 == "IN" && $4 == src)) { f = 1 }
-        END { exit !f }'
+    [[ -n "${1:-}" ]] || return 1
+    tn_gateway_from_rules_ok "$1" "$2" "$2"
 }
 
 # fw_health_keeps SRC -- 0 when the health-port block (apply_kuma_rule,
