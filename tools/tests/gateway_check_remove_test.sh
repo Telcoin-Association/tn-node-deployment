@@ -115,7 +115,7 @@ tn_node_launch_target() { printf 'telcoin source %s\n' "$LAUNCH"; }
 detect_data_dir() { printf '%s\n' "$R/var/lib/telcoin"; }
 SERVICE_NAME=telcoin
 HP="$TN_KUMA_PORT"
-GWIMG="ghcr.io/telcoin-association/tn-public/gateway@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+GWIMG="us-docker.pkg.dev/telcoin-network/tn-public/worker-gateway@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 GWUNIT="$R/etc/systemd/system/telcoin-gateway.service"
 GWMETA="$R/etc/telcoin/gateway/gateway.meta"
 
@@ -134,7 +134,7 @@ fresh() {
     unset FAKE_UID
 }
 mknode() {  # mknode [META_LINE...] -- .node-meta and a source start script with NODE_FLAGS
-    printf '%s\n' NETWORK=testnet INSTALL_METHOD=source "$@" > "$R/etc/telcoin/.node-meta"
+    printf '%s\n' NETWORK=devnet INSTALL_METHOD=source "$@" > "$R/etc/telcoin/.node-meta"
     _tn_start_script_text source /opt/telcoin/telcoin-network "--datadir /var/lib/telcoin --http ${NODE_FLAGS}" > "$LAUNCH"
 }
 mkgw() {  # mkgw MODE FRONT -- gateway.meta, the unit gw_unit_text renders from it, the Caddy block
@@ -142,7 +142,7 @@ mkgw() {  # mkgw MODE FRONT -- gateway.meta, the unit gw_unit_text renders from 
     [[ "$1" != standalone ]] || up=10.0.0.5
     [[ "$2" != none ]] || dom=""
     mkdir -p "${GWMETA%/*}"
-    printf '%s\n' GATEWAY_META_VERSION=1 NETWORK=testnet "MODE=$1" "FRONT=$2" "DOMAIN=$dom" "IMAGE=$GWIMG" \
+    printf '%s\n' GATEWAY_META_VERSION=1 NETWORK=devnet "MODE=$1" "FRONT=$2" "DOMAIN=$dom" "IMAGE=$GWIMG" \
         "UPSTREAM_HOST=$up" RPC_PORT=8545 "HEALTH_PORT=$HP" LISTEN_PORT=8655 PROBE_PORT=8656 \
         METRICS_PORT=9655 REDIRECT_QUERIES=https://rpc.example.org TRUSTED_PROXIES= > "$GWMETA"
     _gw_load_meta || printf 'fixture gateway.meta refused: %s\n' "$GW_ERR"

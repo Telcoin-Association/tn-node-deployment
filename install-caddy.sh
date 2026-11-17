@@ -3061,9 +3061,12 @@ do_gateway_enable() {
     CADDY_GW_UNCHANGED=false
     caddy_gateway_enable_precheck "$domain" "${2:-}" "${3:-}"
     if caddy_gateway_block_current "$domain"; then
-        CADDY_GW_UNCHANGED=true
-        caddy_say ok "${CADDYFILE} already serves the worker gateway site ${domain} (POST -> 127.0.0.1:${CADDY_GW_PORT}, probes -> 127.0.0.1:${CADDY_GW_PROBE_PORT}); nothing was written and Caddy was not reloaded."
-        return 0
+        if systemctl is-active --quiet caddy 2>/dev/null; then
+            CADDY_GW_UNCHANGED=true
+            caddy_say ok "${CADDYFILE} already serves the worker gateway site ${domain} (POST -> 127.0.0.1:${CADDY_GW_PORT}, probes -> 127.0.0.1:${CADDY_GW_PROBE_PORT}); nothing was written and Caddy was not reloaded."
+            return 0
+        fi
+        caddy_say warn "${CADDYFILE} already holds the worker gateway site ${domain}, but Caddy is not running: writing it again and starting Caddy."
     fi
 
     caddy_assert_ports_free
@@ -3190,23 +3193,61 @@ caddy_meta_record_gateway() {
     return 0
 }
 
+# caddy_gateway_url_check <domain> -- rc 0 when GET https://<domain>/health answers
+# 200 from this host (the gateway's liveness path through its front, which answers
+# while the node is down): two tries, 5 s each, certificate checked, no redirect
+# followed. rc 1 otherwise, with CADDY_GW_URL_GOT saying what came back.
+CADDY_GW_URL_GOT=""
+caddy_gateway_url_check() {
+    local url="https://${1}/health" code="" crc i
+    CADDY_GW_URL_GOT=""
+    for i in 1 2; do
+        crc=0
+        code="$(curl -q -sS -o /dev/null -w '%{http_code}' --proto '=https' --max-redirs 0 \
+            --connect-timeout 3 --max-time 5 "$url" 2>/dev/null)" || crc=$?
+        [[ "$crc" -ne 0 || "$code" != "200" ]] || return 0
+        case "$crc" in
+            0)  CADDY_GW_URL_GOT="HTTP ${code:-000}" ;;
+            6)  CADDY_GW_URL_GOT="the name does not resolve" ;;
+            7)  CADDY_GW_URL_GOT="the connection was refused" ;;
+            28) CADDY_GW_URL_GOT="no answer within 5 s" ;;
+            35|51|53|54|58|59|60|64|66|77|80|82|83|90|91)
+                CADDY_GW_URL_GOT="a TLS or certificate error (curl exit ${crc}): the certificate must be valid for ${1}" ;;
+            *)  CADDY_GW_URL_GOT="curl exit ${crc}" ;;
+        esac
+        [[ "$i" -eq 2 ]] || sleep 2
+    done
+    return 1
+}
+
 # Refusals for rpc-advertise (<phase>=rpc-advertise, with <domain>) and
 # rpc-unadvertise, checked before anything changes: a host with no node, the hostname,
 # DATA_DIR or RPC_ADVERTISED_VIA set twice in .node-meta, no usable reth HTTP port
-# (the guarded restart checks the node on it). Sets CADDY_RPC_PORT.
+# (the guarded restart checks the node on it), a public RPC site on this host
+# (rpc-enable's advertisement is rpc-disable's to clear), and for rpc-advertise a
+# https://<domain>/health that does not answer 200 from here (caddy_gateway_url_check;
+# no flag skips it). Sets CADDY_RPC_PORT.
 caddy_rpc_node_precheck() {
     local phase="$1" domain="${2:-}" rc=0
     caddy_node_host || die "${phase} edits node-info.yaml of the node on this host, and this host has no telcoin node (no .node-meta). Run it on the node whose record should name the gateway. Nothing was changed."
     if [[ "$phase" == "rpc-advertise" ]]; then
         caddy_require_domain "$domain" "RPC domain"
     fi
+    if caddy_block_present "$RPC_BEGIN"; then
+        die "this host serves a public RPC site (rpc-enable), whose advertisement in node-info.yaml rpc-disable manages; run install-caddy.sh --phase rpc-disable first. Nothing was changed."
+    fi
+
     caddy_node_info_path >/dev/null 2>&1 \
         || die "DATA_DIR is set more than once in .node-meta, so node-info.yaml cannot be located; remove the extra lines and run this again. Nothing was changed."
     addon_meta_get RPC_ADVERTISED_VIA "" >/dev/null || die "RPC_ADVERTISED_VIA is set more than once in .node-meta; fix the file first. Nothing was changed."
     CADDY_RPC_PORT="$(caddy_node_port --http.port RPC_PORT 8545)" || rc=$?
     [[ "$rc" -eq 0 ]] || die "no usable reth HTTP port to check the node with after its restart (see above). Nothing was changed."
+    if [[ "$phase" == "rpc-advertise" ]] && ! caddy_gateway_url_check "$domain"; then
+        die "rpc-advertise was asked to advertise https://${domain}/, and GET https://${domain}/health from this host got ${CADDY_GW_URL_GOT} instead of 200 (a certificate error counts as a failure). A wrong URL in a validator's record breaks transaction forwarding to it until the record is fixed and the node restarted again, so the record was not edited and the node not restarted. Start the gateway first (setup-gateway.sh --enable on its host) and check the name. Nothing was changed."
+    fi
     return 0
 }
+
 
 # Advertise a worker gateway that serves https://<domain>/ (on this host or another)
 # as worker 0's rpc in node-info.yaml, with no ws URL: rpc-enable's advertise path

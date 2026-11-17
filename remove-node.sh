@@ -1031,6 +1031,20 @@ remove_leftovers() {
         if [[ "$only_gw" == "true" ]]; then
             return 3
         fi
+        # A gateway that runs on its own (gateway.meta MODE is not same-host, or
+        # cannot be read) is never this script's to remove, and the leftovers stay
+        # with it: removing /etc/telcoin would take the gateway's files too.
+        if ! rm_gateway_same_host; then
+            print_warn "Leftover files of a node are here, next to a worker gateway that runs on its own. They are kept, because removing them would take the gateway's files too:"
+            for item in ${dirs[@]+"${dirs[@]}"}; do
+                print_info "  ${item#"$r"}"
+            done
+            for item in ${shown[@]+"${shown[@]}"}; do
+                print_info "  ${item}"
+            done
+            print_info "Remove the gateway first (see below), then run this script again for the leftovers."
+            return 3
+        fi
         shown+=("/etc/systemd/system/telcoin-gateway.service, its container and /etc/telcoin/gateway (worker gateway; its image is kept)")
     fi
     if [[ ${#dirs[@]} -eq 0 && ${#shown[@]} -eq 0 ]]; then
@@ -1514,6 +1528,20 @@ rm_gateway_pointer() {
     rm_baseline_say log "A worker gateway is installed here and this script leaves it in place; remove it with: sudo bash setup-gateway.sh --remove"
 }
 
+# rm_gateway_same_host -- rc 0 when /etc/telcoin/gateway/gateway.meta says, on
+# exactly one line, MODE=same-host (the gateway fronts a node of this host); rc 1
+# for MODE=standalone, a meta that cannot be read, or no MODE line. Reads only.
+rm_gateway_same_host() {
+    local f="${TN_RM_ROOT}/etc/telcoin/gateway/gateway.meta" line mode="" n=0
+    [[ -f "$f" && -r "$f" && ! -L "$f" ]] || return 1
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        case "$line" in
+            MODE=*) mode="${line#MODE=}"; n=$((n + 1)) ;;
+        esac
+    done < "$f"
+    [[ "$n" -eq 1 && "$mode" == "same-host" ]]
+}
+
 # remove_gateway -- tear down the worker gateway setup-gateway.sh installs, the
 # way setup-gateway.sh --remove does except for its Caddy step: the unit
 # telcoin-gateway.service disabled and stopped, its unit file removed, the
@@ -1525,10 +1553,20 @@ rm_gateway_pointer() {
 # remove_alerts, before the node (the gateway's upstream) stops.
 # Fixed paths under TN_RM_ROOT and no lib/gateway.sh call: it works on a host
 # whose updater installed this script and not that library. Says and does
-# nothing when no gateway file is here (rm_gateway_present). Always returns 0.
+# nothing when no gateway file is here (rm_gateway_present). With "node" (a node
+# unit is removed in this run) it removes any gateway; without it, only one whose
+# gateway.meta says MODE=same-host (rm_gateway_same_host): a gateway that runs
+# on its own, or whose MODE cannot be read, is left whole and the output points
+# at setup-gateway.sh --remove. When .node-meta says RPC_ADVERTISED_VIA=gateway,
+# the output says that node-info.yaml still advertises the gateway (the keys are
+# kept: they still match the record). Always returns 0.
 remove_gateway() {
-    local r="$TN_RM_ROOT" gd unit cf img="" line
+    local r="$TN_RM_ROOT" gd unit cf img="" line nm via="" url=""
     rm_gateway_present || return 0
+    if [[ "${1:-}" != "node" ]] && ! rm_gateway_same_host; then
+        rm_gateway_pointer
+        return 0
+    fi
     gd="${r}/etc/telcoin/gateway"
     unit="${r}/etc/systemd/system/telcoin-gateway.service"
     cf="${r}/etc/caddy/Caddyfile"
@@ -1556,6 +1594,14 @@ remove_gateway() {
     fi
     if [[ -f "$cf" ]] && grep -qF '# >>> tn-gateway >>>' "$cf" 2>/dev/null; then
         rm_baseline_say warn "The Caddyfile still holds the worker gateway's site; remove it with: sudo bash install-caddy.sh --phase gateway-disable"
+    fi
+    nm="$(tn_resolve_config_dir)/.node-meta"
+    if [[ -f "$nm" ]]; then
+        via="$(rm_meta_get RPC_ADVERTISED_VIA "$nm" 2>/dev/null)" || via=""
+        url="$(rm_meta_get PUBLIC_RPC_URL "$nm" 2>/dev/null)" || url=""
+    fi
+    if [[ "$via" == "gateway" ]]; then
+        rm_baseline_say warn "node-info.yaml still advertises ${url:-the gateway URL} as this node's RPC; once the node runs again, clear it with: sudo bash install-caddy.sh --phase rpc-unadvertise (or enable a gateway at that URL again)"
     fi
     return 0
 }
@@ -1598,7 +1644,7 @@ remove_node_unit() {
     # push the stop as a failure; the worker gateway goes with them, before its
     # upstream stops.
     remove_alerts
-    remove_gateway
+    remove_gateway node
 
     # Stop service
     stop_and_disable_service "$unit"
@@ -2007,6 +2053,17 @@ json_remove() {
         unit="${TN_RM_ROOT}/etc/systemd/system/${svc}.service"
     else
         svc=""
+        # A gateway that runs on its own is never removed here, and the node's
+        # leftovers stay with it (removing them would take its files too).
+        if rm_gateway_present && ! rm_gateway_same_host; then
+            rm_gateway_pointer
+            if rm_leftovers_present; then
+                json_event error "no node installed (the files a node left here are kept while a worker gateway that runs on its own is installed: remove the gateway first, then run this again)"
+            else
+                json_event error "no node installed"
+            fi
+            return 1
+        fi
         if ! rm_leftovers_present; then
             if rm_gateway_present; then
                 rm_gateway_pointer
@@ -2062,9 +2119,10 @@ json_remove() {
     fi
 
     # The private alerts and the worker gateway first, before the node stops
-    # (every scope).
+    # (every scope; with no node unit left, only a same-host gateway).
     remove_alerts
-    remove_gateway
+    remove_gateway ${svc:+node}
+
 
     # The unit, its old backups (shredded) and its drop-in directory.
     if [[ -n "$svc" ]]; then

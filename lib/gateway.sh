@@ -106,6 +106,8 @@ _GW_ABSENT="<absent>"
 _GW_TOOK_LOCK=0 _GW_WAS_ENABLED=0 _GW_WAS_ACTIVE=0 _GW_DID_ENABLE=0 _GW_DID_START=0
 _GW_WROTE_UNIT=0 _GW_WROTE_META=0 _GW_MADE_DIR=0 _GW_MADE_PARENT=0 _GW_BK_UNIT="" _GW_BK_UNIT_SUM=""
 _GW_BK_META="" _GW_BK_META_SUM="" _GW_PUTBACK_ERR="" _GW_NISSUES=0
+# The upstream's chain id, asked once per run (_gw_chain_ask).
+_GW_CHAIN_KEY="" _GW_CHAIN_ID="" _GW_CHAIN_FRESH=0 _GW_LOOP_WHAT=""
 
 # -----------------------------------------------------------------------------
 # Paths and messages
@@ -174,15 +176,55 @@ _gw_upstream_ok() {
     return 0
 }
 
+# _gw_domain_ok HOST -- a DNS name of two labels or more. An IPv4 literal is
+# not one (its last label has no letter): Caddy's site needs a certificate name.
 _gw_domain_ok() {
-    local l="[${_GW_ALNUM}]([${_GW_ALNUM}-]{0,61}[${_GW_ALNUM}])?" re
+    local l="[${_GW_ALNUM}]([${_GW_ALNUM}-]{0,61}[${_GW_ALNUM}])?" re tld
     re="^${l}(\\.${l})+$"
-    [[ ${#1} -le 253 && "$1" =~ $re ]]
+    tld="[ABCDEFGHIJKLMNOPQRSTUVWXYZ${_GW_LOWER}]"
+    [[ ${#1} -le 253 && "$1" =~ $re && "${1##*.}" =~ $tld ]]
 }
 
+# _gw_redirect_ok URL -- http(s)://host[:port][/path]: the host is labels of
+# letters, digits and inner dashes joined by single dots (a name or an IPv4
+# address), the port 1-65535.
 _gw_redirect_ok() {
-    local re="^https?://[${_GW_ALNUM}.-]+(:[${_GW_DIGITS}]+)?(/[${_GW_ALNUM}._~/-]*)?$"
-    [[ "${1:-}" =~ $re ]]
+    local l="[${_GW_ALNUM}]([${_GW_ALNUM}-]*[${_GW_ALNUM}])?" re hp
+    re="^https?://${l}(\\.${l})*(:[${_GW_DIGITS}]+)?(/[${_GW_ALNUM}._~/-]*)?$"
+    [[ "${1:-}" =~ $re ]] || return 1
+    hp="${1#*://}"
+    hp="${hp%%/*}"
+    case "$hp" in *:*) _gw_port_ok "${hp##*:}" || return 1 ;; esac
+    return 0
+}
+
+# _gw_redirect_loops URL -- rc 0 when URL's host:port is the worker's RPC or
+# readiness address (GW_V_UPSTREAM_HOST with GW_V_RPC_PORT or GW_V_HEALTH_PORT)
+# or this gateway's own listen, probe or metrics port on this host: the gateway
+# refuses to start with such a --redirect-queries. _GW_LOOP_WHAT names it.
+_gw_redirect_loops() {
+    local hp h p lo=0
+    _GW_LOOP_WHAT=""
+    hp="${1#*://}"
+    hp="${hp%%/*}"
+    h="$(printf '%s' "${hp%%:*}" | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' "$_GW_LOWER")"
+    case "$hp" in
+        *:*) p="${hp##*:}" ;;
+        *) p=80; [[ "$1" != https:* ]] || p=443 ;;
+    esac
+    case "$h" in localhost|127.0.0.1|0.0.0.0) lo=1 ;; esac
+    if [[ "$h" == "$GW_V_UPSTREAM_HOST" || ( "$lo" == 1 && "$GW_V_UPSTREAM_HOST" == "127.0.0.1" ) ]]; then
+        case "$p" in
+            "$GW_V_RPC_PORT")    _GW_LOOP_WHAT="the worker's own RPC (http://${GW_V_UPSTREAM_HOST}:${p})" ;;
+            "$GW_V_HEALTH_PORT") _GW_LOOP_WHAT="the worker's readiness port (http://${GW_V_UPSTREAM_HOST}:${p})" ;;
+        esac
+    fi
+    if [[ -z "$_GW_LOOP_WHAT" && "$lo" == 1 ]]; then
+        case "$p" in
+            "$GW_V_LISTEN_PORT"|"$GW_V_PROBE_PORT"|"$GW_V_METRICS_PORT") _GW_LOOP_WHAT="this gateway itself (port ${p})" ;;
+        esac
+    fi
+    [[ -n "$_GW_LOOP_WHAT" ]]
 }
 
 # _gw_proxies_ok LIST -- a comma list of IPv4/IPv6 addresses or CIDRs (the
@@ -203,6 +245,62 @@ _gw_docker_ok() {
         return 1
     fi
     return 0
+}
+
+# _gw_chain_ask HOST PORT -- _GW_CHAIN_ID = the chain id (decimal) that the
+# JSON-RPC at http://HOST:PORT/ gives for eth_chainId, or "" when it does not
+# answer. One POST to that address and nowhere else: no proxy, no redirect, no
+# curl config file, at most 3 s. The answer is kept for the run; _GW_CHAIN_FRESH
+# is 1 only when this call asked. Always rc 0.
+_gw_chain_ask() {
+    local out re
+    _GW_CHAIN_FRESH=0
+    [[ "$_GW_CHAIN_KEY" != "${1}:${2}" ]] || return 0
+    _GW_CHAIN_KEY="${1}:${2}" _GW_CHAIN_ID="" _GW_CHAIN_FRESH=1
+    out="$(curl -q -sS --noproxy '*' --proto '=http' --max-redirs 0 --connect-timeout 2 --max-time 3 \
+        -H 'Content-Type: application/json' \
+        --data '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
+        "http://${1}:${2}/" 2>/dev/null)" || return 0
+    re='"result"[[:space:]]*:[[:space:]]*"0[xX]([0123456789abcdefABCDEF]{1,8})"'
+    [[ "$out" =~ $re ]] || return 0
+    _GW_CHAIN_ID="$((16#${BASH_REMATCH[1]}))"
+    return 0
+}
+
+# _gw_chain_fits NETWORK ID -- rc 0 when chain ID can be NETWORK's: mainnet and
+# testnet have one id each (lib/common.sh); a devnet has none fixed, so any id
+# but those two.
+_gw_chain_fits() {
+    case "$1" in
+        # network-gated: mainnet's fixed chain id
+        mainnet) [[ "$2" == "${MAINNET_CHAIN_ID:-}" ]] ;;
+        # network-gated: testnet's fixed chain id
+        testnet) [[ "$2" == "${TESTNET_CHAIN_ID:-}" ]] ;;
+        *) [[ "$2" != "${MAINNET_CHAIN_ID:-}" && "$2" != "${TESTNET_CHAIN_ID:-}" ]] ;;
+    esac
+}
+
+_gw_chain_name() {
+    case "$1" in
+        "${MAINNET_CHAIN_ID:-}") printf 'mainnet' ;;
+        "${TESTNET_CHAIN_ID:-}") printf 'testnet' ;;
+        *) printf 'neither mainnet nor testnet' ;;
+    esac
+}
+
+# _gw_chain_check NETWORK HOST PORT [FN] -- --enable and --refresh where no
+# node's .node-meta names the network: rc 0 the upstream's chain fits NETWORK, or
+# it did not answer (said once, as a warning: the network is then the
+# operator's word); rc 1 it is another network's chain (GW_ERR names both).
+_gw_chain_check() {
+    _gw_chain_ask "$2" "$3"
+    if [[ -z "$_GW_CHAIN_ID" ]]; then
+        [[ "$_GW_CHAIN_FRESH" == 0 ]] || _gw_say warn "The network could not be confirmed: the node at http://${2}:${3} did not answer eth_chainId within 3 s (it may be down). Going on with ${1} as given; setup-gateway.sh --status checks it again once that node answers." "${4:-}"
+        return 0
+    fi
+    _gw_chain_fits "$1" "$_GW_CHAIN_ID" && return 0
+    GW_ERR="the upstream http://${2}:${3} is on chain ${_GW_CHAIN_ID} ($(_gw_chain_name "$_GW_CHAIN_ID")), and the network given is ${1}: give the network that node runs"
+    return 1
 }
 
 # -----------------------------------------------------------------------------
@@ -312,7 +410,10 @@ gw_validate_inputs() {
     fi
 
     [[ -n "$GW_IN_REDIRECT" ]] || { _gw_refuse "give --redirect-queries <url> (where the gateway sends every call that is not a submission)" "$fn" || return 1; }
-    _gw_redirect_ok "$GW_IN_REDIRECT" || { _gw_refuse "--redirect-queries must be http(s)://host[:port][/path] (letters, digits and . - _ ~ / only)" "$fn" || return 1; }
+    _gw_redirect_ok "$GW_IN_REDIRECT" || { _gw_refuse "--redirect-queries must be http(s)://host[:port][/path] (a hostname or IPv4 address, a port 1-65535, and letters, digits and . - _ ~ / in the path)" "$fn" || return 1; }
+    if _gw_redirect_loops "$GW_IN_REDIRECT"; then
+        _gw_refuse "--redirect-queries ${GW_IN_REDIRECT} points at ${_GW_LOOP_WHAT}, and the gateway refuses to start with that: give a node that answers queries" "$fn" || return 1
+    fi
     GW_V_REDIRECT="$GW_IN_REDIRECT"
 
     if [[ -n "$GW_IN_TRUSTED_PROXIES" ]]; then
@@ -333,6 +434,11 @@ gw_validate_inputs() {
     fi
     gw_image_allowed "$GW_V_IMAGE" "$net" || { _gw_refuse "$GW_ERR" "$fn" || return 1; }
     _gw_docker_ok || { _gw_refuse "$GW_ERR" "$fn" || return 1; }
+    # The network chooses the image rule. With no node's .node-meta to take it
+    # from, the upstream's chain must fit it whenever the upstream answers.
+    if [[ -z "$nnet" ]]; then
+        _gw_chain_check "$net" "$GW_V_UPSTREAM_HOST" "$GW_V_RPC_PORT" "$fn" || { _gw_refuse "$GW_ERR" "$fn" || return 1; }
+    fi
     return 0
 }
 
@@ -363,7 +469,7 @@ gw_image_allowed() {
     fi
     re="^[${_GW_LOWER}${_GW_DIGITS}][${_GW_LOWER}${_GW_DIGITS}._/-]*@sha256:[${_GW_DIGITS}abcdef]{64}$"
     if [[ ! "$img" =~ $re ]]; then
-        GW_ERR="image refused: ${img} (only <repository>@sha256:<64 lowercase hex> is taken; tags are refused)"
+        GW_ERR="image refused: ${img} (only <repository>@sha256:<64 lowercase hex> is taken; tags are refused, and so is a registry host:port)"
         return 1
     fi
     repo="${img%@sha256:*}"
@@ -402,13 +508,21 @@ gw_image_ensure() {
 # gw_image_probe IMAGE [FN] -- run the image's --help offline and unprivileged
 # and need every flag of GW_REQUIRED_FLAGS in it. rc 0/1 (GW_ERR).
 gw_image_probe() {
-    local img="${1:-}" fn="${2:-}" out f re missing=""
+    local img="${1:-}" fn="${2:-}" out f re missing="" prc=0
+    local -a lim=()
     GW_ERR=""
-    if ! out="$(docker run --rm --network=none --read-only --cap-drop ALL --user 1101:1101 \
-                --pull=never "$img" --help 2>&1)"; then
+    # At most 60 s: the run holds the update lock meanwhile.
+    if command -v timeout >/dev/null 2>&1; then lim=(timeout 60); fi
+    out="$(${lim[@]+"${lim[@]}"} docker run --rm --network=none --read-only --cap-drop ALL --user 1101:1101 \
+                --pull=never "$img" --help 2>&1)" || prc=$?
+    if [[ "$prc" -eq 124 ]]; then
+        GW_ERR="the worker-gateway image did not finish its --help within 60 s (${img})"
+        return 1
+    elif [[ "$prc" -ne 0 ]]; then
         GW_ERR="the worker-gateway image did not run its --help (${img})"
         return 1
     fi
+
     for f in $GW_REQUIRED_FLAGS; do
         re="(^|[^${_GW_ALNUM}-])${f}([^${_GW_ALNUM}-]|$)"
         [[ "$out" =~ $re ]] || missing="${missing:+${missing} }${f}"
@@ -898,8 +1012,11 @@ _gw_enable_locked() {
 }
 
 # gw_refresh [FN] -- re-render the gateway from gateway.meta (a non-empty
-# GW_IN_IMAGE replaces IMAGE, after the trust rule, pull and probe), with the
-# same no-op rule as gw_enable; restarts the gateway unit only. rc 0/1/2.
+# GW_IN_IMAGE replaces IMAGE, after the trust rule, pull and probe; without it,
+# testnet and mainnet move to the image this release pins), with the same no-op
+# rule as gw_enable; restarts the gateway unit only. Refused when gateway.meta's
+# NETWORK is not the node's (a node host) or not the upstream's chain (no node,
+# when the upstream answers). rc 0/1/2.
 gw_refresh() {
     local fn="${1:-}" rc=0
     GW_ERR="" GW_APPLIED=""
@@ -911,11 +1028,36 @@ gw_refresh() {
 }
 
 _gw_refresh_locked() {
-    local fn="${1:-}" rc=0
+    local fn="${1:-}" rc=0 nnet="" pin="" moved=""
     tn_gateway_installed || { _gw_refuse "the worker gateway is not installed (enable it with setup-gateway.sh --enable)" "$fn" || return 1; }
     _gw_load_meta || rc=$?
     [[ "$rc" -eq 0 ]] || { _gw_refuse "${GW_ERR}; run setup-gateway.sh --enable again with the settings you want" "$fn" || return 1; }
-    [[ -z "$GW_IN_IMAGE" ]] || GW_V_IMAGE="$GW_IN_IMAGE"
+    # The stored network chooses the image rule: on a node host it must be the
+    # node's; with no node's NETWORK, the upstream's chain must fit it.
+    if node_meta_path >/dev/null 2>&1; then
+        nnet="$(addon_meta_get NETWORK "" 2>/dev/null)" \
+            || { _gw_refuse "this node's .node-meta holds NETWORK more than once" "$fn" || return 1; }
+    fi
+    if [[ -n "$nnet" && "$nnet" != "$GW_V_NETWORK" ]]; then
+        _gw_refuse "${TN_GATEWAY_META} says NETWORK=${GW_V_NETWORK} and the node on this host runs ${nnet}; the gateway's image rule follows the node's network: run setup-gateway.sh --enable again" "$fn" || return 1
+    elif [[ -z "$nnet" ]]; then
+        _gw_chain_check "$GW_V_NETWORK" "$GW_V_UPSTREAM_HOST" "$GW_V_RPC_PORT" "$fn" || { _gw_refuse "$GW_ERR" "$fn" || return 1; }
+    fi
+    if [[ -n "$GW_IN_IMAGE" ]]; then
+        GW_V_IMAGE="$GW_IN_IMAGE"
+    else
+        case "$GW_V_NETWORK" in
+            # network-gated: a refresh moves testnet to its pin
+            testnet) pin="$GW_TESTNET_IMAGE_PIN" ;;
+            # network-gated: a refresh moves mainnet to its pin
+            mainnet) pin="$GW_MAINNET_IMAGE_PIN" ;;
+        esac
+        if [[ -n "$pin" && "$pin" != "$GW_V_IMAGE" ]]; then
+            moved=" The image moved from ${GW_V_IMAGE} to ${pin}."
+            _gw_say step "Moving the worker gateway from ${GW_V_IMAGE} to ${pin}, the image this scripts release pins for ${GW_V_NETWORK}" "$fn"
+            GW_V_IMAGE="$pin"
+        fi
+    fi
     gw_image_allowed "$GW_V_IMAGE" "$GW_V_NETWORK" || { _gw_refuse "$GW_ERR" "$fn" || return 1; }
     _gw_docker_ok || { _gw_refuse "$GW_ERR" "$fn" || return 1; }
     gw_image_ensure "$GW_V_IMAGE" "$fn" || { _gw_refuse "$GW_ERR" "$fn" || return 1; }
@@ -927,7 +1069,7 @@ _gw_refresh_locked() {
         return 0
     fi
     _gw_baseline "$fn"
-    _gw_say ok "The worker gateway was refreshed: $(_gw_summary). The node was not restarted." "$fn"
+    _gw_say ok "The worker gateway was refreshed: $(_gw_summary).${moved} The node was not restarted." "$fn"
     return 0
 }
 
@@ -955,8 +1097,10 @@ _gw_remove_locked() {
         front="$(tn_gateway_meta_get FRONT "" 2>/dev/null)" || front=""
         img="$(tn_gateway_meta_get IMAGE "" 2>/dev/null)" || img=""
     fi
-    if ! tn_gateway_installed && [[ ! -e "$unit" && ! -e "$dir" ]] && ! _gw_caddy_block_present \
-        && ! _gw_container_present; then
+    # A directory that holds only files the gateway did not write is not a
+    # gateway (L8): it is reported, never removed.
+    if ! tn_gateway_installed && [[ ! -e "$unit" ]] && { [[ ! -e "$dir" ]] || [[ -n "$(_gw_dir_extra)" ]]; } \
+        && ! _gw_caddy_block_present && ! _gw_container_present; then
         _gw_say ok "The worker gateway is not installed; nothing to remove." "$fn"
         return 0
     fi
@@ -981,7 +1125,11 @@ _gw_remove_locked() {
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl reset-failed "$TN_GATEWAY_UNIT" >/dev/null 2>&1 || true
     [[ ! -e "$unit" ]] || left="${left}the unit file, "
-    [[ ! -e "$dir" ]] || left="${left}${TN_GATEWAY_ETC_DIR}, "
+    if [[ -L "$dir" ]] || [[ -e "$meta" || -L "$meta" ]]; then
+        left="${left}${TN_GATEWAY_ETC_DIR}, "
+    elif [[ -e "$dir" ]]; then
+        _gw_say warn "${TN_GATEWAY_ETC_DIR} stays: it holds files the gateway did not write ($(_gw_dir_extra | tr '\n' ' ' | sed 's/ $//')); remove them yourself when you do not need them." "$fn"
+    fi
     if _gw_unit_active; then left="${left}a running ${TN_GATEWAY_UNIT}, "; fi
     if _gw_container_present; then left="${left}the container ${TN_GATEWAY_CONTAINER}, "; fi
     if [[ -n "$left" ]]; then
@@ -993,6 +1141,19 @@ _gw_remove_locked() {
     _gw_baseline "$fn"
     _gw_say ok "The worker gateway is removed. Its image stays in docker${img:+ (remove it with: docker image rm ${img})}. The node was not touched." "$fn"
     return 0
+}
+
+# _gw_dir_extra -- the names in /etc/telcoin/gateway that the gateway did not
+# write (anything but gateway.meta and the .tn.* temporary files), one a line.
+_gw_dir_extra() {
+    local dir e
+    dir="$(gw_etc_dir)"
+    [[ -d "$dir" && ! -L "$dir" ]] || return 0
+    for e in "$dir"/* "$dir"/.[!.]* "$dir"/..?*; do
+        [[ -e "$e" || -L "$e" ]] || continue
+        case "${e##*/}" in gateway.meta|.tn.*) continue ;; esac
+        printf '%s\n' "${e##*/}"
+    done
 }
 
 # -----------------------------------------------------------------------------
@@ -1010,7 +1171,7 @@ _gw_issue() {
 # values then come from the unit file and the checks that need root (image held
 # when docker refuses, drift against gateway.meta) are skipped, which is said.
 gw_status() {
-    local fn="${1:-}" unit lrc=0 root=0 a text
+    local fn="${1:-}" unit lrc=0 root=0 a text nnet=""
     GW_ERR=""
     _GW_NISSUES=0
     GW_ST_INSTALLED="false" GW_ST_ENABLED="false" GW_ST_ACTIVE="false" GW_ST_MODE="" GW_ST_FRONT=""
@@ -1089,6 +1250,28 @@ gw_status() {
             _gw_say log "Not root and docker refuses this user: the image check was skipped." "$fn"
         fi
     fi
+
+    # The network (M1) and the image rule of this scripts release (M2), once
+    # gateway.meta could be read.
+    if [[ "$lrc" -eq 0 ]]; then
+        if node_meta_path >/dev/null 2>&1; then
+            nnet="$(addon_meta_get NETWORK "" 2>/dev/null)" || nnet=""
+        fi
+        if [[ -n "$nnet" ]]; then
+            [[ "$nnet" == "$GW_V_NETWORK" ]] \
+                || _gw_issue "${TN_GATEWAY_META} says NETWORK=${GW_V_NETWORK} and the node on this host runs ${nnet}: run setup-gateway.sh --enable again (it takes the node's network)" "$fn"
+        elif [[ -n "$GW_V_UPSTREAM_HOST" && -n "$GW_V_RPC_PORT" ]]; then
+            _gw_chain_ask "$GW_V_UPSTREAM_HOST" "$GW_V_RPC_PORT"
+            if [[ -n "$_GW_CHAIN_ID" ]] && ! _gw_chain_fits "$GW_V_NETWORK" "$_GW_CHAIN_ID"; then
+                _gw_issue "${TN_GATEWAY_META} says NETWORK=${GW_V_NETWORK} but the upstream http://${GW_V_UPSTREAM_HOST}:${GW_V_RPC_PORT} is on chain ${_GW_CHAIN_ID} ($(_gw_chain_name "$_GW_CHAIN_ID")): run setup-gateway.sh --enable again with the network that node runs" "$fn"
+            fi
+        fi
+        if [[ -n "$GW_V_IMAGE" ]] && ! gw_image_allowed "$GW_V_IMAGE" "$GW_V_NETWORK"; then
+            _gw_issue "The gateway runs an image this scripts release does not allow: ${GW_ERR}; run setup-gateway.sh --refresh" "$fn"
+            GW_ERR=""
+        fi
+    fi
+
 
     if [[ "$GW_V_FRONT" == "caddy" ]]; then
         if _gw_caddy_block_present; then

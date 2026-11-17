@@ -115,7 +115,14 @@ adv_stubs() {
     caddy_node_info_write() { echo "edit $2 ${3:-none} ${4:-none}" >> "$ORDER"; return 0; }
     tn_resolve_service() { echo telcoin; }
     systemctl() { echo "systemctl $*" >> "$ORDER"; [[ "$1" == is-failed ]] && return 1; return 0; }
-    curl() { echo '{"result":"0x7e1"}'; }
+    # GET https://<host>/health (rpc-advertise's check of the URL): GW_URL_CODE
+    # (default 200) and curl's exit GW_URL_RC (default 0); anything else: the node.
+    curl() {
+        case "$*" in
+            *'https://'*'/health') printf '%s' "${GW_URL_CODE:-200}"; return "${GW_URL_RC:-0}" ;;
+        esac
+        echo '{"result":"0x7e1"}'
+    }
 }
 
 CF="$RP/etc/caddy/Caddyfile"
@@ -355,6 +362,36 @@ check_rc "gate: no node, no gateway.meta: refused" 1 $?
 check "gate: no node, no gateway.meta: says run setup-gateway.sh first" yes "$(said 'run setup-gateway.sh first')"
 check "gate: no node, no gateway.meta: tree byte-identical" same "$([[ "$(tree_sum)" == "$before" ]] && echo same)"
 
+# The block is current but Caddy is not running: no no-op, Caddy is started.
+fresh "$NM"
+( do_gateway_enable gw1.example.org "" "" ) >"$T/out" 2>&1
+: > "$SYSCTL_LOG"
+rm -f "$T/caddy-up"
+( systemctl() {
+      case "$1" in
+          is-active) [[ -f "$T/caddy-up" ]] ;;
+          restart) : > "$T/caddy-up"; command systemctl "$@" ;;
+          *) command systemctl "$@" ;;
+      esac
+  }
+  do_gateway_enable gw1.example.org 8655 8656 ) >"$T/out" 2>&1
+check_rc "gateway-enable, block current, Caddy stopped: rc 0" 0 $?
+check "gateway-enable, block current, Caddy stopped: says so" yes "$(said 'but Caddy is not running')"
+check "gateway-enable, block current, Caddy stopped: Caddy started" "yes 1" "$([[ -f "$T/caddy-up" ]] && echo yes) $(applies)"
+check "gateway-enable, block current, Caddy stopped: the block is unchanged" same "$(gw_same "$GW")"
+# A public RPC site (rpc-enable) on this host: rpc-advertise and rpc-unadvertise refuse.
+fresh "$NMD"
+printf 'original\n' > "$NIF"
+( caddy_write_managed "" "$RPC_BLOCK" "" ) >"$T/out" 2>&1
+cp "$RP/etc/telcoin/.node-meta" "$T/nm.before"; : > "$ORDER"
+( adv_stubs; do_rpc_advertise gw1.example.org ) >"$T/out" 2>&1
+check_rc "rpc-advertise next to a tn-rpc site: refused" 1 $?
+check "rpc-advertise next to a tn-rpc site: names rpc-disable" yes "$(said 'run install-caddy.sh --phase rpc-disable first')"
+( adv_stubs; do_rpc_unadvertise ) >"$T/out" 2>&1
+check_rc "rpc-unadvertise next to a tn-rpc site: refused" 1 $?
+check "tn-rpc site: nothing edited, nothing restarted, .node-meta byte-identical" " same" \
+    "$(cat "$ORDER") $(cmp -s "$RP/etc/telcoin/.node-meta" "$T/nm.before" && echo same)"
+
 # --- rpc-advertise / rpc-unadvertise / rpc-disable / rpc-enable -----------------------
 fresh "${NMD}PUBLIC_WS_URL=wss://old.example.org/\n"
 printf 'original\n' > "$NIF"
@@ -371,6 +408,18 @@ check "rpc-advertise: RPC_ADVERTISED_VIA" "gateway" "$(addon_meta_get RPC_ADVERT
 check "rpc-advertise: PUBLIC_WS_URL unset" absent "$(meta_has PUBLIC_WS_URL)"
 check "rpc-advertise: Caddyfile untouched, Caddy not reloaded" "same 0" "$(cmp -s "$CF" "$T/cf.before" && echo same) $(applies)"
 check "rpc-advertise: no Caddy write" 0 "$(sed -n "$((w1 + 1)),\$p" "$WRITES" | grep -c '/etc/caddy/')"
+# GET https://<host>/health must answer 200 from this host before the record changes.
+for bad in "502 0 HTTP 502" "000 28 no answer within 5 s" "000 60 a TLS or certificate error"; do
+    code="${bad%% *}"; rest="${bad#* }"; crc="${rest%% *}"; want="${rest#* }"
+    cp "$NIF" "$T/nif.before"; cp "$RP/etc/telcoin/.node-meta" "$T/nm.before"; : > "$ORDER"
+    ( adv_stubs; GW_URL_CODE="$code"; GW_URL_RC="$crc"; do_rpc_advertise gw9.example.org ) >"$T/out" 2>&1
+    check_rc "rpc-advertise, /health ${want}: refused" 1 $?
+    check "rpc-advertise, /health ${want}: says what was asked, what came back and why" "yes yes yes" \
+        "$(said 'advertise https://gw9.example.org/') $(said "got ${want}") $(said 'breaks transaction forwarding')"
+    check "rpc-advertise, /health ${want}: node-info.yaml and .node-meta byte-identical" "same same" \
+        "$(cmp -s "$NIF" "$T/nif.before" && echo same) $(cmp -s "$RP/etc/telcoin/.node-meta" "$T/nm.before" && echo same)"
+    check "rpc-advertise, /health ${want}: no edit, no restart" "" "$(cat "$ORDER")"
+done
 : > "$ORDER"
 ( adv_stubs; NI_CUR="https://gw1.example.org/ none"; do_rpc_unadvertise ) >"$T/out" 2>&1
 check_rc "rpc-unadvertise: rc 0" 0 $?
@@ -398,6 +447,7 @@ check "rpc-disable via gateway: node-info.yaml unchanged" original "$(cat "$NIF"
 check "rpc-disable via gateway: keys kept" "gw1.example.org https://gw1.example.org gateway" \
     "$(addon_meta_get PUBLIC_RPC_DOMAIN '') $(addon_meta_get PUBLIC_RPC_URL '') $(addon_meta_get RPC_ADVERTISED_VIA '')"
 check "rpc-disable via gateway: says rpc-unadvertise" yes "$(said 'rpc-unadvertise removes that advertisement')"
+
 before="$(tree_sum)"
 ( main --json --phase=rpc-enable --rpc-domain rpc.example.org --yes ) >"$T/ev" 2>"$T/out"
 check_rc "rpc-enable while RPC_ADVERTISED_VIA=gateway: refused" 1 $?

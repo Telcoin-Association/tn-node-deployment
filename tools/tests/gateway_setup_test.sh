@@ -94,10 +94,27 @@ cat > "$T/bin/curl" <<'STUB'
 u=""
 for a in "$@"; do u="$a"; done
 printf '%s\n' "$u" >> "$GWT_DIR/curl.log"
+printf '%s\n' "$*" >> "$GWT_DIR/curl.args"
+# The upstream's eth_chainId (lib/gateway.sh _gw_chain_ask): the id in chain-id.
+case "$u" in
+    http://*:*/)
+        if [ -f "$GWT_DIR/chain-id" ]; then
+            printf '{"jsonrpc":"2.0","id":1,"result":"%s"}\n' "$(cat "$GWT_DIR/chain-id")"
+            exit 0
+        fi ;;
+esac
 [ -f "$GWT_DIR/sd/${TN_ROOT_PREFIX##*/}/active" ] || exit 7
 [ -f "$GWT_DIR/health-fails" ] && exit 22
 case "$u" in */ready|*/ready/any) [ -f "$GWT_DIR/not-ready" ] && exit 22 ;; esac
 exit 0
+STUB
+# timeout: logs its arguments; help-hangs makes it end as a timeout would (124).
+cat > "$T/bin/timeout" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$GWT_DIR/timeout.log"
+[ -f "$GWT_DIR/help-hangs" ] && exit 124
+shift
+exec "$@"
 STUB
 printf '#!/bin/sh\nexit 0\n' > "$T/bin/sleep"
 printf '#!/bin/sh\nif [ "${1:-}" = -u ]; then echo "${SGT_UID:-0}"; exit 0; fi\nexec /usr/bin/id "$@"\n' > "$T/sgbin/id"
@@ -823,6 +840,130 @@ check "script: SIGTERM during --enable exits 143 with exactly one done line" "14
 sg --json --remove
 check "script: --remove after an interrupted --enable" "0 1" "${RC} ${NDONE}"
 
+# =============================================================================
+# review R1b fixes: value checks, the --help time limit, the network check (M1),
+# the pin move (M2), the status after a change and the extra file on --remove
+# =============================================================================
+host "$NODE"
+LONGIMG="localhost:5000/worker-gateway@sha256:$(printf '%064d' 0 | tr 0 a)"
+refuse "a redirect port above 65535" "a port 1-65535" MODE=same-host DOMAIN=gw.example.org REDIRECT=http://q.example.org:99999
+refuse "a redirect host of dashes" "--redirect-queries must be" MODE=same-host DOMAIN=gw.example.org REDIRECT=http://-
+refuse "a redirect host of dots" "--redirect-queries must be" MODE=same-host DOMAIN=gw.example.org REDIRECT=http://...
+refuse "an IPv4 address as --domain" "is not a hostname" MODE=same-host DOMAIN=1.2.3.4
+refuse "a redirect at the node's own RPC" "the worker's own RPC" MODE=same-host DOMAIN=gw.example.org REDIRECT=http://127.0.0.1:8544
+refuse "a redirect at the node's readiness port" "the worker's readiness port" MODE=same-host DOMAIN=gw.example.org REDIRECT=http://localhost:43180/
+refuse "a redirect at the gateway itself" "this gateway itself" MODE=same-host DOMAIN=gw.example.org REDIRECT=http://127.0.0.1:8655
+refuse "an image with a registry port" "registry host:port" MODE=same-host DOMAIN=gw.example.org IMAGE="$LONGIMG"
+gin MODE=same-host DOMAIN=gw.example.org REDIRECT=https://q.example.org:8545/rpc
+rc=0; gw_validate_inputs quiet || rc=$?
+check_rc "value checks: a redirect with a valid port and path still validates" 0 "$rc"
+
+: > "$T/timeout.log"
+: > "$T/help-hangs"
+rc=0; gw_image_probe "$IMG" quiet || rc=$?
+rm -f "$T/help-hangs"
+check "--help probe: a probe that times out is refused and says so" "1 yes" "${rc} $(has "$GW_ERR" "within 60 s")"
+check "--help probe: it runs under timeout 60" yes "$(grep -q '^60 docker run ' "$T/timeout.log" && echo yes || echo no)"
+
+# The status after a change says nothing in plain mode, and the host baseline
+# is refreshed once per change.
+: > "$T/baseline.log"
+sg --json --enable --mode same-host --domain gw.example.org --image "$IMG" --redirect-queries "$RQ"
+check "after a change: one --enable refreshes the host baseline once" "0 1" "${RC} $(grep -c baseline "$T/baseline.log")"
+sg --yes --enable --mode same-host --domain gw.example.org --image "$IMG" --redirect-queries "$RQ" --listen-port 8702
+check "after a change: plain --enable prints no status lines after it" "0 no" "${RC} $(has "${OUT}${ERR}" "Worker gateway: same-host")"
+
+# M1 on a node host: gateway.meta NETWORK must be the node's.
+sed 's/^NETWORK=devnet$/NETWORK=testnet/' "$(META_P)" > "$T/m.edit" && cat "$T/m.edit" > "$(META_P)"
+before="$(snap)"
+logs_reset
+rc=0; GW_IN_IMAGE=""; gw_refresh quiet || rc=$?
+check "M1 node host: --refresh with gateway.meta NETWORK not the node's is refused" "1 yes" "${rc} $(has "$GW_ERR" "says NETWORK=testnet and the node on this host runs devnet")"
+check "M1 node host: refused refresh, the tree is byte-identical, nothing restarted" "$before " "$(snap) $(sys_changes)"
+: > "$T/say.log"
+rc=0; gw_status quiet || rc=$?
+check "M1 node host: status counts it as an issue" "yes yes" "$([[ "$rc" -ge 1 ]] && echo yes) $(has "$(cat "$T/say.log")" "says NETWORK=testnet and the node on this host runs devnet")"
+sed 's/^NETWORK=testnet$/NETWORK=devnet/' "$(META_P)" > "$T/m.edit" && cat "$T/m.edit" > "$(META_P)"
+rc=0; gw_status quiet || rc=$?
+check_rc "M1 node host: with the node's network again, no issue" 0 "$rc"
+
+# M1 on a host without a node: the upstream's eth_chainId, when it answers.
+chain() { _GW_CHAIN_KEY=""; rm -f "$T/chain-id"; if [[ -n "${1:-}" ]]; then printf '%s' "$1" > "$T/chain-id"; fi; }
+host "$SA"
+chain 0x1e7
+: > "$T/curl.args"
+gin MODE=standalone NETWORK=devnet UPSTREAM=10.0.0.12 DOMAIN=gw.example.org
+before="$(snap)"
+logs_reset
+rc=0; gw_enable quiet || rc=$?
+check "M1 no node: --enable devnet with the upstream on the mainnet chain is refused, naming both" "1 yes yes" \
+    "${rc} $(has "$GW_ERR" "chain 487 (mainnet)") $(has "$GW_ERR" "the network given is devnet")"
+check "M1 no node: refused, the tree is byte-identical, no change, no docker run" "$before  0" "$(snap) $(sys_changes) $(docker_runs)"
+check "M1 no node: one eth_chainId POST, to the upstream, no proxy, no redirect, 3 s" "1 yes yes" \
+    "$(grep -c eth_chainId "$T/curl.args") $(has "$(grep eth_chainId "$T/curl.args")" "-q -sS --noproxy * --proto =http --max-redirs 0 --connect-timeout 2 --max-time 3") $(has "$(grep eth_chainId "$T/curl.args")" " http://10.0.0.12:8545/")"
+chain ""
+: > "$T/say.log"
+rc=0; gw_enable quiet || rc=$?
+check_rc "M1 no node: an upstream that does not answer: --enable goes on" 0 "$rc"
+check "M1 no node: ... with a warning that the network could not be confirmed" yes "$(has "$(cat "$T/say.log")" "warn The network could not be confirmed")"
+chain 0x1e7
+: > "$T/say.log"
+rc=0; gw_status quiet || rc=$?
+check "M1 no node: status counts an upstream on another chain, naming both" "1 yes" \
+    "${rc} $(has "$(cat "$T/say.log")" "says NETWORK=devnet but the upstream http://10.0.0.12:8545 is on chain 487 (mainnet)")"
+before="$(snap)"
+logs_reset
+GW_IN_IMAGE=""
+rc=0; gw_refresh quiet || rc=$?
+check "M1 no node: --refresh with the upstream on another chain is refused" "1 yes" "${rc} $(has "$GW_ERR" "chain 487 (mainnet)")"
+check "M1 no node: refused refresh, the tree is byte-identical, nothing restarted" "$before " "$(snap) $(sys_changes)"
+chain 0x7e1d
+rc=0; gw_status quiet || rc=$?
+check_rc "M1 no node: an upstream on a devnet chain fits devnet" 0 "$rc"
+
+# M2: a scripts release that changes the pin.
+gw_remove quiet
+# shellcheck disable=SC2034  # read by lib/gateway.sh
+GW_TESTNET_IMAGE_PIN="$IMG"
+chain 0x7e1
+gin MODE=standalone NETWORK=testnet UPSTREAM=10.0.0.12 DOMAIN=gw.example.org IMAGE=
+rc=0; gw_enable quiet || rc=$?
+check_rc "M2: testnet with pin A enables" 0 "$rc"
+GW_TESTNET_IMAGE_PIN="$IMG2"
+: > "$T/say.log"
+rc=0; gw_status quiet || rc=$?
+check "M2: once the release pins B, status counts the running image A as an issue" "1 yes" \
+    "${rc} $(has "$(cat "$T/say.log")" "runs an image this scripts release does not allow")"
+GW_IN_IMAGE=""
+: > "$T/say.log"
+rc=0; gw_refresh quiet || rc=$?
+check "M2: --refresh without --image moves to the new pin" "0 refreshed" "${rc} ${GW_APPLIED}"
+check "M2: ... and says from which image to which" yes "$(has "$(cat "$T/say.log")" "from ${IMG} to ${IMG2}")"
+check "M2: the unit runs the new pin" yes "$(has "$(cat "$(UNIT_P)")" "--stop-timeout 60 ${IMG2} ")"
+check "M2: gateway.meta IMAGE is the new pin" "$IMG2" "$(tn_gateway_meta_get IMAGE '')"
+rc=0; gw_status quiet || rc=$?
+check_rc "M2: status after the move: no issue" 0 "$rc"
+GW_IN_IMAGE="$IMG"
+rc=0; gw_refresh quiet || rc=$?
+check_rc "M2: --refresh --image with a digest other than the pin is still refused" 1 "$rc"
+# shellcheck disable=SC2034  # read by lib/gateway.sh
+GW_IN_IMAGE=""
+# shellcheck disable=SC2034  # read by lib/gateway.sh
+GW_TESTNET_IMAGE_PIN=""
+
+# An extra file in /etc/telcoin/gateway: --remove removes the gateway, names the file.
+printf 'note\n' > "$SA/etc/telcoin/gateway/NOTES"
+: > "$T/say.log"
+rc=0; gw_remove quiet || rc=$?
+check "remove, extra file: rc 0, removed" "0 removed" "${rc} ${GW_APPLIED}"
+check "remove, extra file: the file stays and is named" "yes yes" "$(exists "$SA/etc/telcoin/gateway/NOTES") $(has "$(cat "$T/say.log")" "(NOTES)")"
+check "remove, extra file: gateway.meta and the unit are gone" "no no" "$(exists "$(META_P)") $(exists "$(UNIT_P)")"
+rc=0; gw_remove quiet || rc=$?
+check "remove, extra file: a second --remove has nothing to remove" "0 " "${rc} ${GW_APPLIED}"
+rm -rf "$SA/etc/telcoin/gateway"
+chain ""
+
 check_lacks "script: the node's unit never reaches systemctl" "telcoin.service" "$(cat "$T/systemctl.all")"
+
 
 finish

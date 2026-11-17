@@ -515,25 +515,30 @@ sg_do_status() {
     sg_finish "" "$(sg_jfields "$n")" "worker gateway status"
 }
 
-# sg_after_change RC -- after gw_enable, gw_refresh or gw_remove: on rc 0 the host
-# baseline when something changed; otherwise end the run (sg_lib_end), with the
-# baseline first when the step went partway.
+# sg_after_change RC -- after gw_enable, gw_refresh or gw_remove: on rc 0 nothing
+# more (the library refreshed the host baseline itself when something changed);
+# otherwise end the run (sg_lib_end), with the baseline first when the step went
+# partway (the library does not refresh it then).
 sg_after_change() {
     if [[ "$1" -eq 0 ]]; then
-        [[ -z "${GW_APPLIED:-}" ]] || sg_baseline_refresh
         return 0
     fi
     [[ "$1" -eq 1 ]] || sg_baseline_refresh
     sg_lib_end "$1"
 }
 
+# sg_quiet KIND MSG -- a say function that says nothing.
+sg_quiet() { return 0; }
+
 # sg_end_changed MSG_CHANGED MSG_SAME -- the done line of a change that went
-# through: GW_ST_* read again (gw_status, silent), then sg_finish.
+# through: GW_ST_* read again (gw_status, through sg_quiet: the change already
+# said what it did), then sg_finish.
 sg_end_changed() {
     local n=0 applied msg="$1"
     applied="$(sg_applied)"
     [[ -n "$applied" ]] || msg="$2"
-    gw_status || n=$?
+    gw_status sg_quiet || n=$?
+
     sg_finish "$applied" "$(sg_jfields "$n")" "$msg"
 }
 
