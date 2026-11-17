@@ -480,7 +480,10 @@ check_rc "custom scan: telcoin-gateway is a managed name" 0 "$?"
 fresh
 DOCKER_PS="telcoin-gateway\t${GWIMG}\tUp 2 hours\nmytn\tghcr.io/telcoin-association/tn-dev:latest\tUp 3 hours\n"
 export DOCKER_PS
-OUT="$(scan_custom_installs < /dev/null 2>&1)"
+# custom_container_lines runs docker under timeout(1), which macOS does not have
+# (remove_test.sh stubs it the same way). The scan's two find calls go through the
+# same stub and are left out, so this case reads nothing from the host it runs on.
+OUT="$(timeout() { shift 3; [[ "$1" == docker ]] && "$@"; }; scan_custom_installs < /dev/null 2>&1)"
 DOCKER_PS=""
 check "custom scan: another node container is offered" yes "$(has '[CUSTOM] Docker container: mytn' "$OUT")"
 check_lacks "custom scan: the gateway container is not offered" "telcoin-gateway" "$OUT"
