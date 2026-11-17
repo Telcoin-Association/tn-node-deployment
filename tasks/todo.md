@@ -1,3 +1,127 @@
+## Review: node requirements one-pagers, testnet and mainnet (PR #67, branch docs/node-requirements-one-pagers, 2026-11-17)
+
+Base `origin/main` at b89ada4 (`scripts-v2.1.0`). Plan block at the top of `tasks/plan.md`,
+shared spec `tasks/spec-onepager-shared.md` (sections 8a and 8b record what verification
+changed), checkpoints `tasks/ckpt-onepager-<unit>.md`, verifier reports
+`tasks/ckpt-onepager-V-testnet.md` and `tasks/ckpt-onepager-V-mainnet.md`.
+
+### What landed
+
+- `tools/build-partner-pdf.sh` (b13a915): knows `testnet-node-requirements` and
+  `mainnet-node-requirements`; page bounds per document in the `case "$DOC"` block (15 to 150
+  for the guide and the specification, exactly 1 for the one-pagers, "expected exactly 1");
+  `toc-depth: 0` means no contents and no section numbers; the "legacy" lint message says
+  "this document". `FORBIDDEN`, `CONTACT`, the `mailto:` check, CSS staging and anti-churn are
+  untouched.
+- `docs/partner/testnet-node-requirements/` (165cb99): "Adiri testnet node requirements" 1.0.
+  Header band with the `badge:` label, the hardware table for each role across the full width,
+  then two columns: network, operating system and host, ports, install, validating, contact.
+  Body 8.5 pt, tables 8 pt, code in tables 7.2 pt; Geist and Geist Mono; SVG logos only.
+- `docs/partner/mainnet-node-requirements/` (b86de17): "Mainnet node requirements" 1.0 on
+  byte-identical `template.html` and `theme.css`. Opens with the status (not launched; the
+  scripts refuse it until the launching scripts release), then the same hardware block. States
+  only what the scripts enforce for mainnet; the public RPC is "planned and set at launch",
+  the explorer "Not launched yet"; no stake amount, no committee size.
+- Docs (f0cfb70): `AGENTS.md` "Partner documents" (the two directories, one page and
+  `toc-depth: 0`, identical template and theme, the three Markdown hooks and the fit rule, the
+  guide as source of truth with the same-change rule, what the pages never print), `README.md`
+  (the pointer at the top and the maintenance paragraph), `docs/partner/assets/README.md`,
+  `CHANGELOG.md`.
+
+### Verification
+
+- Baseline before any change: `--all` in `tn-pdf-tools` printed "PDF unchanged" for the guide
+  (77 pages) and the specification (37 pages). Same after the script change.
+- Script: `bash -n` under 5.3 and `bash:3.2`; `check-bash32.sh` clean (197 files); shellcheck
+  0.11 and 0.9 at error severity clean, and no new finding at any severity against the HEAD
+  copy; `check-network-hits.sh` and `check-perl-interp.sh` clean. Seven scratch cases on a
+  mini-tree (one page written with no `<nav` and no section numbers; a long file fails with
+  "expected exactly 1" and only warns under `PARTNER_MD`; `toc-depth` 4 and a missing
+  `toc-depth` fail the lint; `toc-depth: 2` numbers and lists; "legacy" and a missing contact
+  fail the lint). The 15-to-150 messages are byte-identical to the old script's.
+- Final gate from a fresh worktree at another path, at f0cfb70: `--all` twice, "PDF
+  unchanged" for all four documents both times, worktree clean afterwards.
+- Negative checks with `PARTNER_MD`, both pages: an over-long copy reports 2 pages
+  ("expected exactly 1; ignored for PARTNER_MD"), a copy with `--observer` fails the lint, a
+  copy with "legacy" fails the lint.
+- Both PDFs: `devs@telcoin.org` three times, no forbidden string, no "legacy", one A4 page, no
+  CreationDate, only Geist and Geist Mono embedded. `cmp` of the two `template.html` files and
+  of the two `theme.css` files: identical.
+- Rendered pages read by the orchestrator at 110 dpi after every change: nothing clipped,
+  columns end within about 5 mm of each other and of the footer, logos render, text legible.
+- CI on PR #67 at f0cfb70, the last commit that changes anything but task records: 12 of 12
+  checks pass (bash -n on Linux and on macOS bash 3.2, shellcheck, fixture tests on Linux and
+  macOS, hardening lints, release manifest, checksum freshness, Ubuntu 24.04 VM assertions,
+  Node Manager UI tests, the two Socket checks).
+
+### What the verifiers found (one read-only verifier per page, sources read before the page)
+
+Testnet, 62 statements, five findings, all fixed, report closed:
+
+1. "Signed node releases are checked against the same keys": no testnet node release is signed
+   yet (`TN_UNSIGNED_RELEASE_TAG`). The sentence is gone; the page says nothing about node
+   release signatures.
+2. The Docker image line named only `ghcr.io/telcoin-association/tn-testnet`; today's default
+   still pulls from the older registry. Now names both.
+3. The page listed the four validating steps without the prerequisite a planner cannot guess:
+   before staking, the node must be synced and advertise a publicly routable RPC URL.
+4. "Release tarballs are x86_64 Linux": the current tag has no tarball. Now "Signed releases
+   ship x86_64 Linux tarballs; otherwise build from source or use Docker."
+5. Ports 443 and 80 were labelled "Public RPC, dashboard"; port 80 is Caddy's certificate
+   issuance and redirect. Now "Caddy: RPC, dashboard".
+
+Mainnet, 63 statements, four findings, all fixed, report closed; nothing wrong, and no reading
+under which a mainnet node installs today:
+
+1. The page asked a validator to advertise a public RPC URL and said Caddy refuses public RPC
+   on a staked validator, with no way out. Now adds the guide's "it suggests a separate RPC
+   node".
+2. "Mainnet refuses JSON-RPC on a public address; enabling the firewall needs SSH sources"
+   overstated both halves. Now "Mainnet keeps RPC on `127.0.0.1`; the firewall asks for SSH
+   sources."
+3. The public RPC URL was printed as decided; it is planned. Now "is planned and set at
+   launch".
+4. "Signed release tags only ... for a source build too" covered the supplied-binary method,
+   which is not held to tags. Now "Source, release, Docker: signed `vX.Y.Z` release tags
+   only."
+
+Live checks: `https://rpc.adiri.tel` returns `0x7e1`; `https://rpc.telcoin.network` returns
+`0x7e1` too, as the mainnet page says; the explorer, the status page, the installer,
+`copy.fail` and the guide PDF link return 200; the testnet stake reads 1,000,000 TEL on chain.
+
+### Orchestrator changes on top of the agents' work
+
+- Script: the "legacy" lint message ("this document").
+- Testnet page: the installer command breaks at a backslash instead of inside its URL; the
+  ports condition includes the dashboard; the guide is linked by its path instead of a
+  three-line URL; the verifier's five fixes, worded to hold before and after the first signed
+  release rather than to describe today.
+- Mainnet page: three planned facts the writer had cut for space are back (testnet add-ons
+  refused, journal logs, SSH sources for the firewall); the explorer cell uses the guide's
+  words; the validating sentence no longer says the advertised RPC URL is served by another
+  node; the verifier's four fixes.
+- `AGENTS.md`: the bullet on the Markdown hooks and fitting.
+- The verifier was split in two, one per page, and unit D ran early; both are noted in the
+  plan block.
+
+### Left to the user
+
+1. Guide 1.9 says signed node releases are planned to start with `v0.17.0-adiri` (lines 312
+   and 745). `lib/common.sh` treats that tag as the last unsigned one. The guide needs a
+   correction; the one-pagers already avoid the statement.
+2. telcoin-network `main` raised the validator disk figures after `v0.17.0-adiri` (PR 1834
+   there, storage v2): 20,000 sustained write IOPS and 800 MiB/s minimum; local NVMe, or
+   40,000 IOPS and 800 MiB/s on cloud block storage, recommended. The guide and both pages
+   carry the tag's figures (10,000 write IOPS, 300 MB/s). Update all three together when that
+   release is tagged.
+3. Mainnet: the guide does not say outright that a validator's advertised RPC URL may be
+   served by a separate RPC node. Settle it with the node team before launch; the mainnet page
+   stops where the guide stops.
+4. `MAINNET_EXPLORER` in `lib/common.sh` is the testnet explorer's URL. If the launch release
+   keeps it, mainnet setup prints the testnet explorer.
+5. Mainnet setup refuses a host where the Caddy edge is already present
+   (`tn_testnet_addons_present`); the guide mentions only the add-ons.
+
 ## Review: private alerts, a heartbeat pushed from the node host (issue #60, branch private-alerts, 2026-11-04)
 
 Base `hardening-followups` at 4a2cf6e (rebased onto its head before the PR). Shared spec

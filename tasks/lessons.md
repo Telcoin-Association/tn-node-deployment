@@ -580,3 +580,55 @@ host (the image was already there; no container started).
 fixtures drive end to end, run the whole suite once with a sentinel on `PATH` that logs and
 exits 1 for that tool, before the real environment sees the change; V7-IMG's `t_leak.sh` is the
 pattern. A fixture that still reaches the sentinel needs a stub, not a note.
+
+## Node requirements one-pagers (2026-11-17): a summary inherits its parent's stale facts
+
+### A fact copied from the guide was true of the next release, not of this one
+
+**Symptom:** the plan's facts table took "node releases are checked against the same keys",
+"Docker image `ghcr.io/telcoin-association/tn-testnet`" and "release tarballs are x86_64
+Linux" from guide 1.9. The testnet verifier, reading `lib/common.sh` first, found that no
+testnet node release is signed yet (`TN_UNSIGNED_RELEASE_TAG`), that today's Docker default
+still pulls from the older registry, and that the current tag has no tarball. The guide
+(lines 312 and 745) says signed releases start with `v0.17.0-adiri`; the scripts say that tag
+is the last unsigned one.
+
+**Cause:** the plan made the guide the source of truth and listed "which release starts
+signed releases" as left out, but three other statements depend on that same transition and
+nobody traced them.
+
+**Rule:** when a fact is left out because it moves with the next release, grep the facts table
+for every statement that is only true on one side of that release, and word each so it holds
+on both sides ("signed releases ship tarballs; otherwise build from source or use Docker") or
+drop it. A verifier of a summary document reads the code, not only the parent document, and
+has a verdict for "the parent is wrong" (`GUIDE-DEFECT`) so the finding is reported instead
+of copied.
+
+### A paraphrased facts table loses the half of a sentence that matters
+
+**Symptom:** the shared spec said ports 443 and 80 are open "only when the node serves public
+RPC through Caddy". Guide line 173 says "public RPC or the dashboard", and line 174 gives
+port 80 to certificate issuance. The writer followed the spec and flagged the difference; the
+verifier flagged it again.
+
+**Rule:** a facts table for writers quotes the source sentence, or cites the line and says
+"as written". The orchestrator's summary is for choosing what goes on the page, not for
+wording it.
+
+### A writer under a hard page limit cuts by position, not by importance
+
+**Symptom:** the mainnet writer met the one-page bound by dropping three planned facts (the
+testnet add-ons are refused, logs go to the journal, the firewall needs the SSH sources) and
+kept lower-value lines. It reported the cuts, so nothing was lost, but the orchestrator spent
+three fit passes putting them back.
+
+**Rule:** when the output has a hard size limit, the spec ranks its facts: which must appear,
+which go first when space runs out. And the first thing to check on a fitted page is the list
+of what was cut, before the look.
+
+### The build's own bound is the fit test; use it
+
+A changed table cell squeezed its neighbours and tipped the page to two, twice. `expected
+exactly 1` caught it each time before a render was looked at. When a page overflows,
+`pdftotext -layout` of the candidate PDF's two pages shows which column ran over and how the
+edited lines wrapped, faster than reading the PNG.
