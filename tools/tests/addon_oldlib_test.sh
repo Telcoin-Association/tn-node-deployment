@@ -45,7 +45,7 @@ else
     sed -e 's/^obs_quorum_guard()/obs_quorum_guard_gone()/' "${TN_TEST_REPO}/lib/observability.sh" > "$T/old/lib/observability.sh"
     old_from="renamed helpers"
 fi
-for s in firewall-setup.sh setup-vpn.sh setup-observability.sh setup-alerts.sh; do
+for s in firewall-setup.sh setup-vpn.sh setup-observability.sh setup-alerts.sh setup-gateway.sh; do
     cp "${TN_TEST_REPO}/${s}" "$T/old/${s}"
 done
 printf 'old library: %s\n' "$old_from"
@@ -88,7 +88,7 @@ check "alerts --json: stdout is the done event only" "yes" \
     "$(grep -c '' "$T/out" | grep -qx 1 && grep -q '^{"event":"done","ok":false,.*update-scripts.sh' "$T/out" && echo yes)"
 
 # The current library passes every check.
-for s in firewall-setup.sh setup-vpn.sh setup-observability.sh setup-alerts.sh; do
+for s in firewall-setup.sh setup-vpn.sh setup-observability.sh setup-alerts.sh setup-gateway.sh; do
     grep -v '^main "\$@"$' "${TN_TEST_REPO}/${s}" > "$T/new/${s}"
 done
 ln -s "${TN_TEST_REPO}/lib" "$T/new/lib"
