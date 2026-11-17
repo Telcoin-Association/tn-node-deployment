@@ -37,7 +37,7 @@ if [ -r "${SCRIPT_DIR}/lib/fallback.sh" ]; then
     source "${SCRIPT_DIR}/lib/fallback.sh" 2>/dev/null || true
 fi
 
-readonly SCRIPT_VERSION="2.1.0"
+readonly SCRIPT_VERSION="2.2.0"
 readonly TN_REPO_RAW="https://raw.githubusercontent.com/Telcoin-Association/tn-node-deployment"
 # main serves only the RELEASE pointer and the connectivity probe; every release
 # file is fetched from the tag RELEASE names.
@@ -288,6 +288,8 @@ declare -a SCRIPTS=(
     "setup-alerts.sh:setup-alerts.sh:SCRIPT_VERSION"
     "lib/alerts.sh:lib/alerts.sh:ALERTS_VERSION"
     "lib/tn-heartbeat.sh:lib/tn-heartbeat.sh:HEARTBEAT_VERSION"
+    "setup-gateway.sh:setup-gateway.sh:SCRIPT_VERSION"
+    "lib/gateway.sh:lib/gateway.sh:GATEWAY_VERSION"
     "ui/server.py:ui/server.py:UI_VERSION"
     "lib/release-keys/README:lib/release-keys/README:NONE"
     "lib/release-keys/grantkee.asc:lib/release-keys/grantkee.asc:NONE"
@@ -986,7 +988,7 @@ warn_expired() {
 }
 
 run_update() {
-    local keys choice i ui_changed=false alerts_changed=false svc
+    local keys choice i ui_changed=false alerts_changed=false gateway_changed=false svc
 
     print_info "Checking for a signed script release..."
     print_info "Repository: ${TN_REPO_RAW}"
@@ -1076,6 +1078,7 @@ run_update() {
         [[ "${UPD_PATHS[i]}" != ui/* ]] || ui_changed=true
         case "${UPD_PATHS[i]}" in
             lib/tn-heartbeat.sh|lib/alerts.sh) alerts_changed=true ;;
+            setup-gateway.sh|lib/gateway.sh) gateway_changed=true ;;
         esac
     done
     install_pass || exit 1
@@ -1105,6 +1108,14 @@ run_update() {
     if [[ "$alerts_changed" == "true" && -e "${TN_ROOT_PREFIX:-}/etc/systemd/system/telcoin-heartbeat.timer" ]]; then
         print_info "The heartbeat runner or its library changed. Reinstall them on the host:"
         print_info "  sudo bash ${SCRIPT_DIR}/setup-alerts.sh --refresh"
+        echo ""
+    fi
+    # The worker gateway's unit is rendered from gateway.meta by setup-gateway.sh
+    # and lib/gateway.sh (the image pins live there), so new copies of them take
+    # effect only once setup-gateway.sh --refresh renders it again. Printed, never run.
+    if [[ "$gateway_changed" == "true" && -e "${TN_ROOT_PREFIX:-}/etc/systemd/system/telcoin-gateway.service" ]]; then
+        print_info "The worker gateway script or its library changed. Render the gateway again on the host:"
+        print_info "  sudo bash ${SCRIPT_DIR}/setup-gateway.sh --refresh"
         echo ""
     fi
 }
