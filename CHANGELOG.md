@@ -8,6 +8,9 @@ For recent entries (v1.1.40 onwards), see the Changelog section of README.md.
 ## Unreleased
 
 ### Worker gateway, November 2026 -- setup-gateway.sh runs telcoin-network's worker gateway, a public JSON-RPC front for transaction submissions
+Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md). The Changelog
+section of README.md has one 2.2.0 entry per script; this summary goes by area.
+
 `setup-gateway.sh` (new, with `lib/gateway.sh`) installs the worker gateway as
 `telcoin-gateway.service`: the worker-gateway image under Docker, host network, uid 1101,
 read-only, no capability, never pulled by the unit. A submission goes to the worker of the node

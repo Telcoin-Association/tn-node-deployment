@@ -2004,6 +2004,110 @@ prints the exact fix command.
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
 
+### setup-gateway v2.2.0 — the worker gateway, a public JSON-RPC front for transaction submissions (new)
+`setup-gateway.sh` 2.2.0, with `lib/gateway.sh` 2.2.0 (`GATEWAY_VERSION`), is new. It runs
+telcoin-network's worker gateway as `telcoin-gateway.service`: a transaction submission goes to
+the worker of the node it fronts, and every other call is proxied to the `--redirect-queries` URL.
+
+- `--enable`, `--status`, `--refresh` and `--remove`, each with `--json`, in the shape of
+  `setup-alerts.sh`. Exit 0 done, 1 refused or rolled back, 2 older libraries, 3 a step failed
+  after something changed.
+- `--mode same-host` runs next to the node (not on mainnet; the node needs `--healthcheck`).
+  `--mode standalone` runs on a host with no node, in front of a validator's private IPv4
+  (`--upstream` and `--network`).
+- `--front caddy` (the default) serves `https://<domain>/` through this host's Caddy. `--front
+  none` listens on `0.0.0.0:8655` over plain HTTP, and no script opens that port.
+- The unit runs the image by digest under Docker: host network, uid 1101, read-only, no
+  capability, never pulled by the unit. An enable with unchanged inputs changes nothing, and a
+  failure after the first write puts the previous unit back. It never stops, starts or restarts
+  the node.
+- No released worker-gateway image exists. devnet takes a digest from
+  `us-docker.pkg.dev/telcoin-network/tn-public/worker-gateway`; testnet and mainnet refuse the
+  enable until a scripts release pins a digest.
+
+See [OPERATOR.md section 4.15](OPERATOR.md#415-worker-gateway). Full release note:
+[CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+
+### install-caddy v2.2.0 — the gateway site, rpc-advertise and rpc-unadvertise
+- A third managed site, `tn-gateway`, serves the gateway's public hostname in front of its
+  loopback listener: `POST` is proxied, the probe paths go to the probe listener, and a WebSocket
+  upgrade or any other method gets 405. New phases `gateway-status`, `gateway-check-dns`,
+  `gateway-enable` and `gateway-disable`; `gateway-enable` also runs on a host with a gateway and
+  no node.
+- `rpc-advertise` puts the gateway's `https://<host>/` (no WebSocket URL) into `node-info.yaml`
+  with one guarded node restart and no Caddy change. It refuses unless `https://<host>/health`
+  answers 200 from the node host. `rpc-unadvertise` clears the URL.
+- For every operator: each Caddy writer now keeps the gateway site, and the hostname clash check
+  and the teardown count three sites. `rpc-disable` leaves an advertisement made by
+  `rpc-advertise` alone, and `rpc-enable` refuses while a gateway site or advertisement is present.
+
+Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+
+### firewall-setup v2.2.0 — --gateway-from, and source lists compared the way ufw stores them
+- Fix for every operator: the cleanup of stale `--ssh-from` and `--p2p-from` sources compared
+  spellings as text, while `ufw` stores `1.2.3.4/32` as `1.2.3.4` and a CIDR by its network
+  address. Re-entering a source in another spelling, such as `1.2.3.4` after `1.2.3.4/32`,
+  re-allowed its rule and then deleted it as stale; on the SSH list that could lock the operator
+  out (reproduced on ufw 0.36.2). Sources are now compared in the form `ufw` stores them.
+- `--gateway-from <list>|none`, with `--enable` or `--reset`, lets a gateway host reach the node's
+  RPC and health ports. The list is stored as `GATEWAY_ALLOW_FROM` in `.node-meta` and applied
+  again by every `--enable` and `--reset`. While the node is bound for a gateway
+  (`GATEWAY_UPSTREAM`), `--reset`, `none` and a list that drops a bound host are refused.
+- `--json --status` gains `gateway_from`, and the status screen and the expected rules show two
+  rows per gateway source. A Caddyfile with the gateway site counts as a public edge, so 80 and
+  443 survive a `--reset`. `--enable` works on a host with a gateway and no node.
+
+Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+
+### edit-config v2.2.0 — gateway_upstream for a gateway on another host
+`edit-config.sh --set gateway_upstream=<IPv4>[,...]|off` binds the node's RPC and health listener
+to every interface for the listed gateway hosts; `off` puts both binds back.
+
+- Refused unless `ufw` is active, already admits those hosts (`firewall-setup.sh --gateway-from`)
+  and admits nobody else to either port.
+- Refused while the node is starting, stopping or waiting for its automatic restart, and on a node
+  whose RPC is already public. A node that was stopped stays stopped.
+
+Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+
+### check-node v2.2.0 — worker gateway checks
+- On a host with a gateway: the unit, the image, the three listeners, `/health`, the Caddy site,
+  and in same-host mode the node's health listener. `/ready` is reported and is not an issue while
+  the node is down. On a host with a gateway and no node, the node sections are skipped.
+- On a validator bound for a gateway on another host: the `ufw` rules for each listed host, the
+  RPC and health binds against `GATEWAY_UPSTREAM`, that no other source reaches either port, and
+  the advertised RPC URL.
+
+Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+
+### remove-node v2.2.0 — the worker gateway goes before the node
+- A gateway that serves a node on this host, or whose node this run removes, is removed before the
+  node stops: its unit, its container and `/etc/telcoin/gateway`. The image stays, and the Caddy
+  site is named, not removed.
+- A gateway that runs on its own host stays, and so do the node leftovers next to it; the script
+  points at `setup-gateway.sh --remove`.
+- The scan for other installs no longer offers the gateway's unit and container as a stray
+  install.
+
+Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+
+### update-scripts v2.2.0 — tracks the gateway files
+Tracks `setup-gateway.sh` and `lib/gateway.sh`. When an update changes either on a host with
+`telcoin-gateway.service`, it prints `The worker gateway script or its library changed. Render the
+gateway again on the host:` and the `setup-gateway.sh --refresh` command; it never runs it.
+
+Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+
+### lib/common.sh v2.2.0 — shared gateway names and checks
+- The gateway's paths, unit and container names, default ports and Caddyfile fence
+  (`TN_GATEWAY_*`), and the readers the other scripts use: the gateway's meta file, the
+  `GATEWAY_ALLOW_FROM` list (`tn_gateway_from_list`), whether `ufw` holds both rules for each
+  listed host (`tn_gateway_from_rules_ok`) and whether nobody else reaches the two ports
+  (`tn_gateway_ports_private`).
+- Sources `lib/gateway.sh` at its end when the file is present, as it does `lib/alerts.sh`.
+
+Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+
 ### update-scripts v2.1.0 — OpenPGP-signed releases, release expiry and a read-only --check
 `update-scripts.sh v2.1.0` installs `scripts-v2.1.0`, the first signed script release (serial 1).
 
