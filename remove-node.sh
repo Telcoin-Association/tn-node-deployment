@@ -297,6 +297,9 @@ show_detected() {
         remove_leftovers || lrc=$?
         if [[ $lrc -eq 3 ]]; then
             print_warn "No standard Telcoin node installation detected on this server."
+            if rm_gateway_present; then
+                rm_gateway_pointer
+            fi
         else
             report_orphaned_groups
         fi
@@ -479,9 +482,9 @@ remove_unit_leftovers() {
     [[ "$check" != "check" ]]
 }
 
-# rm_baseline_say step|log|warn MSG -- the printer for tn_host_baseline_remove and
-# remove_alerts: a JSON event of the same name in a --json run, a print_* line
-# otherwise.
+# rm_baseline_say step|log|warn MSG -- the printer for tn_host_baseline_remove,
+# remove_alerts and remove_gateway: a JSON event of the same name in a --json
+# run, a print_* line otherwise.
 rm_baseline_say() {
     if [[ "$RM_JSON" == "true" ]]; then
         json_event "${1:-log}" "${2:-}"
@@ -914,9 +917,20 @@ remove_node_host_files() {
 # node unit whose unit file is gone. rc 1 when none of them is.
 # The boot unit of the P2P new-flow limit (telcoin-p2p-limit.service) and the
 # private alerts timer (telcoin-heartbeat.timer) count too.
+# The worker gateway alone is not a node's leftover (a host can run one without
+# a node; setup-gateway.sh --remove removes it): /etc/telcoin counts only when
+# it holds more than the gateway's directory (rm_etc_telcoin_leftover), and
+# /var/backups/telcoin, where the gateway's installer keeps its backups, does
+# not count while a gateway is installed (rm_gateway_present).
 rm_leftovers_present() {
     local r="$TN_RM_ROOT" p m f
-    for p in "${r}/etc/telcoin" "${r}/var/backups/telcoin" "${r}/var/lib/telcoin" \
+    if rm_etc_telcoin_leftover; then
+        return 0
+    fi
+    if ! rm_gateway_present && [[ -e "${r}/var/backups/telcoin" || -L "${r}/var/backups/telcoin" ]]; then
+        return 0
+    fi
+    for p in "${r}/var/lib/telcoin" \
              "${r}/etc/systemd/system/telcoin-p2p-limit.service" \
              "${r}/etc/systemd/system/telcoin-heartbeat.timer"; do
         if [[ -e "$p" || -L "$p" ]]; then
@@ -942,8 +956,11 @@ rm_leftovers_present() {
 
 # remove_leftovers -- the menu with no node unit installed: list what a node
 # install left behind (an earlier removal stopped part way, or kept the keys or
-# the data), ask once, then remove it all. The private alerts go first
-# (remove_alerts). The node keys under the data dirs are shredded as the
+# the data), ask once, then remove it all. The private alerts and the worker
+# gateway go first (remove_alerts, remove_gateway): the gateway is listed and
+# removed only beside a node's leftovers; a host whose only files are the
+# gateway's gets rc 3 (show_detected then points at setup-gateway.sh --remove).
+# The node keys under the data dirs are shredded as the
 # service account (.node-meta HOST_SERVICE_USER, else the default), the config
 # tree /etc/telcoin is shredded, and the shared host files go through
 # remove_node_host_files. A DATA_DIR that .node-meta records outside
@@ -998,6 +1015,24 @@ remove_leftovers() {
     if remove_unit_leftovers "" check; then
         shown+=("unit backups and drop-ins in /etc/systemd/system")
     fi
+    # With a worker gateway here, /etc/telcoin holding only its directory and
+    # the backups dir its installer writes are the gateway's, not a node's: when
+    # nothing else is listed, this host has a gateway and no node (rc 3).
+    if rm_gateway_present; then
+        local only_gw=true
+        for item in ${dirs[@]+"${dirs[@]}"}; do
+            if [[ "$item" != "${r}/etc/telcoin" ]] || rm_etc_telcoin_leftover; then
+                only_gw=false
+            fi
+        done
+        for item in ${shown[@]+"${shown[@]}"}; do
+            [[ "$item" == "/var/backups/telcoin" ]] || only_gw=false
+        done
+        if [[ "$only_gw" == "true" ]]; then
+            return 3
+        fi
+        shown+=("/etc/systemd/system/telcoin-gateway.service, its container and /etc/telcoin/gateway (worker gateway; its image is kept)")
+    fi
     if [[ ${#dirs[@]} -eq 0 && ${#shown[@]} -eq 0 ]]; then
         return 3
     fi
@@ -1016,6 +1051,7 @@ remove_leftovers() {
     fi
     rm_take_lock || return 1
     remove_alerts
+    remove_gateway
 
     # The keys first: every file under a node-keys dir in the data dirs (as the
     # service account that owns them), then the whole config tree.
@@ -1439,11 +1475,98 @@ remove_alerts() {
 }
 
 # =============================================================================
+# REMOVE THE WORKER GATEWAY (telcoin-gateway.service of setup-gateway.sh)
+# =============================================================================
+
+# rm_gateway_present -- rc 0 when a file of the worker gateway is on this host:
+# its unit /etc/systemd/system/telcoin-gateway.service or its directory
+# /etc/telcoin/gateway (gateway.meta); rc 1 when neither is. Reads only.
+rm_gateway_present() {
+    local r="$TN_RM_ROOT" p
+    for p in /etc/systemd/system/telcoin-gateway.service /etc/telcoin/gateway; do
+        if [[ -e "${r}${p}" || -L "${r}${p}" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# rm_etc_telcoin_leftover -- rc 0 when /etc/telcoin is here and is a node's: a
+# symlink or a file there, an empty directory, or a directory holding any entry
+# other than gateway (the worker gateway's own directory, which a host without
+# a node has too); rc 1 when it is absent or holds only gateway. Reads only.
+rm_etc_telcoin_leftover() {
+    local d="${TN_RM_ROOT}/etc/telcoin" e
+    [[ -e "$d" || -L "$d" ]] || return 1
+    [[ -d "$d" && ! -L "$d" ]] || return 0
+    for e in "$d"/* "$d"/.[!.]* "$d"/..?*; do
+        [[ -e "$e" || -L "$e" ]] || continue
+        [[ "${e##*/}" != "gateway" ]] || continue
+        return 0
+    done
+    [[ ! -e "${d}/gateway" && ! -L "${d}/gateway" ]]
+}
+
+# rm_gateway_pointer -- the line for a host with a worker gateway and no node:
+# this script removes the gateway only with a node, setup-gateway.sh removes it
+# on its own.
+rm_gateway_pointer() {
+    rm_baseline_say log "A worker gateway is installed here and this script leaves it in place; remove it with: sudo bash setup-gateway.sh --remove"
+}
+
+# remove_gateway -- tear down the worker gateway setup-gateway.sh installs, the
+# way setup-gateway.sh --remove does except for its Caddy step: the unit
+# telcoin-gateway.service disabled and stopped, its unit file removed, the
+# container telcoin-gateway removed when docker is installed, /etc/telcoin/gateway
+# removed, systemd reloaded and the unit's failed state reset. The image stays
+# (the output names it, from gateway.meta IMAGE). The Caddy site is not changed:
+# when /etc/caddy/Caddyfile still holds the gateway block, the output gives the
+# install-caddy.sh command that removes it. The callers run it next to
+# remove_alerts, before the node (the gateway's upstream) stops.
+# Fixed paths under TN_RM_ROOT and no lib/gateway.sh call: it works on a host
+# whose updater installed this script and not that library. Says and does
+# nothing when no gateway file is here (rm_gateway_present). Always returns 0.
+remove_gateway() {
+    local r="$TN_RM_ROOT" gd unit cf img="" line
+    rm_gateway_present || return 0
+    gd="${r}/etc/telcoin/gateway"
+    unit="${r}/etc/systemd/system/telcoin-gateway.service"
+    cf="${r}/etc/caddy/Caddyfile"
+    if [[ -f "${gd}/gateway.meta" && -r "${gd}/gateway.meta" && ! -L "${gd}/gateway.meta" ]]; then
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            case "$line" in
+                IMAGE=*) img="${line#IMAGE=}"; break ;;
+            esac
+        done < "${gd}/gateway.meta"
+    fi
+    rm_baseline_say step "Removing the worker gateway (telcoin-gateway)"
+    systemctl disable --now telcoin-gateway.service >/dev/null 2>&1 || true
+    systemctl stop telcoin-gateway.service >/dev/null 2>&1 || true
+    rm -f -- "$unit" 2>/dev/null || true
+    if command -v docker >/dev/null 2>&1; then
+        docker rm -f telcoin-gateway >/dev/null 2>&1 || true
+    fi
+    _rm_dir "$gd"
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl reset-failed telcoin-gateway.service >/dev/null 2>&1 || true
+    if [[ -n "$img" ]]; then
+        rm_baseline_say log "The worker gateway image is kept: ${img} (remove it with: docker image rm ${img})"
+    else
+        rm_baseline_say log "The worker gateway image is kept (docker image ls lists it)"
+    fi
+    if [[ -f "$cf" ]] && grep -qF '# >>> tn-gateway >>>' "$cf" 2>/dev/null; then
+        rm_baseline_say warn "The Caddyfile still holds the worker gateway's site; remove it with: sudo bash install-caddy.sh --phase gateway-disable"
+    fi
+    return 0
+}
+
+# =============================================================================
 # REMOVE A NODE  (drives the unit/container/dir teardown from the resolvers)
 # =============================================================================
 
 # Tear down a SINGLE installed node unit and everything tied to it: the private
-# alerts (before the node stops), the systemd unit, the docker container (when
+# alerts and the worker gateway (before the node stops; the gateway's image is
+# kept), the systemd unit, the docker container (when
 # the install method is docker), chain data, keys/config, the host-wide testnet
 # add-ons, shared components, and the service user. $1 is the unit base name
 # (the new "telcoin" unit or a legacy unit name) discovered by
@@ -1472,8 +1595,10 @@ remove_node_unit() {
     [[ -n "$key_group" && "$key_group" != "root" ]] || key_group="${SERVICE_GROUP:-telcoin}"
 
     # The private alerts go before the node stops, so the heartbeat does not
-    # push the stop as a failure.
+    # push the stop as a failure; the worker gateway goes with them, before its
+    # upstream stops.
     remove_alerts
+    remove_gateway
 
     # Stop service
     stop_and_disable_service "$unit"
@@ -1636,6 +1761,9 @@ custom_container_lines() {
 custom_is_managed_name() {
     local name="$1" n
     [[ "$name" == "telcoin-ui" ]] && return 0
+    # the worker gateway (unit and container telcoin-gateway): setup-gateway.sh
+    # manages it, and its image is a tn-public one the scan would match
+    [[ "$name" == "telcoin-gateway" ]] && return 0
     while IFS= read -r n; do
         [[ -z "$n" ]] && continue
         [[ "$name" == "$n" ]] && return 0
@@ -1818,8 +1946,9 @@ main_menu() {
 # Used by the Telcoin Node Manager UI through the root-owned telcoin-ui-helper.
 # DESTRUCTIVE: requires --yes, and the server gates it behind a typed "DELETE"
 # confirmation. Scope is cumulative:
-#   service -> remove the private alerts (remove_alerts, before the node stops),
-#              then stop+disable+rm unit, its old backups (shredded) and
+#   service -> remove the private alerts and the worker gateway (remove_alerts,
+#              remove_gateway, before the node stops; the gateway image is
+#              kept), then stop+disable+rm unit, its old backups (shredded) and
 #              drop-in dir (+ docker container)
 #   data    -> service + remove chain data (node keys inside it shredded)
 #   keys    -> data + shred keys and passphrase files, remove config/.node-meta,
@@ -1830,7 +1959,9 @@ main_menu() {
 # When the unit file is already gone (an earlier run stopped part way, or ran
 # with a smaller scope), a run continues as long as the node left files behind
 # (rm_leftovers_present), does what its scope still needs and ends with the
-# usual "done" event; with nothing left it reports "no node installed".
+# usual "done" event; with nothing left it reports "no node installed". A host
+# with a worker gateway and no node gets a "log" event pointing at
+# setup-gateway.sh --remove before that error, and nothing is removed.
 #
 #   remove-node.sh --json --remove <observer|validator> --scope <service|data|keys> --yes
 #
@@ -1877,6 +2008,9 @@ json_remove() {
     else
         svc=""
         if ! rm_leftovers_present; then
+            if rm_gateway_present; then
+                rm_gateway_pointer
+            fi
             json_event error "no node installed"
             return 1
         fi
@@ -1927,8 +2061,10 @@ json_remove() {
         return 1
     fi
 
-    # The private alerts first, before the node stops (every scope).
+    # The private alerts and the worker gateway first, before the node stops
+    # (every scope).
     remove_alerts
+    remove_gateway
 
     # The unit, its old backups (shredded) and its drop-in directory.
     if [[ -n "$svc" ]]; then
