@@ -62,6 +62,10 @@ AUTHORITY_ID=""
 NETWORK_RPC=""
 QUERY_NETWORK=true
 RUN_AUDIT=false
+# True on a host with a worker gateway (setup-gateway.sh) and no node: set by
+# detect_node; the header says so once, and only the host sections (disk, memory,
+# script release) and the worker-gateway section run.
+CN_GATEWAY_ONLY=false
 
 # The network this node belongs to, set by resolve_network: NODE_NETWORK is
 # testnet, mainnet or devnet ("" when unknown), NETWORK_SRC says where that came
@@ -120,7 +124,11 @@ detect_node() {
         SERVICE_NAME="$svc"
     else
         SERVICE_NAME="telcoin"
-        print_warn "No Telcoin node detected on this server -- checking service '${SERVICE_NAME}'."
+        if declare -F tn_gateway_installed >/dev/null 2>&1 && tn_gateway_installed; then
+            CN_GATEWAY_ONLY=true
+        else
+            print_warn "No Telcoin node detected on this server -- checking service '${SERVICE_NAME}'."
+        fi
     fi
     return 0
 }
@@ -2177,6 +2185,235 @@ check_alerts() {
     return 0
 }
 
+# _cn_gw_listener NAME HOST:PORT SS_OUTPUT -- is the gateway's NAME listener bound
+# at HOST:PORT (gateway.meta's address, as gw_status reports it) in `ss -ltn`
+# output? rc 0 with an OK line; rc 1 with an error line saying what is bound on
+# that port instead, or that nothing is.
+_cn_gw_listener() {
+    local name="$1" want="$2" port bound
+    if [[ "$want" != *:* ]]; then
+        print_info "Gateway ${name} listener: not checked (no address from gateway.meta)"
+        return 0
+    fi
+    port="${want##*:}"
+    bound="$(awk -v p=":${port}" '
+        NR > 1 && length($4) > length(p) && substr($4, length($4) - length(p) + 1) == p { printf "%s ", $4 }' <<< "$3")"
+    bound="${bound% }"
+    case " ${bound} " in
+        *" ${want} "*) print_ok "Gateway ${name} listener on ${want}"; return 0 ;;
+    esac
+    if [[ "${want%:*}" == "0.0.0.0" && " ${bound} " == *" *:${port} "* ]]; then
+        print_ok "Gateway ${name} listener on ${want}"
+        return 0
+    fi
+    if [[ -z "$bound" ]]; then
+        print_error "Gateway ${name} listener: nothing listens on ${want}, the address in gateway.meta"
+    else
+        print_error "Gateway ${name} listener is bound at ${bound}, not at ${want} as gateway.meta says; run: sudo bash setup-gateway.sh --refresh"
+    fi
+    return 1
+}
+
+# check_gateway -- the worker gateway on this host (setup-gateway.sh, every
+# network), run when tn_gateway_installed. gw_status (lib/gateway.sh) prints its
+# own lines and returns the number of issues it found (the unit not enabled or not
+# active, the image not held, GET /health on the probe listener not answering 200,
+# no Caddy gateway block with FRONT=caddy); they count in HEALTH_ISSUES. This adds
+# what gw_status does not check: the /ready state as information (a 503 while the
+# node is down or still syncing is not an issue), each listener bound where
+# gateway.meta says, the unit's ExecStart image equal to gateway.meta's IMAGE and,
+# in same-host mode, a --healthcheck on the node's launch line at gateway.meta's
+# HEALTH_PORT. With an older lib/common.sh or lib/gateway.sh the section is
+# skipped with one line, and only when this host has a gateway.
+check_gateway() {
+    local n=0 meta mode image hport unit exec_img bind rc=0 ss_out pair
+    if ! have_fns tn_gateway_installed tn_gateway_meta_path tn_gateway_meta_get \
+            tn_node_health_bind gw_status gw_unit_path; then
+        if have_fns tn_gateway_installed; then
+            tn_gateway_installed || return 0
+        else
+            [[ -f "${TN_ROOT_PREFIX:-}/etc/telcoin/gateway/gateway.meta" ]] || return 0
+        fi
+        echo ""
+        print_warn "This host has a worker gateway, but this check-node.sh needs a newer lib/common.sh (${COMMON_VERSION:-unknown}) or lib/gateway.sh (${GATEWAY_VERSION:-not installed}), so the gateway checks were skipped. Run update-scripts.sh."
+        return 0
+    fi
+    tn_gateway_installed || return 0
+    echo ""
+    print_step "Checking the worker gateway..."
+    gw_status || n=$?
+    HEALTH_ISSUES=$(( HEALTH_ISSUES + n ))
+
+    if [[ "${GW_ST_ACTIVE:-}" != "true" ]]; then
+        print_info "Gateway /ready and listeners: not checked (the gateway is not running)"
+    else
+        if [[ "${GW_ST_READY:-}" == "true" ]]; then
+            print_info "Gateway /ready: 200 (worker 0 accepts transactions)"
+        else
+            print_info "Gateway /ready: not ready (503 while the node is down or still syncing; not an issue by itself)"
+        fi
+        if ! command -v ss >/dev/null 2>&1; then
+            print_info "Gateway listeners: not checked (ss not found)"
+        else
+            ss_out="$(ss -ltn 2>/dev/null)"
+            for pair in "listen ${GW_ST_LISTEN:-}" "probe ${GW_ST_PROBE:-}" "metrics ${GW_ST_METRICS:-}"; do
+                _cn_gw_listener "${pair%% *}" "${pair#* }" "$ss_out" || (( ++HEALTH_ISSUES ))
+            done
+        fi
+    fi
+
+    meta="$(tn_gateway_meta_path)"
+    if [[ ! -r "$meta" ]]; then
+        print_info "gateway.meta is readable by root only: the unit's image and the node's --healthcheck were not checked (run with sudo)"
+        return 0
+    fi
+    mode="$(tn_gateway_meta_get MODE 2>/dev/null)" || mode=""
+    image="$(tn_gateway_meta_get IMAGE 2>/dev/null)" || image=""
+    hport="$(tn_gateway_meta_get HEALTH_PORT 2>/dev/null)" || hport=""
+    unit="$(gw_unit_path)"
+    if [[ ! -r "$unit" ]]; then
+        print_info "Gateway unit ${unit} not found, so its image was not compared with gateway.meta"
+    else
+        exec_img="$(awk '/^ExecStart=/ { for (i = 1; i <= NF; i++) if ($i ~ /@sha256:/) { print $i; exit } }' "$unit" 2>/dev/null)"
+        if [[ -n "$image" && "$exec_img" == "$image" ]]; then
+            print_ok "Gateway unit runs gateway.meta's image (${image})"
+        else
+            print_error "The gateway unit's ExecStart image (${exec_img:-none found}) is not gateway.meta's IMAGE (${image:-not set}); run: sudo bash setup-gateway.sh --refresh"
+            (( ++HEALTH_ISSUES ))
+        fi
+    fi
+
+    [[ "$mode" == "same-host" ]] || return 0
+    bind="$(tn_node_health_bind 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        print_error "Same-host gateway, but no node launch file was found to read --healthcheck from"
+        (( ++HEALTH_ISSUES ))
+    elif [[ $rc -ne 0 ]]; then
+        print_error "Same-host gateway, but the node's launch line has no --healthcheck${hport:+ ${hport}}: the gateway cannot tell when worker 0 is ready"
+        (( ++HEALTH_ISSUES ))
+    elif [[ -n "$hport" && "${bind##*:}" != "$hport" ]]; then
+        print_error "The node's --healthcheck is on ${bind}, but the gateway's readiness URL uses port ${hport} (gateway.meta HEALTH_PORT); re-run setup-gateway.sh --enable so it reads the node's port"
+        (( ++HEALTH_ISSUES ))
+    else
+        print_ok "Node launch line has --healthcheck ${bind} for the gateway's readiness URL"
+    fi
+    return 0
+}
+
+# check_gateway_upstream -- the validator side of a worker gateway, run when
+# .node-meta has GATEWAY_ALLOW_FROM (firewall-setup.sh --gateway-from) or
+# GATEWAY_UPSTREAM (edit-config.sh --set gateway_upstream). ufw must let every
+# listed source reach the RPC and health ports (tn_gateway_from_rules_ok; reading
+# ufw needs root). The RPC bind (--http.addr) and the --healthcheck bind must be
+# 0.0.0.0 exactly when GATEWAY_UPSTREAM is set; without it a wildcard RPC bind is
+# fine only behind the public-RPC Caddy block. node-info.yaml advertising an https
+# RPC URL and no ws URL is reported as information. Failures count in
+# HEALTH_ISSUES; an older lib/common.sh skips the section with one line.
+check_gateway_upstream() {
+    local from="" up="" frc=0 urc=0 list s rpc_port launch rpc_bind="" brc=0 bind="" hrc=0 ni http ws
+    if ! have_fns tn_gateway_from_list tn_gateway_from_rules_ok tn_node_health_bind \
+            tn_node_launch_target tn_launch_flag_get; then
+        from="$(meta_get GATEWAY_ALLOW_FROM 2>/dev/null || true)"
+        up="$(meta_get GATEWAY_UPSTREAM 2>/dev/null || true)"
+        [[ -n "${from}${up}" ]] || return 0
+        echo ""
+        print_warn "This node has gateway settings in .node-meta, but lib/common.sh ${COMMON_VERSION:-unknown} is older than this check-node.sh, so the gateway upstream checks were skipped. Run update-scripts.sh."
+        return 0
+    fi
+    from="$(tn_gateway_from_list 2>/dev/null)" || frc=$?
+    up="$(meta_get GATEWAY_UPSTREAM 2>/dev/null)" || urc=$?
+    [[ $frc -eq 2 || $urc -eq 2 || -n "$from" || -n "$up" ]] || return 0
+    echo ""
+    print_step "Checking the gateway upstream (validator side)..."
+    if [[ $frc -eq 2 || $urc -eq 2 ]]; then
+        print_error "GATEWAY_ALLOW_FROM or GATEWAY_UPSTREAM is set more than once in .node-meta, so the gateway upstream was not checked. Remove the extra lines."
+        (( ++HEALTH_ISSUES ))
+        return 0
+    fi
+
+    # Firewall: every source in GATEWAY_ALLOW_FROM and GATEWAY_UPSTREAM.
+    list="$from"
+    for s in ${up//,/ }; do
+        case ",${list}," in
+            *",${s},"*) ;;
+            *) list="${list:+${list},}${s}" ;;
+        esac
+    done
+    rpc_port="$(meta_get RPC_PORT 2>/dev/null || true)"
+    [[ "$rpc_port" =~ ^[0-9]+$ ]] || rpc_port="$DEFAULT_RPC_PORT"
+    if [[ "$(id -u 2>/dev/null)" != "0" ]]; then
+        print_info "Gateway firewall rules: not checked (reading ufw needs sudo)"
+    elif tn_gateway_from_rules_ok "$list" "$rpc_port" "$TN_KUMA_PORT"; then
+        print_ok "ufw lets ${list} reach the RPC port ${rpc_port} and the health port ${TN_KUMA_PORT}"
+    elif [[ "${TN_GATEWAY_FROM_MISSING:-}" == "ufw-inactive" ]]; then
+        print_error "ufw is not active, so the gateway's rules are not in force; run: sudo bash firewall-setup.sh --enable --gateway-from ${list}"
+        (( ++HEALTH_ISSUES ))
+    else
+        print_error "ufw has no rule 'allow from ${TN_GATEWAY_FROM_MISSING%% *} to any port ${TN_GATEWAY_FROM_MISSING##* } proto tcp'; run: sudo bash firewall-setup.sh --enable --gateway-from ${list}"
+        (( ++HEALTH_ISSUES ))
+    fi
+
+    # Binds: 0.0.0.0 exactly when GATEWAY_UPSTREAM is set. An absent --http.addr is
+    # the node's default, 127.0.0.1.
+    launch="$(_cn_launch_file 2>/dev/null)" || launch=""
+    if [[ -z "$launch" || ! -r "$launch" ]]; then
+        print_info "The node launch file is not readable, so the RPC and --healthcheck binds were not checked${launch:+ (run with sudo)}"
+    else
+        rpc_bind="$(tn_launch_flag_get "$launch" --http.addr 2>/dev/null)" || brc=$?
+        case $brc in
+            0) ;;
+            1) rpc_bind="127.0.0.1" ;;
+            *) rpc_bind="unknown" ;;
+        esac
+        bind="$(tn_node_health_bind 2>/dev/null)" || hrc=$?
+        case $hrc in
+            0) bind="${bind%:*}" ;;
+            1) bind="none" ;;
+            *) bind="unknown" ;;
+        esac
+        if [[ -n "$up" ]]; then
+            if [[ "$rpc_bind" == "0.0.0.0" && "$bind" == "0.0.0.0" ]]; then
+                print_ok "RPC and --healthcheck listen on 0.0.0.0 for the gateway at ${up}"
+            else
+                print_error "GATEWAY_UPSTREAM is ${up}, but the node's RPC listens on ${rpc_bind} and its --healthcheck on ${bind} (both must be 0.0.0.0); run: sudo bash edit-config.sh --set gateway_upstream=${up}"
+                (( ++HEALTH_ISSUES ))
+            fi
+        else
+            case "$rpc_bind" in
+                0.0.0.0|::|"[::]")
+                    if grep -qxF "# >>> tn-rpc >>>" "${TN_ROOT_PREFIX:-}/etc/caddy/Caddyfile" 2>/dev/null; then
+                        print_info "RPC listens on ${rpc_bind}; the public-RPC Caddy block fronts it"
+                    else
+                        print_error "The node's RPC listens on ${rpc_bind} with no GATEWAY_UPSTREAM and no public-RPC Caddy block; run: sudo bash edit-config.sh --set gateway_upstream=off"
+                        (( ++HEALTH_ISSUES ))
+                    fi
+                    ;;
+            esac
+            if [[ "$bind" == "0.0.0.0" ]]; then
+                print_error "The node's --healthcheck listens on 0.0.0.0 with no GATEWAY_UPSTREAM; run: sudo bash edit-config.sh --set gateway_upstream=off"
+                (( ++HEALTH_ISSUES ))
+            elif [[ "$rpc_bind" != "0.0.0.0" && "$rpc_bind" != "::" && "$rpc_bind" != "[::]" ]]; then
+                print_ok "RPC (${rpc_bind}) and --healthcheck (${bind}) are not on 0.0.0.0 (no GATEWAY_UPSTREAM)"
+            fi
+        fi
+    fi
+
+    # Advertisement: behind a gateway, worker 0 advertises the gateway's https URL
+    # and no ws URL (install-caddy.sh --phase rpc-advertise writes exactly that).
+    ni="$(detect_data_dir 2>/dev/null)/node-info.yaml"
+    if [[ ! -r "$ni" ]]; then
+        print_info "node-info.yaml is not readable, so the advertised RPC URL was not checked"
+    else
+        read -r http ws <<< "$(advertised_rpc "$ni")"
+        if [[ "$http" == https://* && "$ws" == "none" ]]; then
+            print_ok "node-info.yaml advertises ${http} and no ws URL"
+        else
+            print_info "node-info.yaml advertises RPC ${http:-none}, ws ${ws:-none}; behind a gateway it should advertise the gateway's https URL and no ws URL: run sudo bash install-caddy.sh --phase rpc-advertise --rpc-domain <gateway host>"
+        fi
+    fi
+    return 0
+}
+
 # The P2P committee allowlist (firewall-setup.sh --p2p-committee): the state dir
 # of tn-p2p-allow-sync (root 0700: config, status, the last-good program) and the
 # timer that runs one sync every 5 minutes. check_p2p_committee reads its files
@@ -2562,24 +2799,34 @@ trap check_node_cleanup EXIT
 # The local RPC is probed before the header: when .node-meta does not say which
 # network this node is on, its chain id decides which network RPC to compare with.
 LOCAL_CHAIN_ID=""
-read -r LOCAL_RPC_MODE LOCAL_CHAIN_ID <<< "$(probe_local_rpc "$RPC_URL")"
-resolve_network
+LOCAL_RPC_MODE=""
+if [[ "$CN_GATEWAY_ONLY" != "true" ]]; then
+    read -r LOCAL_RPC_MODE LOCAL_CHAIN_ID <<< "$(probe_local_rpc "$RPC_URL")"
+    resolve_network
+fi
 
 print_header "Telcoin Network Node Health Check  v${SCRIPT_VERSION}"
-print_info "Service:      ${SERVICE_NAME}"
-print_info "Local RPC:    ${RPC_URL}"
-if [[ -n "$NODE_NETWORK" ]]; then
-    print_info "Network:      ${NODE_NETWORK} (chain ${EXPECTED_CHAIN_ID}, from ${NETWORK_SRC}${NETWORK_NOTE:+; ${NETWORK_NOTE}})"
+if [[ "$CN_GATEWAY_ONLY" == "true" ]]; then
+    print_info "No Telcoin node on this server, only a worker gateway: the node sections are skipped."
 else
-    print_info "Network:      unknown (${NETWORK_NOTE:-not recorded}; any Telcoin chain id is accepted)"
+    print_info "Service:      ${SERVICE_NAME}"
+    print_info "Local RPC:    ${RPC_URL}"
+    if [[ -n "$NODE_NETWORK" ]]; then
+        print_info "Network:      ${NODE_NETWORK} (chain ${EXPECTED_CHAIN_ID}, from ${NETWORK_SRC}${NETWORK_NOTE:+; ${NETWORK_NOTE}})"
+    else
+        print_info "Network:      unknown (${NETWORK_NOTE:-not recorded}; any Telcoin chain id is accepted)"
+    fi
+    [[ -z "$NETWORK_RPC_LABEL" ]] || print_info "Network RPC:  ${NETWORK_RPC_LABEL}"
 fi
-[[ -z "$NETWORK_RPC_LABEL" ]] || print_info "Network RPC:  ${NETWORK_RPC_LABEL}"
-print_info "Time:         $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+print_info "Time:        $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
 if ! version_gte "${COMMON_VERSION:-0}" "2.0.0"; then
     print_warn "lib/common.sh ${COMMON_VERSION:-unknown} is older than 2.0.0: checks that need its newer helpers are skipped. Run update-scripts.sh."
 fi
 echo ""
 
+# Sections 1-7 check the node. A host with only a worker gateway skips them
+# without a line each (the header said so once); the fi before section 8 ends it.
+if [[ "$CN_GATEWAY_ONLY" != "true" ]]; then
 # =============================================================================
 # 1. SERVICE STATUS
 # =============================================================================
@@ -2949,6 +3196,7 @@ else
     echo ""
     print_info "Tip: run with --address 0xYOUR_ADDRESS to check on-chain validator status."
 fi
+fi  # end of the node sections 1-7 (skipped on a gateway-only host)
 
 # =============================================================================
 # 8. DISK
@@ -3046,12 +3294,18 @@ report_testnet_addons
 # =============================================================================
 # 9.6 PUBLIC RPC (Caddy tn-rpc vhost / https + wss probes / worker.rpc advert)
 # =============================================================================
-report_public_rpc
+[[ "$CN_GATEWAY_ONLY" == "true" ]] || report_public_rpc
 
 # =============================================================================
 # 9.7 SCRIPT RELEASE (the installed signed release and its expiry)
 # =============================================================================
 report_scripts_release
+
+# =============================================================================
+# 9.8 WORKER GATEWAY (setup-gateway.sh on this host; the validator side of one)
+# =============================================================================
+check_gateway
+check_gateway_upstream
 
 # =============================================================================
 # 10. SUMMARY
@@ -3092,7 +3346,9 @@ if [[ "$CATCHING_UP" == "true" ]]; then
         print_warn "CATCHING UP: execution layer is behind the network"
     fi
 elif (( HEALTH_ISSUES == 0 )); then
-    if [[ -n "$EVM_LAG" ]]; then
+    if [[ "$CN_GATEWAY_ONLY" == "true" ]]; then
+        print_ok "All checks passed -- the worker gateway appears healthy"
+    elif [[ -n "$EVM_LAG" ]]; then
         print_ok "All checks passed -- node is healthy and caught up (EVM lag ${EVM_LAG})"
     else
         print_ok "All checks passed -- node appears healthy"
