@@ -1,0 +1,235 @@
+/* =============================================================================
+ * theme.css -- print stylesheet for the node requirements one-pagers
+ *
+ * The two one-pagers, docs/partner/testnet-node-requirements/ and
+ * docs/partner/mainnet-node-requirements/, each hold an identical copy of this
+ * file and of template.html. Everything that differs between the networks lives
+ * in each one's Markdown and metadata.yaml, never here.
+ *
+ * Rendered by WeasyPrint (CSS paged media) from the HTML that pandoc writes to
+ * the document's build/ directory. Font paths are relative to this file; the
+ * build copies this stylesheet into build/ with those paths adjusted.
+ * Built by tools/build-partner-pdf.sh <doc>, which fails unless the result is
+ * exactly one page.
+ *
+ * Brand tokens: the guide's (docs/partner/mno-node-guide/theme.css).
+ *   navy gradient   #183988 -> #080821      accent (rules only)  #14C8FF
+ *   body text       #0B183C                 headings             #183988
+ *   links           #1A3372                 muted / borders      #9298B5 / #D5DBEA
+ *   print tints     #EEF1F8 / #F5F7FC       CTA gradient         #5533FF -> #37AEFF
+ * Type floors: body text 7.5pt, table and code text 7pt. Cut words to fit;
+ * do not go below them. A table's first column never wraps: keep its labels
+ * short. A table with an empty header row prints no header (pandoc drops it).
+ * Layout uses normal flow, CSS columns and absolute or fixed positioning only
+ * (no flexbox).
+ *
+ * Markdown hooks (raw HTML in the .md, blank lines around the Markdown inside):
+ *   <div class="wide"> ... </div>      full width, above the columns
+ *   <div class="columns"> ... </div>   the rest, in two columns
+ *   <div class="col-break"></div>      inside .columns: starts the right column
+ * ============================================================================= */
+
+/* ---- Fonts (Geist / Geist Mono, OFL 1.1, see ../assets/README.md) ---------- */
+@font-face { font-family: "Geist"; font-style: normal; font-weight: 400;
+  src: url("../assets/fonts/geist/Geist-Regular.woff2") format("woff2"); }
+@font-face { font-family: "Geist"; font-style: italic; font-weight: 400;
+  src: url("../assets/fonts/geist/Geist-Italic.woff2") format("woff2"); }
+@font-face { font-family: "Geist"; font-style: normal; font-weight: 500;
+  src: url("../assets/fonts/geist/Geist-Medium.woff2") format("woff2"); }
+@font-face { font-family: "Geist"; font-style: normal; font-weight: 600;
+  src: url("../assets/fonts/geist/Geist-SemiBold.woff2") format("woff2"); }
+@font-face { font-family: "Geist"; font-style: normal; font-weight: 700;
+  src: url("../assets/fonts/geist/Geist-Bold.woff2") format("woff2"); }
+@font-face { font-family: "Geist Mono"; font-style: normal; font-weight: 400;
+  src: url("../assets/fonts/geist/GeistMono-Regular.woff2") format("woff2"); }
+
+/* ---- Page ------------------------------------------------------------------- */
+/* No side or top margin, so the header band runs edge to edge. The bottom
+   margin is the footer strip's height: body text stops above it, and text that
+   does not fit goes to a second page, which fails the build. */
+@page {
+  size: A4;
+  margin: 0 0 12mm;
+}
+
+/* ---- Base ------------------------------------------------------------------- */
+html {
+  font-family: "Geist", sans-serif;
+  font-size: 8.5pt;
+  font-weight: 400;
+  line-height: 1.38;
+  color: #0B183C;
+}
+body { margin: 0; }
+p { margin: 0 0 1.6mm; }
+strong { font-weight: 600; }
+img { max-width: 100%; }
+
+/* ---- Header band -------------------------------------------------------------- */
+.band {
+  position: relative;
+  padding: 6mm 14mm 5mm;
+  background: linear-gradient(110deg, #183988 0%, #080821 100%);
+  color: #fff;
+}
+.band p { margin: 0; }
+.band-logo { display: block; width: 40mm; height: auto; }
+.band-badge {
+  position: absolute; top: 6.2mm; right: 14mm;
+  padding: .9mm 2.6mm .7mm;
+  border: .75pt solid #14C8FF; border-radius: 3mm;
+  font: 600 7.5pt/1.2 "Geist", sans-serif;
+  letter-spacing: .06em; text-transform: uppercase;
+  color: #14C8FF;
+}
+.band-rule {
+  width: 18mm; height: 1mm; margin: 3.6mm 0 2.2mm;
+  background: linear-gradient(90deg, #5533FF, #37AEFF);
+}
+.band-title { font: 700 18pt/1.15 "Geist", sans-serif; }
+.band-subtitle {
+  margin-top: .8mm !important;
+  font: 400 9pt/1.3 "Geist", sans-serif;
+  color: rgba(255, 255, 255, .82);
+}
+.band-meta {
+  position: absolute; right: 14mm; bottom: 5mm;
+  font: 500 8pt/1.3 "Geist", sans-serif;
+  color: rgba(255, 255, 255, .82);
+}
+
+/* ---- Footer strip --------------------------------------------------------------- */
+/* Fixed boxes are placed on the page, so bottom: -12mm puts the strip in the
+   page's bottom margin, which @page keeps free of body text. */
+.strip {
+  position: fixed; left: 0; right: 0; bottom: -12mm;
+  height: 12mm;
+  background: #F5F7FC;
+  border-top: .5pt solid #D5DBEA;
+}
+.strip-logo {
+  position: absolute; left: 14mm; top: 4mm;
+  width: 40mm; height: auto;
+}
+.strip-links {
+  position: absolute; right: 14mm; top: 4.3mm;
+  margin: 0;
+  font: 400 7.5pt/1.2 "Geist", sans-serif;
+  color: #1A3372;
+}
+.strip a { color: #1A3372; text-decoration: none; }
+.strip-sep { color: #9298B5; }
+
+/* ---- Body: full-width block, then two columns ------------------------------ */
+/* CSS multi-column on a wrapper, not on main: WeasyPrint 70 lays a
+   column-span: all box out wider than its multi-column parent, so the
+   full-width block sits outside the columns instead of spanning them. The
+   right column starts at a forced break, so the split is the writer's choice. */
+main { margin: 4.5mm 14mm 0; }
+.wide { margin-bottom: 3.4mm; }
+.wide table { font-size: 8.5pt; }
+.wide th, .wide td { padding-top: 1.2mm; padding-bottom: 1.2mm; }
+/* The full-width hardware table: role, minimum, recommended. */
+.wide th:nth-child(2) { width: 42%; }
+.wide th:nth-child(3) { width: 32%; }
+/* A list in the full-width block runs in two columns of its own. */
+.wide ul { column-count: 2; column-gap: 8mm; }
+.wide li { break-inside: avoid; }
+.columns {
+  column-count: 2;
+  column-gap: 8mm;
+  column-rule: .5pt solid #D5DBEA;
+}
+.col-break { break-before: column; }
+
+/* ---- Headings --------------------------------------------------------------- */
+/* pandoc shifts the Markdown's "## " sections up to h1. */
+main h1 {
+  margin: 3.6mm 0 1.6mm; padding-bottom: .8mm;
+  font: 600 10pt/1.25 "Geist", sans-serif; color: #183988;
+  border-bottom: .75pt solid #14C8FF;
+  break-after: avoid;
+}
+main h1:first-child, .col-break + h1 { margin-top: 0; }
+
+/* ---- Links ------------------------------------------------------------------ */
+main a {
+  color: #1A3372;
+  text-decoration: underline;
+  text-decoration-color: #14C8FF;
+}
+
+/* ---- Lists ------------------------------------------------------------------ */
+ul, ol { margin: 0 0 1.6mm; padding-left: 4mm; }
+li { margin: .5mm 0; }
+li > p { margin-bottom: .5mm; }
+
+/* ---- Code ------------------------------------------------------------------- */
+pre {
+  margin: 1mm 0 2mm;
+  padding: 1.6mm 2.4mm;
+  font: 400 7.5pt/1.4 "Geist Mono", monospace;
+  background: #EEF1F8;
+  border-left: 2pt solid #14C8FF;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  break-inside: avoid;
+  /* Geist Mono's contextual alternates swallow the space in " --flag". */
+  font-variant-ligatures: none;
+  font-feature-settings: "calt" 0, "liga" 0;
+}
+code {
+  font-family: "Geist Mono", monospace; font-size: .9em;
+  font-variant-ligatures: none; font-feature-settings: "calt" 0, "liga" 0;
+  background: #EEF1F8; padding: 0 .2em;
+  overflow-wrap: anywhere;
+}
+pre code { font-size: inherit; background: none; padding: 0; }
+
+/* ---- Tables ----------------------------------------------------------------- */
+table {
+  width: 100%;
+  margin: 1mm 0 2mm;
+  border-collapse: collapse;
+  font-size: 8pt;
+  line-height: 1.32;
+  break-inside: avoid;
+}
+/* Row backgrounds, not cell backgrounds: abutting cell fills leave hairline
+   seams between cells in some PDF viewers. */
+thead tr { background: #183988; }
+th {
+  padding: 1.1mm 1.8mm;
+  color: #fff;
+  font-weight: 600; text-align: left; vertical-align: bottom;
+}
+td { padding: .9mm 1.8mm; vertical-align: top; border-bottom: .5pt solid #D5DBEA; }
+tbody tr:nth-child(even) { background: #F5F7FC; }
+td:first-child { white-space: nowrap; font-weight: 500; }
+/* break-word, not anywhere: anywhere shrinks a code column's min-content width
+   to one character, so the table squeezes it and splits identifiers. */
+td code { overflow-wrap: break-word; }
+th code { background: rgba(255, 255, 255, .16); color: #fff; }
+td p { margin: 0; }
+
+/* ---- Callouts (GitHub alerts and blockquotes) ------------------------------- */
+div.warning, div.caution,
+div.note, div.tip, div.important, blockquote {
+  margin: 1.4mm 0 2mm;
+  padding: 1.6mm 2.4mm;
+  break-inside: avoid;
+}
+div.warning, div.caution { border-left: 2pt solid #FFBA00; background: #FFF6DC; }
+div.note, div.tip, div.important, blockquote { border-left: 2pt solid #14C8FF; background: #EAF9FF; }
+div.warning > :last-child, div.caution > :last-child, div.note > :last-child,
+div.tip > :last-child, div.important > :last-child, blockquote > :last-child { margin-bottom: 0; }
+/* The alert's title runs into its first line to save a line. */
+div.title, div.title p, div.title + p { display: inline; }
+div.title p {
+  margin: 0 1.6mm 0 0;
+  font: 600 7.5pt/1.3 "Geist", sans-serif;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: #183988;
+}
+div.warning div.title p, div.caution div.title p { color: #7A5200; }

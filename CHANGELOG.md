@@ -7,6 +7,21 @@ For recent entries (v1.1.40 onwards), see the Changelog section of README.md.
 
 ## Unreleased
 
+### Node requirements one-pagers 1.0, November 2026 -- one A4 page each for the Adiri testnet and mainnet, from guide 1.9
+Two new partner documents for prospective node operators, each a single A4 page with no cover
+and no contents: "Adiri testnet node requirements" (`docs/partner/testnet-node-requirements/`)
+and "Mainnet node requirements" (`docs/partner/mainnet-node-requirements/`), both version 1.0,
+November 2026. A page holds the network's facts, the hardware for each role, the operating
+system and host, the ports, the install, what validating takes and the contact address. The
+pages follow guide 1.9, which stays their source of truth, and the mainnet page marks
+everything not yet decided "set at launch". `tools/build-partner-pdf.sh` builds them by name
+or with `--all`, like the guide and the specification: `toc-depth: 0` in `metadata.yaml` now
+means no contents and no section numbers, the page bounds are set per document (15 to 150 for
+the guide and the specification, exactly 1 for a one-pager), and the "legacy" lint covers the
+one-pagers. The two directories hold byte-identical `template.html` and `theme.css`; the
+header's status label comes from `badge:` in `metadata.yaml`. `AGENTS.md` ("Partner
+documents"), `README.md` and `docs/partner/assets/README.md` list the new documents.
+
 ### Partner guide 1.5 and technical specification 1.2, November 2026 -- the documents describe telcoin-network main at 7167e7800
 `main` (28a7cc7: the mainnet hardening round and scripts-v2.0.0, the devnet Docker images, a
 dependabot bump) is merged into the `docs/technical-specification` branch; the conflicts in

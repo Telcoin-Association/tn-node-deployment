@@ -1,0 +1,24 @@
+# Header, footer and PDF metadata for
+# docs/partner/mainnet-node-requirements/mainnet-node-requirements.md.
+# The title is NOT set here: it comes from the page's single "# " heading.
+# `badge` is the short status label in the header band; it says mainnet has not
+# launched. Change it in the same commit that brings the page up to launch.
+# Bump `version` and `date` whenever the page's content changes. `date` is printed
+# in the header as written and names the month only ("November 2026", never a day).
+# pandoc cannot normalise a month-only date, so `date-meta` stays unset, the template
+# emits no dcterms tags and the PDF carries no creation date; that keeps the build
+# byte-reproducible.
+subtitle: Hardware, host, ports and install for a Telcoin Network node
+badge: Mainnet · not launched
+version: "1.0"
+date: November 2026
+author: Telcoin Association
+description: >-
+  What a server needs to run a Telcoin Network mainnet node, ahead of the
+  mainnet launch: hardware per role, operating system, ports, install and the
+  path to validating.
+contact: devs@telcoin.org
+repo-url: https://github.com/Telcoin-Association/tn-node-deployment
+lang: en-GB
+# One page: no contents and no section numbers.
+toc-depth: 0

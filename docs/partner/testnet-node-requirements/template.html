@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<!--
+  pandoc HTML5 template for the node requirements one-pagers. The two one-pagers,
+  docs/partner/testnet-node-requirements/ and docs/partner/mainnet-node-requirements/,
+  each hold an identical copy of this file and of theme.css; everything that differs
+  between the networks lives in each one's Markdown and metadata.yaml.
+  One A4 page: header band, the body in two columns, footer strip. No cover, no
+  contents and no date-meta tags, so the PDF stays byte-reproducible.
+  Built by tools/build-partner-pdf.sh <doc>.
+-->
+<html xmlns="http://www.w3.org/1999/xhtml"$if(lang)$ lang="$lang$" xml:lang="$lang$"$endif$>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>$pagetitle$</title>
+$for(author-meta)$
+  <meta name="author" content="$author-meta$" />
+$endfor$
+$if(description-meta)$
+  <meta name="description" content="$description-meta$" />
+$endif$
+$for(css)$
+  <link rel="stylesheet" href="$css$" />
+$endfor$
+</head>
+<body>
+<header class="band">
+<img class="band-logo" src="$asset-dir$/logos/telcoin-network-light.svg" alt="Telcoin Network" />
+$if(badge)$
+<p class="band-badge">$badge$</p>
+$endif$
+<div class="band-rule"></div>
+<p class="band-title">$title$</p>
+<p class="band-subtitle">$subtitle$</p>
+<p class="band-meta">Version $version$ · $date$</p>
+</header>
+<main>
+$body$
+</main>
+<footer class="strip">
+<img class="strip-logo" src="$asset-dir$/logos/telcoin-association-dark.svg" alt="Telcoin Association" />
+<p class="strip-links"><a href="mailto:$contact$">$contact$</a><span class="strip-sep"> · </span><a href="$repo-url$">$repo-url$</a></p>
+</footer>
+</body>
+</html>

@@ -1,13 +1,14 @@
 # Vendored assets for the partner documents
 
-Both partner documents use these files: the MNO node guide and the Telcoin Network
-Technical Specification. They are fetched once and committed so each PDF build works
-offline and gives the same output on every run. Nothing here is downloaded at build time.
+Every partner document uses these files: the MNO node guide, the Telcoin Network
+Technical Specification and the two node requirements one-pagers (Adiri testnet and
+mainnet). They are fetched once and committed so each PDF build works offline and gives
+the same output on every run. Nothing here is downloaded at build time.
 
-- **Fonts.** The node guide is set in Geist and Geist Mono by Vercel, under
-  `fonts/geist/`. Both licence files from the upstream tag are kept beside them
-  (`OFL.txt` carries the current copyright line, `LICENSE.txt` the original one). The
-  specification is set in Inter by Rasmus Andersson, under `fonts/inter/`: six static
+- **Fonts.** The node guide and the one-pagers are set in Geist and Geist Mono by
+  Vercel, under `fonts/geist/`. Both licence files from the upstream tag are kept beside
+  them (`OFL.txt` carries the current copyright line, `LICENSE.txt` the original one).
+  The specification is set in Inter by Rasmus Andersson, under `fonts/inter/`: six static
   faces, with the upstream `LICENSE.txt` beside them. Code spans in the specification use
   Geist Mono from `fonts/geist/`. Both families are licensed under the SIL Open Font
   License 1.1.
@@ -17,7 +18,7 @@ offline and gives the same output on every run. Nothing here is downloaded at bu
   wordmarks are for dark backgrounds and the two `-dark` wordmarks for light ones (see
   below).
 - **Covers.** `covers/technical-specification.png` is the full-page artwork behind the
-  specification's cover (see below).
+  specification's cover (see below). The one-pagers have no cover and use no raster file.
 
 Geist was retrieved 2026-10-01 from the `v1.7.2` tag of
 [vercel/geist-font](https://github.com/vercel/geist-font), commit
@@ -58,10 +59,11 @@ file names follow the wordmark colour:
 
 - `telcoin-network-light.svg` and `telcoin-association-white.svg` draw the wordmark in
   white for a dark background, which is why the node guide uses them only on its navy
-  cover.
+  cover. The one-pagers put `telcoin-network-light.svg` in their navy header band.
 - `telcoin-network-dark.svg` and `telcoin-association-dark.svg` draw the wordmark in
   `#424761` for a light background. The technical specification uses them on its light
-  cover and in its footer.
+  cover and in its footer, and the one-pagers put `telcoin-association-dark.svg` in their
+  footer strip.
 
 `telcoin-network-dark.svg` is a byte-for-byte copy of `docs/src/assets/tn-light.svg` in
 the telcoin-network repository at tag `v0.16.0-adiri`, commit
