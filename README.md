@@ -30,6 +30,7 @@ There is one node identity. Every node installs validator-capable and follows co
 | `setup-observability.sh` | Opt-in centralized logging + health monitoring (testnet add-on) |
 | `setup-vpn.sh` | Opt-in WireGuard admin SSH for the Telcoin Association (testnet add-on) |
 | `setup-alerts.sh` | Opt-in private alerts on every network: a heartbeat from the node host to a monitor you own (Uptime Kuma push, healthchecks.io or a JSON webhook). See [Private alerts](#private-alerts-every-network) |
+| `setup-gateway.sh` | Opt-in worker gateway: a public JSON-RPC front for transaction submissions, in front of this node or of a validator on another host (library `lib/gateway.sh`). See [OPERATOR.md section 4.15](OPERATOR.md#415-worker-gateway) |
 | `lib/common.sh` | Shared functions used by the above scripts (not run directly) |
 | `lib/alerts.sh`, `lib/tn-heartbeat.sh` | The private alerts library, and the heartbeat runner that `setup-alerts.sh` installs as `/usr/local/libexec/telcoin/tn-heartbeat` (not run directly) |
 | `lib/release-keys/` | The OpenPGP keys a script release and a node release must be signed with (see [How updates are verified](#how-updates-are-verified)) |

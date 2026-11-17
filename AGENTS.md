@@ -449,6 +449,52 @@ The fixture tests are `tools/tests/heartbeat_test.sh` (the runner), `tools/tests
 (the library) and `tools/tests/setup_alerts_test.sh` (the script); `tools/tests/vm.d/P0-alerts.sh`
 runs the whole path on a VM with systemd.
 
+## Worker gateway
+
+`setup-gateway.sh` and `lib/gateway.sh` install telcoin-network's worker gateway as
+`telcoin-gateway.service` (container `telcoin-gateway`), a public JSON-RPC front for transaction
+submissions, next to a node (`--mode same-host`) or on a host with no node in front of a
+validator's private address (`--mode standalone`). `install-caddy.sh` owns its `tn-gateway`
+site; `firewall-setup.sh --gateway-from` and `edit-config.sh --set gateway_upstream` are the
+validator side. Rules:
+
+- `setup-gateway.sh` and `lib/gateway.sh` never stop, start or restart the node and never write
+  `.node-meta`, the node's launch file or a firewall rule; a node restart belongs only to the
+  validator-side phases (`gateway_upstream`, `rpc-advertise`, `rpc-unadvertise`) and their guards.
+- An image is `<repository>@sha256:<64 lowercase hex>` and never a tag: on devnet from
+  `GW_DEVNET_IMAGE_REPOS`, on testnet and mainnet only `GW_TESTNET_IMAGE_PIN` /
+  `GW_MAINNET_IMAGE_PIN` in `lib/gateway.sh`, which the signed MANIFEST covers.
+- The unit never pulls (`--pull=never`): `gw_image_ensure` pulls by digest before anything is
+  written, and `gw_image_probe` needs every flag of `GW_REQUIRED_FLAGS` in the image's `--help`,
+  so a flag added to the unit goes into that list too.
+- The Caddyfile is rebuilt from its managed blocks on every write (`caddy_write_managed <dash>
+  <rpc> <gateway>`), so every writer passes back the blocks it does not change, the gateway one
+  included.
+- A gateway host may have no node and no `.node-meta`, so gateway code reads `gateway.meta`
+  (`tn_gateway_installed`, `tn_gateway_meta_get`) and never assumes a node, as
+  `firewall-setup.sh` (`FW_GW_ONLY`) and `caddy_gateway_gate` do.
+- The gateway's state lives only in `/etc/telcoin/gateway/gateway.meta` (root 0600,
+  `GATEWAY_META_VERSION=1`), and `--refresh` renders the unit from it alone.
+- Every refusal ends "Nothing was changed." (`_gw_refuse` appends it), and exit 1 means nothing
+  on the host changed.
+- An enable or refresh whose inputs equal what is installed writes and restarts nothing, and a
+  failure after the first write puts back the files `tn_backup_file` saved.
+- The library takes the update lock (`addon_meta_lock`) for every change; `gw_status` takes none
+  and needs no root.
+- `remove-node.sh` removes the gateway (`remove_gateway`) next to `remove_alerts`, before the node
+  stops, with fixed paths and no `lib/gateway.sh` call; on a host with a gateway and no node it
+  removes nothing and points at `setup-gateway.sh --remove`.
+- `rpc-advertise` records `RPC_ADVERTISED_VIA=gateway`; `rpc-disable` leaves that advertisement
+  alone and `rpc-enable` refuses while it or a `tn-gateway` block exists, because one host never
+  serves both sites.
+- `GATEWAY_VERSION` stays the first assignment of that name in `lib/gateway.sh`, and each pin
+  line keeps its `# network-gated:` marker.
+
+The fixture tests are `tools/tests/gateway_setup_test.sh`, `gateway_check_remove_test.sh`,
+`gateway_validator_test.sh`, `gateway_upstream_test.sh` and `caddy_gateway_test.sh`;
+`gateway_smoke.sh <image>` and `caddy_gateway_smoke.sh <image>` need Docker and are not run by
+`run.sh`.
+
 ## Partner documents
 
 `docs/partner/` holds one directory per partner document plus a shared `assets/` tree:

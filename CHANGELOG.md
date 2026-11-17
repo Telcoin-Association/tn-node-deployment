@@ -7,6 +7,45 @@ For recent entries (v1.1.40 onwards), see the Changelog section of README.md.
 
 ## Unreleased
 
+### Worker gateway, November 2026 -- setup-gateway.sh runs telcoin-network's worker gateway, a public JSON-RPC front for transaction submissions
+`setup-gateway.sh` (new, with `lib/gateway.sh`) installs the worker gateway as
+`telcoin-gateway.service`: the worker-gateway image under Docker, host network, uid 1101,
+read-only, no capability, never pulled by the unit. A submission goes to the worker of the node
+it fronts; every other call is proxied to the `--redirect-queries` URL. It has `--enable`,
+`--status`, `--refresh` and `--remove`, each with `--json`, in the shape of `setup-alerts.sh`.
+Two layouts: `--mode same-host` next to the node (not on mainnet; the node needs
+`--healthcheck`) and `--mode standalone` on a host with no node, in front of a validator's
+private IPv4. Front `caddy` (the default) serves `https://<domain>/` through this host's Caddy;
+`none` listens on `0.0.0.0:8655` over plain HTTP. The settings live in
+`/etc/telcoin/gateway/gateway.meta`; an enable with unchanged inputs changes nothing, and a
+failure after the first write puts the previous unit back. `setup-gateway.sh` never stops,
+starts or restarts the node.
+`install-caddy.sh` gains a third managed site, `tn-gateway`, and the phases `gateway-status`,
+`gateway-check-dns`, `gateway-enable`, `gateway-disable`, `rpc-advertise` (the gateway's
+`https://<host>/` and no WebSocket URL into `node-info.yaml`, one guarded node restart, no
+Caddy change) and `rpc-unadvertise`. `firewall-setup.sh --gateway-from <list>|none`, with
+`--enable` or `--reset`, lets a gateway host reach the node's RPC and health ports; the list is
+stored as `GATEWAY_ALLOW_FROM` and applied again by every `--enable` and `--reset`.
+`edit-config.sh --set gateway_upstream=<IPv4>[,...]|off` binds the RPC and the health check to
+every interface for those hosts, refused unless `ufw` already admits them; a node that was
+stopped stays stopped. `check-node.sh` checks the gateway, and on a validator the gateway rules,
+binds and advertised URL; on a host with only a gateway it skips the node sections.
+`remove-node.sh` removes a gateway before it stops the node and keeps its image and Caddy site.
+Nothing changes for an operator who does not use it, except: every Caddy writer now keeps the
+gateway site, and the hostname clash check and the teardown count three sites; `rpc-disable`
+leaves an advertisement made by `rpc-advertise` alone, and `rpc-enable` refuses while a gateway
+site or advertisement is present; `firewall-setup.sh --json --status` gains `gateway_from`, and
+the status screen and the expected rules gain two rows per gateway source; a Caddyfile with the
+gateway site counts as a public edge, so 80 and 443 survive a `--reset`;
+`firewall-setup.sh --enable` works on a host with a gateway and no node; and the scan of
+`remove-node.sh` for other installs no longer offers the gateway's unit and container as a stray
+install.
+Limits: no released worker-gateway image exists. devnet takes a digest from
+`us-docker.pkg.dev/telcoin-network/tn-public/worker-gateway`; testnet and mainnet refuse the
+enable until a scripts release pins a digest. Each client IP gets 100 requests a second and 32
+connections, so a relay that forwards many users' transactions counts as one client. The
+runbook is OPERATOR.md section 4.15.
+
 ### Node requirements one-pagers 1.0, November 2026 -- one A4 page each for the Adiri testnet and mainnet, from guide 1.9
 Two new partner documents for prospective node operators, each a single A4 page with no cover
 and no contents: "Adiri testnet node requirements" (`docs/partner/testnet-node-requirements/`)
