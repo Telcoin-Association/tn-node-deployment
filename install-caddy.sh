@@ -3,8 +3,8 @@
 # install-caddy.sh -- External (public) access via Caddy: dashboard + RPC
 #
 # Unified manager for the single /etc/caddy/Caddyfile this repo owns. It hosts up
-# to TWO independent vhosts, each fenced by markers inside the one managed file so
-# toggling one PRESERVES the other verbatim:
+# to THREE independent vhosts, each fenced by markers inside the one managed file so
+# toggling one PRESERVES the others verbatim:
 #
 #   1) Dashboard  (# >>> tn-dashboard >>> ... # <<< tn-dashboard <<<)
 #        https://<domain> -> 127.0.0.1:8080 (Node Manager UI), Caddy basic_auth.
@@ -25,6 +25,17 @@
 #        A block written by an older version (no `# tn-rpc block v2` stamp) is
 #        reported as stale; running rpc-enable again with the same hostname
 #        rewrites it.
+#
+#   3) Worker gateway (# >>> tn-gateway >>> ... # <<< tn-gateway <<<), block v1:
+#        https://<gateway-domain>/ POST -> 127.0.0.1:<gateway port> (default 8655),
+#        the worker gateway setup-gateway.sh runs on loopback; GET/HEAD /health,
+#        /ready, /ready/any -> 127.0.0.1:<probe port> (default 8656); a WebSocket
+#        upgrade and every other method but POST and the CORS preflight -> 405.
+#        Caddy only: gateway-enable never touches the node. On a node host,
+#        rpc-advertise puts https://<gateway-domain>/ into node-info.yaml (no Caddy
+#        change) and records RPC_ADVERTISED_VIA=gateway in .node-meta, so
+#        rpc-disable leaves that advertisement alone; rpc-unadvertise removes it.
+#        The tn-rpc and tn-gateway sites are never served from one host.
 #
 # SAFETY RULES (every Caddyfile change, enable/disable/teardown alike):
 #   - The new file is rendered to a temp file inside /etc/caddy and checked with
@@ -113,6 +124,16 @@
 #   install-caddy.sh --json --phase=rpc-enable --rpc-domain <d> [--move-dashboard-to <host>]
 #       (the exposure summary goes out as a `warn` event; the UI action is the consent)
 #   install-caddy.sh --json --phase=rpc-disable
+#   install-caddy.sh --json --phase=rpc-advertise --rpc-domain <gateway-domain>
+#       (node host only: node-info.yaml advertises https://<gateway-domain>/ and no ws
+#       URL, with the guarded node restart; no Caddy change)
+#   install-caddy.sh --json --phase=rpc-unadvertise
+#   install-caddy.sh --json --phase=gateway-status
+#   install-caddy.sh --json --phase=gateway-check-dns --gateway-domain <d> [--public-ip <inbound-ip>]
+#   install-caddy.sh --json --phase=gateway-enable --gateway-domain <d> [--gateway-port <n>] [--gateway-probe-port <n>]
+#       (ports default to 8655 / 8656; a host with no node needs setup-gateway.sh
+#       first; no write and no reload when the block on disk is already this one)
+#   install-caddy.sh --json --phase=gateway-disable
 # rpc-enable without --json prints the same summary and asks for a yes on a terminal;
 # without a terminal it needs --yes.
 # =============================================================================
@@ -143,6 +164,9 @@ readonly CADDY_KEEP_BACKUPS=5
 # Stamp line of the RPC block write_rpc_block emits. A tn-rpc block without it was
 # written by install-caddy.sh 1.3.0 or older (caddy_rpc_block_stale).
 readonly RPC_BLOCK_STAMP="# tn-rpc block v2"
+# Stamp (the whole first line) of the gateway block write_gateway_block emits. Its
+# fences are TN_CADDY_GW_BEGIN / TN_CADDY_GW_END from lib/common.sh.
+readonly GW_BLOCK_STAMP="# tn-gateway block v1"
 # TN_ROOT_PREFIX points the file paths at a fixture tree (tests only).
 readonly CADDYFILE="${TN_ROOT_PREFIX:-}/etc/caddy/Caddyfile"
 readonly CADDY_DIR="${CADDYFILE%/*}"
@@ -258,6 +282,9 @@ JSON_DOMAIN=""
 JSON_USERNAME=""
 JSON_RPC_DOMAIN=""
 JSON_MOVE_DASH=""
+JSON_GW_DOMAIN=""
+JSON_GW_PORT=""
+JSON_GW_PROBE_PORT=""
 JSON_DONE_EMITTED=false
 # true once json_setup_fds has opened fd 3: from then on die() reports through events.
 JSON_STREAM=false
@@ -754,10 +781,24 @@ caddy_current_dashboard_block() {
     awk 'started==0 && (/^#/ || /^[[:space:]]*$/){next} {started=1; print}' "$CADDYFILE"
 }
 
-# 0 (true) when any managed vhost (dashboard or RPC) is configured.
+# The tn-gateway block. Its fences come from lib/common.sh (TN_CADDY_GW_BEGIN /
+# TN_CADDY_GW_END); caddy_require_lib refuses a library without them before any
+# phase runs, and these readers take a library without them as "no gateway block",
+# so a copy sourced by the fixture tests still works.
+caddy_gateway_block_present() {
+    [[ -n "${TN_CADDY_GW_BEGIN:-}" ]] || return 1
+    caddy_block_present "$TN_CADDY_GW_BEGIN" "${1:-$CADDYFILE}"
+}
+caddy_current_gateway_block() {
+    [[ -n "${TN_CADDY_GW_BEGIN:-}" && -n "${TN_CADDY_GW_END:-}" ]] || return 0
+    caddy_extract_block "$TN_CADDY_GW_BEGIN" "$TN_CADDY_GW_END"
+}
+
+# 0 (true) when any managed vhost (dashboard, RPC or worker gateway) is configured.
 caddy_any_vhost_enabled() {
     [[ -n "$(caddy_current_dashboard_block)" ]] && return 0
     caddy_block_present "$RPC_BEGIN" && return 0
+    caddy_gateway_block_present && return 0
     return 1
 }
 
@@ -777,6 +818,12 @@ caddy_current_rpc_domain() {
     block="$(caddy_extract_block "$RPC_BEGIN" "$RPC_END")"
     printf '%s\n' "$block" | caddy_block_domain
 }
+caddy_current_gateway_domain() {
+    local block
+    block="$(caddy_current_gateway_block)"
+    [[ -n "$block" ]] || return 0
+    printf '%s\n' "$block" | caddy_block_domain
+}
 
 # 0 (true) when two hostnames name the same site (case-insensitive, trailing dot ignored).
 caddy_same_host() {
@@ -786,34 +833,52 @@ caddy_same_host() {
     [[ -n "$a" && "$a" == "$b" ]]
 }
 
-# Same-domain guard. The dashboard and the public RPC endpoint are two Caddy sites and
-# cannot share a hostname (caddy rejects the pair as an "ambiguous site definition").
-# Echo why <domain> cannot host <kind> (rpc|dashboard) because the OTHER vhost already
-# serves it, and return 0; return 1 (echo nothing) when there is no clash. Callers die
+# Same-domain guard. The dashboard, the public RPC endpoint and the worker gateway are
+# separate Caddy sites and cannot share a hostname (caddy rejects the pair as an
+# "ambiguous site definition"). Echo why <domain> cannot host <kind>
+# (rpc|dashboard|gateway) because ANOTHER vhost already serves it, and return 0; return 1 (echo nothing) when there is no clash. Callers die
 # BEFORE writing anything. Never resolve a clash by dropping the dashboard block --
 # that would silently lose the operator's password hash.
 caddy_domain_clash() {
     local kind="$1" domain="$2" other
+    if [[ "$kind" != "gateway" ]]; then
+        other="$(caddy_current_gateway_domain)"
+        if caddy_same_host "$domain" "$other"; then
+            printf '%s' "${domain} already serves the worker gateway -- each Caddy site (dashboard, public RPC, worker gateway) needs its own hostname. Nothing was changed."
+            return 0
+        fi
+    fi
     if [[ "$kind" == "rpc" ]]; then
         other="$(caddy_current_dashboard_domain)"
         caddy_same_host "$domain" "$other" || return 1
         # network-gated: example hostnames in a message shown on every network; the operator's own names are checked
         printf '%s' "${domain} already serves the Node Manager dashboard -- the dashboard and the public RPC endpoint need DIFFERENT hostnames. The node's public name (e.g. nodeN.adiri.telcoin.network) should carry the RPC endpoint, with the dashboard on another hostname (e.g. dashboard.${domain}). Nothing was changed. To move the dashboard (same login) and enable RPC in one step, first create the DNS A record for dashboard.${domain} pointing at this server (Caddy requests a certificate for it), then run: sudo bash ${SCRIPT_DIR}/install-caddy.sh --phase=rpc-enable --rpc-domain ${domain} --move-dashboard-to dashboard.${domain}"
-    else
+    elif [[ "$kind" == "dashboard" ]]; then
         other="$(caddy_current_rpc_domain)"
         caddy_same_host "$domain" "$other" || return 1
         # network-gated: example hostnames in a message shown on every network; the operator's own names are checked
         printf '%s' "${domain} already serves the public RPC endpoint -- the dashboard and the public RPC endpoint need DIFFERENT hostnames. The node's public name (e.g. nodeN.adiri.telcoin.network) should carry the RPC endpoint; put the dashboard on another hostname (e.g. dashboard.${domain}). Nothing was changed."
+    else
+        other="$(caddy_current_dashboard_domain)"
+        if caddy_same_host "$domain" "$other"; then
+            printf '%s' "${domain} already serves the Node Manager dashboard -- the dashboard and the worker gateway need different hostnames. Nothing was changed."
+            return 0
+        fi
+        other="$(caddy_current_rpc_domain)"
+        caddy_same_host "$domain" "$other" || return 1
+        printf '%s' "${domain} already serves the public RPC endpoint -- the public RPC endpoint and the worker gateway need different hostnames. Nothing was changed."
     fi
     return 0
 }
 
-# Compose + write the single managed Caddyfile from two block bodies (each a file
-# path; empty/missing -> that vhost omitted) through caddy_swap_in (validate, backup,
-# atomic rename). Never clobbers a working live config: a validation failure dies with
+# Compose + write the single managed Caddyfile from up to three block bodies, <dash>
+# <rpc> [<gateway>] (each a file path; empty/missing -> that vhost omitted, so a
+# two-argument call writes no gateway block), through caddy_swap_in (validate,
+# backup, atomic rename). The file is rebuilt from these alone: every caller passes
+# back the blocks it does not change, extracted from the live file. Never clobbers a working live config: a validation failure dies with
 # the live file untouched. Each block's bytes are emitted verbatim (no re-parsing).
 caddy_write_managed() {
-    local dash="$1" rpc="$2" tmp
+    local dash="$1" rpc="$2" gw="${3:-}" tmp
     mkdir -p "$CADDY_DIR"
     tmp="$(mktemp "${CADDYFILE}.tn-new.XXXXXX")"   # same filesystem -> atomic mv
     caddy_tmp_track "$tmp"
@@ -834,6 +899,11 @@ caddy_write_managed() {
             printf '\n%s\n' "$RPC_BEGIN"
             cat "$rpc"
             printf '%s\n' "$RPC_END"
+        fi
+        if [[ -n "$gw" && -s "$gw" ]]; then
+            printf '\n%s\n' "$TN_CADDY_GW_BEGIN"
+            cat "$gw"
+            printf '%s\n' "$TN_CADDY_GW_END"
         fi
     } > "$tmp"
     caddy_swap_in "$tmp"
@@ -1229,6 +1299,85 @@ write_rpc_block() {
         printf '\t\t\tmax_size 2MB\n'
         printf '\t\t}\n'
         printf '\t\treverse_proxy 127.0.0.1:%s\n' "$rpc_port"
+        printf '\t}\n'
+        printf '}\n'
+    } > "$outfile"
+}
+
+# Write the worker-gateway vhost block (content only, no fences) to <outfile>: block
+# v1, GW_BLOCK_STAMP alone on its first line. The gateway (setup-gateway.sh) is a
+# plain-HTTP POST proxy on loopback, with no TLS and no WebSocket; this site is its
+# TLS edge. Self-contained, in the style of write_rpc_block:
+#   - OPTIONS preflight -> empty 200 + CORS, as the tn-rpc block answers it;
+#   - a WebSocket upgrade (the tn-rpc block's case-insensitive match) -> 405;
+#   - GET / HEAD on /health, /ready, /ready/any without an Upgrade header -> the
+#     gateway's probe listener, 127.0.0.1:<probe_port>;
+#   - any other method but POST and OPTIONS -> 405;
+#   - POST -> the gateway, 127.0.0.1:<listen_port>, + CORS; request bodies capped at
+#     2 MB, as on the tn-rpc site.
+# Every 405 carries Allow: POST, OPTIONS. The probe handle comes before the 405 one
+# and the two cannot both match a WebSocket upgrade or a preflight, so the result
+# does not depend on how the Caddyfile adapter orders `handle` blocks; the one
+# without a matcher (POST) always goes last.
+# X-Forwarded-For: the gateway trusts 127.0.0.1/32 (--trusted-proxies) and reads the
+# header from the right, so its LAST entry must be the address Caddy accepted the
+# connection from. reverse_proxy's own header handling, left as it is (no header_up
+# for it), guarantees that on every Caddy this script allows (2.8.0 or newer; the
+# rule dates from 2.5.0): Caddy SETS X-Forwarded-For to the connection peer's IP
+# and drops the value the client sent, unless the peer is in the server's
+# trusted_proxies -- which this generated Caddyfile never sets -- in which case it
+# appends the peer's IP to the received list. Either way the peer is the last entry,
+# so a client-sent X-Forwarded-For cannot spoof the address the gateway limits by: it
+# is dropped (or, from a trusted proxy, sits left of the peer, where the gateway
+# stops reading). The ports are checked as the tn-rpc ones are (caddy_proxy_port_ok).
+write_gateway_block() {
+    local domain="$1" listen_port="$2" probe_port="$3" outfile="$4"
+    caddy_proxy_port_ok "$listen_port" || die "refusing port '${listen_port}' as the worker gateway target: it must be 1024-65535 and not the Node Manager port ${CADDY_UI_PORT}. Nothing was changed."
+    caddy_proxy_port_ok "$probe_port" || die "refusing port '${probe_port}' as the worker gateway probe target: it must be 1024-65535 and not the Node Manager port ${CADDY_UI_PORT}. Nothing was changed."
+    {
+        printf '%s\n' "$GW_BLOCK_STAMP"
+        printf '# Worker gateway site, written by install-caddy.sh gateway-enable (run it again\n'
+        printf '# with the same hostname to rewrite this block). JSON-RPC over POST to the\n'
+        printf '# gateway on loopback, probes to its probe port; CORS and the OPTIONS preflight\n'
+        printf '# are answered here, every other method gets 405, request bodies are capped at 2 MB.\n'
+        printf '%s {\n' "$domain"
+        printf '\tencode zstd gzip\n'
+        printf '\t@preflight method OPTIONS\n'
+        printf '\thandle @preflight {\n'
+        printf '\t\theader Access-Control-Allow-Origin "*"\n'
+        printf '\t\theader Access-Control-Allow-Methods "POST, GET, OPTIONS"\n'
+        printf '\t\theader Access-Control-Allow-Headers "X-Requested-With, Content-Type"\n'
+        printf '\t\trespond 200\n'
+        printf '\t}\n'
+        printf '\t@websocket {\n'
+        printf '\t\theader_regexp wsconn Connection (?i)upgrade\n'
+        printf '\t\theader_regexp wsup Upgrade (?i)websocket\n'
+        printf '\t}\n'
+        printf '\thandle @websocket {\n'
+        printf '\t\theader Allow "POST, OPTIONS"\n'
+        printf '\t\trespond 405\n'
+        printf '\t}\n'
+        printf '\t@probe {\n'
+        printf '\t\tmethod GET HEAD\n'
+        printf '\t\tpath /health /ready /ready/any\n'
+        printf '\t\theader !Upgrade\n'
+        printf '\t}\n'
+        printf '\thandle @probe {\n'
+        printf '\t\treverse_proxy 127.0.0.1:%s\n' "$((10#$probe_port))"
+        printf '\t}\n'
+        printf '\t@notpost not method POST OPTIONS\n'
+        printf '\thandle @notpost {\n'
+        printf '\t\theader Allow "POST, OPTIONS"\n'
+        printf '\t\trespond 405\n'
+        printf '\t}\n'
+        printf '\thandle {\n'
+        printf '\t\theader Access-Control-Allow-Origin "*"\n'
+        printf '\t\theader Access-Control-Allow-Methods "POST, GET, OPTIONS"\n'
+        printf '\t\theader Access-Control-Allow-Headers "X-Requested-With, Content-Type"\n'
+        printf '\t\trequest_body {\n'
+        printf '\t\t\tmax_size 2MB\n'
+        printf '\t\t}\n'
+        printf '\t\treverse_proxy 127.0.0.1:%s\n' "$((10#$listen_port))"
         printf '\t}\n'
         printf '}\n'
     } > "$outfile"
@@ -2391,31 +2540,34 @@ do_enable() {
     hash=$(printf '%s\n' "$pw" | caddy hash-password --algorithm bcrypt 2>/dev/null || true)
     [[ "$hash" == \$2* ]] || die "failed to hash the password (caddy hash-password produced no bcrypt hash)"
 
-    local dash_tmp rpc_tmp
-    dash_tmp="$(mktemp)"; rpc_tmp="$(mktemp)"
-    caddy_tmp_track "$dash_tmp" "$rpc_tmp"
+    local dash_tmp rpc_tmp gw_tmp
+    dash_tmp="$(mktemp)"; rpc_tmp="$(mktemp)"; gw_tmp="$(mktemp)"
+    caddy_tmp_track "$dash_tmp" "$rpc_tmp" "$gw_tmp"
     caddy_extract_block "$RPC_BEGIN" "$RPC_END" > "$rpc_tmp"          # preserve RPC verbatim
+    caddy_current_gateway_block > "$gw_tmp"                           # and the gateway
     write_dashboard_block "$domain" "$username" "$hash" "$dash_tmp"
-    caddy_write_managed "$dash_tmp" "$rpc_tmp"
-    rm -f "$dash_tmp" "$rpc_tmp"
+    caddy_write_managed "$dash_tmp" "$rpc_tmp" "$gw_tmp"
+    rm -f "$dash_tmp" "$rpc_tmp" "$gw_tmp"
 
     caddy_open_ports
     caddy_reload
 }
 
-# Disable the dashboard vhost; preserve any RPC vhost. Full teardown only when no
-# managed vhost remains.
+# Disable the dashboard vhost; preserve any RPC and gateway vhost. Full teardown only
+# when no managed vhost remains.
 do_disable() {
-    local rpc_tmp; rpc_tmp="$(mktemp)"
-    caddy_tmp_track "$rpc_tmp"
+    local rpc_tmp gw_tmp
+    rpc_tmp="$(mktemp)"; gw_tmp="$(mktemp)"
+    caddy_tmp_track "$rpc_tmp" "$gw_tmp"
     caddy_extract_block "$RPC_BEGIN" "$RPC_END" > "$rpc_tmp"
-    if [[ -s "$rpc_tmp" ]]; then
-        caddy_write_managed "" "$rpc_tmp"
+    caddy_current_gateway_block > "$gw_tmp"
+    if [[ -s "$rpc_tmp" || -s "$gw_tmp" ]]; then
+        caddy_write_managed "" "$rpc_tmp" "$gw_tmp"
         caddy_reload
     else
         caddy_teardown
     fi
-    rm -f "$rpc_tmp"
+    rm -f "$rpc_tmp" "$gw_tmp"
 }
 
 # Print a single JSON status object for the DASHBOARD vhost (UI dashboard card).
@@ -2591,15 +2743,24 @@ caddy_operation_reset() {
 }
 
 # Refusals for an rpc-enable, checked before anything is written (and, in a --json
-# run, before any step is announced): <domain> and <move_to> (both normalised) and the
+# run, before any step is announced): a tn-gateway block on this host (run
+# gateway-disable first), a gateway advertisement in node-info.yaml (RPC_ADVERTISED_VIA=
+# gateway: run rpc-unadvertise first), <domain> and <move_to> (both normalised) and the
 # one-hostname-per-site rule. Sets CADDY_DASH_FROM (the dashboard's current hostname,
 # '' when none) and CADDY_DASH_MOVE (true when the dashboard sits on <domain> and moves
 # to <move_to> in the same swap + reload).
 CADDY_DASH_FROM=""
 CADDY_DASH_MOVE=false
 caddy_rpc_enable_precheck() {
-    local domain="$1" move_to="${2:-}" clash rc
+    local domain="$1" move_to="${2:-}" clash rc via
     caddy_require_domain "$domain" "RPC domain"
+    if caddy_gateway_block_present; then
+        die "A worker gateway site ($(caddy_current_gateway_domain)) is configured in ${CADDYFILE}; the public RPC site and the worker gateway are not served from one host. Run --phase=gateway-disable first. Nothing was changed."
+    fi
+    via="$(addon_meta_get RPC_ADVERTISED_VIA "")" || die "RPC_ADVERTISED_VIA is set more than once in .node-meta; fix the file first. Nothing was changed."
+    if [[ "$via" == "gateway" ]]; then
+        die "node-info.yaml advertises a worker gateway (RPC_ADVERTISED_VIA=gateway in .node-meta, written by rpc-advertise). Run --phase=rpc-unadvertise first. Nothing was changed."
+    fi
     CADDY_DASH_MOVE=false
     CADDY_DASH_FROM="$(caddy_current_dashboard_domain)"
     if [[ -n "$move_to" ]]; then
@@ -2699,18 +2860,19 @@ do_rpc_enable() {
         caddy_node_lock
     fi
 
-    local dash_tmp rpc_tmp
-    dash_tmp="$(mktemp)"; rpc_tmp="$(mktemp)"
-    caddy_tmp_track "$dash_tmp" "$rpc_tmp"
+    local dash_tmp rpc_tmp gw_tmp
+    dash_tmp="$(mktemp)"; rpc_tmp="$(mktemp)"; gw_tmp="$(mktemp)"
+    caddy_tmp_track "$dash_tmp" "$rpc_tmp" "$gw_tmp"
     caddy_current_dashboard_block > "$dash_tmp"       # preserve dashboard verbatim (handles legacy)
+    caddy_current_gateway_block > "$gw_tmp"           # and the gateway (the precheck refuses one)
     if [[ "$CADDY_DASH_MOVE" == "true" ]]; then
         caddy_retarget_dashboard "$dash_tmp" "$move_to"
         CADDY_DASH_MOVED_TO="$move_to"
         caddy_say info "Moving the dashboard from ${CADDY_DASH_FROM} to ${move_to} (same login; only the hostname changes). Its DNS A record must already point here -- Caddy requests a certificate for it."
     fi
     write_rpc_block "$domain" "$rpc_tmp" "$want_ws"
-    caddy_write_managed "$dash_tmp" "$rpc_tmp"
-    rm -f "$dash_tmp" "$rpc_tmp"
+    caddy_write_managed "$dash_tmp" "$rpc_tmp" "$gw_tmp"
+    rm -f "$dash_tmp" "$rpc_tmp" "$gw_tmp"
 
     caddy_open_ports
     caddy_reload
@@ -2737,20 +2899,31 @@ do_rpc_enable() {
 # node-info.yaml: only when worker 0 still advertises something, the update lock,
 # the edit, then the committee guard, the epoch wait and a guarded restart (allowed
 # on mainnet too; a guard refusal puts node-info.yaml back). A lock held by another
-# run refuses that second part (`done ok:false`; the site is already gone).
+# run refuses that second part (`done ok:false`; the site is already gone). A gateway
+# block is kept like the dashboard one. With RPC_ADVERTISED_VIA=gateway in .node-meta
+# (rpc-advertise) node-info.yaml and the PUBLIC_RPC_* keys belong to the worker
+# gateway: only the site is removed (rpc-unadvertise removes that advertisement).
 do_rpc_disable() {
+    local via
     caddy_operation_reset
-    local dash_tmp; dash_tmp="$(mktemp)"
-    caddy_tmp_track "$dash_tmp"
+    via="$(addon_meta_get RPC_ADVERTISED_VIA "")" || die "RPC_ADVERTISED_VIA is set more than once in .node-meta; fix the file first. Nothing was changed."
+    local dash_tmp gw_tmp
+    dash_tmp="$(mktemp)"; gw_tmp="$(mktemp)"
+    caddy_tmp_track "$dash_tmp" "$gw_tmp"
     caddy_current_dashboard_block > "$dash_tmp"
-    if [[ -s "$dash_tmp" ]]; then
-        caddy_write_managed "$dash_tmp" ""
+    caddy_current_gateway_block > "$gw_tmp"
+    if [[ -s "$dash_tmp" || -s "$gw_tmp" ]]; then
+        caddy_write_managed "$dash_tmp" "" "$gw_tmp"
         caddy_reload
     else
         caddy_teardown
     fi
-    rm -f "$dash_tmp"
+    rm -f "$dash_tmp" "$gw_tmp"
     caddy_say ok "The public RPC site is removed."
+    if [[ "$via" == "gateway" ]]; then
+        caddy_say info "node-info.yaml and the PUBLIC_RPC_* keys in .node-meta advertise a worker gateway (RPC_ADVERTISED_VIA=gateway), so they were left as they are; --phase=rpc-unadvertise removes that advertisement."
+        return 0
+    fi
     caddy_meta_record ""
 
     CADDY_LOCK_NOTE="The public RPC site is removed, but node-info.yaml still advertises it; run rpc-disable again later (once any update in progress has finished)."
@@ -2796,6 +2969,274 @@ do_rpc_status() {
     printf '{"installed":%s,"running":%s,"enabled":%s,"domain":"%s","advertised_http":"%s","advertised_ws":"%s","ws_listening":%s,"block_stale":%s}\n' \
         "$installed" "$running" "$enabled" "$(json_escape "$domain")" \
         "$(json_escape "$adv_http")" "$(json_escape "$adv_ws")" "$ws_listening" "$block_stale"
+}
+
+# =============================================================================
+# PHASES -- WORKER GATEWAY
+# =============================================================================
+
+# 0 (true) when this host runs a telcoin node: lib/common.sh finds a .node-meta
+# (node_meta_path prints nothing without one). A host that only runs the worker
+# gateway (setup-gateway.sh) has none.
+caddy_node_host() {
+    local p
+    p="$(node_meta_path 2>/dev/null || true)"
+    [[ -n "$p" && -f "$p" ]]
+}
+
+# 0 (true) when .node-meta records that node-info.yaml advertises a worker gateway
+# (RPC_ADVERTISED_VIA=gateway, written by rpc-advertise). A key set twice reads as
+# false here; the phases that act on it refuse that case first.
+caddy_rpc_via_gateway() {
+    local v
+    v="$(addon_meta_get RPC_ADVERTISED_VIA "" 2>/dev/null)" || return 1
+    [[ "$v" == "gateway" ]]
+}
+
+# The gate of gateway-enable. A host with a node takes the dashboard's and the public
+# RPC's gate (caddy_mainnet_gate: no Caddy site on a staked mainnet validator); a host
+# with no node passes only once setup-gateway.sh has installed the gateway
+# (tn_gateway_installed: gateway.meta is there).
+caddy_gateway_gate() {
+    if caddy_node_host; then
+        caddy_mainnet_gate
+        return 0
+    fi
+    tn_gateway_installed && return 0
+    die "This host has no telcoin node and no worker gateway installed, so a gateway site would have nothing to proxy to: run setup-gateway.sh first, then gateway-enable again. Nothing was changed."
+}
+
+# Refusals for a gateway-enable, checked before anything is written (and, in a --json
+# run, before any step is announced): the hostname (normalised), the two ports (empty
+# -> 8655 / 8656; they must differ), a tn-rpc block on this host (run rpc-disable
+# first), the one-hostname-per-site rule and caddy_gateway_gate. Sets CADDY_GW_PORT
+# and CADDY_GW_PROBE_PORT (decimal).
+CADDY_GW_PORT=""
+CADDY_GW_PROBE_PORT=""
+caddy_gateway_enable_precheck() {
+    local domain="$1" port="${2:-}" probe="${3:-}" clash
+    caddy_require_domain "$domain" "gateway domain"
+    [[ -n "$port" ]] || port="${TN_GATEWAY_LISTEN_PORT:-8655}"
+    [[ -n "$probe" ]] || probe="${TN_GATEWAY_PROBE_PORT:-8656}"
+    caddy_proxy_port_ok "$port" || die "invalid --gateway-port '${port}': it must be 1024-65535 and not the Node Manager port ${CADDY_UI_PORT}. Nothing was changed."
+    caddy_proxy_port_ok "$probe" || die "invalid --gateway-probe-port '${probe}': it must be 1024-65535 and not the Node Manager port ${CADDY_UI_PORT}. Nothing was changed."
+    CADDY_GW_PORT="$((10#$port))"
+    CADDY_GW_PROBE_PORT="$((10#$probe))"
+    [[ "$CADDY_GW_PORT" != "$CADDY_GW_PROBE_PORT" ]] || die "--gateway-port and --gateway-probe-port are both ${CADDY_GW_PORT}; the gateway's listener and its probe listener are two ports. Nothing was changed."
+    if caddy_block_present "$RPC_BEGIN"; then
+        die "The public RPC site ($(caddy_current_rpc_domain)) is configured in ${CADDYFILE}; the public RPC site and the worker gateway are not served from one host. Run --phase=rpc-disable first. Nothing was changed."
+    fi
+    if clash="$(caddy_domain_clash gateway "$domain")"; then die "$clash"; fi
+    caddy_gateway_gate
+    return 0
+}
+
+# 0 (true) when the tn-gateway block on disk is exactly the one write_gateway_block
+# writes for <domain> and the ports caddy_gateway_enable_precheck set.
+caddy_gateway_block_current() {
+    local want_tmp want cur
+    caddy_gateway_block_present || return 1
+    want_tmp="$(mktemp)"
+    caddy_tmp_track "$want_tmp"
+    write_gateway_block "$1" "$CADDY_GW_PORT" "$CADDY_GW_PROBE_PORT" "$want_tmp"
+    want="$(cat "$want_tmp")"
+    rm -f "$want_tmp"
+    cur="$(caddy_current_gateway_block)"
+    [[ "$cur" == "$want" ]]
+}
+
+# Enable the worker-gateway vhost on <domain> -> 127.0.0.1:<port> (probes
+# 127.0.0.1:<probe_port>): the precheck, then -- unless the block on disk is already
+# the one it would write, which is a no-op with no write and no reload
+# (CADDY_GW_UNCHANGED=true) -- install + configure + open 80/443 + reload, through the
+# same validate / backup / swap / reload / rollback path as the other blocks,
+# preserving the dashboard and tn-rpc blocks verbatim. Caddy only: the node is never
+# edited or restarted, so no update lock and no epoch wait.
+CADDY_GW_UNCHANGED=false
+do_gateway_enable() {
+    local domain
+    domain="$(caddy_norm_host "$1")"
+    CADDY_GW_UNCHANGED=false
+    caddy_gateway_enable_precheck "$domain" "${2:-}" "${3:-}"
+    if caddy_gateway_block_current "$domain"; then
+        CADDY_GW_UNCHANGED=true
+        caddy_say ok "${CADDYFILE} already serves the worker gateway site ${domain} (POST -> 127.0.0.1:${CADDY_GW_PORT}, probes -> 127.0.0.1:${CADDY_GW_PROBE_PORT}); nothing was written and Caddy was not reloaded."
+        return 0
+    fi
+
+    caddy_assert_ports_free
+    caddy_assert_not_foreign
+    install_caddy_pkg
+
+    local dash_tmp rpc_tmp gw_tmp
+    dash_tmp="$(mktemp)"; rpc_tmp="$(mktemp)"; gw_tmp="$(mktemp)"
+    caddy_tmp_track "$dash_tmp" "$rpc_tmp" "$gw_tmp"
+    caddy_current_dashboard_block > "$dash_tmp"                       # preserve dashboard verbatim (handles legacy)
+    caddy_extract_block "$RPC_BEGIN" "$RPC_END" > "$rpc_tmp"          # and RPC (the precheck refuses one)
+    write_gateway_block "$domain" "$CADDY_GW_PORT" "$CADDY_GW_PROBE_PORT" "$gw_tmp"
+    caddy_write_managed "$dash_tmp" "$rpc_tmp" "$gw_tmp"
+    rm -f "$dash_tmp" "$rpc_tmp" "$gw_tmp"
+
+    caddy_open_ports
+    caddy_reload
+}
+
+# Disable the worker-gateway vhost; preserve the dashboard and tn-rpc blocks. Full
+# teardown only when no managed vhost remains. No gateway block: nothing is written.
+do_gateway_disable() {
+    if ! caddy_gateway_block_present; then
+        caddy_say ok "No worker gateway site is configured in ${CADDYFILE}; nothing was changed."
+        return 0
+    fi
+    local dash_tmp rpc_tmp
+    dash_tmp="$(mktemp)"; rpc_tmp="$(mktemp)"
+    caddy_tmp_track "$dash_tmp" "$rpc_tmp"
+    caddy_current_dashboard_block > "$dash_tmp"
+    caddy_extract_block "$RPC_BEGIN" "$RPC_END" > "$rpc_tmp"
+    if [[ -s "$dash_tmp" || -s "$rpc_tmp" ]]; then
+        caddy_write_managed "$dash_tmp" "$rpc_tmp" ""
+        caddy_reload
+    else
+        caddy_teardown
+    fi
+    rm -f "$dash_tmp" "$rpc_tmp"
+    caddy_say ok "The worker gateway site is removed."
+}
+
+# Echo "<listen port> <probe port>" the tn-gateway block on stdin proxies to (the
+# reverse_proxy inside `handle @probe`, and the one outside it); '' parts when absent.
+caddy_gateway_block_ports() {
+    awk '
+        /^\thandle @probe / {inp=1}
+        /reverse_proxy 127\.0\.0\.1:[0-9]/ {
+            p=$0; sub(/.*reverse_proxy 127\.0\.0\.1:/, "", p); sub(/[^0-9].*$/, "", p)
+            if (inp) {probe=p} else {listen=p}
+        }
+        inp && /^\t}/ {inp=0}
+        END {print listen " " probe}
+    '
+}
+
+# Print a single JSON status object for the worker-gateway vhost: installed / running
+# (Caddy), enabled (a tn-gateway block), domain, port and probe_port (what the block
+# proxies to: numbers, null without a block) and block_stale (a block whose first line
+# is not GW_BLOCK_STAMP; gateway-enable rewrites it).
+do_gateway_status() {
+    local installed=false running=false enabled=false domain="" block="" ports
+    local port=null probe_port=null block_stale=false
+    command -v caddy >/dev/null 2>&1 && installed=true
+    systemctl is-active --quiet caddy 2>/dev/null && running=true
+    if caddy_gateway_block_present; then
+        enabled=true
+        block="$(caddy_current_gateway_block)"
+        domain="$(printf '%s\n' "$block" | caddy_block_domain)"
+        ports="$(printf '%s\n' "$block" | caddy_gateway_block_ports)"
+        if [[ -n "${ports% *}" ]]; then port="${ports% *}"; fi
+        if [[ -n "${ports#* }" ]]; then probe_port="${ports#* }"; fi
+        if [[ "${block%%$'\n'*}" != "$GW_BLOCK_STAMP" ]]; then block_stale=true; fi
+    fi
+    printf '{"installed":%s,"running":%s,"enabled":%s,"domain":"%s","port":%s,"probe_port":%s,"block_stale":%s}\n' \
+        "$installed" "$running" "$enabled" "$(json_escape "$domain")" "$port" "$probe_port" "$block_stale"
+}
+
+# Human-readable status of the worker-gateway vhost (the gateway-status fields) and
+# whether .node-meta records a gateway advertisement.
+print_gateway_status_human() {
+    local block gdom ports
+    if caddy_gateway_block_present; then
+        block="$(caddy_current_gateway_block)"
+        gdom="$(printf '%s\n' "$block" | caddy_block_domain)"
+        ports="$(printf '%s\n' "$block" | caddy_gateway_block_ports)"
+        print_ok "Worker gateway site: ENABLED  ->  https://${gdom:-<unknown>}/  (POST -> 127.0.0.1:${ports% *}, probes -> 127.0.0.1:${ports#* })"
+        if [[ "${block%%$'\n'*}" != "$GW_BLOCK_STAMP" ]]; then
+            print_warn "The worker gateway block in ${CADDYFILE} was not written by this install-caddy.sh; run gateway-enable again with the same hostname to rewrite it."
+        fi
+    else
+        print_info "Worker gateway site: disabled"
+    fi
+    if caddy_rpc_via_gateway; then
+        print_info "node-info.yaml advertises a worker gateway (RPC_ADVERTISED_VIA=gateway): $(addon_meta_get PUBLIC_RPC_URL "" 2>/dev/null || true)"
+    fi
+}
+
+# Record (<domain>) or remove (no <domain>) the gateway advertisement in .node-meta:
+# PUBLIC_RPC_DOMAIN=<domain>, PUBLIC_RPC_URL=https://<domain> (no trailing slash, as
+# caddy_meta_record writes it), PUBLIC_WS_URL removed (the gateway serves no
+# WebSocket) and RPC_ADVERTISED_VIA=gateway; no <domain> removes all four. Best
+# effort: a failure is a warning, never fatal.
+caddy_meta_record_gateway() {
+    local domain="${1:-}" key failed=""
+    if ! caddy_meta_ready; then
+        caddy_say warn "The update lock or the ownership migration stopped the .node-meta update, so PUBLIC_RPC_DOMAIN, PUBLIC_RPC_URL, PUBLIC_WS_URL and RPC_ADVERTISED_VIA were not changed."
+        caddy_note ".node-meta not updated"
+        return 0
+    fi
+    if [[ -n "$domain" ]]; then
+        meta_set PUBLIC_RPC_DOMAIN "$domain" >/dev/null 2>&1 || failed="${failed} PUBLIC_RPC_DOMAIN"
+        meta_set PUBLIC_RPC_URL "https://${domain}" >/dev/null 2>&1 || failed="${failed} PUBLIC_RPC_URL"
+        meta_unset PUBLIC_WS_URL >/dev/null 2>&1 || failed="${failed} PUBLIC_WS_URL"
+        meta_set RPC_ADVERTISED_VIA gateway >/dev/null 2>&1 || failed="${failed} RPC_ADVERTISED_VIA"
+    else
+        for key in PUBLIC_RPC_DOMAIN PUBLIC_RPC_URL PUBLIC_WS_URL RPC_ADVERTISED_VIA; do
+            meta_unset "$key" >/dev/null 2>&1 || failed="${failed} ${key}"
+        done
+    fi
+    if [[ -n "$failed" ]]; then
+        caddy_say warn "Could not update${failed} in $(node_meta_path 2>/dev/null || echo .node-meta). The UI and check-node may show the previous endpoint until it is fixed by hand."
+        caddy_note ".node-meta not fully updated"
+    fi
+    return 0
+}
+
+# Refusals for rpc-advertise (<phase>=rpc-advertise, with <domain>) and
+# rpc-unadvertise, checked before anything changes: a host with no node, the hostname,
+# DATA_DIR or RPC_ADVERTISED_VIA set twice in .node-meta, no usable reth HTTP port
+# (the guarded restart checks the node on it). Sets CADDY_RPC_PORT.
+caddy_rpc_node_precheck() {
+    local phase="$1" domain="${2:-}" rc=0
+    caddy_node_host || die "${phase} edits node-info.yaml of the node on this host, and this host has no telcoin node (no .node-meta). Run it on the node whose record should name the gateway. Nothing was changed."
+    if [[ "$phase" == "rpc-advertise" ]]; then
+        caddy_require_domain "$domain" "RPC domain"
+    fi
+    caddy_node_info_path >/dev/null 2>&1 \
+        || die "DATA_DIR is set more than once in .node-meta, so node-info.yaml cannot be located; remove the extra lines and run this again. Nothing was changed."
+    addon_meta_get RPC_ADVERTISED_VIA "" >/dev/null || die "RPC_ADVERTISED_VIA is set more than once in .node-meta; fix the file first. Nothing was changed."
+    CADDY_RPC_PORT="$(caddy_node_port --http.port RPC_PORT 8545)" || rc=$?
+    [[ "$rc" -eq 0 ]] || die "no usable reth HTTP port to check the node with after its restart (see above). Nothing was changed."
+    return 0
+}
+
+# Advertise a worker gateway that serves https://<domain>/ (on this host or another)
+# as worker 0's rpc in node-info.yaml, with no ws URL: rpc-enable's advertise path
+# (update lock, keytool set-rpc, committee guard, epoch wait, guarded restart; no edit
+# and no restart when node-info.yaml already says so), then .node-meta via
+# caddy_meta_record_gateway (RPC_ADVERTISED_VIA=gateway keeps rpc-disable away from
+# it). No Caddy file is read or written. Refused on a host with no node.
+do_rpc_advertise() {
+    local domain
+    domain="$(caddy_norm_host "$1")"
+    caddy_operation_reset
+    caddy_rpc_node_precheck rpc-advertise "$domain"
+    caddy_meta_ready || die "the update lock or the ownership migration stopped this run (see above). Nothing was changed."
+    CADDY_LOCK_NOTE="Nothing was changed."
+    caddy_node_info_advertise set "$domain" false
+    caddy_meta_record_gateway "$domain"
+    caddy_baseline_refresh
+    caddy_node_unlock
+}
+
+# The inverse of rpc-advertise: clear worker 0's rpc in node-info.yaml (guarded
+# restart; nothing when already clear) and remove the four .node-meta keys. No Caddy
+# file is read or written. Refused on a host with no node.
+do_rpc_unadvertise() {
+    caddy_operation_reset
+    caddy_rpc_node_precheck rpc-unadvertise
+    caddy_meta_ready || die "the update lock or the ownership migration stopped this run (see above). Nothing was changed."
+    CADDY_LOCK_NOTE="Nothing was changed."
+    caddy_node_info_advertise clear
+    caddy_meta_record_gateway ""
+    caddy_baseline_refresh
+    caddy_node_unlock
 }
 
 # =============================================================================
@@ -2855,9 +3296,69 @@ run_json_rpc_disable() {
     trap json_on_exit EXIT
     check_root
     json_event step "Removing the public RPC site"
-    json_event step "Clearing the advertisement in node-info.yaml"
+    if caddy_rpc_via_gateway; then
+        json_event step "Keeping the worker gateway advertisement in node-info.yaml (RPC_ADVERTISED_VIA=gateway)"
+    else
+        json_event step "Clearing the advertisement in node-info.yaml"
+    fi
     do_rpc_disable
     json_done "{\"event\":\"done\",\"ok\":true,\"msg\":\"$(json_escape "public RPC endpoint disabled${CADDY_DONE_NOTES:+ (${CADDY_DONE_NOTES})}")\"}"
+}
+
+run_json_rpc_advertise() {
+    local domain
+    json_setup_fds
+    trap json_on_exit EXIT
+    check_root
+    domain="$(caddy_norm_host "$JSON_RPC_DOMAIN")"
+    caddy_rpc_node_precheck rpc-advertise "$domain"
+    json_event step "Advertising https://${domain}/ (no WebSocket URL) in node-info.yaml"
+    json_event step "Recording the gateway advertisement in .node-meta"
+    do_rpc_advertise "$domain"
+    json_done "{\"event\":\"done\",\"ok\":true,\"domain\":\"$(json_escape "$domain")\",\"msg\":\"$(json_escape "worker gateway advertised in node-info.yaml${CADDY_DONE_NOTES:+ (${CADDY_DONE_NOTES})}")\"}"
+}
+
+run_json_rpc_unadvertise() {
+    json_setup_fds
+    trap json_on_exit EXIT
+    check_root
+    caddy_rpc_node_precheck rpc-unadvertise
+    json_event step "Clearing the advertisement in node-info.yaml"
+    json_event step "Removing the gateway advertisement from .node-meta"
+    do_rpc_unadvertise
+    json_done "{\"event\":\"done\",\"ok\":true,\"msg\":\"$(json_escape "worker gateway advertisement removed${CADDY_DONE_NOTES:+ (${CADDY_DONE_NOTES})}")\"}"
+}
+
+run_json_gateway_enable() {
+    local domain
+    json_setup_fds
+    trap json_on_exit EXIT
+    check_root
+    domain="$(caddy_norm_host "$JSON_GW_DOMAIN")"
+    caddy_gateway_enable_precheck "$domain" "$JSON_GW_PORT" "$JSON_GW_PROBE_PORT"
+    if caddy_gateway_block_current "$domain"; then
+        json_event step "Checking the worker gateway site for ${domain}"
+    else
+        json_event step "Checking ports 80 and 443 are free"
+        json_event step "Installing Caddy (if needed)"
+        json_event step "Configuring the worker gateway site for ${domain}"
+        json_event step "Opening the firewall (80, 443) and reloading Caddy"
+    fi
+    do_gateway_enable "$domain" "$JSON_GW_PORT" "$JSON_GW_PROBE_PORT"
+    if [[ "$CADDY_GW_UNCHANGED" == "true" ]]; then
+        json_done "{\"event\":\"done\",\"ok\":true,\"domain\":\"$(json_escape "$domain")\",\"msg\":\"worker gateway site already configured -- nothing written, Caddy not reloaded\"}"
+    else
+        json_done "{\"event\":\"done\",\"ok\":true,\"domain\":\"$(json_escape "$domain")\",\"msg\":\"worker gateway site enabled -- certificate issues on first request\"}"
+    fi
+}
+
+run_json_gateway_disable() {
+    json_setup_fds
+    trap json_on_exit EXIT
+    check_root
+    json_event step "Removing the worker gateway site"
+    do_gateway_disable
+    json_done "{\"event\":\"done\",\"ok\":true,\"msg\":\"worker gateway site disabled\"}"
 }
 
 # =============================================================================
@@ -3281,7 +3782,32 @@ run_phase_human() {
             print_ok "Public RPC endpoint disabled."
             caddy_print_notes
             ;;
-        *) die "unknown --phase '${phase}' (status|check-dns|enable|disable|rpc-status|rpc-check-dns|rpc-enable|rpc-disable)" ;;
+        rpc-advertise)
+            check_root
+            do_rpc_advertise "$JSON_RPC_DOMAIN"
+            print_ok "Worker gateway advertisement set: https://${JSON_RPC_DOMAIN}/ (no WebSocket URL)."
+            caddy_print_notes
+            ;;
+        rpc-unadvertise)
+            check_root
+            do_rpc_unadvertise
+            print_ok "Worker gateway advertisement removed."
+            caddy_print_notes
+            ;;
+        gateway-status)    print_caddy_state_human; print_gateway_status_human ;;
+        gateway-check-dns) do_check_dns_human "$JSON_GW_DOMAIN" ;;
+        gateway-enable)
+            check_root
+            do_gateway_enable "$JSON_GW_DOMAIN" "$JSON_GW_PORT" "$JSON_GW_PROBE_PORT"
+            if [[ "$CADDY_GW_UNCHANGED" != "true" ]]; then
+                print_ok "Worker gateway site enabled at https://${JSON_GW_DOMAIN}/ -- the certificate is issued on the first request."
+            fi
+            ;;
+        gateway-disable)
+            check_root
+            do_gateway_disable
+            ;;
+        *) die "unknown --phase '${phase}' (status|check-dns|enable|disable|rpc-status|rpc-check-dns|rpc-enable|rpc-disable|rpc-advertise|rpc-unadvertise|gateway-status|gateway-check-dns|gateway-enable|gateway-disable)" ;;
     esac
 }
 
@@ -3305,9 +3831,13 @@ caddy_require_lib() {
     local fn missing=""
     for fn in tn_write_root_file tn_backup_file tn_restore_backup tn_as_service_user \
               addon_meta_get addon_meta_write_begin tn_acquire_update_lock _tn_strip_gw \
-              tn_committee_down_guard tn_wait_restart_window tn_local_rpc_url; do
+              tn_committee_down_guard tn_wait_restart_window tn_local_rpc_url \
+              tn_gateway_installed; do
         declare -F "$fn" >/dev/null 2>&1 || missing="${missing:+${missing}, }${fn}"
     done
+    # The tn-gateway fence lines.
+    [[ -n "${TN_CADDY_GW_BEGIN:-}" ]] || missing="${missing:+${missing}, }TN_CADDY_GW_BEGIN"
+    [[ -n "${TN_CADDY_GW_END:-}" ]] || missing="${missing:+${missing}, }TN_CADDY_GW_END"
     [[ -z "$missing" ]] && return 0
     caddy_usage_error "lib/common.sh ${COMMON_VERSION:-unknown} lacks ${missing}; run update-scripts.sh, then this again."
 }
@@ -3325,10 +3855,10 @@ main() {
             --json)         shift ;;
             --password-stdin) CADDY_PASSWORD_STDIN=true; shift ;;
             --yes|-y)       CADDY_YES=true; shift ;;
-            --phase|--domain|--username|--rpc-domain|--move-dashboard-to|--public-ip)
+            --phase|--domain|--username|--rpc-domain|--move-dashboard-to|--public-ip|--gateway-domain|--gateway-port|--gateway-probe-port)
                 # A value flag given as the last word has no value: a usage error,
                 # never a silent exit.
-                [[ $# -ge 2 ]] || caddy_usage_error "$1 needs a value (usage: install-caddy.sh [--json] --phase=<phase> [--domain <d>] [--username <u>] [--rpc-domain <d>] [--move-dashboard-to <host>] [--public-ip <ip>])"
+                [[ $# -ge 2 ]] || caddy_usage_error "$1 needs a value (usage: install-caddy.sh [--json] --phase=<phase> [--domain <d>] [--username <u>] [--rpc-domain <d>] [--move-dashboard-to <host>] [--public-ip <ip>] [--gateway-domain <d>] [--gateway-port <n>] [--gateway-probe-port <n>])"
                 case "$1" in
                     --phase)             JSON_PHASE="$2" ;;
                     --domain)            JSON_DOMAIN="$2" ;;
@@ -3341,6 +3871,11 @@ main() {
                     # Exported so both JSON (check-dns) and interactive paths honour it via
                     # caddy_public_ip().
                     --public-ip)         export TN_CADDY_PUBLIC_IP="$2" ;;
+                    # gateway-check-dns / gateway-enable: the worker gateway's hostname,
+                    # its listen port and its probe port (defaults 8655 / 8656).
+                    --gateway-domain)     JSON_GW_DOMAIN="$2" ;;
+                    --gateway-port)       JSON_GW_PORT="$2" ;;
+                    --gateway-probe-port) JSON_GW_PROBE_PORT="$2" ;;
                 esac
                 shift 2 ;;
             --phase=*)      JSON_PHASE="${1#*=}"; shift ;;
@@ -3349,6 +3884,9 @@ main() {
             --rpc-domain=*) JSON_RPC_DOMAIN="${1#*=}"; shift ;;
             --move-dashboard-to=*) JSON_MOVE_DASH="${1#*=}"; shift ;;
             --public-ip=*)  export TN_CADDY_PUBLIC_IP="${1#*=}"; shift ;;
+            --gateway-domain=*)     JSON_GW_DOMAIN="${1#*=}"; shift ;;
+            --gateway-port=*)       JSON_GW_PORT="${1#*=}"; shift ;;
+            --gateway-probe-port=*) JSON_GW_PROBE_PORT="${1#*=}"; shift ;;
             *) shift ;;
         esac
     done
@@ -3357,6 +3895,7 @@ main() {
     JSON_DOMAIN="$(caddy_norm_host "$JSON_DOMAIN")"
     JSON_RPC_DOMAIN="$(caddy_norm_host "$JSON_RPC_DOMAIN")"
     JSON_MOVE_DASH="$(caddy_norm_host "$JSON_MOVE_DASH")"
+    JSON_GW_DOMAIN="$(caddy_norm_host "$JSON_GW_DOMAIN")"
     caddy_require_lib
     if [[ "$CADDY_PASSWORD_STDIN" == "true" ]]; then
         [[ -z "$pw_env" ]] || caddy_usage_error "the password came both on stdin (--password-stdin) and in TN_CADDY_PASSWORD; give it one way only."
@@ -3388,7 +3927,13 @@ main() {
             rpc-check-dns) do_check_dns_json "$JSON_RPC_DOMAIN" ;;
             rpc-enable)    run_json_rpc_enable ;;
             rpc-disable)   run_json_rpc_disable ;;
-            *) echo '{"event":"done","ok":false,"msg":"unknown or missing --phase (status|check-dns|enable|disable|rpc-status|rpc-check-dns|rpc-enable|rpc-disable)"}'; exit 1 ;;
+            rpc-advertise)     run_json_rpc_advertise ;;
+            rpc-unadvertise)   run_json_rpc_unadvertise ;;
+            gateway-status)    do_gateway_status ;;
+            gateway-check-dns) do_check_dns_json "$JSON_GW_DOMAIN" ;;
+            gateway-enable)    run_json_gateway_enable ;;
+            gateway-disable)   run_json_gateway_disable ;;
+            *) echo '{"event":"done","ok":false,"msg":"unknown or missing --phase (status|check-dns|enable|disable|rpc-status|rpc-check-dns|rpc-enable|rpc-disable|rpc-advertise|rpc-unadvertise|gateway-status|gateway-check-dns|gateway-enable|gateway-disable)"}'; exit 1 ;;
         esac
         exit $?
     fi
