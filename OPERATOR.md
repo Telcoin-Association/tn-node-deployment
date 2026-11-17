@@ -362,7 +362,7 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh --json --enable --ssh-from 19
 
 - `--ssh-from CIDR[,CIDR]` or `--ssh-from <file>` (one source per line) limits SSH to those sources; `--p2p-from` does the same for the P2P ports. The lists are stored in `.node-meta` as `SSH_ALLOW_FROM` and `P2P_ALLOW_FROM`, and a new list replaces the old one's rules. Addresses with leading zeros, `/0` and masks wider than `/8` are refused. An IPv6 entry must parse as Rust's `Ipv6Addr` parses it, the grammar `tn-p2p-allow-sync` reads `P2P_ALLOW_FROM` with: hex groups only, at most one `::`, and no zone (`%eth0`), brackets or dotted IPv4 tail (write `::ffff:192.0.2.1` as `::ffff:c000:201`), so a typo is refused before anything is written.
 - `--ssh-anywhere` and `--p2p-anywhere` drop a stored list and open the port to every address again. Each cannot be combined with its `-from` twin.
-- `--gateway-from <list|file>` lets those hosts reach the node's RPC port and health port 43174, on every network, for a worker gateway on another host (section 4.15). It goes with `--enable` or `--reset`, is stored as `GATEWAY_ALLOW_FROM` and applied again by every later `--enable` and `--reset`; `--gateway-from none` removes the list and its rules.
+- `--gateway-from <list|file>` lets those hosts reach the node's RPC port and health port 43174, on every network, for a worker gateway on another host (section 4.15). It goes with `--enable` or `--reset`, is stored as `GATEWAY_ALLOW_FROM` and applied again by every later `--enable` and `--reset`; `--gateway-from none` removes the list and its rules. While `GATEWAY_UPSTREAM` is set in `.node-meta`, `--reset`, `--gateway-from none` and a list that leaves out a host it names are refused (section 4.15).
 - On a Google Cloud VM the IAP range `35.235.240.0/20` is added to the SSH sources, so the console's SSH button keeps working.
 - On mainnet, enabling the firewall without SSH sources is refused unless you pass `--ssh-anywhere`. The health port 43174 is never opened to everyone.
 
@@ -974,7 +974,7 @@ When the value is already in place, nothing is written and the node is not resta
 | `allow_private_forward_targets` | `true` or `false`. `true` lets the node forward transactions to committee RPC endpoints on private addresses. `true` is refused on testnet and mainnet, so it is for private networks such as a devnet; `false` is accepted everywhere. |
 | `admission` | `open`, `grace` or `closed`: the admission mode, written into `network-config` with the recorded trusted nodes map and, as `committee_peers`, the installed bootstrap peers map. Needs node release 0.17.0 or later (section 2.9). |
 | `trusted_nodes` | An absolute path to a trusted nodes map, shape-checked and installed as `/etc/telcoin/trusted-nodes.yaml`, or `none` to remove it. Needs an admission mode first (section 2.9). |
-| `gateway_upstream` | `<IPv4>[,<IPv4>...]` or `off`. The list binds the RPC and the health check to every interface (`--http.addr 0.0.0.0`, `--healthcheck 0.0.0.0:43174`) for worker gateways on those hosts, and is refused unless `ufw` already admits them (`firewall-setup.sh --enable --gateway-from`); `off` puts both back. A stopped node stays stopped. Section 4.15. |
+| `gateway_upstream` | `<IPv4>[,<IPv4>...]` or `off`. The list binds the RPC and the health check to every interface (`--http.addr 0.0.0.0`, `--healthcheck 0.0.0.0:43174`) for worker gateways on those hosts, and is refused unless `ufw` already admits them (`firewall-setup.sh --enable --gateway-from`) and keeps every other address out of both ports; `off` puts both back. A stopped node (inactive or failed) stays stopped; a node that is starting, stopping or waiting for its automatic restart is refused. Section 4.15. |
 
 A listener's UDP port must match the advertised external port (`EXTERNAL_PRIMARY_ADDR` or `EXTERNAL_WORKER_ADDR` in `.node-meta`), because that is the port peers dial; a different port is refused unless a NAT or port forward maps the external port to it and you allow the mismatch (`--allow-port-mismatch` or `TN_ALLOW_PORT_MISMATCH=1`; the Node Manager asks you to confirm it).
 With `--json`, `verbosity` takes at most `-vvv`.
@@ -1644,11 +1644,12 @@ Pick a layout with `--mode`:
 
 And a front with `--front`:
 
-- `caddy` (the default): the gateway listens on `127.0.0.1:8655`, and this host's Caddy serves `https://<domain>/` in front of it. Needs `--domain`, a DNS record and ports 80 and 443.
+- `caddy` (the default): the gateway listens on `127.0.0.1:8655`, and this host's Caddy serves `https://<domain>/` in front of it. Needs `--domain` (a DNS name: an IP address is refused, because Caddy needs a name for the certificate), a DNS record and ports 80 and 443.
 - `none`: the gateway itself listens on `0.0.0.0:8655` over plain HTTP, for a load balancer or private network that brings its own TLS. No script opens that port: the firewall is yours.
 
 The gateway has two more listeners, on `127.0.0.1` only: the probe listener on 8656 (`/health`, `/ready`, `/ready/any`) and the metrics listener on 9655.
 `--listen-port`, `--probe-port` and `--metrics-port` change the three; they must differ from each other and, on a node host, from the node's RPC and health ports.
+`--redirect-queries` takes `http(s)://host[:port][/path]` with a hostname or an IPv4 address, and is refused when it points at the worker's RPC or readiness port, or at one of the gateway's own ports on this host, because the gateway refuses to start with such a URL.
 
 Images.
 The gateway runs from a Docker image given by digest, `<repository>@sha256:<64 lowercase hex>`; a tag is refused.
@@ -1701,6 +1702,7 @@ Same host, behind Caddy.
    `--yes` skips the question and `--json` never asks; without a terminal and without either it stops with `Enabling the worker gateway needs your consent to the above: run again with --yes (or from a terminal). Nothing was changed.`
    Then it writes `/etc/telcoin/gateway/gateway.meta` and `telcoin-gateway.service`, starts the unit, waits up to 20 seconds for the gateway's `/health`, and runs `install-caddy.sh --phase gateway-enable`, which writes the `tn-gateway` site, opens 80 and 443 and reloads Caddy. It ends with `worker gateway enabled`.
    It does not wait for `/ready`, because the node may be down.
+   When the Caddyfile already holds the same site but Caddy is not running, `gateway-enable` writes the site again and starts Caddy.
 5. Check it:
 
    ```bash
@@ -1711,6 +1713,7 @@ Same host, behind Caddy.
    ```
 
    The query endpoint answers the `eth_chainId` call.
+6. Advertise the gateway in the node's record (below) only now: `rpc-advertise` refuses until `https://gw.example.org/health` answers 200 from this host.
 
 The node's RPC port defaults to the node's `--http.port`, else `RPC_PORT` in `.node-meta`, else 8545, and the health port to the node's own; `--rpc-port` and `--health-port` override them.
 `--network` defaults to the node's network and must match it when given.
@@ -1736,6 +1739,7 @@ On the validator:
 
    This adds two `ufw` rules per source on every network, `allow from 10.0.0.20 to any port <RPC port> proto tcp` and the same for the health port 43174 (the RPC port is `RPC_PORT` in `.node-meta`, else 8545).
    The list is stored as `GATEWAY_ALLOW_FROM` in `.node-meta`, and every later `--enable` and `--reset` applies it again.
+   Sources are compared the way `ufw` stores them: `10.0.0.20/32` and `10.0.0.20` are one source, and a CIDR is its network address (`10.0.0.5/24` is `10.0.0.0/24`).
    `sudo bash ~/telcoin-node-scripts/firewall-setup.sh --json --status` shows it as `"gateway_from":["10.0.0.20"]`.
 2. Bind the RPC and the health check to every interface:
 
@@ -1746,7 +1750,11 @@ On the validator:
    It sets `--http.addr 0.0.0.0` and `--healthcheck 0.0.0.0:43174` on the node command and records `GATEWAY_UPSTREAM` and, the first time, the previous `--healthcheck` value as `GATEWAY_PREV_HEALTHCHECK` in `.node-meta`.
    It adds none of the public RPC limits and no `--http.api`, and leaves the WebSocket bind alone.
    It is refused on every network, mainnet included, unless `ufw` is active and holds both rules for every address listed, for example: `ufw has no rule letting 10.0.0.20 in to port 8545, so the gateways cannot reach the RPC and health check; open them first: sudo bash ~/telcoin-node-scripts/firewall-setup.sh --enable --gateway-from 10.0.0.20`.
-   A running node is restarted after the committee quorum check (section 4.11) and the epoch wait (section 4.2), as for any other edit; a node that was stopped stays stopped, with the files edited and nothing started.
+   It is also refused when the firewall lets more than the gateways in: a default policy for incoming traffic other than deny or reject, or a rule that lets any address in to the RPC or health port, such as `ufw has a rule letting any address (Anywhere) in to port 8545; delete it first`.
+   And it is refused when the node's RPC already listens on every interface: that RPC is public, and `gateway_upstream` is for a node whose RPC is private.
+   List each gateway host by its IPv4 address, as `--gateway-from` names it (`10.0.0.20` or `10.0.0.20/32`); a CIDR in `--gateway-from` that contains the address does not count.
+   A running node is restarted after the committee quorum check (section 4.11) and the epoch wait (section 4.2), as for any other edit; a node that was stopped (inactive or failed) stays stopped, with the files edited and nothing started.
+   A node that is starting, stopping or waiting for its automatic restart is refused: `the node is starting or restarting (or stopping), neither active nor stopped; wait until it is active, or stop it`.
 
 On the gateway host, which runs no node:
 
@@ -1759,6 +1767,9 @@ On the gateway host, which runs no node:
      --redirect-queries https://rpc.example.org/
    ```
 
+   The enable asks the validator for its chain id (`eth_chainId`) and refuses when the chain belongs to another network than `--network`, such as `the upstream http://10.0.0.12:8545 is on chain <id> (testnet), and the network given is devnet: give the network that node runs`.
+   Mainnet and testnet each have one chain id, and a devnet is any other.
+   When the validator does not answer within 3 seconds, it warns `The network could not be confirmed` and goes on with the network given; `--status` checks it again once the validator answers.
    The DNS record and the ports 80 and 443 of the same-host steps apply to this host.
    The gateway reaches the validator at `http://10.0.0.12:8545` and reads its readiness from `http://10.0.0.12:43174/health/workers`; give `--rpc-port` or `--health-port` when the validator uses other ports.
    With `--front none` there is no Caddy and no DNS step; leave out `--domain`.
@@ -1770,6 +1781,9 @@ On the gateway host, which runs no node:
 
    On a host with a gateway and no node, `firewall-setup.sh` takes the network from `gateway.meta` and applies the SSH rules and, when Caddy serves the gateway site, 80 and 443; it adds no P2P rule and no health rule.
    With `--front none` it opens nothing for the gateway's port, so add your own rule, such as `sudo ufw allow from 203.0.113.0/24 to any port 8655 proto tcp` for a load balancer's range.
+   It keeps the SSH source list as `SSH_ALLOW_FROM` in `gateway.meta`, so `--ssh-from` is given once: a plain `--enable` applies the stored list again, and removing the gateway removes the list with `gateway.meta`.
+   On mainnet, as on a node host, `--enable` is refused until it has an SSH source list, given or stored, or `--ssh-anywhere`.
+5. On the validator, advertise the gateway in its record (below) only now, with the gateway, its DNS record and its certificate in place: `rpc-advertise` refuses until `https://gw.example.org/health` answers 200 from the validator.
 
 To undo it, go in the reverse order:
 
@@ -1785,6 +1799,20 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh --enable --gateway-from none
 `gateway_upstream=off` puts `--http.addr` back on `127.0.0.1`, whatever it was before, and `--healthcheck` back to the value recorded in `GATEWAY_PREV_HEALTHCHECK` (it removes the flag when there was none, and leaves the flag as it is with a warning when the key is missing), then unsets both keys; it restarts the node under the same guards.
 `--gateway-from none` removes `GATEWAY_ALLOW_FROM` and deletes its rules.
 
+While `GATEWAY_UPSTREAM` is set, `firewall-setup.sh` on the validator refuses `--gateway-from none`, a `--gateway-from` list that leaves out a host `GATEWAY_UPSTREAM` names, and `--reset`; a plain `--enable` still runs.
+The node's RPC listens on every interface then, and the firewall is all that limits who reaches it: `--gateway-from none` or a shorter list deletes the rules made for the gateway, and a reset turns `ufw` off while it applies the rules again.
+That is why the undo steps run `gateway_upstream=off` before `--gateway-from none`.
+To reset the firewall of such a validator, turn the upstream off around the reset:
+
+```bash
+sudo bash ~/telcoin-node-scripts/edit-config.sh --set gateway_upstream=off
+sudo bash ~/telcoin-node-scripts/firewall-setup.sh --reset
+sudo bash ~/telcoin-node-scripts/firewall-setup.sh --enable --gateway-from 10.0.0.20
+sudo bash ~/telcoin-node-scripts/edit-config.sh --set gateway_upstream=10.0.0.20
+```
+
+Each `gateway_upstream` change restarts a running node under the guards of step 2.
+
 Advertise the gateway in the node's record.
 Other nodes forward the transactions they receive to the RPC URL that committee members advertise in `node-info.yaml` (section 6.1).
 To have them send transactions to the gateway, advertise its URL on the node host: this host in same-host mode, the validator in standalone mode.
@@ -1793,6 +1821,9 @@ To have them send transactions to the gateway, advertise its URL on the node hos
 sudo bash ~/telcoin-node-scripts/install-caddy.sh --phase=rpc-advertise --rpc-domain gw.example.org
 ```
 
+It first asks for `https://gw.example.org/health` from this host and refuses unless the answer is 200 with a certificate valid for that name: `rpc-advertise was asked to advertise https://gw.example.org/, and GET https://gw.example.org/health from this host got <what> instead of 200`.
+No flag skips the check: a wrong URL in a validator's record breaks transaction forwarding to it until the record is fixed and the node restarted again.
+So the gateway, its DNS record and its certificate come first, and in standalone mode the validator must resolve the gateway's name and reach it over HTTPS.
 It writes `https://gw.example.org/` and no WebSocket URL into `node-info.yaml`, sets `PUBLIC_RPC_DOMAIN`, `PUBLIC_RPC_URL` and `RPC_ADVERTISED_VIA=gateway` in `.node-meta`, removes `PUBLIC_WS_URL`, and touches no Caddy file.
 The node signs its record at start, so this restarts the node once, after the quorum check and the epoch wait; when `node-info.yaml` already holds that URL, there is no restart.
 It ends with `Worker gateway advertisement set: https://gw.example.org/ (no WebSocket URL).`
@@ -1801,6 +1832,7 @@ The URL is always `https`, so advertise only a gateway that serves TLS: one behi
 
 While `RPC_ADVERTISED_VIA=gateway` is set, `rpc-disable` removes only a public RPC site and leaves `node-info.yaml` and the keys alone, and `rpc-enable` refuses until you run `rpc-unadvertise`.
 `gateway-enable` refuses while a public RPC site is configured.
+`rpc-advertise` and `rpc-unadvertise` refuse while this host serves a public RPC site, whose advertisement is `rpc-disable`'s to clear.
 A public RPC site and a gateway are never served from one host.
 
 Status and logs.
@@ -1817,6 +1849,8 @@ health true, ready true, ready_any true, issues 0
 ```
 
 Each issue it finds comes on its own line with its fix, such as `The unit differs from /etc/telcoin/gateway/gateway.meta: run setup-gateway.sh --refresh`.
+Three issues compare the gateway with the node and with this scripts release: `gateway.meta` names another network than the node on this host; on a host with no node, the upstream answers with the chain id of another network than `gateway.meta` names; the gateway runs an image this scripts release does not allow (`The gateway runs an image this scripts release does not allow: ...; run setup-gateway.sh --refresh`).
+`check-node.sh` reports the same issues.
 `--status` needs no root, but `gateway.meta` is root 0600, so run it with `sudo` to see everything.
 It exits 0 whenever it could read the state; with `--json` its `done` line carries `installed`, `active`, `health`, `ready`, `ready_any` and `issues`, which a script judges.
 
@@ -1832,6 +1866,7 @@ It exits 0 whenever it could read the state; with `--json` its `done` line carri
 It reports `/ready` without counting it.
 On a host with a gateway and no node it says `No Telcoin node on this server, only a worker gateway: the node sections are skipped.`
 On a validator with `GATEWAY_ALLOW_FROM` or `GATEWAY_UPSTREAM` in `.node-meta`, a section `Checking the gateway upstream (validator side)...` checks the `ufw` rules for each listed host, that the RPC and `--healthcheck` listen on `0.0.0.0` exactly when `GATEWAY_UPSTREAM` is set, and that `node-info.yaml` advertises an `https` URL and no WebSocket URL.
+When they listen on `0.0.0.0`, it also reports a firewall that lets more than the gateways reach them.
 
 The gateway logs to the journal through its unit, and Docker keeps the container's output while it runs (the container is removed when it stops):
 
@@ -1852,9 +1887,12 @@ sudo bash ~/telcoin-node-scripts/setup-gateway.sh --refresh
 
 A refresh renders the unit again from `gateway.meta` with the scripts on disk and, when the result differs from the installed unit, writes it and restarts the gateway only.
 With `--image <repository>@sha256:<digest>` it moves the gateway to that image, under the same image rules as an enable.
+On testnet and mainnet, without `--image`, it moves the gateway to the image this scripts release pins when `gateway.meta` holds another, and says so: `Moving the worker gateway from <old> to <new>, the image this scripts release pins for testnet`.
+It checks the network first: on a node host it refuses when `gateway.meta` names another network than the node's, and on a host with no node it asks the upstream for its chain id, as the enable does.
 When nothing differs it says `the worker gateway was already current; nothing had to change`.
 A scripts update (section 4.1) replaces the scripts on disk and nothing else: the installed unit, `gateway.meta` and the running container stay as they were.
 When the new scripts would write a different unit, `--status` and `check-node.sh` report that the unit differs; run the refresh then.
+When the new release pins another image, they report the running image as one the release does not allow, and the refresh moves the gateway to the new pin.
 To change a setting other than the image, run `--enable` again with every option you want.
 
 Remove.
@@ -1866,12 +1904,16 @@ sudo bash ~/telcoin-node-scripts/setup-gateway.sh --remove
 It says what goes, such as `https://gw.example.org/ stops answering: its Caddy block is removed.` and `The unit telcoin-gateway.service, its container and /etc/telcoin/gateway are removed; the image stays.`, and asks `Remove the worker gateway? [y/N]` (`--yes` or `--json` skips it).
 With front `caddy` it runs `install-caddy.sh --phase gateway-disable` first, which removes the site and leaves any other Caddy site in place.
 It ends with `worker gateway removed; its image stays on this host`.
+A file in `/etc/telcoin/gateway` that the gateway did not write stays, and the directory with it: the removal names it (`... stays: it holds files the gateway did not write (...)`) and exits 0.
 It does not touch the node's record: run `rpc-unadvertise` on the node host if you advertised the gateway.
 On a standalone layout, close the validator side as the undo steps above show.
 
 `remove-node.sh` on a host with a node and a gateway removes the gateway (its unit, container and `/etc/telcoin/gateway`) before it stops the node, as it does the private alerts (section 4.7).
 It keeps the image and says how to remove it (`docker image rm <image>`), and it leaves the Caddy site in place with `The Caddyfile still holds the worker gateway's site; remove it with: sudo bash install-caddy.sh --phase gateway-disable`.
-On a host with a gateway and no node it removes nothing and says `A worker gateway is installed here and this script leaves it in place; remove it with: sudo bash setup-gateway.sh --remove`.
+When `.node-meta` still says `RPC_ADVERTISED_VIA=gateway`, it warns `node-info.yaml still advertises https://gw.example.org/ as this node's RPC` and names `rpc-unadvertise`.
+On a host with a gateway and no node, it never removes a gateway that runs on its own host (`MODE=standalone` in `gateway.meta`, or no mode it can read), and says `A worker gateway is installed here and this script leaves it in place; remove it with: sudo bash setup-gateway.sh --remove`.
+The files a node left on such a host stay as well, because removing them would take the gateway's files with them: remove the gateway first, then run `remove-node.sh` again.
+A same-host gateway whose node is gone is removed with the files the node left.
 Update the scripts (section 4.1) before you remove a node that has a gateway: an older `remove-node.sh` does not know the gateway, leaves it running, and its scan for other installs offers the gateway's unit and container as a stray install.
 
 Limits to know.
@@ -1888,7 +1930,7 @@ The files:
 | File | Owner, mode | What |
 |---|---|---|
 | `/etc/telcoin/gateway/` | root 0755 | Holds `gateway.meta`. |
-| `/etc/telcoin/gateway/gateway.meta` | root 0600 | The gateway's settings, one `KEY=value` per line: the network, the mode, the front, the domain, the image, the upstream host and ports, the gateway's own ports, the query endpoint and the trusted proxies. `--refresh` renders the unit from it. |
+| `/etc/telcoin/gateway/gateway.meta` | root 0600 | The gateway's settings, one `KEY=value` per line: the network, the mode, the front, the domain, the image, the upstream host and ports, the gateway's own ports, the query endpoint and the trusted proxies; on a host with no node also the firewall's SSH list (`SSH_ALLOW_FROM`). `--refresh` renders the unit from it. |
 | `/etc/systemd/system/telcoin-gateway.service` | root 0644 | Runs `docker run --rm --name telcoin-gateway --network=host --user 1101:1101 --read-only --cap-drop ALL --security-opt no-new-privileges --pull=never --stop-timeout 60 <image> <flags>`, with `Restart=on-failure` and `TimeoutStopSec=75`. |
 | The `tn-gateway` block of `/etc/caddy/Caddyfile` | | With front `caddy` only; `install-caddy.sh` writes and removes it. |
 | `GATEWAY_ALLOW_FROM`, `GATEWAY_UPSTREAM`, `GATEWAY_PREV_HEALTHCHECK` in the validator's `.node-meta` | | Written by `firewall-setup.sh --gateway-from` and `edit-config.sh --set gateway_upstream` in standalone mode. |
@@ -1915,6 +1957,13 @@ Troubleshooting.
 | `413` | The request body is too large. | Send smaller requests. |
 | The certificate does not issue | The A record does not point at this host, or 80 and 443 are closed in a firewall in front of it. | `install-caddy.sh --phase=gateway-check-dns --gateway-domain <name>`, open 80 and 443 in the cloud firewall, then `sudo journalctl -u caddy -n 50`. |
 | `edit-config.sh --set gateway_upstream=...` is refused with `ufw has no rule letting ...` or `ufw is not active` | The firewall does not admit the gateway host yet. | Run the `firewall-setup.sh --enable --gateway-from <list>` it names first. |
+| `edit-config.sh --set gateway_upstream=...` is refused with `ufw has a rule letting any address (Anywhere) in to port ...` or `ufw's default policy for incoming traffic is ...` | Other addresses than the gateways would reach the RPC or health port once it listens on `0.0.0.0`. | Delete the open rule (`sudo ufw status numbered`, then `sudo ufw delete <number>`), or run `firewall-setup.sh --enable --gateway-from <list>`, which sets the default deny. |
+| `edit-config.sh --set gateway_upstream=...` is refused with `the node is starting or restarting (or stopping)` | systemd reports the node neither active nor stopped, such as a crashed node waiting for its automatic restart. | Wait until the node is active, or stop it (`sudo systemctl stop <service>`, as the message says), then run it again. |
+| `firewall-setup.sh --gateway-from none`, or a list without a gateway host, is refused with `GATEWAY_UPSTREAM in .node-meta names ...` | The node is bound for that gateway, and the run would delete the gateway's rules. | `edit-config.sh --set gateway_upstream=off` (or a new list) first, then the firewall run. |
+| `firewall-setup.sh --reset` is refused with `--reset is refused while GATEWAY_UPSTREAM is set` | A reset turns `ufw` off while it applies the rules again, and the node's RPC listens on every interface. | The four commands the message names, in order (the reset steps after the undo steps above). A plain `--enable` is allowed. |
+| `setup-gateway.sh --enable` or `--refresh` is refused with `the upstream http://... is on chain ..., and the network given is ...` | `--network`, or `NETWORK` in `gateway.meta`, is another network than the validator runs. | Run `--enable` again with the validator's network as `--network`. |
+| `setup-gateway.sh --refresh` says `Moving the worker gateway from ...` | On testnet and mainnet a refresh moves the gateway to the image this scripts release pins. | Nothing: that is the only image the release allows there. `--status` shows the new image. |
+| `install-caddy.sh --phase=rpc-advertise` is refused with `GET https://<name>/health from this host got ... instead of 200` | The gateway, its DNS record or its certificate is not in place, or this host cannot reach the name. | Enable the gateway first, then run `curl -sS https://<name>/health` from this host; run `rpc-advertise` again when it answers. |
 | `firewall-setup.sh --gateway-from ...` runs without error, but `--json --status` has no `gateway_from` | Scripts older than this release ignore flags they do not know. | Update the scripts (section 4.1), then run it again. |
 | `setup-gateway.sh` exits 2 | The libraries are older than the script. | Update the scripts (section 4.1). |
 

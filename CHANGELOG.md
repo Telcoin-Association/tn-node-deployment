@@ -25,12 +25,18 @@ starts or restarts the node.
 `https://<host>/` and no WebSocket URL into `node-info.yaml`, one guarded node restart, no
 Caddy change) and `rpc-unadvertise`. `firewall-setup.sh --gateway-from <list>|none`, with
 `--enable` or `--reset`, lets a gateway host reach the node's RPC and health ports; the list is
-stored as `GATEWAY_ALLOW_FROM` and applied again by every `--enable` and `--reset`.
+stored as `GATEWAY_ALLOW_FROM` and applied again by every `--enable` and `--reset`; while the
+node is bound for a gateway, `--reset`, `none` and a list that drops a bound host are refused.
 `edit-config.sh --set gateway_upstream=<IPv4>[,...]|off` binds the RPC and the health check to
-every interface for those hosts, refused unless `ufw` already admits them; a node that was
-stopped stays stopped. `check-node.sh` checks the gateway, and on a validator the gateway rules,
+every interface for those hosts, refused unless `ufw` already admits them and keeps every other
+address out, and refused while the node is starting or restarting; a node that was stopped stays
+stopped. `check-node.sh` checks the gateway, and on a validator the gateway rules,
 binds and advertised URL; on a host with only a gateway it skips the node sections.
-`remove-node.sh` removes a gateway before it stops the node and keeps its image and Caddy site.
+`remove-node.sh` removes a gateway before it stops the node and keeps its image and Caddy site;
+on a host with no node it removes only a same-host gateway, never one that runs on its own, and
+keeps a node's leftovers next to such a gateway. `rpc-advertise` refuses until
+`https://<host>/health` answers 200 from the node host. On a host with no node, `--enable` and
+`--refresh` refuse an upstream whose chain id belongs to another network than the one named.
 Nothing changes for an operator who does not use it, except: every Caddy writer now keeps the
 gateway site, and the hostname clash check and the teardown count three sites; `rpc-disable`
 leaves an advertisement made by `rpc-advertise` alone, and `rpc-enable` refuses while a gateway
@@ -40,6 +46,11 @@ gateway site counts as a public edge, so 80 and 443 survive a `--reset`;
 `firewall-setup.sh --enable` works on a host with a gateway and no node; and the scan of
 `remove-node.sh` for other installs no longer offers the gateway's unit and container as a stray
 install.
+Fix for every operator: `firewall-setup.sh` compared the sources of `--ssh-from` and
+`--p2p-from` with the stored list as text, while `ufw` stores `1.2.3.4/32` as `1.2.3.4` and a
+CIDR by its network address. Re-entering a source in another spelling, such as `1.2.3.4` after
+`1.2.3.4/32`, confirmed its rule and then deleted it as stale; for the SSH list that could lock
+the operator out (confirmed on ufw 0.36.2). Sources are now compared the way `ufw` stores them.
 Limits: no released worker-gateway image exists. devnet takes a digest from
 `us-docker.pkg.dev/telcoin-network/tn-public/worker-gateway`; testnet and mainnet refuse the
 enable until a scripts release pins a digest. Each client IP gets 100 requests a second and 32

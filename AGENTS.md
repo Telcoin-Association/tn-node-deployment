@@ -474,24 +474,40 @@ validator side. Rules:
   (`tn_gateway_installed`, `tn_gateway_meta_get`) and never assumes a node, as
   `firewall-setup.sh` (`FW_GW_ONLY`) and `caddy_gateway_gate` do.
 - The gateway's state lives only in `/etc/telcoin/gateway/gateway.meta` (root 0600,
-  `GATEWAY_META_VERSION=1`), and `--refresh` renders the unit from it alone.
+  `GATEWAY_META_VERSION=1`), and `--refresh` renders the unit from it alone (on testnet and
+  mainnet with the image the release pins).
+- On a host with a gateway and no node, the firewall's state (`SSH_ALLOW_FROM`) lives in
+  `gateway.meta` too: `firewall-setup.sh` writes it with `meta_set`, and `lib/gateway.sh` writes
+  that file key by key (`meta_set`), so each keeps the other's keys.
 - Every refusal ends "Nothing was changed." (`_gw_refuse` appends it), and exit 1 means nothing
   on the host changed.
 - An enable or refresh whose inputs equal what is installed writes and restarts nothing, and a
   failure after the first write puts back the files `tn_backup_file` saved.
 - The library takes the update lock (`addon_meta_lock`) for every change; `gw_status` takes none
   and needs no root.
-- `remove-node.sh` removes the gateway (`remove_gateway`) next to `remove_alerts`, before the node
-  stops, with fixed paths and no `lib/gateway.sh` call; on a host with a gateway and no node it
-  removes nothing and points at `setup-gateway.sh --remove`.
+- `remove-node.sh` removes the gateway (`remove_gateway node`) next to `remove_alerts`, before
+  the node stops, with fixed paths and no `lib/gateway.sh` call. With no node unit it removes only
+  a gateway whose `gateway.meta` says `MODE=same-host` (`rm_gateway_same_host`): any other
+  gateway, and the leftovers of a node next to it, stay, and it points at
+  `setup-gateway.sh --remove`.
 - `rpc-advertise` records `RPC_ADVERTISED_VIA=gateway`; `rpc-disable` leaves that advertisement
   alone and `rpc-enable` refuses while it or a `tn-gateway` block exists, because one host never
   serves both sites.
+- While `.node-meta` holds `GATEWAY_UPSTREAM`, `firewall-setup.sh` refuses, and never just warns
+  about, a run that would drop the gateway's rules or turn `ufw` off: `--reset`, and a
+  `--gateway-from` list or `none` that leaves out a host it names (`fw_gw_upstream_guard`).
+- Firewall sources are compared in the form `ufw` stores them, an IPv4 host without `/32` and a
+  CIDR by its network address (`fw_src_canon` and `fw_src_in` in `firewall-setup.sh`,
+  `tn_gateway_src_canon` in `lib/common.sh`), never as the text given.
+- The network chooses the image rule, so `--enable`, `--refresh` and `--status` check it: against
+  the node's `.node-meta NETWORK` on a node host, else against the upstream's `eth_chainId`
+  (`_gw_chain_check`, `_gw_chain_fits`); an upstream that does not answer is not a refusal.
 - `GATEWAY_VERSION` stays the first assignment of that name in `lib/gateway.sh`, and each pin
   line keeps its `# network-gated:` marker.
 
 The fixture tests are `tools/tests/gateway_setup_test.sh`, `gateway_check_remove_test.sh`,
-`gateway_validator_test.sh`, `gateway_upstream_test.sh` and `caddy_gateway_test.sh`;
+`gateway_remove_test.sh`, `gateway_validator_test.sh`, `gateway_upstream_test.sh` and
+`caddy_gateway_test.sh`;
 `gateway_smoke.sh <image>` and `caddy_gateway_smoke.sh <image>` need Docker and are not run by
 `run.sh`.
 
