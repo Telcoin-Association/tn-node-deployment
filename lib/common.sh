@@ -9600,14 +9600,29 @@ kuma_extra_add() {
 
 # kuma_extra_remove <src> — drop <src> from KUMA_EXTRA_SRC, persist the trimmed list,
 # then delete its ufw allow rule. Removing an entry that isn't present is harmless.
+# The rule stays when a worker gateway source (GATEWAY_ALLOW_FROM) is the same ufw
+# source (tn_gateway_src_canon), or when that list cannot be read (a duplicated key):
+# the gateway needs the same health-port rule.
 kuma_extra_remove() {
-    local src="$1" cur new="" s
+    local src="$1" cur new="" s gw="" rc=0
     cur="$(kuma_extra_list)" || return 1
     for s in $cur; do
         [[ "$s" == "$src" ]] && continue
         new="${new:+$new }$s"
     done
     meta_set KUMA_EXTRA_SRC "$new"
+    gw="$(tn_gateway_from_list)" || rc=$?
+    [[ $rc -ne 2 ]] || return 0
+    gw="${gw},"
+    while [[ -n "$gw" ]]; do
+        s="${gw%%,*}"
+        gw="${gw#*,}"
+        [[ -n "$s" ]] || continue
+        if [[ "$(tn_gateway_src_canon "$s")" == "$(tn_gateway_src_canon "$src")" ]]; then
+            print_info "Kept the ufw rule for ${src} on port ${TN_KUMA_PORT}: the worker gateway list (GATEWAY_ALLOW_FROM) still admits it" >&2
+            return 0
+        fi
+    done
     ufw delete allow from "$src" to any port "${TN_KUMA_PORT}" proto tcp >/dev/null 2>&1 || true
 }
 
@@ -11281,6 +11296,21 @@ tn_gateway_from_list() {
     return 0
 }
 
+# tn_gateway_src_canon <src> — print a firewall source the way ufw stores it: an
+# IPv4 host without /32, an IPv4 CIDR by its network address (10.0.0.5/24 is
+# 10.0.0.0/24); anything else as given. rc 0. Two spellings name the same ufw
+# rule exactly when their canonical forms are equal.
+tn_gateway_src_canon() {
+    local s="${1%/32}" a b c d mask n
+    if [[ "$s" == */* ]] && validate_cidr "$s"; then
+        IFS=. read -r a b c d <<<"${s%/*}"
+        mask=$((10#${s#*/}))
+        n=$(( ((10#$a << 24) | (10#$b << 16) | (10#$c << 8) | 10#$d) & ((0xFFFFFFFF << (32 - mask)) & 0xFFFFFFFF) ))
+        s="$((n >> 24 & 255)).$((n >> 16 & 255)).$((n >> 8 & 255)).$((n & 255))/${mask}"
+    fi
+    printf '%s\n' "$s"
+}
+
 # tn_gateway_from_rules_ok <list> <rpc-port> <health-port> — rc 0 when ufw is
 # active and, for every source in LIST (comma-separated IPv4 hosts or CIDRs, as
 # GATEWAY_ALLOW_FROM holds them; empty entries are skipped), `ufw status` shows
@@ -11294,7 +11324,7 @@ tn_gateway_from_list() {
 # shellcheck disable=SC2034 # TN_GATEWAY_FROM_MISSING is the caller's to read
 tn_gateway_from_rules_ok() {
     local list="${1:-}" rpc="${2:-}" health="${3:-}" out rest src want net port hit
-    local to act from more a b c d mask n
+    local to act from more
     TN_GATEWAY_FROM_MISSING=""
     if ! ufw_active; then
         TN_GATEWAY_FROM_MISSING="ufw-inactive"
@@ -11308,13 +11338,7 @@ tn_gateway_from_rules_ok() {
         src="${src//[[:space:]]/}"
         [[ -n "$src" ]] || continue
         want="${src%/32}"
-        net="$want"
-        if [[ "$want" == */* ]] && validate_cidr "$want"; then
-            IFS=. read -r a b c d <<<"${want%/*}"
-            mask=$((10#${want#*/}))
-            n=$(( ((10#$a << 24) | (10#$b << 16) | (10#$c << 8) | 10#$d) & ((0xFFFFFFFF << (32 - mask)) & 0xFFFFFFFF) ))
-            net="$((n >> 24 & 255)).$((n >> 16 & 255)).$((n >> 8 & 255)).$((n & 255))/${mask}"
-        fi
+        net="$(tn_gateway_src_canon "$want")"
         for port in "$rpc" "$health"; do
             hit=1
             while read -r to act from more; do
@@ -11334,6 +11358,108 @@ tn_gateway_from_rules_ok() {
         done
     done
     return 0
+}
+
+# tn_gateway_ports_private <rpc-port> <health-port> — the other half of the bind
+# guard: tn_gateway_from_rules_ok checks that the gateways get in, this checks
+# that nobody else does. rc 0 when `ufw status verbose` shows ufw active, a
+# default policy of deny or reject for incoming traffic, and no ALLOW or LIMIT
+# rule (incoming, v4 or v6) from Anywhere that covers either port: the port
+# itself with /tcp or no protocol, a list or range holding it, or every port (a
+# rule to Anywhere, or to an address with no port). A rule from a named source
+# (the gateways, the monitor's addresses) is fine; an application-profile rule is
+# not read. Else rc 1 with TN_GATEWAY_OPEN_FOUND set to "ufw-inactive",
+# "policy-<word>" (the policy ufw shows; "policy-unknown" when it shows none) or
+# "Anywhere <port>" (the first port a rule opens to every address); it is empty
+# after rc 0. Prints nothing. Call it directly, not in $(...), to read
+# TN_GATEWAY_OPEN_FOUND.
+# shellcheck disable=SC2034 # TN_GATEWAY_OPEN_FOUND is the caller's to read
+tn_gateway_ports_private() {
+    local rpc="${1:-}" health="${2:-}" out line re pol i n to act port
+    local -a w
+    TN_GATEWAY_OPEN_FOUND=""
+    out="$(ufw status verbose 2>/dev/null)" || out=""
+    if ! grep -q "Status: active" <<<"$out"; then
+        TN_GATEWAY_OPEN_FOUND="ufw-inactive"
+        return 1
+    fi
+    re='Default: ([a-z]+) \(incoming\)'
+    pol=unknown
+    if [[ "$out" =~ $re ]]; then
+        pol="${BASH_REMATCH[1]}"
+    fi
+    if [[ "$pol" != "deny" && "$pol" != "reject" ]]; then
+        TN_GATEWAY_OPEN_FOUND="policy-${pol}"
+        return 1
+    fi
+    while IFS= read -r line; do
+        line="${line// (v6)/}"
+        line="${line%%#*}"
+        [[ -n "${line//[[:space:]]/}" ]] || continue
+        read -r -a w <<<"$line"
+        n=${#w[@]}
+        # The To column ends at the action; keep its last word (the port spec),
+        # skipping an "on <interface>".
+        to=""
+        i=0
+        while (( i < n )); do
+            case "${w[i]}" in
+                ALLOW|DENY|REJECT|LIMIT) break ;;
+                on) i=$((i + 2)); continue ;;
+            esac
+            to="${w[i]}"
+            i=$((i + 1))
+        done
+        (( i < n )) || continue
+        act="${w[i]}"
+        i=$((i + 1))
+        [[ "$act" == "ALLOW" || "$act" == "LIMIT" ]] || continue
+        case "${w[i]:-}" in
+            IN) i=$((i + 1)) ;;
+            OUT|FWD) continue ;;
+        esac
+        case "${w[i]:-}" in
+            Anywhere|0.0.0.0/0|::/0) ;;
+            *) continue ;;
+        esac
+        for port in "$rpc" "$health"; do
+            if _tn_gateway_spec_has_port "$to" "$port"; then
+                TN_GATEWAY_OPEN_FOUND="Anywhere ${port}"
+                return 1
+            fi
+        done
+    done <<<"$out"
+    return 0
+}
+
+# _tn_gateway_spec_has_port <to> <port> — rc 0 when a ufw To column word covers
+# TCP <port>: Anywhere; <port>, <list> or <lo>:<hi> with /tcp or no protocol; an
+# IPv4 or IPv6 address (every port). rc 1 for /udp and anything else.
+_tn_gateway_spec_has_port() {
+    local spec="${1:-}" port="${2:-}" rest item lo hi re
+    [[ "$port" =~ ^[0-9]+$ ]] || return 1
+    case "$spec" in
+        Anywhere) return 0 ;;
+        */udp) return 1 ;;
+    esac
+    spec="${spec%/tcp}"
+    re='^[0-9]+([,:][0-9]+)*$'
+    if ! [[ "$spec" =~ $re ]]; then
+        re='^[0-9A-Fa-f.:]*[.:][0-9A-Fa-f.:]*(/[0-9]+)?$'
+        [[ "$spec" =~ $re ]]
+        return
+    fi
+    rest="${spec},"
+    while [[ -n "$rest" ]]; do
+        item="${rest%%,*}"
+        rest="${rest#*,}"
+        lo="${item%%:*}"
+        hi="${item##*:}"
+        if (( 10#$lo <= 10#$port && 10#$port <= 10#$hi )); then
+            return 0
+        fi
+    done
+    return 1
 }
 
 # tn_node_health_bind — print the address the node's health endpoint binds, from

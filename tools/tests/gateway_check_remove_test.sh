@@ -275,8 +275,8 @@ echo "status: gateway-only group done" >&2
 # =============================================================================
 # check_gateway_upstream (the validator side)
 # =============================================================================
-ufw_rules() {  # ufw_rules "SRC PORT"... -- an active ufw with these allow rules
-    local r out="Status: active\n\nTo                         Action      From\n--                         ------      ----\n"
+ufw_rules() {  # ufw_rules "SRC PORT"... -- an active ufw (default deny incoming) with these allow rules
+    local r out="Status: active\nDefault: deny (incoming), allow (outgoing), disabled (routed)\n\nTo                         Action      From\n--                         ------      ----\n"
     for r in "$@"; do
         out="${out}${r##* }/tcp                   ALLOW       ${r%% *}\n"
     done
@@ -340,6 +340,44 @@ check_lacks "not root: ufw not run" "ufw " "$(cat "$CALLS")"
 fresh; mknode; nodeinfo https://gw.example.org
 runc check_gateway_upstream
 check "no gateway settings in .node-meta: silent" "issues=0" "$(sed '/^$/d' <<< "$OUT")"
+
+# Nobody but the gateways gets in (tn_gateway_ports_private), with GATEWAY_UPSTREAM set.
+NODE_FLAGS="--http.addr 0.0.0.0 --healthcheck 0.0.0.0:${HP}"
+fresh; mknode "$FROM" "$UP"; nodeinfo https://gw.example.org; setrules "$ALL4"
+UFW_OUT="${UFW_OUT}8545/tcp (v6)              ALLOW       Anywhere (v6)\n"
+FAKE_UID=0 runc check_gateway_upstream
+check_has "upstream set, RPC port open to Anywhere: one issue" "issues=1" "$OUT"
+check "open to Anywhere: named" yes "$(has "ufw has a rule letting any address (Anywhere) in to port 8545" "$OUT")"
+fresh; mknode "$FROM" "$UP"; nodeinfo https://gw.example.org; setrules "$ALL4"
+UFW_OUT="${UFW_OUT//deny (incoming)/allow (incoming)}"
+FAKE_UID=0 runc check_gateway_upstream
+check_has "upstream set, default allow incoming: one issue" "issues=1" "$OUT"
+check "default allow: named" yes "$(has "default policy for incoming traffic is allow" "$OUT")"
+NODE_FLAGS="--http.addr 127.0.0.1 --healthcheck ${HP}"
+fresh; mknode "$FROM"; nodeinfo https://gw.example.org; setrules "$ALL4"
+UFW_OUT="${UFW_OUT}8545/tcp                   ALLOW       Anywhere\n"
+FAKE_UID=0 runc check_gateway_upstream
+check_has "no GATEWAY_UPSTREAM: an open port is not this section's issue" "issues=0" "$OUT"
+
+# The RPC port as edit-config.sh and firewall-setup.sh read it (tn_local_rpc_url).
+NODE_FLAGS="--http.addr 0.0.0.0 --healthcheck 0.0.0.0:${HP}"
+fresh; mknode "$FROM" "$UP" RPC_PORT=08545; nodeinfo https://gw.example.org; setrules "$ALL4"
+FAKE_UID=0 runc check_gateway_upstream
+check_has "RPC_PORT=08545: no false issue" "issues=0" "$OUT"
+check "RPC_PORT=08545: read as 8545" yes "$(has "reach the RPC port 8545 and" "$OUT")"
+fresh; mknode "$FROM" "$UP"; nodeinfo https://gw.example.org
+setrules "10.0.0.5 9545|10.0.0.5 ${HP}|10.0.0.6 9545|10.0.0.6 ${HP}"
+RPC_PORT=9545 FAKE_UID=0 runc check_gateway_upstream
+check_has "RPC_PORT from the environment: no false issue" "issues=0" "$OUT"
+
+# A hand-edited GATEWAY_UPSTREAM is split without globbing.
+mkdir -p "$T/globdir" && : > "$T/globdir/10.0.0.9"
+fresh; mknode "$FROM" "GATEWAY_UPSTREAM=10.0.0.*"; nodeinfo https://gw.example.org; setrules "$ALL4"
+cd "$T/globdir" || exit 1
+FAKE_UID=0 runc check_gateway_upstream
+cd "$OLDPWD" || exit 1
+check "glob in GATEWAY_UPSTREAM: the value as written" yes "$(has "allow from 10.0.0.* to any port 8545" "$OUT")"
+check_lacks "glob in GATEWAY_UPSTREAM: not expanded to a file name" "10.0.0.9" "$OUT"
 echo "status: validator group done" >&2
 
 # =============================================================================

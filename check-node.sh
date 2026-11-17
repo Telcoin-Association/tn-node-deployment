@@ -2285,15 +2285,17 @@ check_gateway() {
 # .node-meta has GATEWAY_ALLOW_FROM (firewall-setup.sh --gateway-from) or
 # GATEWAY_UPSTREAM (edit-config.sh --set gateway_upstream). ufw must let every
 # listed source reach the RPC and health ports (tn_gateway_from_rules_ok; reading
-# ufw needs root). The RPC bind (--http.addr) and the --healthcheck bind must be
+# ufw needs root; the RPC port as tn_local_rpc_url has it) and, with
+# GATEWAY_UPSTREAM set, keep every other address out (tn_gateway_ports_private:
+# default deny, no allow from Anywhere). The RPC bind (--http.addr) and the --healthcheck bind must be
 # 0.0.0.0 exactly when GATEWAY_UPSTREAM is set; without it a wildcard RPC bind is
 # fine only behind the public-RPC Caddy block. node-info.yaml advertising an https
 # RPC URL and no ws URL is reported as information. Failures count in
 # HEALTH_ISSUES; an older lib/common.sh skips the section with one line.
 check_gateway_upstream() {
-    local from="" up="" frc=0 urc=0 list s rpc_port launch rpc_bind="" brc=0 bind="" hb_port="" hrc=0 ni http ws
-    if ! have_fns tn_gateway_from_list tn_gateway_from_rules_ok tn_node_health_bind \
-            tn_node_launch_target tn_launch_flag_get; then
+    local from="" up="" frc=0 urc=0 list rest s rpc_port launch rpc_bind="" brc=0 bind="" hb_port="" hrc=0 ni http ws open
+    if ! have_fns tn_gateway_from_list tn_gateway_from_rules_ok tn_gateway_ports_private tn_node_health_bind \
+            tn_node_launch_target tn_launch_flag_get tn_local_rpc_url; then
         from="$(meta_get GATEWAY_ALLOW_FROM 2>/dev/null || true)"
         up="$(meta_get GATEWAY_UPSTREAM 2>/dev/null || true)"
         [[ -n "${from}${up}" ]] || return 0
@@ -2312,18 +2314,28 @@ check_gateway_upstream() {
         return 0
     fi
 
-    # Firewall: every source in GATEWAY_ALLOW_FROM and GATEWAY_UPSTREAM.
+    # Firewall: every source in GATEWAY_ALLOW_FROM and GATEWAY_UPSTREAM (split
+    # without globbing: the value may be hand-edited).
     list="$from"
-    for s in ${up//,/ }; do
+    rest="${up},"
+    while [[ -n "$rest" ]]; do
+        s="${rest%%,*}"
+        rest="${rest#*,}"
+        [[ -n "$s" ]] || continue
         case ",${list}," in
             *",${s},"*) ;;
             *) list="${list:+${list},}${s}" ;;
         esac
     done
-    rpc_port="$(meta_get RPC_PORT 2>/dev/null || true)"
-    [[ "$rpc_port" =~ ^[0-9]+$ ]] || rpc_port="$DEFAULT_RPC_PORT"
+    # The RPC port as edit-config.sh and firewall-setup.sh read it.
+    rpc_port="$(tn_local_rpc_url 2>/dev/null)" || rpc_port=""
+    rpc_port="${rpc_port##*:}"
+    rpc_port="${rpc_port%%/*}"
     if [[ "$(id -u 2>/dev/null)" != "0" ]]; then
         print_info "Gateway firewall rules: not checked (reading ufw needs sudo)"
+    elif [[ ! "$rpc_port" =~ ^[0-9]+$ ]]; then
+        print_error "Could not tell the node's RPC port (is RPC_PORT set more than once in .node-meta?), so the gateway firewall rules were not checked"
+        (( ++HEALTH_ISSUES ))
     elif tn_gateway_from_rules_ok "$list" "$rpc_port" "$TN_KUMA_PORT"; then
         print_ok "ufw lets ${list} reach the RPC port ${rpc_port} and the health port ${TN_KUMA_PORT}"
     elif [[ "${TN_GATEWAY_FROM_MISSING:-}" == "ufw-inactive" ]]; then
@@ -2331,6 +2343,19 @@ check_gateway_upstream() {
         (( ++HEALTH_ISSUES ))
     else
         print_error "ufw has no rule 'allow from ${TN_GATEWAY_FROM_MISSING%% *} to any port ${TN_GATEWAY_FROM_MISSING##* } proto tcp'; run: sudo bash firewall-setup.sh --enable --gateway-from ${list}"
+        (( ++HEALTH_ISSUES ))
+    fi
+    # With the binds on 0.0.0.0, nobody but the gateways may get in (the same
+    # check edit-config.sh makes before it binds). ufw inactive is reported above.
+    if [[ -n "$up" && "$(id -u 2>/dev/null)" == "0" && "$rpc_port" =~ ^[0-9]+$ ]] \
+            && ! tn_gateway_ports_private "$rpc_port" "$TN_KUMA_PORT" \
+            && [[ "${TN_GATEWAY_OPEN_FOUND:-}" != "ufw-inactive" ]]; then
+        open="${TN_GATEWAY_OPEN_FOUND:-}"
+        case "$open" in
+            policy-*)     open="ufw's default policy for incoming traffic is ${open#policy-}, not deny or reject" ;;
+            Anywhere" "*) open="ufw has a rule letting any address (Anywhere) in to port ${open#Anywhere }" ;;
+        esac
+        print_error "GATEWAY_UPSTREAM is ${up} and the RPC and health check listen on 0.0.0.0, but ${open}: more than the gateways can reach them; delete the open rule (sudo ufw status numbered, then sudo ufw delete <number>) or run: sudo bash firewall-setup.sh --enable --gateway-from ${list}"
         (( ++HEALTH_ISSUES ))
     fi
 

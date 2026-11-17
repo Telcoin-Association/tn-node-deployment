@@ -21,7 +21,17 @@
 #                  saying it stays stopped; another key (verbosity) on a
 #                  stopped node still restarts it, as before;
 #   rollback       a restart that does not come back puts the launch file,
-#                  node.env and .node-meta back byte for byte.
+#                  node.env and .node-meta back byte for byte;
+#   unit state     activating (a crashed node waiting for its automatic
+#                  restart), deactivating, reloading: refused, nothing written
+#                  or started; failed counts as stopped;
+#   nobody else    an allow from Anywhere (v4, v6, no protocol, a range) to
+#                  either port, or a default policy that is not deny: refused;
+#                  the monitor's own health rule is fine;
+#   public RPC     an RPC already on 0.0.0.0 without GATEWAY_UPSTREAM: refused;
+#   PREV lost      setting again does not record the gateway's wildcard;
+#   lib/common.sh  tn_gateway_ports_private, tn_gateway_src_canon, and
+#                  kuma_extra_remove keeping a rule a gateway source needs.
 #
 #   bash tools/tests/run.sh tools/tests/gateway_upstream_test.sh
 #   docker run --rm -v "$PWD:/w" -w /w bash:3.2 bash tools/tests/run.sh tools/tests/gateway_upstream_test.sh
@@ -111,15 +121,17 @@ tn_restore_backup() {
     [ "$(sha256sum < "$1" | cut -d' ' -f1)" = "$2" ] || return 1
     tn_write_root_file "$3" "$4" "${5:-root}" < "$1"
 }
-# The unit's state is in unit.state (active, inactive, failed). restart and
-# start make it active, except the restart numbered ECA_RESTART_FAIL_AT, which
-# leaves it failed.
+# The unit's state is in unit.state (active, inactive, failed, activating,
+# deactivating, reloading); is-active prints it (not with --quiet), as systemd
+# does. restart and start make it active, except the restart numbered
+# ECA_RESTART_FAIL_AT, which leaves it failed.
 systemctl() {
     local st n
     rec "systemctl $*"
     st="$(cat "$ECA_DIR/unit.state" 2>/dev/null)"
     case "${1:-}" in
         is-active)
+            [ "${2:-}" = --quiet ] || printf '%s\n' "${st:-active}"
             [ "${st:-active}" = active ]
             return ;;
         restart|start)
@@ -176,12 +188,14 @@ restarts() { grep -c '^systemctl restart' "$T/calls.log"; }
 starts() { grep -cE '^systemctl (start|restart)' "$T/calls.log"; }
 gwkeys() { grep -E '^GATEWAY_' "$META" | sort -r | tr '\n' ' ' | sed 's/ $//'; }
 unit_state() { cat "$T/unit.state"; }
-# ufw_status on|off [SRC...] -- `ufw status`: on with 22/tcp from anywhere and,
-# for each SRC, the RPC and health allows from it.
+# ufw_status on|off [SRC...] -- `ufw status` (and `ufw status verbose`, the same
+# text): on with the default deny policy, 22/tcp from anywhere and, for each SRC,
+# the RPC and health allows from it.
 ufw_status() {
     {
         if [[ "$1" == on ]]; then
-            printf 'Status: active\n\nTo                         Action      From\n--                         ------      ----\n'
+            printf 'Status: active\nLogging: on (low)\nDefault: deny (incoming), allow (outgoing), disabled (routed)\n'
+            printf 'New profiles: skip\n\nTo                         Action      From\n--                         ------      ----\n'
             printf '22/tcp                     ALLOW       Anywhere\n'
         else
             printf 'Status: inactive\n'
@@ -349,5 +363,116 @@ check "verbosity on a stopped node: no is-active before the edit" "systemctl dae
     "$(grep -m1 '^systemctl' "$T/calls.log")"
 check "verbosity on a stopped node: restarted (today's behaviour)" 1 "$(restarts)"
 check "verbosity on a stopped node: the unit ends active" active "$(unit_state)"
+
+# ---- a unit that is starting, restarting or stopping: refused; failed counts as stopped ----
+# activating includes a crashed node waiting for its automatic restart.
+for st in activating deactivating reloading; do
+    fixture " --healthcheck ${KP}" testnet "$st"
+    ufw_status on 10.0.0.7
+    drv gateway_upstream=10.0.0.7
+    check "unit ${st}: rc 1, files byte-identical, no start or restart" "1 same 0" "$RC $(same) $(starts)"
+    check "unit ${st}: says starting or restarting, wait and run again" "yes yes" \
+        "$(has "starting or restarting" "$(done_line)") $(has "run this again" "$(done_line)")"
+    check "unit ${st}: state left alone" "$st" "$(unit_state)"
+done
+fixture " --healthcheck ${KP}" testnet failed
+ufw_status on 10.0.0.7
+drv gateway_upstream=10.0.0.7
+check "unit failed: rc 0, edited, no start or restart" "0 yes 0" "$RC $(has " --http.addr 0.0.0.0 " "$(nodeline)") $(starts)"
+check "unit failed: done says it stays stopped" yes "$(has "stays stopped" "$(done_line)")"
+check "unit failed: stays failed" failed "$(unit_state)"
+
+# ---- the bind guard keeps everybody else out (tn_gateway_ports_private) -------------------
+fixture " --healthcheck ${KP}" mainnet
+ufw_status on 10.0.0.7
+printf '8545/tcp                   ALLOW       Anywhere\n' >> "$T/ufw.status"
+drv gateway_upstream=10.0.0.7
+check "Anywhere on the RPC port: rc 1, files byte-identical, no restart" "1 same 0" "$RC $(same) $(starts)"
+check "Anywhere on the RPC port: named" yes "$(has "any address (Anywhere) in to port 8545" "$(done_line)")"
+ufw_status on 10.0.0.7
+printf '%s (v6)                  ALLOW IN    Anywhere (v6)\n' "$KP" >> "$T/ufw.status"
+drv gateway_upstream=10.0.0.7
+check "Anywhere (v6) on the health port, no protocol: rc 1, files byte-identical" "1 same" "$RC $(same)"
+check "Anywhere (v6) on the health port: named" yes "$(has "in to port ${KP}" "$(done_line)")"
+ufw_status on 10.0.0.7
+printf '8000:9000/tcp              LIMIT       Anywhere\n' >> "$T/ufw.status"
+drv gateway_upstream=10.0.0.7
+check "a range holding the RPC port open to Anywhere: rc 1, files byte-identical" "1 same" "$RC $(same)"
+ufw_status on 10.0.0.7
+sed 's/^Default: deny (incoming)/Default: allow (incoming)/' "$T/ufw.status" > "$T/ufw.tmp" && cat "$T/ufw.tmp" > "$T/ufw.status"
+drv gateway_upstream=10.0.0.7
+check "default allow incoming: rc 1, files byte-identical, no restart" "1 same 0" "$RC $(same) $(starts)"
+check "default allow incoming: named" yes "$(has "default policy for incoming traffic is allow" "$(done_line)")"
+ufw_status on 10.0.0.7
+grep -v '^Default:' "$T/ufw.status" > "$T/ufw.tmp" && cat "$T/ufw.tmp" > "$T/ufw.status"
+drv gateway_upstream=10.0.0.7
+check "no default policy shown: rc 1, files byte-identical" "1 same" "$RC $(same)"
+ufw_status on 10.0.0.7
+printf '%s/tcp                  ALLOW       104.155.184.201\n8546/tcp                   ALLOW       Anywhere\n9000/udp                   ALLOW       Anywhere\nOpenSSH                    ALLOW       Anywhere\n' \
+    "$KP" >> "$T/ufw.status"
+drv gateway_upstream=10.0.0.7
+check "the monitor's health rule, other ports and an app profile: not refused, rc 0" "0 yes" \
+    "$RC $(has " --http.addr 0.0.0.0 " "$(nodeline)")"
+
+# ---- an RPC already public (no GATEWAY_UPSTREAM): refused, off would take it away --------
+fixture " --healthcheck ${KP}"
+sed 's/--http.addr 127.0.0.1/--http.addr 0.0.0.0/' "$LAUNCH" > "$T/l.tmp" && cat "$T/l.tmp" > "$LAUNCH" && cp -p "$LAUNCH" "$T/launch.orig"
+ufw_status on 10.0.0.7
+drv gateway_upstream=10.0.0.7
+check "public RPC: rc 1, files byte-identical, no restart" "1 same 0" "$RC $(same) $(starts)"
+check "public RPC: names the RPC access item" yes "$(has "choose 'RPC access', then '1) Private" "$(done_line)")"
+
+# ---- GATEWAY_PREV_HEALTHCHECK lost while set: the wildcard is not recorded as "before" ----
+fixture " --healthcheck ${KP}"
+ufw_status on 10.0.0.7 10.0.0.8
+drv gateway_upstream=10.0.0.7
+grep -v '^GATEWAY_PREV_HEALTHCHECK=' "$META" > "$T/meta.tmp" && cat "$T/meta.tmp" > "$META"
+drv gateway_upstream=10.0.0.7,10.0.0.8
+check "PREV lost: rc 0, the wildcard not recorded" "0 GATEWAY_UPSTREAM=10.0.0.7,10.0.0.8" "$RC $(gwkeys)"
+check "PREV lost: warns that off leaves --healthcheck" yes "$(has "will leave --healthcheck as it is" "$(cat "$T/events")")"
+
+# ---- GATEWAY_PREV_HEALTHCHECK that is not one word: off is refused (the launch-flag setter
+# takes one word) and rolled back ----------------------------------------------------------
+fixture " --healthcheck ${KP}"
+ufw_status on 10.0.0.7
+drv gateway_upstream=10.0.0.7
+sed "s/^GATEWAY_PREV_HEALTHCHECK=.*/GATEWAY_PREV_HEALTHCHECK=${KP} --http.api eth,admin/" "$META" > "$T/meta.tmp" && cat "$T/meta.tmp" > "$META"
+cp -p "$LAUNCH" "$T/launch.orig" && cp -p "$META" "$T/meta.orig" && cp -p "$ENVF" "$T/env.orig"
+drv gateway_upstream=off
+check "PREV with a space: off rc 1, files byte-identical, no restart" "1 same 0" "$RC $(same) $(starts)"
+check "PREV with a space: no --http.api on the node line" no "$(has "--http.api" "$(nodeline)")"
+
+# ---- lib/common.sh: tn_gateway_ports_private, tn_gateway_src_canon, kuma_extra_remove -----
+# lib_run CODE -- run CODE in a bash that sourced lib/common.sh under the fixture
+# root, with ufw printing $T/ufw.status and logging its calls to $T/ufw.calls.
+lib_run() {
+    : > "$T/ufw.calls"
+    TN_ROOT_PREFIX="$FX" ECA_DIR="$T" bash -c '. "$1" > /dev/null 2>&1
+        set +e
+        ufw() { printf "ufw %s\n" "$*" >> "$ECA_DIR/ufw.calls"; cat "$ECA_DIR/ufw.status"; }
+        tn_write_root_file() { cat > "$1" && chmod "$2" "$1"; }
+        eval "$2"' _ "$TN_TEST_REPO/lib/common.sh" "$1" 2>/dev/null
+}
+fixture " --healthcheck ${KP}"
+ufw_status on 10.0.0.7
+check "ports_private: closed, rc 0 and an empty global" "0 []" \
+    "$(lib_run 'tn_gateway_ports_private 8545 '"$KP"'; printf "%s [%s]" $? "$TN_GATEWAY_OPEN_FOUND"')"
+printf 'Anywhere                   ALLOW       Anywhere\n' >> "$T/ufw.status"
+check "ports_private: every port from Anywhere" "1 [Anywhere 8545]" \
+    "$(lib_run 'tn_gateway_ports_private 8545 '"$KP"'; printf "%s [%s]" $? "$TN_GATEWAY_OPEN_FOUND"')"
+ufw_status off
+check "ports_private: ufw inactive" "1 [ufw-inactive]" \
+    "$(lib_run 'tn_gateway_ports_private 8545 '"$KP"'; printf "%s [%s]" $? "$TN_GATEWAY_OPEN_FOUND"')"
+check "src_canon: /32 dropped, a CIDR by its network address" "10.0.0.7 10.0.0.0/24 10.0.0.7" \
+    "$(lib_run 'printf "%s " "$(tn_gateway_src_canon 10.0.0.7/32)" "$(tn_gateway_src_canon 10.0.0.5/24)"; tn_gateway_src_canon 10.0.0.7')"
+# kuma_extra_remove: a source that is also a gateway source keeps the health rule.
+ufw_status on 10.0.0.7
+printf 'KUMA_EXTRA_SRC=10.0.0.7/32 10.0.0.9\nGATEWAY_ALLOW_FROM=10.0.0.7\n' >> "$META"
+lib_run 'kuma_extra_remove 10.0.0.7/32'
+check "extra that is a gateway source: health rule not deleted" 0 "$(grep -c 'delete' "$T/ufw.calls")"
+check "extra that is a gateway source: dropped from the extras" "KUMA_EXTRA_SRC=10.0.0.9" "$(grep '^KUMA_EXTRA_SRC=' "$META")"
+lib_run 'kuma_extra_remove 10.0.0.9'
+check "extra that is not a gateway source: its rule deleted" "ufw delete allow from 10.0.0.9 to any port ${KP} proto tcp" \
+    "$(grep 'delete' "$T/ufw.calls")"
 
 finish

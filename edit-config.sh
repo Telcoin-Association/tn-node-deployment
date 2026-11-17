@@ -122,17 +122,30 @@
 #                                     reach this node's RPC and health check:
 #                                     --http.addr 0.0.0.0 and --healthcheck
 #                                     0.0.0.0:<health port>, recorded in
-#                                     .node-meta. Refused unless ufw is active
-#                                     and lets every address listed in to both
+#                                     .node-meta. Refused unless ufw is active,
+#                                     lets every address listed in to both
 #                                     ports (firewall-setup.sh --enable
-#                                     --gateway-from <list>), which is the
-#                                     guard on every network. Not the public
+#                                     --gateway-from <list>) and keeps every
+#                                     other address out (default deny, no
+#                                     allow from Anywhere to either port),
+#                                     which is the guard on every network.
+#                                     Refused too when the RPC is already
+#                                     public (made so with the RPC access
+#                                     item). The list must name the
+#                                     --gateway-from entries as written (a
+#                                     CIDR there does not cover an address
+#                                     here). Not the public
 #                                     RPC: no RPC limits, no --http.api, and
 #                                     the WebSocket bind is left alone. off
 #                                     puts --http.addr back on 127.0.0.1 and
 #                                     --healthcheck back as it was. A node
-#                                     that is stopped stays stopped: the files
-#                                     are edited and nothing is started.
+#                                     that is stopped (inactive or failed)
+#                                     stays stopped: the files are edited and
+#                                     nothing is started. A node that is
+#                                     starting or restarting (a crashed node
+#                                     waiting for its automatic restart
+#                                     included) is refused: run it again once
+#                                     the node is active, or stopped.
 # =============================================================================
 # --help prints the block above only. Not advertised there: --observer and
 # --validator are still accepted and ignored, because the node's role is
@@ -2804,11 +2817,16 @@ edit_rpc_addr_env() {
 # --http.addr 0.0.0.0 and --healthcheck 0.0.0.0:<health port> on the launch
 # line, TN_RPC_ADDR in node.env (edit_rpc_addr_env), GATEWAY_UPSTREAM=LIST in
 # .node-meta and, when not recorded yet, GATEWAY_PREV_HEALTHCHECK (the
-# --healthcheck value the launch line had, as written there, or none). Refused
-# before a file changes unless ufw is active and lets every address of LIST in
-# to the RPC port (as tn_local_rpc_url has it) and the health port
-# (TN_KUMA_PORT): tn_gateway_from_rules_ok, the guard on every network, mainnet
-# included. Unlike the public RPC bind (set_rpc_addr) it sets no RPC limits and
+# --healthcheck value the launch line had, as written there, or none; nothing
+# when the key is already set, since the line then holds the gateway's value).
+# Refused before a file changes unless ufw is active and lets every address of
+# LIST in to the RPC port (as tn_local_rpc_url has it) and the health port
+# (TN_KUMA_PORT), tn_gateway_from_rules_ok, and keeps every other address out
+# (default deny or reject, no allow from Anywhere to either port),
+# tn_gateway_ports_private: the guard on every network, mainnet included. Also
+# refused when the RPC is already public (--http.addr a wildcard with no
+# GATEWAY_UPSTREAM), which off would take away. Unlike the public RPC bind
+# (set_rpc_addr) it sets no RPC limits and
 # no --http.api, and leaves --ws.addr alone. off: --http.addr 127.0.0.1,
 # --healthcheck back to GATEWAY_PREV_HEALTHCHECK (removed for none), both keys
 # unset; off on a node with no GATEWAY_UPSTREAM changes nothing. run_set leaves
@@ -2879,8 +2897,32 @@ set_gateway_upstream() {
         edit_error "${miss}, so the gateways cannot reach the RPC and health check; open them first: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --enable --gateway-from ${value}"
         return 1
     fi
+    # ...and nobody else gets in once the ports listen on every interface.
+    if ! tn_gateway_ports_private "$rport" "$hport"; then
+        miss="${TN_GATEWAY_OPEN_FOUND:-}"
+        case "$miss" in
+            ufw-inactive)   miss="ufw is not active" ;;
+            policy-unknown) miss="ufw status verbose shows no default policy for incoming traffic" ;;
+            policy-*)       miss="ufw's default policy for incoming traffic is ${miss#policy-}, not deny or reject" ;;
+            Anywhere" "*)   miss="ufw has a rule letting any address (Anywhere) in to port ${miss#Anywhere }; delete it first (sudo ufw status numbered, then sudo ufw delete <number>)" ;;
+            *)              miss="ufw does not keep other addresses out of ports ${rport} and ${hport}" ;;
+        esac
+        edit_error "${miss}, so binding the RPC and health check to 0.0.0.0 would open them to more than the gateways; firewall-setup.sh --enable sets the default deny: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --enable --gateway-from ${value}"
+        return 1
+    fi
 
     edit_launch_spec || return 1
+    # A gateway upstream is for a node whose RPC is private; off puts it back on
+    # 127.0.0.1, so an RPC already public (no GATEWAY_UPSTREAM) is refused.
+    rc=0
+    cur="$(tn_launch_flag_get "$TARGET_LAUNCH_FILE" --http.addr 2>/dev/null)" || rc=$?
+    if [[ -z "$up" && $rc -eq 0 ]]; then
+        case "$cur" in
+            0.0.0.0|::|"[::]")
+                edit_error "the node's RPC already listens on every interface (--http.addr ${cur}): it is public, and a gateway upstream is for a node whose RPC is private (gateway_upstream=off would put it on 127.0.0.1). Make it private first: run sudo bash ${SCRIPT_DIR}/edit-config.sh, choose 'RPC access', then '1) Private (recommended) -- RPC on 127.0.0.1'"
+                return 1 ;;
+        esac
+    fi
     rc=0
     cur="$(tn_launch_flag_get "$TARGET_LAUNCH_FILE" --healthcheck 2>/dev/null)" || rc=$?
     case "$rc" in
@@ -2893,8 +2935,12 @@ set_gateway_upstream() {
     edit_flag_change set --healthcheck "0.0.0.0:${hport}" || return 1
     edit_rpc_addr_env 0.0.0.0 || return 1
     edit_admission_meta GATEWAY_UPSTREAM "$value" || return 1
-    if [[ -z "$prev" ]]; then
+    if [[ -z "$prev" && -z "$up" ]]; then
         edit_admission_meta GATEWAY_PREV_HEALTHCHECK "$cur" || return 1
+    elif [[ -z "$prev" ]]; then
+        # Already set, record lost: the launch line holds the gateway's own
+        # wildcard, not the value from before, so nothing is recorded.
+        edit_warn "GATEWAY_PREV_HEALTHCHECK is not recorded in .node-meta and --healthcheck is already the gateway's, so the value from before is unknown; gateway_upstream=off will leave --healthcheck as it is"
     fi
     return 0
 }
@@ -3926,10 +3972,12 @@ main_menu() {
 # service stays up. A failed restart puts every changed file back and restarts
 # once more, without waiting. An edit that changes nothing ends there, with no
 # restart, and so does one that changes only .node-meta (edit_only_meta_changed).
-# A gateway_upstream edit of a node whose unit was not active when the run began
-# ends after the files are written: systemd reloads, nothing starts.
+# A gateway_upstream edit of a node whose unit was inactive or failed when the
+# run began ends after the files are written: systemd reloads, nothing starts.
+# One whose unit was activating (a crashed node waiting for its automatic
+# restart included), deactivating or reloading is refused before any change.
 run_set() {
-    local field value rc err stopped=false
+    local field value rc err ustate stopped=false
     edit_require_root
     if [[ "$EDIT_SET_PAIR" != *=* || -z "${EDIT_SET_PAIR%%=*}" ]]; then
         edit_error "--set needs field=value, for example --set state_export=unlimited"
@@ -3949,9 +3997,21 @@ run_set() {
     resolve_target || return 1
     edit_lock || return 1
     edit_reset_backups
-    # gateway_upstream only: a node whose unit is not active now stays stopped.
-    if [[ "$field" == "gateway_upstream" ]] && ! systemctl is-active --quiet "$TARGET_SERVICE" 2>/dev/null; then
-        stopped=true
+    # gateway_upstream only: a node that systemd will not start on its own
+    # (inactive, failed) stays stopped. One that is starting, reloading or
+    # stopping, or a crashed one waiting for its automatic restart (activating),
+    # would pick up the edit without the guarded restart: refused.
+    if [[ "$field" == "gateway_upstream" ]]; then
+        ustate="$(systemctl is-active "$TARGET_SERVICE" 2>/dev/null)" || true
+        case "$ustate" in
+            active) ;;
+            inactive|failed) stopped=true ;;
+            *)
+                err="${TARGET_SERVICE} is ${ustate:-in a state systemctl did not report}: the node is starting or restarting (or stopping), neither active nor stopped; wait until it is active, or stop it (sudo systemctl stop ${TARGET_SERVICE}), and run this again"
+                edit_error "$err"
+                edit_done false "$field" "" "${err}; nothing was changed"
+                return 1 ;;
+        esac
     fi
 
     edit_step "Setting ${field}=${value}"
