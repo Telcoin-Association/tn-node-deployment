@@ -190,6 +190,49 @@ sudo bash ~/telcoin-node-scripts/remove-node.sh
 
 ---
 
+## AWS one-click (CloudFormation)
+
+`aws/node.yaml` is a CloudFormation template that builds a ready node host in the operator's own AWS account, for the Adiri testnet. It leaves a host, not a running node: the operator opens a Session Manager shell and runs `setup-node.sh` and `firewall-setup.sh`, so the BLS passphrase never enters AWS. [OPERATOR.md section 2.11](OPERATOR.md#211-aws-one-click) is the walkthrough.
+
+| Path | What it is |
+|---|---|
+| `aws/node.yaml` | The template. Hand-written YAML: no CDK, no Lambda-backed custom resources, no nested stacks. |
+| `aws/rules/*.guard` | cfn-guard rules that pin its security posture; test cases with passing and failing inputs in `aws/rules/tests/`. |
+| `aws/requirements-ci.txt` | cfn-lint for CI, every file pinned by hash. |
+| `.github/workflows/publish-aws-templates.yml` | Uploads the template of each `scripts-v*` tag for the launch link. |
+
+Parameters: `Preset` (`FullNode` c7i.2xlarge, `PublicRPC` c7i.4xlarge with TCP 80 and 443 open, `Validator` c7i.8xlarge), `InstanceType` (empty for the preset's type, or another x86_64 type), `DataVolumeSize` (2000 or 4000 GiB), `AutoUpdate` (`Enabled` or `Disabled`) and `ImageId` (Canonical's public SSM parameter `/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id`).
+
+The stack creates a VPC with one public subnet, an internet gateway and route, an Elastic IP on the instance's network interface, and a security group with UDP 49590 and 49594 in from everywhere (plus TCP 80 and 443 on `PublicRPC`), no SSH and everything out. The instance runs Ubuntu 24.04 with IMDSv2 required, an encrypted gp3 root volume and an instance role that trusts `ec2.amazonaws.com` only and carries only `AmazonSSMManagedInstanceCore`. The data volume is encrypted gp3 (10,000 IOPS, 300 MB/s) with `DeletionPolicy: Retain` and `UpdateReplacePolicy: Retain`, and no snapshots. The user data writes `install algif_aead /bin/false` to `/etc/modprobe.d/telcoin-algif-aead.conf` first (and unloads the module if it is loaded), turns swap off, formats the data volume ext4 only when it carries no filesystem, mounts it at `/var/lib/telcoin` by UUID with `nofail` (found under `/dev/disk/by-id/` by its volume ID), installs the scripts as `ubuntu` with `install.sh --yes`, and signals a `WaitCondition` with `curl`, `SUCCESS` or `FAILURE` and the reason.
+
+| Output | Value |
+|---|---|
+| `InstanceId`, `PublicIp` | The instance and its Elastic IP. |
+| `SessionManagerUrl` | The Systems Manager console page that opens a shell on the instance. |
+| `SetupCommand` | `sudo bash /home/ubuntu/telcoin-node-scripts/setup-node.sh` |
+| `FirewallCommand` | `sudo bash /home/ubuntu/telcoin-node-scripts/firewall-setup.sh --enable --ssh-from <VPC CIDR>` |
+| `ApplyUpdateDocument` | The Run Command document that runs `update-node.sh --json --apply --yes`. |
+| `DataVolumeId` | The data volume, which deleting the stack keeps. |
+
+With `AutoUpdate` enabled, a State Manager association runs a Command document daily (03:00 UTC, then a random wait of up to an hour): nothing before setup has written `/etc/telcoin/.node-meta`; then `printf 'y\n' | sudo -u ubuntu -H bash update-scripts.sh`, `update-node.sh --json --check`, and when `update_available` is true (read with `python3`) `--json --prepare --ref <latest_ref>` and `--json --apply` without `--yes`. A prepared update that is already pending is applied, not prepared again. On a staked validator, or one whose stake cannot be read, the apply refuses without `--yes` and the prepared update waits for the apply document. The association never runs `ui/install-ui.sh --update` or `setup-alerts.sh --refresh`.
+
+Telcoin gets no access to the account or the node: no cross-account role, no Systems Manager hybrid activation, no Telcoin principal. The guard rules check that the only IAM principal is `ec2.amazonaws.com`, that the role carries `AmazonSSMManagedInstanceCore` and nothing else (no inline policy), that every resource type is on an allowed list of types that take no resource policy, that no ingress rule covers TCP 22 (no all-protocol ingress either), that the instance requires IMDSv2, that every EBS volume is encrypted and that the data volume is retained.
+
+Check a change locally the way the `cfn lint` CI job does:
+
+```bash
+python3 -m pip install --require-hashes -r aws/requirements-ci.txt   # Python 3.12
+cfn-lint aws/node.yaml
+cfn-guard validate --rules aws/rules --data aws/node.yaml
+cfn-guard test --dir aws/rules
+```
+
+The job installs cfn-guard 3.2.2 from its GitHub release after checking the tarball's sha256. On a `scripts-v*` tag on `main`, `publish-aws-templates.yml` runs the same checks, then, in the GitHub environment `aws-templates`, assumes `vars.AWS_TEMPLATES_ROLE_ARN` in us-east-1 and puts the template at `s3://<vars.AWS_TEMPLATES_BUCKET>/templates/<tag>/node.yaml`; the role can only `s3:PutObject` under `templates/*`. Nothing under `aws/` is updater-tracked or carries a `.sha256` sidecar: the template reaches operators through that bucket and the release tag, not through `update-scripts.sh`.
+
+Default AWS quotas allow 5 VPCs and 5 Elastic IPs per region, one of each per stack. The costs are the instance, the data volume with its provisioned IOPS and throughput, the Elastic IP, and data transfer out (P2P, and RPC on a public RPC node).
+
+---
+
 ## What the Setup Script Does
 
 Each script walks through numbered steps:

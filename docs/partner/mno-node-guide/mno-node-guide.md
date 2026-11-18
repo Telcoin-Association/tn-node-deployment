@@ -31,7 +31,7 @@ The repository's [README](https://github.com/Telcoin-Association/tn-node-deploym
 This guide is the path through them, in the order you need them:
 
 - [Before you start](#before-you-start): hardware, operating system, ports, networks and what to have ready.
-- [Install](#install): fetch and check the scripts, run setup, see how the passphrase is stored and where files land, back up the keys, set up the firewall, check the host hardening, add the optional host baseline, and choose the optional node flags and the log target.
+- [Install](#install): fetch and check the scripts, run setup, see how the passphrase is stored and where files land, back up the keys, set up the firewall, check the host hardening, add the optional host baseline, choose the optional node flags and the log target, or start from the AWS one-click stack.
 - [Confirm the node is syncing, then synced](#confirm-the-node-is-syncing-then-synced): how to tell a healthy node from a stuck one, how long sync takes, and what the health check says about epochs and the committee.
 - [Day-2 operations](#day-2-operations): script and node updates, one-way updates, restarts around the epoch boundary, configuration changes, service commands, the Node Manager UI, testnet add-ons, private alerts, the keys over the node's life, and removal.
 - [Public RPC (https and wss)](#public-rpc-https-and-wss): serve JSON-RPC and WebSocket on your own DNS name.
@@ -574,6 +574,71 @@ The `source_admission` key can refuse committee peers once its limits fill, and 
 
 `journalctl -u telcoin` shows the service's own messages either way.
 Setup records the choice as `LOG_TARGET` in `.node-meta`.
+
+### AWS one-click
+
+On AWS, a CloudFormation stack in your own account builds a ready node host for the Adiri testnet: the network, the instance, the data volume, the host preparation and the scripts.
+It does not run setup.
+You run setup yourself from a Session Manager shell, so the BLS passphrase never enters AWS.
+The template is [`aws/node.yaml`](https://github.com/Telcoin-Association/tn-node-deployment/blob/main/aws/node.yaml) in the deployment repository.
+
+Telcoin publishes the template with every scripts release, and the launch link opens it on the CloudFormation console's quick-create page; ask devs@telcoin.org for the link.
+Pick the AWS region at the top of the console first.
+You can also download `aws/node.yaml` from the release tag and create the stack from the file.
+The stack creates an IAM role for the instance, so the console asks you to acknowledge that.
+
+| Parameter | Choices |
+|---|---|
+| `Preset` | `FullNode` (default): c7i.2xlarge, 8 vCPU (4 cores), 16 GiB. `PublicRPC`: c7i.4xlarge, 16 vCPU (8 cores), 32 GiB, with TCP 80 and 443 open for Caddy. `Validator`: c7i.8xlarge, 32 vCPU (16 cores), 64 GiB. |
+| `InstanceType` | Empty for the preset's type, or another x86_64 instance type. |
+| `DataVolumeSize` | 2000 GiB (default) or 4000 GiB. |
+| `AutoUpdate` | `Enabled` (default) or `Disabled`: the daily update described below. |
+
+The presets follow the recommended column of [Hardware per role](#hardware-per-role).
+A validator also needs the Association's approval and a stake (see [Validators: stake and activate](#validators-stake-and-activate)); the host is the same.
+
+The stack creates:
+
+- a VPC with one public subnet, an internet gateway and a route, and an Elastic IP that setup detects as the node's public address;
+- a security group that lets in UDP 49590 and 49594 from everywhere, and TCP 80 and 443 on `PublicRPC` only, with no SSH port and all outbound traffic allowed;
+- an Ubuntu 24.04 instance with IMDSv2 required and an encrypted root volume, whose role trusts only the EC2 service and carries only the policy Session Manager and Run Command need, `AmazonSSMManagedInstanceCore`;
+- an encrypted gp3 data volume (10,000 IOPS, 300 MB/s) mounted at `/var/lib/telcoin`, which deleting the stack keeps, with no snapshots or backups, because a snapshot of it is a copy of the node keys;
+- the first-boot preparation: the CVE-2026-31431 mitigation before anything else (see [Operating system](#operating-system)), swap off, the data volume formatted only when it is blank, and the scripts installed in `/home/ubuntu/telcoin-node-scripts`. Time sync stays as the Ubuntu image sets it up, with chrony and the Amazon Time Sync Service. The stack completes only when this preparation succeeded, and rolls back with the reason when it did not.
+
+The health-monitor port of the testnet add-ons, TCP 43174, stays closed in the security group; add a rule for `104.155.184.201/32` yourself if you turn the health monitor on (see [Testnet add-ons](#testnet-add-ons)).
+
+Once the stack is complete, open the `SessionManagerUrl` output, which starts a shell on the instance, and run the two commands from the outputs in this order:
+
+```bash
+sudo bash /home/ubuntu/telcoin-node-scripts/setup-node.sh
+sudo bash /home/ubuntu/telcoin-node-scripts/firewall-setup.sh --enable \
+  --ssh-from 10.0.0.0/16
+```
+
+Setup runs as in [Run setup](#run-setup).
+Press Enter at the data directory prompt: `/var/lib/telcoin` is the data volume, and setup hands it to the node's service user.
+The second command, the `FirewallCommand` output, turns the host firewall on and allows SSH from inside the VPC only (see [Firewall](#firewall)).
+Session Manager needs no inbound port.
+To copy the key archive off the host (see [Back up the keys now](#back-up-the-keys-now)), run `scp` through Session Manager: add your SSH public key for `ssm-user` in the Session Manager shell, then pass `-o ProxyCommand="aws ssm start-session --target %h --document-name AWS-StartSSHSession --parameters portNumber=%p"` to `scp` with `ssm-user@<instance ID>`.
+The stack does not install the Node Manager UI; install it as in [Node Manager UI](#node-manager-ui) and reach it with Session Manager port forwarding (`AWS-StartPortForwardingSession`, port 8080) instead of an SSH tunnel.
+
+With `AutoUpdate` enabled, a State Manager association in your account runs once a day, at 03:00 UTC plus a random wait of up to an hour, and does nothing until setup has run.
+It updates the scripts (see [Keep the scripts current](#keep-the-scripts-current)), asks `update-node.sh` whether a newer node release exists, and when one does, prepares it and applies it without confirming a validator restart.
+On a node that is not a staked validator, the apply goes ahead with the usual quorum check and epoch wait (see [Update the node](#update-the-node)); a one-way update is applied the same way, with no snapshot (see [One-way updates](#one-way-updates)).
+On a staked validator, or one whose stake cannot be read, `update-node.sh` refuses to restart without confirmation, so the prepared update waits.
+Apply it when the node may restart by running the document the `ApplyUpdateDocument` output names from Systems Manager Run Command; it runs `update-node.sh --json --apply --yes`.
+The association never reinstalls the Node Manager UI or the private alerts runner: run the commands `update-scripts.sh` prints for those yourself.
+
+Telcoin gets no access to your AWS account or your node.
+The stack creates no cross-account role, no Systems Manager hybrid activation and no Telcoin principal; the only principal it trusts is the EC2 service.
+Updates are pulled: Telcoin publishes signed releases, and your instance downloads and verifies them (see [How the scripts and releases are checked](#how-the-scripts-and-releases-are-checked)).
+
+Every stack update reads the Ubuntu image parameter again, so once a newer image is out, an update tries to replace the instance, fails while the instance holds its network interface, and rolls back unchanged.
+Make later changes in the consoles instead: change the instance type in EC2 while the instance is stopped, and stop the daily updates by deleting the association in State Manager.
+Deleting the stack keeps the data volume (the `DataVolumeId` output) with the keys and chain data; back up the keys, then delete the volume yourself once you no longer need it.
+
+Each stack uses one VPC and one Elastic IP, and an AWS region allows 5 of each by default, so ask for a quota increase before a sixth node in one region.
+You pay AWS directly, mainly for the instance, the data volume with its provisioned IOPS and throughput, the Elastic IP, and data transfer out: P2P traffic to peers, and public RPC traffic on a `PublicRPC` node.
 
 ## Confirm the node is syncing, then synced
 
