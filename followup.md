@@ -774,9 +774,10 @@ are pulled through the customer's own State Manager association. The account sid
   `BootMode` `uefi`, `TpmSupport` `v2.0`). Mainnet seals the passphrase credential with the TPM
   unless the operator passes `--allow-no-tpm`; without NitroTPM the stack needs its own AMI. Then
   revisit the presets and the firewall's `--ssh-from` for mainnet.
-- **The partner guide PDF is stale.** The branch changes `mno-node-guide.md` and its metadata,
-  but the machine that made it had no pandoc or WeasyPrint. Run
-  `bash tools/build-partner-pdf.sh mno-node-guide` and commit the PDF before merge.
+- **The partner guide PDF was built with pandoc 3.14**, WeasyPrint 70.0 and poppler 26.11.0 from
+  Homebrew, newer than the reference pandoc 3.12.1 in AGENTS.md, which Homebrew no longer ships.
+  A maintainer on 3.12.1 who rebuilds it may get different bytes; move the reference to 3.14, or
+  rebuild with `--force` on 3.12.1 before merge.
 - **`checksum freshness` fails on main, unrelated to this branch.** Dependabot's #63 changed
   `ui/requirements.txt` without its `.sha256` sidecar; any pull request shows the red check until
   `tools/gen-checksums.sh` runs in a release commit.
