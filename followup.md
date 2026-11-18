@@ -738,3 +738,59 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   `admission: Closed` admits; the extra disk the tndb copy needs. Add any of them if operators
   ask, with the then-current citations. (guide-1.5)
   Why: the guide names only what an operator acts on; these are maintainer or dashboard facts.
+
+## AWS one-click stack
+
+The CloudFormation stack under `aws/` (design agreed 2026-11-17, branch
+`rogerrrosas/cloudformation-aws`). Telcoin gets no access to customer accounts or nodes; updates
+are pulled through the customer's own State Manager association. The account side lives in
+`Telcoin-Association/ta-aws-infra` (`docs/backlog.md`, section 6).
+
+- **The branch is local only.** Its author has read access to this repository, so the branch
+  waits for a maintainer with write access to push it and open the pull request. No fork.
+- **Immutable OIDC subjects.** The publish role in ta-aws-infra (PR #3) trusts only the immutable
+  subject. A repository admin opts this repository in
+  (`gh api -X PUT repos/Telcoin-Association/tn-node-deployment/actions/oidc/customization/sub -F use_default=true -F use_immutable_subject=true`),
+  then reruns Publish installer on the current tag
+  (`gh workflow run publish-installer.yml --ref scripts-v2.1.0`) to confirm the Pages deploy still
+  works; it republishes the same `install.sh`. If it fails, the setting goes back.
+- **Signed commits.** The branch's commits are unsigned: no signing key is configured on the
+  maintainer machine that made them. Re-sign them (`git rebase -S`) before merge once the issue #30
+  ruleset requires signatures.
+- **Publishing is not wired yet.** The publish workflow needs the GitHub environment
+  `aws-templates` (deployment refs limited to `scripts-v*` tags) and its variables
+  `AWS_TEMPLATES_ROLE_ARN` and `AWS_TEMPLATES_BUCKET`, which come from applying the
+  `tn-node-templates` account in ta-aws-infra. Until then, the workflow fails on a `scripts-v*` tag.
+- **The widget link.** The frontend's quick-create link names a pinned
+  `templates/<tag>/node.yaml`. Move it with each scripts release that changes the template.
+- **Verify on a first real launch** (a sandbox account): Canonical's SSM parameter path resolves;
+  the SSM agent registers to the customer's account; `algif_aead` is not loaded at first boot, so
+  setup's CVE-2026-31431 check passes; interactive setup detects the Elastic IP and advertises it;
+  setup accepts the data volume mounted at `/var/lib/telcoin` (owner, mode, `lost+found`);
+  `printf 'y\n' | update-scripts.sh` works under Run Command; the association prepares and applies
+  on a full node and leaves the apply to the operator on a staked validator; c7i is offered in the
+  subnet's availability zone.
+- **Before mainnet.** Check that Canonical's Ubuntu 24.04 AMI supports NitroTPM (`describe-images`:
+  `BootMode` `uefi`, `TpmSupport` `v2.0`). Mainnet seals the passphrase credential with the TPM
+  unless the operator passes `--allow-no-tpm`; without NitroTPM the stack needs its own AMI. Then
+  revisit the presets and the firewall's `--ssh-from` for mainnet.
+- **The partner guide PDF is stale.** The branch changes `mno-node-guide.md` and its metadata,
+  but the machine that made it had no pandoc or WeasyPrint. Run
+  `bash tools/build-partner-pdf.sh mno-node-guide` and commit the PDF before merge.
+- **`checksum freshness` fails on main, unrelated to this branch.** Dependabot's #63 changed
+  `ui/requirements.txt` without its `.sha256` sidecar; any pull request shows the red check until
+  `tools/gen-checksums.sh` runs in a release commit.
+- **A stack update can try to replace the instance.** CloudFormation reads Canonical's AMI
+  parameter again on every update, so once a newer image exists an update replaces the instance,
+  which fails on the network interface it holds and rolls back (reasoned from the docs, not
+  tested). The docs tell operators to change the instance type in EC2 instead. A fix is an
+  optional `ImageId` parameter that pins the current image.
+- **The subnet takes the region's first availability zone**, which may not offer c7i. An
+  `AvailabilityZone` parameter fixes it if a launch hits that.
+- **Not checked without AWS:** the root device name `/dev/sda1` on Canonical's images, the Session
+  Manager console URL in the Outputs, and a home directory for `ssm-user` (the docs copy the key
+  backup off the host through Session Manager).
+- **PR #68 overlap.** The worker-gateway PR also edits `OPERATOR.md` and `README.md`; whichever
+  lands second rebases.
+- **Later, if operators ask.** An existing-VPC option (the default quotas are 5 VPCs and 5 Elastic
+  IPs per region); `open-ui.sh` reaching the Node Manager UI through Session Manager instead of SSH.
