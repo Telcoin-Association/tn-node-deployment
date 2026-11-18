@@ -1207,7 +1207,7 @@ In both checks `gpgv` must print a `GOODSIG` line, with its `VALIDSIG` ending in
 
 A node release lives at `https://github.com/Telcoin-Association/telcoin-network/releases/download/<tag>/`.
 Its `SHA256SUMS` lists five files: `IMAGE_DIGEST`, the tarball `telcoin-network-<tag>-x86_64-unknown-linux-gnu.tar.gz`, and the chain configs `chain-configs/<dir>/committee.yaml`, `genesis.yaml` and `parameters.yaml` (`<dir>` is `testnet` for `-adiri` tags and `mainnet` for mainnet tags).
-`SHA256SUMS.asc` is a detached GPG signature by a release key; the public keys ship with the scripts in `lib/release-keys/*.asc`. This script release ships one, `grantkee.asc` (primary key `4E36D35A4AB61B589861D01AC7173F2377CA7573`, expires 2028-10-16); `update-scripts.sh` brings later keys and refreshed expiry dates. `v0.16.0-adiri` and older have no release page, and the first signed node release is planned as `v0.17.0-adiri`, so use the tag of a published release in the commands below.
+`SHA256SUMS.asc` is a detached GPG signature by a release key; the public keys ship with the scripts in `lib/release-keys/*.asc`. This script release ships two, `grantkee.asc` (primary key `95A38484E1CBD31D773F6AF928FD56AD2F9FAE47`, expires 2028-11-16) and `MavenRain.asc` (primary key `32F886ADE9C3A88218E4B67CA0A69159FC76DBFD`, expires 2028-11-10), copies of the maintainer keys in `Telcoin-Association/tn-release-signing`; `update-scripts.sh` brings later keys and refreshed expiry dates. The RSA key `4E36D35A4AB61B589861D01AC7173F2377CA7573` that `scripts-v2.1.0` shipped is retired and verifies nothing from `scripts-v2.2.0` on. `v0.16.0-adiri` and older have no release page, and the first signed node release is planned as `v0.17.0-adiri`, so use the tag of a published release in the commands below.
 
 ```bash
 TAG=vX.Y.Z-adiri   # a published release tag
@@ -1232,21 +1232,21 @@ Run `--version` as an unprivileged user, never as root.
 For a Docker install, `IMAGE_DIGEST` is one line that names the image by digest in the network's package, `ghcr.io/telcoin-association/tn-mainnet@sha256:<digest>` on mainnet or `ghcr.io/telcoin-association/tn-testnet@sha256:<digest>` on testnet; the scripts refuse a release whose `IMAGE_DIGEST` names another repository. Pull and run it by that digest (`docker pull "$(cat IMAGE_DIGEST)"`), never by a tag. The image's binary is `/usr/local/bin/telcoin`, and its `--version` must print the same three lines. The scripts take the newest image the same way: the digest in the signed `IMAGE_DIGEST` of the newest release, not the registry's answer. When that release cannot be verified (a check fails, or its signed files, gpg or a key file are missing), testnet takes `DEFAULT_DOCKER_IMAGE` with a warning that gives the reason and mainnet stops; the registry's digest is never taken for a release published on GitHub.
 
 A script release is the `scripts-v*` tag of this repository, with `MANIFEST` and `MANIFEST.asc` (detached OpenPGP signatures over `MANIFEST`) at its root.
-`scripts-v2.1.0` is the first signed release.
-Check it with the keyring above, in the same directory:
+`scripts-v2.1.0` is the first signed release, signed with the retired RSA key, so the keyring above checks `scripts-v2.2.0` and later.
+Check one with it, in the same directory:
 
 ```bash
-TAG=scripts-v2.1.0
+TAG=scripts-v2.2.0
 git clone --quiet --branch "$TAG" https://github.com/Telcoin-Association/tn-node-deployment.git tnd-check
 gpgv --status-fd 1 --keyring ./release-keys.gpg tnd-check/MANIFEST.asc tnd-check/MANIFEST
 (cd tnd-check && grep '^sha256  ' MANIFEST | sed 's/^sha256  //' | sha256sum --check)
 grep -E '^(release|serial|date|expires)=' tnd-check/MANIFEST
 ```
 
-`gpgv` must print the status lines above, a `GOODSIG` and its `VALIDSIG` for a shipped key (`4E36D35A4AB61B589861D01AC7173F2377CA7573` today), and every file must print `OK`.
+`gpgv` must print the status lines above, a `GOODSIG` and its `VALIDSIG` for a shipped key (`95A38484E1CBD31D773F6AF928FD56AD2F9FAE47` or `32F886ADE9C3A88218E4B67CA0A69159FC76DBFD` today), and every file must print `OK`.
 The last line shows which release it is, its release date and its expiry date.
 The scripts take a script release on the same status rules as a node release, and need good signatures by at least one release key (`TN_SIG_THRESHOLD`).
-On a host without an installed copy, make the keyring from the keys the installer carries, its trust root, and check their fingerprint against the one above:
+On a host without an installed copy, make the keyring from the keys the installer carries, its trust root, and check their fingerprints against the ones above:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -fsSL https://install.telcoin.network \

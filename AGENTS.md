@@ -615,6 +615,23 @@ Before editing any of these, read the **"Sync note (vendored files)"** section i
 `docs/testnet-addons.md`. It records what each file mirrors upstream, which parts must
 stay byte-identical, and how to re-vendor without drifting.
 
+The release keys `lib/release-keys/*.asc` come from the git submodule `vendor/tn-release-signing`
+(`github.com/Telcoin-Association/tn-release-signing`, the maintainers' key allowlist): they are
+byte-for-byte copies of its `keys/*.asc` at the commit the tree records, the same names and the
+same bytes. The submodule is only their source. GitHub's tag archive, which `install.sh`
+downloads, never holds a submodule's files, and the updater installs what `MANIFEST` lists, so
+the keys ship as ordinary files, with their `SCRIPTS` rows, sidecars and the `install.sh` key
+block as before. `tools/check-release-keys.sh` fails when the copies drift: it reads the
+gitlink from the index and the keys from the submodule's object store at that commit, never
+from its checkout. The "checksum freshness" CI job checks the submodule out and runs it, and
+`tools/tests/release_keys_test.sh` tests it. To add, remove or rotate a key, the change lands
+in tn-release-signing first; then move the pointer, copy the files and run the check, as
+`lib/release-keys/README` ("Adding or removing a key") shows. The path is `vendor/`, not the
+`release/` of tn-release-signing's own docs: the root file `RELEASE` and a `release/` directory
+are one name on a case-insensitive filesystem (macOS). Nothing globs `vendor/` as shipped
+content: the `*.sh` sweeps run `git ls-files`, which does not enter a submodule, and the tests
+that copy the tree skip it.
+
 `lib/wgvpn/peers/ssh/KEYS` has no upstream copy yet, so nothing keeps it in sync for you.
 setup-vpn installs only the `.pub` files `KEYS` lists, each with a matching fingerprint: when a
 maintainer key is mirrored in, add its `KEYS` line by hand in the same commit (the Sync note
@@ -636,7 +653,8 @@ the repository root, and `RELEASE` on main (one line, `<tag> <date>`) names the 
   `tools/release-scripts.sh` builds it from the
   `SCRIPTS`, `UI_BUNDLE` and `TESTNET_ADDONS_BUNDLE` arrays in `update-scripts.sh`, plus
   `install.sh` and `open-ui.sh`. The release keys `lib/release-keys/*.asc` are `SCRIPTS` rows
-  like any other file. The three arrays stay the single source of truth for what operators
+  like any other file (copies of `keys/` in the `vendor/tn-release-signing` submodule; see
+  "Vendored files"). The three arrays stay the single source of truth for what operators
   receive.
 - `MANIFEST.asc` holds detached OpenPGP signatures over `MANIFEST`, one armored block per
   signer, by the maintainer release keys in `lib/release-keys/*.asc`: the same keys, and the
@@ -738,12 +756,19 @@ the repository root, and `RELEASE` on main (one line, `<tag> <date>`) names the 
   (`lib/release-keys/*.asc` on the host), `install.sh` against its embedded keys, and
   `release-scripts.sh --check` against the tree's `lib/release-keys`. A release that adds,
   removes or replaces a key must therefore be signed by a key that is in both the old and the
-  new set.
-- Key expiry: the release key's primary (`4E36D35A4AB61B589861D01AC7173F2377CA7573`) expires
-  2028-10-16. From that date `gpgv` reports `EXPKEYSIG` for it on a host whose installed copy
-  is the old one, and that host refuses every later release, script or node. Only a release
-  that verifies against the installed copy can renew it, so the extended key (re-exported
-  with the new expiry) must ship in a script release signed before that date. A host that has
+  new set. `scripts-v2.2.0` has none: it replaces grantkee's RSA key
+  (`4E36D35A4AB61B589861D01AC7173F2377CA7573`, the only key of `scripts-v2.1.0`, removed from
+  tn-release-signing) with the ed25519 keys of grantkee and MavenRain. A host on 2.1.0 refuses
+  a release signed only by the new keys and re-runs the installer; a `MANIFEST.asc` that the
+  RSA key signs as well (appended with `--output - MANIFEST >> MANIFEST.asc`) updates it in
+  place, and the new keys' check only warns on that signature (`NO_PUBKEY`).
+- Key expiry: the release keys' primaries expire on 2028-11-16 (grantkee,
+  `95A38484E1CBD31D773F6AF928FD56AD2F9FAE47`) and 2028-11-10 (MavenRain,
+  `32F886ADE9C3A88218E4B67CA0A69159FC76DBFD`). From that date `gpgv` reports `EXPKEYSIG` for
+  a key on a host whose installed copy is the old one, and that host refuses every later
+  release that key signed, script or node. Only a release that verifies against the installed
+  copy can renew it, so the extended key (re-exported with the new expiry into
+  tn-release-signing) must ship in a script release signed before that date. A host that has
   not installed that release by then re-runs the installer, whose embedded keys are the
   extended ones.
 
@@ -958,7 +983,7 @@ no permissions by default (`permissions: {}`) and each job asks for `contents: r
 `persist-credentials: false`. `tools/tests/ci_pins_test.sh` checks these rules, and also that the hardening lints job
 runs the passphrase-print, perl and network-hits lints; the fixture jobs run
 `tools/tests/run.sh` (the macOS one under `/bin/bash`); the checksum job runs
-`tools/gen-checksums.sh`; the UI job installs the test requirements by hash and runs pytest;
+`tools/gen-checksums.sh`, checks out the submodule and runs `tools/check-release-keys.sh`; the UI job installs the test requirements by hash and runs pytest;
 the UI and macOS jobs run the three UI shell tests; the hardening lints and UI jobs have no
 `if [ -f` fallback and the UI job no unittest fallback; no required job, and no step of one,
 carries an `if:` or a `continue-on-error` (other than `false`), except the advisory
@@ -989,8 +1014,9 @@ into a pass. The jobs:
   is no unittest fallback), then the three UI shell tests under bash 5. As the runner user,
   not root, `install_ui_test.sh` checks only that the installer refuses a non-root run; its
   ownership and mode cases need root (run them in `bash:3.2`, which runs as root).
-- `checksums` ("checksum freshness"): runs `tools/gen-checksums.sh` and fails on a stale,
-  missing or uncommitted sidecar.
+- `checksums` ("checksum freshness"): checks out the submodule `vendor/tn-release-signing`,
+  runs `tools/check-release-keys.sh` (the release keys are its `keys/*.asc`), then runs
+  `tools/gen-checksums.sh` and fails on a stale, missing or uncommitted sidecar.
 
 `.github/workflows/integration.yml` has one job, `vm-assertions`: on an Ubuntu 24.04 runner
 (a full VM with systemd), it installs logrotate, ufw and openssh-server and runs every
@@ -1022,7 +1048,8 @@ commits: sign every commit (`git commit -S`, or `commit.gpgsign=true` with an SS
 signing key registered on GitHub). `.github/CODEOWNERS` lists three owners on every line,
 so the ruleset can require that review from a code owner (`require_code_owner_review`);
 `ci_pins_test.sh` requires at least two owners on every owned path. The release path has lines
-of its own, among them `/lib/release-keys/`, `/tools/release-scripts.sh`,
+of its own, among them `/lib/release-keys/`, `/vendor/tn-release-signing` and `/.gitmodules`
+(the pointer decides which keys `lib/release-keys` must copy), `/tools/release-scripts.sh`,
 `/tools/cut-release.sh`, `/MANIFEST`, `/MANIFEST.asc` and `/RELEASE`. Do not rename a CI job
 and do not make a required job skippable (`if:`) or non-blocking (`continue-on-error`,
 `|| true`): `ci_pins_test.sh` rejects both.
@@ -1074,6 +1101,12 @@ line.
 - The P2P committee allowlist has `p2p_allow_install_test.sh` (the signed install of the tool and every refusal, each leaving an installed binary byte-identical) and `p2p_committee_mode_test.sh` (the verbs, the units, the kill switch, the lock rule and the `p2p_committee` status object), both on the stubs of `tools/tests/fwstub.sh`: a `#!/bin/sh` `tn-p2p-allow-sync` stand-in that records argv, environment and stdin and takes its output and exit codes from `TN_P2P_STUB_*`, and an nft stub that models `table inet tn_p2p_allow`; its systemctl stub prints `$SYSTEMCTL_SHOW` as it is for `show` (nothing when unset), which feeds check-node's and the status screen's read of the sync unit's last run.
   `p2p_reason_text_test.sh` checks that `fw_allow_reason_text rpc-method-missing` appears byte for byte in check-node.sh, and that both scripts word a failed sync and a failed unit run the same.
   `edit_config_resync_test.sh` covers edit-config's resync hook and its three call sites.
+- `release_keys_test.sh` drives `tools/check-release-keys.sh` on a fixture superproject and
+  submodule (a changed byte, a missing, extra or symlinked key file, a pointer moved without the
+  copies, an uninitialized submodule), then runs it over the tree; that last check is skipped
+  where git or the submodule is missing, and the "checksum freshness" job runs the tool itself.
+  `release_scripts_test.sh` and `cut_release_test.sh` copy the tracked files without the
+  submodule and keep one throwaway key in the `SCRIPTS` row of `grantkee.asc`.
 - The node admission settings have `network_config_test.sh` (the renderer), `setup_node_admission_test.sh` and `edit_config_admission_test.sh`.
 
 Nothing under `tools/tests/` is updater-tracked or carries a sidecar. The UI's own tests live

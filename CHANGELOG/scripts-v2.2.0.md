@@ -12,6 +12,12 @@ One fix reaches every operator, gateway or not: `firewall-setup.sh` now compares
 `--ssh-from` and `--p2p-from` the way `ufw` stores them. Re-entering a source in another spelling
 used to delete its rule (see [firewall-setup 2.2.0](#firewall-setup-220)).
 
+The release keys change, for every operator. grantkee's RSA key, the only key of
+`scripts-v2.1.0`, is replaced by grantkee's new ed25519 key, and MavenRain's key is added. The keys now come
+from the maintainers' key allowlist, the tn-release-signing repository, and `tn-p2p-allow-sync`
+moves to v0.1.2, the first release signed with the new key. A host on `scripts-v2.1.0` may need
+the installer once to take this release (see [The release keys](#the-release-keys)).
+
 | Component | Version |
 |---|---|
 | setup-gateway | 2.2.0 (new) |
@@ -19,9 +25,44 @@ used to delete its rule (see [firewall-setup 2.2.0](#firewall-setup-220)).
 | install-caddy, firewall-setup, edit-config, check-node, remove-node | 2.2.0 |
 | update-scripts | 2.2.0 |
 | lib/common (`COMMON_VERSION`) | 2.2.0 |
+| Release keys (`lib/release-keys/*.asc`) | grantkee `95A38484E1CBD31D773F6AF928FD56AD2F9FAE47` (replaces `4E36D35A4AB61B589861D01AC7173F2377CA7573`), MavenRain `32F886ADE9C3A88218E4B67CA0A69159FC76DBFD` (new) |
+| `tn-p2p-allow-sync` (pinned in lib/common) | v0.1.2 (was v0.1.1) |
 
 Every other script, library and UI file keeps its version. The runbook for the gateway is
 [OPERATOR.md section 4.15](../OPERATOR.md#415-worker-gateway).
+
+## The release keys
+
+| Key file | Primary key | Expires |
+|---|---|---|
+| `lib/release-keys/grantkee.asc` | ed25519 `95A38484E1CBD31D773F6AF928FD56AD2F9FAE47` | 2028-11-16 |
+| `lib/release-keys/MavenRain.asc` | ed25519 `32F886ADE9C3A88218E4B67CA0A69159FC76DBFD` | 2028-11-10 |
+
+- Either key may sign script releases, node releases and `tn-p2p-allow-sync` releases, under the
+  same `gpgv` status rules as before; one good signature is still enough (`TN_SIG_THRESHOLD` 1). The
+  RSA-2048 key `4E36D35A4AB61B589861D01AC7173F2377CA7573` is gone from `grantkee.asc` and
+  verifies nothing from this release on.
+- The files are byte-for-byte copies of `keys/` in
+  [tn-release-signing](https://github.com/Telcoin-Association/tn-release-signing) at the commit
+  this repository records for its submodule `vendor/tn-release-signing` (`813fcf4`). They still
+  ship as ordinary files in `lib/release-keys/`, listed in `MANIFEST` and embedded in
+  `install.sh`: the installer downloads GitHub's archive of the release tag, which never holds a
+  submodule's files. For maintainers: `tools/check-release-keys.sh` fails when the copies differ
+  from the submodule's keys at the recorded commit, the "checksum freshness" CI job checks the
+  submodule out and runs it, CODEOWNERS covers the pointer and `.gitmodules`, and
+  `lib/release-keys/README` has the steps to move the pointer and copy the keys.
+- Hosts on `scripts-v2.1.0` hold only the RSA key, and the updater verifies a release against the
+  keys a host already has. A `scripts-v2.2.0` that only the new keys signed is refused there
+  with `The release manifest is not signed by a Telcoin release key (no release key in
+  lib/release-keys made a good signature); nothing was changed.` Re-run the installer once, whose
+  embedded keys are the new ones:
+  `curl --proto '=https' --tlsv1.2 -fsSL https://install.telcoin.network | bash -s -- --yes`.
+  When the release's `MANIFEST.asc` also carries a signature by the RSA key, a 2.1.0 host takes
+  it on that signature with `update-scripts.sh` as usual, warning about the new key's signature
+  it cannot check, and a host on the new keys warns about the RSA signature the same way.
+- The Node Manager UI runs its own copy of the scripts and keys: run
+  `sudo bash ui/install-ui.sh --update` after the update, as for every script release, or its
+  release checks keep the RSA key.
 
 ## What changed
 
@@ -161,6 +202,8 @@ Every other script, library and UI file keeps its version. The runbook for the g
 
 ### update-scripts 2.2.0
 
+- Tracks `lib/release-keys/MavenRain.asc`, and ships the ed25519 `lib/release-keys/grantkee.asc`
+  (see [The release keys](#the-release-keys)).
 - Tracks `setup-gateway.sh` and `lib/gateway.sh`. When an update changes either on a host with
   `/etc/systemd/system/telcoin-gateway.service`, it prints `The worker gateway script or its
   library changed. Render the gateway again on the host:` and the `setup-gateway.sh --refresh`
@@ -169,6 +212,14 @@ Every other script, library and UI file keeps its version. The runbook for the g
 
 ### lib/common 2.2.0
 
+- Pins `tn-p2p-allow-sync` v0.1.2 (`TN_P2P_ALLOW_VERSION`, `TN_P2P_ALLOW_TARBALL_SHA256`
+  `1177ee11c48a5ff27a2de78fed8de8168360e4810ed23956cd169aa5cc0765d8`). Its code is v0.1.1's, with
+  `config-version 1` and `snapshot-versions 1` as before. v0.1.1 is signed only by the retired
+  RSA key, so the new keys cannot verify it, and the pin moves with them; v0.1.2 is signed by
+  grantkee's ed25519 key. A validator in P2P committee mode keeps running the v0.1.1 binary it
+  installed (the timer runs the installed binary) until the next
+  `firewall-setup.sh --p2p-committee sync` or `on`, or a resync after a settings change, installs
+  the pinned release.
 - The gateway's paths, unit and container names, default ports and Caddyfile fence
   (`TN_GATEWAY_*`).
 - The readers the other scripts use: the gateway's meta file (`tn_gateway_meta_path`,
@@ -182,6 +233,8 @@ Every other script, library and UI file keeps its version. The runbook for the g
 | Path or key | What it is |
 |---|---|
 | `setup-gateway.sh`, `lib/gateway.sh` | The worker gateway's script and library |
+| `lib/release-keys/MavenRain.asc` | MavenRain's release key (`32F886ADE9C3A88218E4B67CA0A69159FC76DBFD`) |
+| `lib/release-keys/grantkee.asc` | Now grantkee's ed25519 key (`95A38484E1CBD31D773F6AF928FD56AD2F9FAE47`); the RSA key is gone |
 | `/etc/systemd/system/telcoin-gateway.service` | The gateway's unit |
 | `/etc/telcoin/gateway/gateway.meta` | The gateway's settings (`GATEWAY_META_VERSION=1`) |
 | Caddy site `tn-gateway` | The third managed site, beside `tn-dashboard` and `tn-rpc` |
@@ -194,6 +247,7 @@ Every other script, library and UI file keeps its version. The runbook for the g
 
 | Message (shortened) | What to do |
 |---|---|
+| `The release manifest is not signed by a Telcoin release key (no release key in lib/release-keys made a good signature)`, on a host on `scripts-v2.1.0` | Re-run the installer once (see [The release keys](#the-release-keys)). |
 | `this scripts release pins no worker-gateway image for <network>` | Testnet and mainnet wait for a release that pins an image. |
 | `on mainnet the gateway runs on its own host (use --mode standalone there)` | Run the gateway on a host of its own. |
 | `--reset is refused while GATEWAY_UPSTREAM is set` | Set `gateway_upstream=off` first; OPERATOR.md section 4.15 has the order. |
@@ -205,6 +259,15 @@ Every other script, library and UI file keeps its version. The runbook for the g
 
 ## Left open
 
+- Whether `scripts-v2.2.0` is also signed by the retired RSA key decides whether hosts on
+  `scripts-v2.1.0` update in place or need the installer once (see
+  [The release keys](#the-release-keys)).
+- telcoin-network main still lists the RSA key (`.github/maintainer-gpg-keys/grantkee.asc`). From
+  this release on the scripts accept a node release only when a tn-release-signing key signed it,
+  so the first telcoin-network release must be signed with one.
+- tn-release-signing refuses a `SHA256SUMS.asc` that carries any signature not good by one of its
+  keys, and counts signatures per holder; these scripts only warn on a signature by a key they do
+  not ship, and count distinct primary keys. The two policies are not reconciled yet.
 - No released worker-gateway image exists. Testnet and mainnet refuse the gateway until a scripts
   release pins a digest in `lib/gateway.sh`; devnet takes one by digest from the repository above.
 - The per-client limit (100 requests a second, 32 connections) is keyed on the client IP address,

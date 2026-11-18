@@ -1363,7 +1363,7 @@ A script release is a `scripts-vX.Y.Z` tag of this repository; `RELEASE` on `mai
 - `MANIFEST`: `format=1`, `release=<tag>`, a `serial` that every release raises, `min_updater` (the oldest `update-scripts.sh` that may install it), from `scripts-v2.1.0` on `date=YYYY-MM-DD` (the release date) and `expires=YYYY-MM-DD` (see [Keeping Scripts Up to Date](#keeping-scripts-up-to-date)), and one `sha256  <hash>  <path>` line for every file in the release. Updaters and installers of 2.0.0 ignore the two date keys.
 - `MANIFEST.asc`: detached OpenPGP signatures over `MANIFEST`, one armored block per signer, by the release keys in `lib/release-keys/*.asc`. These are the same keys that sign node releases (below). `scripts-v2.1.0` is the first signed release (serial 1).
 
-The installer and the updater install a release only when the signature verifies, every file matches its manifest line, and the serial is not lower than the installed one. They install all of it or none of it. A signature verifies when `gpgv`, given a keyring made from `lib/release-keys/*.asc` alone, reports good signatures by at least `TN_SIG_THRESHOLD` of those keys (one today) and no bad, expired or revoked one: the status rules are the ones for node releases below. The installer carries its own copy of the keys, written into it at the release tag; the updater uses the `lib/release-keys/*.asc` already on the host, so a release that changes the key set must be signed by a key that is in both the old set and the new one. Both read the key files with `base64` and need `gpgv`, not `gpg`.
+The installer and the updater install a release only when the signature verifies, every file matches its manifest line, and the serial is not lower than the installed one. They install all of it or none of it. A signature verifies when `gpgv`, given a keyring made from `lib/release-keys/*.asc` alone, reports good signatures by at least `TN_SIG_THRESHOLD` of those keys (one today) and no bad, expired or revoked one: the status rules are the ones for node releases below. The installer carries its own copy of the keys, written into it at the release tag; the updater uses the `lib/release-keys/*.asc` already on the host, so a release that changes the key set must be signed by a key that is in both the old set and the new one. The key files are copies of the maintainer keys in `Telcoin-Association/tn-release-signing` (`lib/release-keys/README`). `scripts-v2.2.0` replaces grantkee's RSA key with the ed25519 keys of grantkee and MavenRain, and no key is in both sets: a host on `scripts-v2.1.0` refuses it (`The release manifest is not signed by a Telcoin release key`) unless the RSA key signs it too, and otherwise takes it by re-running the installer. Both read the key files with `base64` and need `gpgv`, not `gpg`.
 
 To check a release by hand you need `gpg` and `gpgv`. Make the keyring once, in an empty directory, from the keys you already trust; the node release check below uses the same keyring:
 
@@ -1379,7 +1379,7 @@ gpgv --status-fd 1 --keyring ./release-keys.gpg ~/telcoin-node-scripts/MANIFEST.
 grep -E '^(release|serial|date|expires)=' ~/telcoin-node-scripts/MANIFEST
 ```
 
-`gpgv` must print a `[GNUPG:] GOODSIG` line and its `[GNUPG:] VALIDSIG` line, which ends in the primary fingerprint of a shipped key (`4E36D35A4AB61B589861D01AC7173F2377CA7573` today), and no `BADSIG`, `EXPSIG`, `EXPKEYSIG`, `REVKEYSIG` or `ERRSIG` line. Read those status lines, not the exit status: `gpgv` exits 0 for an expired or revoked key. Every file must print `OK`, and the last line shows which release it is and until when it is current. To check a release tag before you install it, clone the tag (`git clone --quiet --branch scripts-vX.Y.Z https://github.com/Telcoin-Association/tn-node-deployment.git tnd-check`) and run the same `gpgv` and `sha256sum` lines on its `MANIFEST.asc` and `MANIFEST`, with the keyring made from the keys you already trust; [OPERATOR.md section 4.10](OPERATOR.md#410-verifying-a-release-by-hand) walks through it.
+`gpgv` must print a `[GNUPG:] GOODSIG` line and its `[GNUPG:] VALIDSIG` line, which ends in the primary fingerprint of a shipped key (`95A38484E1CBD31D773F6AF928FD56AD2F9FAE47` or `32F886ADE9C3A88218E4B67CA0A69159FC76DBFD` today), and no `BADSIG`, `EXPSIG`, `EXPKEYSIG`, `REVKEYSIG` or `ERRSIG` line. Read those status lines, not the exit status: `gpgv` exits 0 for an expired or revoked key. Every file must print `OK`, and the last line shows which release it is and until when it is current. To check a release tag before you install it, clone the tag (`git clone --quiet --branch scripts-vX.Y.Z https://github.com/Telcoin-Association/tn-node-deployment.git tnd-check`) and run the same `gpgv` and `sha256sum` lines on its `MANIFEST.asc` and `MANIFEST`, with the keyring made from the keys you already trust; [OPERATOR.md section 4.10](OPERATOR.md#410-verifying-a-release-by-hand) walks through it.
 
 ### Node releases
 
@@ -2091,14 +2091,27 @@ Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
 
 Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
 
-### update-scripts v2.2.0 — tracks the gateway files
-Tracks `setup-gateway.sh` and `lib/gateway.sh`. When an update changes either on a host with
-`telcoin-gateway.service`, it prints `The worker gateway script or its library changed. Render the
-gateway again on the host:` and the `setup-gateway.sh --refresh` command; it never runs it.
+### update-scripts v2.2.0 — tracks the gateway files and the new release keys
+- Tracks `setup-gateway.sh` and `lib/gateway.sh`. When an update changes either on a host with
+  `telcoin-gateway.service`, it prints `The worker gateway script or its library changed. Render
+  the gateway again on the host:` and the `setup-gateway.sh --refresh` command; it never runs it.
+- The release keys change: `lib/release-keys/grantkee.asc` is grantkee's ed25519 key
+  (`95A38484E1CBD31D773F6AF928FD56AD2F9FAE47`, replacing the RSA key
+  `4E36D35A4AB61B589861D01AC7173F2377CA7573`), and `lib/release-keys/MavenRain.asc`
+  (`32F886ADE9C3A88218E4B67CA0A69159FC76DBFD`) is new and tracked. The files are copies of
+  `keys/` in tn-release-signing, carried as the submodule `vendor/tn-release-signing` and checked
+  by `tools/check-release-keys.sh`; `install.sh` embeds the same two keys.
+- A host on `scripts-v2.1.0` holds only the RSA key, so it refuses a `scripts-v2.2.0` signed only
+  by the new keys (`The release manifest is not signed by a Telcoin release key`) and takes it by
+  re-running the installer once.
 
 Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
 
-### lib/common.sh v2.2.0 — shared gateway names and checks
+### lib/common.sh v2.2.0 — shared gateway names and checks, tn-p2p-allow-sync v0.1.2
+- Pins `tn-p2p-allow-sync` v0.1.2 (`TN_P2P_ALLOW_TARBALL_SHA256`
+  `1177ee11c48a5ff27a2de78fed8de8168360e4810ed23956cd169aa5cc0765d8`), v0.1.1's code signed with
+  grantkee's new key; v0.1.1 is signed only by the retired RSA key. `--p2p-committee sync` and
+  `on` install it on a validator that runs v0.1.1.
 - The gateway's paths, unit and container names, default ports and Caddyfile fence
   (`TN_GATEWAY_*`), and the readers the other scripts use: the gateway's meta file, the
   `GATEWAY_ALLOW_FROM` list (`tn_gateway_from_list`), whether `ufw` holds both rules for each
