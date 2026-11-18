@@ -40,12 +40,10 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   against the installed copy can renew them; hosts that miss it re-run the installer. Closes
   when the extended keys ship.
 - `scripts-v2.2.0` replaces grantkee's RSA key (`4E36D35A4AB61B589861D01AC7173F2377CA7573`)
-  with the ed25519 keys, so no key is in both the old and the new set. Hosts on
-  `scripts-v2.1.0` hold only the RSA key and refuse a release signed only by the new keys;
-  they re-run the installer, whose embedded keys are the new ones. A `MANIFEST.asc` that the
-  RSA key signs as well (appended with `--output - MANIFEST >> MANIFEST.asc`) updates them in
-  place: the new keys' check only warns on its signature. Closes when `scripts-v2.2.0` is cut
-  and the 2.1.0 hosts have taken it.
+  with the ed25519 keys, so no key is in both the old and the new set, and the RSA key no
+  longer signs. Hosts on `scripts-v2.1.0` hold only the RSA key and refuse the release; they
+  re-run the installer once, whose embedded keys are the new ones. Closes when
+  `scripts-v2.2.0` is cut and the 2.1.0 hosts have re-run the installer.
 - telcoin-network main still lists the RSA key in `.github/maintainer-gpg-keys/grantkee.asc`.
   From `scripts-v2.2.0` on the scripts accept a node release only when a tn-release-signing key
   signed it, so the first telcoin-network release must be signed with one. Closes when

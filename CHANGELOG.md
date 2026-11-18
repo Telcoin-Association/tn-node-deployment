@@ -18,8 +18,8 @@ Part of `scripts-v2.2.0`; see "The release keys" in
 the maintainers' key allowlist, carried as the submodule `vendor/tn-release-signing`;
 `tools/check-release-keys.sh` fails when they drift, and the "checksum freshness" CI job runs it.
 `lib/common.sh` pins `tn-p2p-allow-sync` v0.1.2, signed with the new key (v0.1.1 is signed only
-by the RSA key). Hosts on `scripts-v2.1.0` hold only the RSA key: unless the release is also
-signed by it, they refuse `scripts-v2.2.0` and re-run the installer once.
+by the RSA key). Hosts on `scripts-v2.1.0` hold only the RSA key, which no longer signs: they
+refuse `scripts-v2.2.0` and re-run the installer once.
 
 ### Worker gateway, November 2026 -- setup-gateway.sh runs telcoin-network's worker gateway, a public JSON-RPC front for transaction submissions
 Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md). The Changelog

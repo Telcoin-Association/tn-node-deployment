@@ -15,8 +15,8 @@ used to delete its rule (see [firewall-setup 2.2.0](#firewall-setup-220)).
 The release keys change, for every operator. grantkee's RSA key, the only key of
 `scripts-v2.1.0`, is replaced by grantkee's new ed25519 key, and MavenRain's key is added. The keys now come
 from the maintainers' key allowlist, the tn-release-signing repository, and `tn-p2p-allow-sync`
-moves to v0.1.2, the first release signed with the new key. A host on `scripts-v2.1.0` may need
-the installer once to take this release (see [The release keys](#the-release-keys)).
+moves to v0.1.2, the first release signed with the new key. A host on `scripts-v2.1.0` takes this
+release by re-running the installer once (see [The release keys](#the-release-keys)).
 
 | Component | Version |
 |---|---|
@@ -52,14 +52,12 @@ Every other script, library and UI file keeps its version. The runbook for the g
   submodule out and runs it, CODEOWNERS covers the pointer and `.gitmodules`, and
   `lib/release-keys/README` has the steps to move the pointer and copy the keys.
 - Hosts on `scripts-v2.1.0` hold only the RSA key, and the updater verifies a release against the
-  keys a host already has. A `scripts-v2.2.0` that only the new keys signed is refused there
-  with `The release manifest is not signed by a Telcoin release key (no release key in
-  lib/release-keys made a good signature); nothing was changed.` Re-run the installer once, whose
-  embedded keys are the new ones:
+  keys a host already has. The RSA key no longer signs, so `scripts-v2.2.0` carries only the new
+  keys' signatures and a 2.1.0 host refuses it with `The release manifest is not signed by a
+  Telcoin release key (no release key in lib/release-keys made a good signature); nothing was
+  changed.` Re-run the installer once, whose embedded keys are the new ones:
   `curl --proto '=https' --tlsv1.2 -fsSL https://install.telcoin.network | bash -s -- --yes`.
-  When the release's `MANIFEST.asc` also carries a signature by the RSA key, a 2.1.0 host takes
-  it on that signature with `update-scripts.sh` as usual, warning about the new key's signature
-  it cannot check, and a host on the new keys warns about the RSA signature the same way.
+  Later releases update with `update-scripts.sh` as usual.
 - The Node Manager UI runs its own copy of the scripts and keys: run
   `sudo bash ui/install-ui.sh --update` after the update, as for every script release, or its
   release checks keep the RSA key.
@@ -259,9 +257,6 @@ Every other script, library and UI file keeps its version. The runbook for the g
 
 ## Left open
 
-- Whether `scripts-v2.2.0` is also signed by the retired RSA key decides whether hosts on
-  `scripts-v2.1.0` update in place or need the installer once (see
-  [The release keys](#the-release-keys)).
 - telcoin-network main still lists the RSA key (`.github/maintainer-gpg-keys/grantkee.asc`). From
   this release on the scripts accept a node release only when a tn-release-signing key signed it,
   so the first telcoin-network release must be signed with one.

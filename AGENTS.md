@@ -758,10 +758,9 @@ the repository root, and `RELEASE` on main (one line, `<tag> <date>`) names the 
   removes or replaces a key must therefore be signed by a key that is in both the old and the
   new set. `scripts-v2.2.0` has none: it replaces grantkee's RSA key
   (`4E36D35A4AB61B589861D01AC7173F2377CA7573`, the only key of `scripts-v2.1.0`, removed from
-  tn-release-signing) with the ed25519 keys of grantkee and MavenRain. A host on 2.1.0 refuses
-  a release signed only by the new keys and re-runs the installer; a `MANIFEST.asc` that the
-  RSA key signs as well (appended with `--output - MANIFEST >> MANIFEST.asc`) updates it in
-  place, and the new keys' check only warns on that signature (`NO_PUBKEY`).
+  tn-release-signing) with the ed25519 keys of grantkee and MavenRain. The RSA key no longer
+  signs, so a host on 2.1.0 refuses 2.2.0 and re-runs the installer, whose embedded keys are
+  the new ones.
 - Key expiry: the release keys' primaries expire on 2028-11-16 (grantkee,
   `95A38484E1CBD31D773F6AF928FD56AD2F9FAE47`) and 2028-11-10 (MavenRain,
   `32F886ADE9C3A88218E4B67CA0A69159FC76DBFD`). From that date `gpgv` reports `EXPKEYSIG` for

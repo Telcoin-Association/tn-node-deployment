@@ -67,8 +67,7 @@ be signed by a key the host already has. When no key is in both the old and
 the new set, as in the scripts-v2.2.0 rotation from grantkee's RSA key to the
 ed25519 keys, a host that holds only the old keys refuses the release ("not
 signed by a Telcoin release key") and re-runs the installer, whose embedded
-keys are the new ones; a release that an old key signs as well updates those
-hosts in place. tools/release-scripts.sh prepares and checks a release;
+keys are the new ones. tools/release-scripts.sh prepares and checks a release;
 tools/cut-release.sh runs the release steps.
 
 Format
