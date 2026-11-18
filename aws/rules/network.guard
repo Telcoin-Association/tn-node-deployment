@@ -1,0 +1,34 @@
+#
+# aws/node.yaml: no ingress on TCP 22. The host is reached through Session Manager, which needs
+# no inbound port. An all-protocol rule (-1) would open 22 too, so it is refused on ingress.
+# Both forms are checked: rules inside a security group and AWS::EC2::SecurityGroupIngress.
+#
+
+let security_groups = Resources.*[ Type == 'AWS::EC2::SecurityGroup' ]
+let ingress_rules = Resources.*[ Type == 'AWS::EC2::SecurityGroupIngress' ]
+
+rule no_ssh_in_security_groups when %security_groups !empty {
+    %security_groups.Properties {
+        when SecurityGroupIngress exists {
+            SecurityGroupIngress[*] {
+                IpProtocol not in ['-1', -1, 'all']
+                    <<No all-protocol ingress: it opens TCP 22>>
+                when IpProtocol in ['tcp', 'TCP', '6', 6] {
+                    FromPort > 22 or ToPort < 22
+                        <<No ingress on TCP 22>>
+                }
+            }
+        }
+    }
+}
+
+rule no_ssh_ingress_resources when %ingress_rules !empty {
+    %ingress_rules.Properties {
+        IpProtocol not in ['-1', -1, 'all']
+            <<No all-protocol ingress: it opens TCP 22>>
+        when IpProtocol in ['tcp', 'TCP', '6', 6] {
+            FromPort > 22 or ToPort < 22
+                <<No ingress on TCP 22>>
+        }
+    }
+}

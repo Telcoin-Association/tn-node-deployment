@@ -1,0 +1,136 @@
+# cfn-guard test cases for aws/rules/network.guard: cfn-guard test --dir aws/rules
+---
+- name: the node.yaml group (UDP P2P in, everything out) and the PublicRPC 80 and 443 pass
+  input:
+    Resources:
+      NodeSecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties:
+          GroupDescription: node
+          SecurityGroupIngress:
+            - IpProtocol: udp
+              FromPort: 49590
+              ToPort: 49590
+              CidrIp: 0.0.0.0/0
+            - IpProtocol: udp
+              FromPort: 49594
+              ToPort: 49594
+              CidrIp: 0.0.0.0/0
+          SecurityGroupEgress:
+            - IpProtocol: '-1'
+              CidrIp: 0.0.0.0/0
+      PublicRpcHttpIngress:
+        Type: AWS::EC2::SecurityGroupIngress
+        Properties:
+          GroupId: sg-0123456789abcdef0
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      PublicRpcHttpsIngress:
+        Type: AWS::EC2::SecurityGroupIngress
+        Properties:
+          GroupId: sg-0123456789abcdef0
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+  expectations:
+    rules:
+      no_ssh_in_security_groups: PASS
+      no_ssh_ingress_resources: PASS
+
+- name: a group without inline ingress has nothing to check
+  input:
+    Resources:
+      NodeSecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties:
+          GroupDescription: node
+  expectations:
+    rules:
+      no_ssh_in_security_groups: SKIP
+      no_ssh_ingress_resources: SKIP
+
+- name: inline TCP 22 fails
+  input:
+    Resources:
+      NodeSecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties:
+          GroupDescription: node
+          SecurityGroupIngress:
+            - IpProtocol: udp
+              FromPort: 49590
+              ToPort: 49590
+              CidrIp: 0.0.0.0/0
+            - IpProtocol: tcp
+              FromPort: 22
+              ToPort: 22
+              CidrIp: 203.0.113.7/32
+  expectations:
+    rules:
+      no_ssh_in_security_groups: FAIL
+      no_ssh_ingress_resources: SKIP
+
+- name: an inline TCP range that covers 22 fails
+  input:
+    Resources:
+      NodeSecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties:
+          GroupDescription: node
+          SecurityGroupIngress:
+            - IpProtocol: '6'
+              FromPort: 0
+              ToPort: 1024
+              CidrIp: 10.0.0.0/16
+  expectations:
+    rules:
+      no_ssh_in_security_groups: FAIL
+      no_ssh_ingress_resources: SKIP
+
+- name: inline all-protocol ingress fails
+  input:
+    Resources:
+      NodeSecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties:
+          GroupDescription: node
+          SecurityGroupIngress:
+            - IpProtocol: '-1'
+              CidrIp: 0.0.0.0/0
+  expectations:
+    rules:
+      no_ssh_in_security_groups: FAIL
+      no_ssh_ingress_resources: SKIP
+
+- name: a separate ingress resource on TCP 22 fails
+  input:
+    Resources:
+      SshIngress:
+        Type: AWS::EC2::SecurityGroupIngress
+        Properties:
+          GroupId: sg-0123456789abcdef0
+          IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIpv6: ::/0
+  expectations:
+    rules:
+      no_ssh_in_security_groups: SKIP
+      no_ssh_ingress_resources: FAIL
+
+- name: a separate all-protocol ingress resource fails
+  input:
+    Resources:
+      AllIngress:
+        Type: AWS::EC2::SecurityGroupIngress
+        Properties:
+          GroupId: sg-0123456789abcdef0
+          IpProtocol: -1
+          SourceSecurityGroupId: sg-0fedcba9876543210
+  expectations:
+    rules:
+      no_ssh_in_security_groups: SKIP
+      no_ssh_ingress_resources: FAIL

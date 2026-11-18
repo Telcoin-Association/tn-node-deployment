@@ -1,0 +1,10 @@
+#
+# aws/node.yaml: the instance requires IMDSv2 (session tokens) for its metadata service.
+#
+
+let instances = Resources.*[ Type == 'AWS::EC2::Instance' ]
+
+rule imdsv2_required when %instances !empty {
+    %instances.Properties.MetadataOptions.HttpTokens == 'required'
+        <<The instance must require IMDSv2: MetadataOptions.HttpTokens required>>
+}

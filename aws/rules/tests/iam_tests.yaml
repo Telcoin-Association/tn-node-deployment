@@ -1,0 +1,252 @@
+# cfn-guard test cases for aws/rules/iam.guard: cfn-guard test --dir aws/rules
+---
+- name: the node.yaml role (Service ec2, the SSM core policy through Fn::Sub) passes
+  input:
+    Resources:
+      NodeRole:
+        Type: AWS::IAM::Role
+        Properties:
+          AssumeRolePolicyDocument:
+            Statement:
+              - Effect: Allow
+                Principal:
+                  Service: ec2.amazonaws.com
+                Action: sts:AssumeRole
+          ManagedPolicyArns:
+            - Fn::Sub: arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
+      NodeInstanceProfile:
+        Type: AWS::IAM::InstanceProfile
+        Properties:
+          Roles:
+            - Ref: NodeRole
+  expectations:
+    rules:
+      only_allowed_resource_types: PASS
+      role_trusts_only_ec2: PASS
+      role_has_only_ssm_core: PASS
+
+- name: a service list holding ec2 only and a plain policy ARN pass
+  input:
+    Resources:
+      NodeRole:
+        Type: AWS::IAM::Role
+        Properties:
+          AssumeRolePolicyDocument:
+            Statement:
+              - Effect: Allow
+                Principal:
+                  Service:
+                    - ec2.amazonaws.com
+                Action: sts:AssumeRole
+          ManagedPolicyArns:
+            - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+  expectations:
+    rules:
+      only_allowed_resource_types: PASS
+      role_trusts_only_ec2: PASS
+      role_has_only_ssm_core: PASS
+
+- name: a foreign account principal (cross-account access) fails
+  input:
+    Resources:
+      NodeRole:
+        Type: AWS::IAM::Role
+        Properties:
+          AssumeRolePolicyDocument:
+            Statement:
+              - Effect: Allow
+                Principal:
+                  Service: ec2.amazonaws.com
+                Action: sts:AssumeRole
+              - Effect: Allow
+                Principal:
+                  AWS: arn:aws:iam::111122223333:root
+                Action: sts:AssumeRole
+          ManagedPolicyArns:
+            - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+  expectations:
+    rules:
+      only_allowed_resource_types: PASS
+      role_trusts_only_ec2: FAIL
+      role_has_only_ssm_core: PASS
+
+- name: a wildcard principal fails
+  input:
+    Resources:
+      NodeRole:
+        Type: AWS::IAM::Role
+        Properties:
+          AssumeRolePolicyDocument:
+            Statement:
+              - Effect: Allow
+                Principal: '*'
+                Action: sts:AssumeRole
+          ManagedPolicyArns:
+            - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+  expectations:
+    rules:
+      only_allowed_resource_types: PASS
+      role_trusts_only_ec2: FAIL
+      role_has_only_ssm_core: PASS
+
+- name: a second trusted service fails
+  input:
+    Resources:
+      NodeRole:
+        Type: AWS::IAM::Role
+        Properties:
+          AssumeRolePolicyDocument:
+            Statement:
+              - Effect: Allow
+                Principal:
+                  Service:
+                    - ec2.amazonaws.com
+                    - ssm.amazonaws.com
+                Action: sts:AssumeRole
+          ManagedPolicyArns:
+            - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+  expectations:
+    rules:
+      only_allowed_resource_types: PASS
+      role_trusts_only_ec2: FAIL
+      role_has_only_ssm_core: PASS
+
+- name: NotPrincipal fails
+  input:
+    Resources:
+      NodeRole:
+        Type: AWS::IAM::Role
+        Properties:
+          AssumeRolePolicyDocument:
+            Statement:
+              - Effect: Allow
+                NotPrincipal:
+                  Service: ec2.amazonaws.com
+                Principal:
+                  Service: ec2.amazonaws.com
+                Action: sts:AssumeRole
+          ManagedPolicyArns:
+            - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+  expectations:
+    rules:
+      only_allowed_resource_types: PASS
+      role_trusts_only_ec2: FAIL
+      role_has_only_ssm_core: PASS
+
+- name: a second managed policy fails
+  input:
+    Resources:
+      NodeRole:
+        Type: AWS::IAM::Role
+        Properties:
+          AssumeRolePolicyDocument:
+            Statement:
+              - Effect: Allow
+                Principal:
+                  Service: ec2.amazonaws.com
+                Action: sts:AssumeRole
+          ManagedPolicyArns:
+            - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+            - arn:aws:iam::aws:policy/AdministratorAccess
+  expectations:
+    rules:
+      only_allowed_resource_types: PASS
+      role_trusts_only_ec2: PASS
+      role_has_only_ssm_core: FAIL
+
+- name: another managed policy through Fn::Sub fails
+  input:
+    Resources:
+      NodeRole:
+        Type: AWS::IAM::Role
+        Properties:
+          AssumeRolePolicyDocument:
+            Statement:
+              - Effect: Allow
+                Principal:
+                  Service: ec2.amazonaws.com
+                Action: sts:AssumeRole
+          ManagedPolicyArns:
+            - Fn::Sub: arn:${AWS::Partition}:iam::aws:policy/AdministratorAccess
+  expectations:
+    rules:
+      only_allowed_resource_types: PASS
+      role_trusts_only_ec2: PASS
+      role_has_only_ssm_core: FAIL
+
+- name: an inline policy fails
+  input:
+    Resources:
+      NodeRole:
+        Type: AWS::IAM::Role
+        Properties:
+          AssumeRolePolicyDocument:
+            Statement:
+              - Effect: Allow
+                Principal:
+                  Service: ec2.amazonaws.com
+                Action: sts:AssumeRole
+          ManagedPolicyArns:
+            - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+          Policies:
+            - PolicyName: extra
+              PolicyDocument:
+                Statement:
+                  - Effect: Allow
+                    Action: s3:GetObject
+                    Resource: '*'
+  expectations:
+    rules:
+      only_allowed_resource_types: PASS
+      role_trusts_only_ec2: PASS
+      role_has_only_ssm_core: FAIL
+
+- name: a role without the SSM core policy fails
+  input:
+    Resources:
+      NodeRole:
+        Type: AWS::IAM::Role
+        Properties:
+          AssumeRolePolicyDocument:
+            Statement:
+              - Effect: Allow
+                Principal:
+                  Service: ec2.amazonaws.com
+                Action: sts:AssumeRole
+  expectations:
+    rules:
+      only_allowed_resource_types: PASS
+      role_trusts_only_ec2: PASS
+      role_has_only_ssm_core: FAIL
+
+- name: a resource type that takes a policy (a bucket policy naming another account) fails
+  input:
+    Resources:
+      Policy:
+        Type: AWS::S3::BucketPolicy
+        Properties:
+          Bucket: example
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Principal:
+                  AWS: arn:aws:iam::111122223333:root
+                Action: s3:GetObject
+                Resource: arn:aws:s3:::example/*
+  expectations:
+    rules:
+      only_allowed_resource_types: FAIL
+      role_trusts_only_ec2: SKIP
+      role_has_only_ssm_core: SKIP
+
+- name: an IAM user fails
+  input:
+    Resources:
+      User:
+        Type: AWS::IAM::User
+        Properties: {}
+  expectations:
+    rules:
+      only_allowed_resource_types: FAIL
+      role_trusts_only_ec2: SKIP
+      role_has_only_ssm_core: SKIP

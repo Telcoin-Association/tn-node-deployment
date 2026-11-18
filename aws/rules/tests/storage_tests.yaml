@@ -1,0 +1,124 @@
+# cfn-guard test cases for aws/rules/storage.guard: cfn-guard test --dir aws/rules
+---
+- name: an encrypted root mapping and an encrypted, retained data volume pass
+  input:
+    Resources:
+      NodeInstance:
+        Type: AWS::EC2::Instance
+        Properties:
+          ImageId: ami-0123456789abcdef0
+          BlockDeviceMappings:
+            - DeviceName: /dev/sda1
+              Ebs:
+                VolumeType: gp3
+                VolumeSize: 50
+                Encrypted: true
+      DataVolume:
+        Type: AWS::EC2::Volume
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          AvailabilityZone: us-east-1a
+          Size: 2000
+          Encrypted: true
+  expectations:
+    rules:
+      instance_volumes_encrypted: PASS
+      data_volumes_encrypted: PASS
+      data_volumes_retained: PASS
+
+- name: an unencrypted data volume fails
+  input:
+    Resources:
+      DataVolume:
+        Type: AWS::EC2::Volume
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          AvailabilityZone: us-east-1a
+          Size: 2000
+          Encrypted: false
+  expectations:
+    rules:
+      instance_volumes_encrypted: SKIP
+      data_volumes_encrypted: FAIL
+      data_volumes_retained: PASS
+
+- name: a data volume with no Encrypted property fails
+  input:
+    Resources:
+      DataVolume:
+        Type: AWS::EC2::Volume
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          AvailabilityZone: us-east-1a
+          Size: 2000
+  expectations:
+    rules:
+      instance_volumes_encrypted: SKIP
+      data_volumes_encrypted: FAIL
+      data_volumes_retained: PASS
+
+- name: a data volume deleted with the stack fails
+  input:
+    Resources:
+      DataVolume:
+        Type: AWS::EC2::Volume
+        DeletionPolicy: Delete
+        UpdateReplacePolicy: Retain
+        Properties:
+          AvailabilityZone: us-east-1a
+          Size: 2000
+          Encrypted: true
+  expectations:
+    rules:
+      instance_volumes_encrypted: SKIP
+      data_volumes_encrypted: PASS
+      data_volumes_retained: FAIL
+
+- name: a data volume without UpdateReplacePolicy fails
+  input:
+    Resources:
+      DataVolume:
+        Type: AWS::EC2::Volume
+        DeletionPolicy: Retain
+        Properties:
+          AvailabilityZone: us-east-1a
+          Size: 2000
+          Encrypted: true
+  expectations:
+    rules:
+      instance_volumes_encrypted: SKIP
+      data_volumes_encrypted: PASS
+      data_volumes_retained: FAIL
+
+- name: an unencrypted root mapping fails
+  input:
+    Resources:
+      NodeInstance:
+        Type: AWS::EC2::Instance
+        Properties:
+          ImageId: ami-0123456789abcdef0
+          BlockDeviceMappings:
+            - DeviceName: /dev/sda1
+              Ebs:
+                VolumeSize: 50
+  expectations:
+    rules:
+      instance_volumes_encrypted: FAIL
+      data_volumes_encrypted: SKIP
+      data_volumes_retained: SKIP
+
+- name: an instance that leaves its root mapping to the image fails
+  input:
+    Resources:
+      NodeInstance:
+        Type: AWS::EC2::Instance
+        Properties:
+          ImageId: ami-0123456789abcdef0
+  expectations:
+    rules:
+      instance_volumes_encrypted: FAIL
+      data_volumes_encrypted: SKIP
+      data_volumes_retained: SKIP
