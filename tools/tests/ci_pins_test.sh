@@ -10,7 +10,8 @@
 # CODEOWNERS and dependabot.yml exist. Each display name the main-branch
 # ruleset requires names exactly one job; the hardening lints, the UI tests
 # and the macOS job run the lints and the UI shell tests directly, with no
-# fallback for a missing file; no required job, and no step of one, carries
+# fallback for a missing file; the checksum job checks out the submodule and
+# runs tools/check-release-keys.sh; no required job, and no step of one, carries
 # an if: or a continue-on-error, except the advisory shellcheck run; no run
 # line in them ends a failure with || true, || : or || exit 0; the Pages site
 # gets no .nojekyll. Plain text checks (no YAML parser), so they assume the
@@ -199,7 +200,10 @@ done
 check "fixture-tests runs the suite" "yes" "$(has 'bash tools/tests/run.sh' "$(job_body "$GH/workflows/ci.yml" fixture-tests)")"
 check "fixture-tests-macos runs the suite under /bin/bash" "yes" \
     "$(has '/bin/bash tools/tests/run.sh' "$(job_body "$GH/workflows/ci.yml" fixture-tests-macos)")"
-check "checksums regenerates the sidecars" "yes" "$(has 'bash tools/gen-checksums.sh' "$(job_body "$GH/workflows/ci.yml" checksums)")"
+sum_job="$(job_body "$GH/workflows/ci.yml" checksums)"
+check "checksums regenerates the sidecars" "yes" "$(has 'bash tools/gen-checksums.sh' "$sum_job")"
+check "checksums checks the release keys against tn-release-signing" "yes" "$(has 'bash tools/check-release-keys.sh' "$sum_job")"
+check "checksums checks out the submodule the keys come from" "yes" "$(has 'submodules: true' "$sum_job")"
 
 # A skipped required check counts as passed, and continue-on-error turns a
 # failure into a pass, so neither may sit on a required job or on a step of

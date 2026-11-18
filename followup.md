@@ -32,10 +32,26 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   `scripts-v2.1.0` ("has no MANIFEST.sig; nothing was changed.") and need the installer once.
   A leftover `lib/allowed_signers` stays on them, unused. Closes when those hosts have re-run
   the installer.
-- The release key's primary (`4E36D35A4AB61B589861D01AC7173F2377CA7573`) expires 2028-10-16.
-  The extended key must ship in a script release that hosts install before that date, since
-  only a release that verifies against the installed copy can renew it; hosts that miss it
-  re-run the installer. Closes when the extended key ships.
+- The release keys are copies of `keys/` in tn-release-signing (the submodule
+  `vendor/tn-release-signing`, checked by `tools/check-release-keys.sh`). Their primaries
+  expire on 2028-11-16 (grantkee, `95A38484E1CBD31D773F6AF928FD56AD2F9FAE47`) and 2028-11-10
+  (MavenRain, `32F886ADE9C3A88218E4B67CA0A69159FC76DBFD`). The extended keys must ship in a
+  script release that hosts install before those dates, since only a release that verifies
+  against the installed copy can renew them; hosts that miss it re-run the installer. Closes
+  when the extended keys ship.
+- `scripts-v2.2.0` replaces grantkee's RSA key (`4E36D35A4AB61B589861D01AC7173F2377CA7573`)
+  with the ed25519 keys, so no key is in both the old and the new set, and the RSA key no
+  longer signs. Hosts on `scripts-v2.1.0` hold only the RSA key and refuse the release; they
+  re-run the installer once, whose embedded keys are the new ones. Closes when
+  `scripts-v2.2.0` is cut and the 2.1.0 hosts have re-run the installer.
+- telcoin-network main still lists the RSA key in `.github/maintainer-gpg-keys/grantkee.asc`.
+  From `scripts-v2.2.0` on the scripts accept a node release only when a tn-release-signing key
+  signed it, so the first telcoin-network release must be signed with one. Closes when
+  telcoin-network signs with the tn-release-signing keys.
+- tn-release-signing's co-signer policy (KEYS.md) refuses a `SHA256SUMS.asc` that carries any
+  signature not good by one of its keys; these scripts only warn on a signature by a key that
+  is not shipped (`NO_PUBKEY`, `ERRSIG` code 9), and count distinct primary keys where it
+  counts holders. Closes when the two policies are reconciled.
 - The main-branch ruleset of #30 is a user step. Its JSON in the issue requires eight contexts:
   "fixture tests (macOS bash 3.2)" and "Ubuntu 24.04 VM assertions" are not in it, although
   `tools/tests/ci_pins_test.sh` guards both names. `.github/CODEOWNERS` now lists three owners

@@ -7,6 +7,20 @@ For recent entries (v1.1.40 onwards), see the Changelog section of README.md.
 
 ## Unreleased
 
+### Release keys from tn-release-signing, November 2026 -- grantkee's ed25519 key and MavenRain's key, tn-p2p-allow-sync v0.1.2
+Part of `scripts-v2.2.0`; see "The release keys" in
+[CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+`lib/release-keys/grantkee.asc` is now grantkee's ed25519 key
+(`95A38484E1CBD31D773F6AF928FD56AD2F9FAE47`) instead of the RSA key
+`4E36D35A4AB61B589861D01AC7173F2377CA7573`, and `lib/release-keys/MavenRain.asc`
+(`32F886ADE9C3A88218E4B67CA0A69159FC76DBFD`) is new; `update-scripts.sh` tracks it and
+`install.sh` embeds both. The files are byte-for-byte copies of `keys/` in tn-release-signing,
+the maintainers' key allowlist, carried as the submodule `vendor/tn-release-signing`;
+`tools/check-release-keys.sh` fails when they drift, and the "checksum freshness" CI job runs it.
+`lib/common.sh` pins `tn-p2p-allow-sync` v0.1.2, signed with the new key (v0.1.1 is signed only
+by the RSA key). Hosts on `scripts-v2.1.0` hold only the RSA key, which no longer signs: they
+refuse `scripts-v2.2.0` and re-run the installer once.
+
 ### Worker gateway, November 2026 -- setup-gateway.sh runs telcoin-network's worker gateway, a public JSON-RPC front for transaction submissions
 Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md). The Changelog
 section of README.md has one 2.2.0 entry per script; this summary goes by area.

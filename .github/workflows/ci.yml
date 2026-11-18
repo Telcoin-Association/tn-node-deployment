@@ -219,9 +219,18 @@ jobs:
     permissions:
       contents: read
     steps:
+      # The submodule vendor/tn-release-signing is the source of the release
+      # keys, so this checkout fetches it at the commit the tree records.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          submodules: true
+      # lib/release-keys/*.asc ship to hosts as ordinary files (a tag archive
+      # never holds a submodule's files); they must be byte-for-byte copies of
+      # keys/*.asc in tn-release-signing at the recorded commit, read from the
+      # submodule's object store.
+      - name: Release keys are the tn-release-signing keys
+        run: bash tools/check-release-keys.sh
       # Updaters older than the signed-manifest flow still verify each file
       # against its .sha256 sidecar, and a host's first signed release fetches
       # the release keys (lib/release-keys/*.asc) through theirs, so the
