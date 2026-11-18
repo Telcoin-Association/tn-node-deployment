@@ -192,7 +192,7 @@ sudo bash ~/telcoin-node-scripts/remove-node.sh
 
 ## AWS one-click (CloudFormation)
 
-`aws/node.yaml` is a CloudFormation template that builds a ready node host in the operator's own AWS account, for the Adiri testnet. It leaves a host, not a running node: the operator opens a Session Manager shell and runs `setup-node.sh` and `firewall-setup.sh`, so the BLS passphrase never enters AWS. [OPERATOR.md section 2.11](OPERATOR.md#211-aws-one-click) is the walkthrough.
+`aws/node.yaml` is a CloudFormation template that builds a ready node host in the operator's own AWS account, for the Adiri testnet. It leaves a host, not a running node: the operator opens a Session Manager shell and runs `setup-node.sh` and `firewall-setup.sh`, so the BLS passphrase never enters AWS. [OPERATOR.md section 2.11](OPERATOR.md#211-aws-one-click) is the walkthrough. The stack is created with the launching user's own permissions (the console's optional CloudFormation service role stays empty, and deployment validations stay on), so it takes an account administrator or a user allowed to create the VPC, EC2, IAM role and Systems Manager resources; its one IAM resource is the instance role, acknowledged as `CAPABILITY_IAM`.
 
 | Path | What it is |
 |---|---|

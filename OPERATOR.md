@@ -677,7 +677,9 @@ The template is [aws/node.yaml](aws/node.yaml).
 Telcoin publishes the template with every script release, as `templates/<scripts-vX.Y.Z>/node.yaml` in its template bucket, and the launch link opens it on the CloudFormation console's quick-create page.
 Pick the region at the top of the console first.
 Without the link, download `aws/node.yaml` from the release tag and create the stack from it (CloudFormation, `Create stack`, `Upload a template file`).
-The stack creates an IAM role, so the console asks you to acknowledge that.
+Launch it signed in as an administrator of the account, or as a user allowed to create the VPC, EC2, IAM role and Systems Manager resources listed below: CloudFormation creates them with your permissions.
+On the console page, leave `Permissions` (the IAM role) empty and leave deployment validations on.
+The stack creates one IAM role, the instance's, so tick `I acknowledge that AWS CloudFormation might create IAM resources`.
 
 | Parameter | Choices |
 |---|---|
