@@ -3,10 +3,12 @@
 # that review has to come from one of them.
 #
 # The release path (the updater, the installer, lib/, ui/, the workflows, the
-# release tooling and the maintainer key directory) is listed separately so the
-# owners of each line can change independently; the ruleset sets how many
-# approvals a pull request needs. tools/tests/ci_pins_test.sh requires at least
-# two owners on every release-path line.
+# release tooling, the maintainer key directory, and the tn-release-signing
+# submodule pointer and .gitmodules, which decide the keys that directory must
+# copy) is listed separately so the owners of each line can change
+# independently; the ruleset sets how many approvals a pull request needs.
+# tools/tests/ci_pins_test.sh requires at least two owners on every
+# release-path line.
 
 *                           @grantkee @sstanfield @MavenRain
 
@@ -14,6 +16,8 @@
 /install.sh                 @grantkee @sstanfield @MavenRain
 /lib/                       @grantkee @sstanfield @MavenRain
 /lib/release-keys/          @grantkee @sstanfield @MavenRain
+/vendor/tn-release-signing  @grantkee @sstanfield @MavenRain
+/.gitmodules                @grantkee @sstanfield @MavenRain
 /lib/wgvpn/peers/ssh/       @grantkee @sstanfield @MavenRain
 /ui/                        @grantkee @sstanfield @MavenRain
 /.github/                   @grantkee @sstanfield @MavenRain

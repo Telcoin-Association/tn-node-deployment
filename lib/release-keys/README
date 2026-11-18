@@ -23,13 +23,14 @@ and read its status lines:
     missing key) is not checked and does not refuse: the scripts print a
     warning that names its key id, once. Any other ERRSIG refuses.
 
-Why an unknown co-signer only warns: the telcoin-network release pipeline
-refuses to sign, verify or publish a SHA256SUMS.asc that carries any
-signature that is not good or not by an allowlisted maintainer key, and the
-manual check on the install page refuses one too. So a published release only
-ever carries allowlisted signatures, and the warning covers the one case left:
-a co-signer allowlisted on telcoin-network main whose key has not shipped here
-yet (this directory lags main's list until the next script release).
+Why an unknown co-signer only warns: the release pipelines refuse to sign,
+verify or publish a SHA256SUMS.asc that carries any signature that is not
+good or not by an allowlisted maintainer key, and the manual check on the
+install page refuses one too. So a published release only ever carries
+allowlisted signatures, and the warning covers the one case left: a co-signer
+allowlisted upstream whose key has not shipped here yet (this directory lags
+tn-release-signing until a script release moves its submodule pointer, see
+"Adding or removing a key" below).
 
 Then every file used from the release (the tarball, IMAGE_DIGEST) must match its
 SHA256SUMS line, and the chain-config lines must carry the hashes these scripts
@@ -45,6 +46,10 @@ refuses the build on every network. A tag that cannot be checked (no key here,
 gpg missing, an unsigned tag, or a signer whose key is not here) refuses the
 build on mainnet and builds with a warning on testnet.
 
+firewall-setup.sh --p2p-committee on checks the tn-p2p-allow-sync release it
+installs the same way: its SHA256SUMS.asc against these keys, then the
+tarball against its SHA256SUMS line and the sha256 lib/common.sh pins.
+
 Script releases
 ---------------
 
@@ -58,53 +63,108 @@ alone. The release is accepted when at least TN_SIG_THRESHOLD of these keys
 (one today) made a good signature and no signature is bad, expired or revoked;
 the same status rules as above apply. These files are listed in the signed
 MANIFEST like any script, so a script release that adds or removes a key must
-be signed by a key the host already has. tools/release-scripts.sh prepares and
-checks a release; tools/cut-release.sh runs the release steps.
+be signed by a key the host already has. When no key is in both the old and
+the new set, as in the scripts-v2.2.0 rotation from grantkee's RSA key to the
+ed25519 keys, a host that holds only the old keys refuses the release ("not
+signed by a Telcoin release key") and re-runs the installer, whose embedded
+keys are the new ones; a release that an old key signs as well updates those
+hosts in place. tools/release-scripts.sh prepares and checks a release;
+tools/cut-release.sh runs the release steps.
 
 Format
 ------
 
-ASCII-armored public keys, one file per maintainer, named <github-handle>.asc,
-the same files as .github/maintainer-gpg-keys/ in the telcoin-network
-repository on main. Every *.asc file here is read; other files (this README)
-are ignored. A file may carry more than one primary key: every primary key
-(every "pub" that gpg --show-keys lists) in every file joins the keyring and the
-fingerprint allowlist, whether the file holds one armored block or several. A
-key that is expired or revoked stays refused even while its file is here.
+ASCII-armored public keys, one file per maintainer, named <github-handle>.asc.
+They are byte-for-byte copies of keys/*.asc in the tn-release-signing
+repository (https://github.com/Telcoin-Association/tn-release-signing), the
+maintainers' key allowlist, at the commit tn-node-deployment records for its
+submodule at vendor/tn-release-signing: the same set of names and the same
+bytes. tools/check-release-keys.sh fails when they differ, and CI runs it.
+The submodule is where the files come from, not where hosts read them: the
+installer downloads GitHub's archive of the release tag, which never holds a
+submodule's files, and the updater installs the files the signed MANIFEST
+lists, so the keys ship here as ordinary files. Every *.asc file here is
+read; other files (this README) are ignored. A file may carry more than one
+primary key: every primary key (every "pub" that gpg --show-keys lists) in
+every file joins the keyring and the fingerprint allowlist, whether the file
+holds one armored block or several. A key that is expired or revoked stays
+refused even while its file is here.
 
 Shipped keys
 ------------
 
-    handle     primary key fingerprint                    expires      added
-    grantkee   4E36D35A4AB61B589861D01AC7173F2377CA7573   2028-10-16   2026-10-21
+    handle      primary key fingerprint                    expires      added
+    grantkee    95A38484E1CBD31D773F6AF928FD56AD2F9FAE47   2028-11-16   2026-11-17
+    MavenRain   32F886ADE9C3A88218E4B67CA0A69159FC76DBFD   2028-11-10   2026-11-17
 
-grantkee.asc is a byte-for-byte copy of .github/maintainer-gpg-keys/grantkee.asc
-in telcoin-network (an RSA-2048 primary key that signs; its subkeys are not
-used here).
+Both are ed25519 primary keys that sign, each on its holder's YubiKey; their
+subkeys are not used here. The table in KEYS.md of tn-release-signing lists
+the same fingerprints. grantkee.asc held grantkee's RSA-2048 key
+4E36D35A4AB61B589861D01AC7173F2377CA7573 up to scripts-v2.1.0; that key was
+replaced by the ed25519 one and removed from tn-release-signing, and it signs
+nothing these scripts accept from scripts-v2.2.0 on.
 
 Before a key expires, its maintainer extends the expiry, re-exports the public
-key and ships the new file in a script release, the same way a key is added
-below. Hosts must install that script release before the old expiry date: from
-that date gpgv reports EXPKEYSIG for every release signed with the key, and the
-scripts refuse those releases, script releases included. Only a script release
-that verifies against the copy a host already has can renew it, so a host that
-misses the window re-runs the installer, whose embedded keys are the renewed
-ones. grantkee.asc expires 2028-10-16.
+key into tn-release-signing and ships the new file in a script release, the
+same way a key is added below. Hosts must install that script release before
+the old expiry date: from that date gpgv reports EXPKEYSIG for every release
+signed with the key, and the scripts refuse those releases, script releases
+included. Only a script release that verifies against the copy a host already
+has can renew it, so a host that misses the window re-runs the installer,
+whose embedded keys are the renewed ones. grantkee.asc expires 2028-11-16 and
+MavenRain.asc 2028-11-10.
 
 Adding or removing a key
 ------------------------
 
-1. Take the key from .github/maintainer-gpg-keys/<handle>.asc on the
-   telcoin-network main branch, and check its fingerprint against the
-   maintainer release keys table in that repository's SECURITY.md and
-   against https://github.com/<handle>.gpg:
+1. The change lands in tn-release-signing first: keys/<handle>.asc and its
+   row in KEYS.md, reviewed there (its KEYS.md and docs/signing.md say how).
 
-       gpg --show-keys --with-fingerprint <handle>.asc
+2. Move the submodule pointer to that commit, on a branch of
+   tn-node-deployment that starts at an up-to-date main, and read what the
+   move brings in:
 
-2. Add (or delete) lib/release-keys/<handle>.asc in tn-node-deployment and
-   list it in update-scripts.sh SCRIPTS so the updater ships it.
+       git submodule update --init -- vendor/tn-release-signing
+       git -C vendor/tn-release-signing fetch --quiet origin main
+       git -C vendor/tn-release-signing checkout --quiet --detach FETCH_HEAD
+       git diff --submodule=log -- vendor/tn-release-signing
+       git -C vendor/tn-release-signing diff "$(git rev-parse HEAD:vendor/tn-release-signing)" HEAD -- keys KEYS.md
+       git add vendor/tn-release-signing
 
-3. Publish a signed script release. Hosts pick the key set up with
+   Check every fingerprint against the KEYS.md table and against
+   https://github.com/<handle>.gpg:
+
+       gpg --show-keys --with-fingerprint vendor/tn-release-signing/keys/*.asc
+
+3. Copy the files: lib/release-keys/*.asc become the keys/*.asc of the
+   commit the pointer now records, the same names and the same bytes, taken
+   from the submodule's object store:
+
+       sha="$(git rev-parse :vendor/tn-release-signing)"
+       rm -f lib/release-keys/*.asc lib/release-keys/*.asc.sha256
+       git -C vendor/tn-release-signing ls-tree --name-only "$sha" keys/ |
+           grep '\.asc$' | while IFS= read -r k; do
+               git -C vendor/tn-release-signing cat-file blob "$sha:$k" > "lib/release-keys/${k#keys/}"
+           done
+
+   List every key file in update-scripts.sh SCRIPTS
+   ("lib/release-keys/<handle>.asc:lib/release-keys/<handle>.asc:NONE") so
+   the updater ships it, and drop the row of a key that is gone. Write the
+   key files, in name order, into the TN_RELEASE_KEYS block of install.sh
+   (tools/release-scripts.sh does it the same way when it prepares the
+   release; tools/tests/install_test.sh checks that the two match).
+
+4. Run the check, then refresh the sidecars:
+
+       bash tools/check-release-keys.sh
+       bash tools/gen-checksums.sh
+
+   The check exits 0 when the copies match, 1 with every difference named
+   when they do not, and 2 when it cannot read the submodule (run the
+   git submodule update --init line of step 2). Commit the pointer and
+   lib/release-keys together (git add -A lib/release-keys).
+
+5. Publish a signed script release. Hosts pick the key set up with
    update-scripts.sh; the keys are part of the signed MANIFEST, like the
    scripts that read them. The Node Manager UI runs its own copy of the
    scripts and keys (/opt/telcoin-ui-update), which takes the new key set

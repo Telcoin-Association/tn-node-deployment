@@ -229,7 +229,9 @@ tool() {
     RC=$?
 }
 
-(cd "$REPO" && git ls-files | tar -cf - -T -) | tar -xf - -C "$W"
+# The tracked files, without the submodule vendor/tn-release-signing: a
+# directory (holding a .git file once initialized) that no release ships.
+(cd "$REPO" && git ls-files | while IFS= read -r p; do [ -d "$p" ] || printf '%s\n' "$p"; done | tar -cf - -T -) | tar -xf - -C "$W"
 git -C "$W" init -q
 commit_all "fixture"
 
@@ -237,6 +239,10 @@ commit_all "fixture"
 # The fixture starts before any release: no release record and no release key,
 # also once main carries a release.
 rm -f "$W/MANIFEST" "$W/MANIFEST.asc" "$W/RELEASE" "$W"/lib/release-keys/*.asc "$W"/lib/release-keys/*.asc.sha256
+# One throwaway key signs here, in the SCRIPTS row of grantkee.asc (below); the
+# rows of the other shipped key files go.
+awk '!/^ *"lib\/release-keys\/[^"]*\.asc:/ || /"lib\/release-keys\/grantkee\.asc:/' "$W/update-scripts.sh" > "$T/updater.rows"
+cat "$T/updater.rows" > "$W/update-scripts.sh"
 commit_all "no release yet" || true
 tool --check
 check_rc "no MANIFEST: check passes" 0 "$RC"
