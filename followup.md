@@ -793,5 +793,13 @@ are pulled through the customer's own State Manager association. The account sid
   backup off the host through Session Manager).
 - **PR #68 overlap.** The worker-gateway PR also edits `OPERATOR.md` and `README.md`; whichever
   lands second rebases.
+- **A least-privilege deployer role (after the 2026-11-20 demo).** The docs ask for an account
+  administrator, or a user allowed to create the VPC, EC2, IAM role and Systems Manager resources.
+  For accounts that hand out neither: launch once in a sandbox account, generate the policy from
+  that launch's CloudTrail record (IAM Access Analyzer policy generation), test it with a second
+  launch, and ship it as a small template that creates a CloudFormation service role the operator
+  picks under the console's Permissions. Publish it beside `node.yaml`, give it cfn-guard rules,
+  and document it with the launch steps. Not before a real launch: a hand-written list would be a
+  guess.
 - **Later, if operators ask.** An existing-VPC option (the default quotas are 5 VPCs and 5 Elastic
   IPs per region); `open-ui.sh` reaching the Node Manager UI through Session Manager instead of SSH.
