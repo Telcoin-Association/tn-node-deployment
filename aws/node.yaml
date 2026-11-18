@@ -78,8 +78,9 @@ Parameters:
       - Disabled
     Description: >-
       Enabled adds a daily State Manager association that installs the newest signed script
-      release and prepares and applies a newer node release. It never confirms the restart of a
-      staked validator: there the prepared update waits for you to run the apply document.
+      release and prepares and applies a newer node release. It never applies a one-way update
+      or confirms the restart of a staked validator: there the prepared update waits for you to
+      run the apply document.
   ImageId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
@@ -458,7 +459,7 @@ Resources:
         description: >-
           Daily, pulled update of a Telcoin Network node: the newest signed script release, then
           the node, prepared and applied without --yes, so a staked validator's prepared update
-          waits for the operator.
+          waits for the operator. A one-way update is prepared and never applied here.
         mainSteps:
           - action: aws:runShellScript
             name: updateTelcoinNode
@@ -519,6 +520,7 @@ Resources:
                   print("yes" if found.get("update_available") is True else "no")
                   print("yes" if found.get("pending") else "no")
                   print(found.get("latest_ref") or "")
+                  print("yes" if found.get("storage_migration") is True else "no")
                   '); then
                       echo "update-node.sh --check printed no result line:" >&2
                       printf '%s\n' "$check" >&2
@@ -527,6 +529,7 @@ Resources:
                   available=$(printf '%s\n' "$fields" | sed -n 1p)
                   pending=$(printf '%s\n' "$fields" | sed -n 2p)
                   ref=$(printf '%s\n' "$fields" | sed -n 3p)
+                  migration=$(printf '%s\n' "$fields" | sed -n 4p)
 
                   # A prepared update that waits (a validator's) is applied as it is, not
                   # prepared again every day.
@@ -544,6 +547,14 @@ Resources:
                       fi
                   else
                       echo "The node runs the newest release."
+                      exit 0
+                  fi
+
+                  # A one-way update (storage_migration) waits for the operator on every node:
+                  # older releases cannot open the data dir afterwards, and update-node.sh does
+                  # not ask for a snapshot in --json mode.
+                  if [ "$migration" = yes ]; then
+                      echo "This update migrates the data dir one way: older releases cannot open it afterwards, and a failed health check will not roll back. The update is prepared and waits. Run the apply document (stack output ApplyUpdateDocument) when you accept that."
                       exit 0
                   fi
 

@@ -745,7 +745,8 @@ On a node that is not a staked validator it goes ahead.
 On a staked validator, or one whose stake cannot be read, `update-node.sh` refuses an apply without `--yes`: the prepared update waits, and the run ends with `the update is prepared and waits`.
 Apply it when the node may restart: in Systems Manager, `Run Command`, run the document the `ApplyUpdateDocument` output names on the instance.
 It runs `update-node.sh --json --apply --yes`.
-A one-way update (section 4.2) is applied like any other on a node that is not a staked validator, with no snapshot.
+A one-way update (section 4.2; the check reports `storage_migration` true) waits on every node: the association prepares it, never applies it, and ends with `The update is prepared and waits`.
+Apply it with the same document once you accept that older releases cannot open the data dir afterwards.
 The association never runs `ui/install-ui.sh --update` or `setup-alerts.sh --refresh`: when its output (State Manager, the association, `Execution history`) shows `update-scripts.sh` printing one of them, run it yourself.
 
 **Telcoin's access.**

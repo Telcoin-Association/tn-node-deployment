@@ -624,9 +624,10 @@ The stack does not install the Node Manager UI; install it as in [Node Manager U
 
 With `AutoUpdate` enabled, a State Manager association in your account runs once a day, at 03:00 UTC plus a random wait of up to an hour, and does nothing until setup has run.
 It updates the scripts (see [Keep the scripts current](#keep-the-scripts-current)), asks `update-node.sh` whether a newer node release exists, and when one does, prepares it and applies it without confirming a validator restart.
-On a node that is not a staked validator, the apply goes ahead with the usual quorum check and epoch wait (see [Update the node](#update-the-node)); a one-way update is applied the same way, with no snapshot (see [One-way updates](#one-way-updates)).
+On a node that is not a staked validator, the apply goes ahead with the usual quorum check and epoch wait (see [Update the node](#update-the-node)).
 On a staked validator, or one whose stake cannot be read, `update-node.sh` refuses to restart without confirmation, so the prepared update waits.
-Apply it when the node may restart by running the document the `ApplyUpdateDocument` output names from Systems Manager Run Command; it runs `update-node.sh --json --apply --yes`.
+A one-way update (see [One-way updates](#one-way-updates)) waits on every node: the association prepares it and never applies it.
+Apply a waiting update when the node may restart by running the document the `ApplyUpdateDocument` output names from Systems Manager Run Command; it runs `update-node.sh --json --apply --yes`.
 The association never reinstalls the Node Manager UI or the private alerts runner: run the commands `update-scripts.sh` prints for those yourself.
 
 Telcoin gets no access to your AWS account or your node.

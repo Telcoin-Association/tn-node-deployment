@@ -542,7 +542,9 @@ from a Session Manager shell, so the BLS passphrase never enters AWS. Rules:
 - Updates are pull-only, through the State Manager association: `update-scripts.sh` answered
   `y`, then `update-node.sh --json --check`, `--prepare --ref <latest_ref>` and `--apply`. The
   association never passes `--yes` to `--apply`, so a staked validator's prepared update waits for
-  the operator's apply document, the one place `--yes` appears. It never runs
+  the operator's apply document, the one place `--yes` appears. It never applies an update whose
+  check reports `storage_migration` true, on any node: that update waits for the apply document
+  too, because `update-node.sh` asks for no snapshot in `--json` mode. It never runs
   `ui/install-ui.sh --update` or `setup-alerts.sh --refresh`.
 - No snapshots or backup plan for the data volume: a snapshot is a copy of the node keys. The
   volume keeps `DeletionPolicy: Retain` and `UpdateReplacePolicy: Retain`, and the user data
