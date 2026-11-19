@@ -778,9 +778,6 @@ are pulled through the customer's own State Manager association. The account sid
   Homebrew, newer than the reference pandoc 3.12.1 in AGENTS.md, which Homebrew no longer ships.
   A maintainer on 3.12.1 who rebuilds it may get different bytes; move the reference to 3.14, or
   rebuild with `--force` on 3.12.1 before merge.
-- **`checksum freshness` fails on main, unrelated to this branch.** Dependabot's #63 changed
-  `ui/requirements.txt` without its `.sha256` sidecar; any pull request shows the red check until
-  `tools/gen-checksums.sh` runs in a release commit.
 - **A stack update can try to replace the instance.** CloudFormation reads Canonical's AMI
   parameter again on every update, so once a newer image exists an update replaces the instance,
   which fails on the network interface it holds and rolls back (reasoned from the docs, not
@@ -791,8 +788,12 @@ are pulled through the customer's own State Manager association. The account sid
 - **Not checked without AWS:** the root device name `/dev/sda1` on Canonical's images, the Session
   Manager console URL in the Outputs, and a home directory for `ssm-user` (the docs copy the key
   backup off the host through Session Manager).
-- **PR #68 overlap.** The worker-gateway PR also edits `OPERATOR.md` and `README.md`; whichever
-  lands second rebases.
+- **Rebase onto main before the pull request.** PR #68 (the worker gateway) and #69
+  (scripts-v2.2.0: tn-p2p-allow-sync v0.1.2 and the release keys from tn-release-signing) merged
+  on 2026-11-19. A test merge conflicts in `AGENTS.md` only. After the rebase, check the template
+  against 2.2.0: its notes say 2.1.0 hosts re-run the installer to take a release signed only by
+  the new keys, so on a stack launched before 2.2.0 the association's `update-scripts.sh` step
+  should fail until the operator runs the installer once (not tested on a stack).
 - **A least-privilege deployer role (after the 2026-11-20 demo).** The docs ask for an account
   administrator, or a user allowed to create the VPC, EC2, IAM role and Systems Manager resources.
   For accounts that hand out neither: launch once in a sandbox account, generate the policy from
@@ -800,6 +801,12 @@ are pulled through the customer's own State Manager association. The account sid
   launch, and ship it as a small template that creates a CloudFormation service role the operator
   picks under the console's Permissions. Publish it beside `node.yaml`, give it cfn-guard rules,
   and document it with the launch steps. Not before a real launch: a hand-written list would be a
-  guess.
+  guess. The generator reads a CloudTrail trail, not Event history, so the sandbox account needs a
+  trail delivering to S3 before that launch. A trail of the account's own is simpler than the
+  organization trail, whose bucket in another account would have to grant Access Analyzer read
+  access.
+- **After the sandbox launch.** Delete the stack, then delete the data volume by hand: the stack
+  retains it (`DeletionPolicy: Retain`), it keeps billing for its size and IOPS, and it holds a
+  copy of the node keys.
 - **Later, if operators ask.** An existing-VPC option (the default quotas are 5 VPCs and 5 Elastic
   IPs per region); `open-ui.sh` reaching the Node Manager UI through Session Manager instead of SSH.
