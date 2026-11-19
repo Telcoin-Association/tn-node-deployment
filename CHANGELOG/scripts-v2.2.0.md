@@ -5,8 +5,9 @@ telcoin-network's worker gateway: a public JSON-RPC front that sends transaction
 the worker of a node and proxies every other call to a query endpoint the operator names. The
 gateway runs next to a testnet or devnet node, or on a host of its own in front of a validator's
 private address, so the validator stays off the public internet. Six existing scripts and
-`lib/common.sh` change with it. No released worker-gateway image exists yet: devnet takes one by
-digest, and testnet and mainnet refuse the enable until a scripts release pins a digest.
+`lib/common.sh` change with it. No signed telcoin-network release with a worker-gateway image
+exists yet: devnet takes one by digest, and testnet and mainnet refuse the enable until a scripts
+release pins the image of a signed release.
 
 One fix reaches every operator, gateway or not: `firewall-setup.sh` now compares the sources of
 `--ssh-from` and `--p2p-from` the way `ufw` stores them. Re-entering a source in another spelling
@@ -99,18 +100,29 @@ Every other script, library and UI file keeps its version. The runbook for the g
   starts or restarts the node, and never edits the node's launch file, `.node-meta` or a firewall
   rule.
 - Images are taken by digest only, `<repository>@sha256:<64 lowercase hex>`; a tag is refused. On
-  devnet the repository must be `us-docker.pkg.dev/telcoin-network/tn-public/worker-gateway`. On
-  testnet and mainnet only the digest this release pins in `lib/gateway.sh` is taken, and this
-  release pins none. Before it writes anything, the enable pulls the digest when Docker does not
-  hold it, runs the image's `--help` under a time limit and refuses an image that lacks a flag the
-  unit passes.
+  devnet the repository must be `ghcr.io/telcoin-association/tn-dev` (telcoin-network's unsigned
+  builds), `ghcr.io/telcoin-association/tn-worker-gateway` (the release images) or
+  `us-docker.pkg.dev/telcoin-network/tn-public/worker-gateway`. On testnet and mainnet only the
+  image this release pins in `lib/gateway.sh` is taken: the image a signed telcoin-network
+  release names in its `IMAGE_DIGEST-worker-gateway`, in
+  `ghcr.io/telcoin-association/tn-worker-gateway`, with that release's tag on the same line
+  (`GW_TESTNET_PIN_RELEASE`, `GW_MAINNET_PIN_RELEASE`). This release pins none. Before it writes
+  anything, the enable pulls the digest when Docker does not hold it, runs the image's `--help`
+  under a time limit and refuses an image that lacks a flag the unit passes. For maintainers:
+  `tools/check-gateway-pin.sh` checks each set pin against its release. The tag must be a release
+  tag of that network, `SHA256SUMS-edge.asc` must verify against `lib/release-keys` under the rule
+  node releases follow, `SHA256SUMS-edge` must list only that release's edge files, the worker
+  gateway's among them, and the `IMAGE_DIGEST-worker-gateway` it lists must hold the pin. The
+  "release manifest" CI job runs it, and `publish-installer.yml` publishes the installer only
+  when it passes.
 - The image rule depends on the network, so the network is checked. On a host with a node,
   `--refresh` refuses, and `--status` reports, a gateway whose recorded network differs from the
   node's. On a host with no node, `--enable` and `--refresh` ask the upstream for its chain id and
   refuse the chain of another network; an upstream that does not answer only warns, since the node
   may be down, and `--status` repeats the check.
 - After a scripts release changes the pinned image, `--refresh` without `--image` moves the
-  gateway to the pin and says so, and `--status` counts an image the release does not allow.
+  gateway to the pin and says so, naming the telcoin-network release the image comes from, and
+  `--status` counts an image the release does not allow.
 - `--remove` leaves a file it did not write in place and names it.
 
 ### install-caddy 2.2.0
@@ -246,7 +258,8 @@ Every other script, library and UI file keeps its version. The runbook for the g
 | Message (shortened) | What to do |
 |---|---|
 | `The release manifest is not signed by a Telcoin release key (no release key in lib/release-keys made a good signature)`, on a host on `scripts-v2.1.0` | Re-run the installer once (see [The release keys](#the-release-keys)). |
-| `this scripts release pins no worker-gateway image for <network>` | Testnet and mainnet wait for a release that pins an image. |
+| `this scripts release pins no worker-gateway image for <network> yet (...)` | Testnet and mainnet wait for a scripts release that pins the image of a signed telcoin-network release; `update-scripts.sh` brings it. |
+| `this scripts release's <network> worker-gateway pin cannot be used: ...` | A defect of the scripts release; a corrected one comes through `update-scripts.sh`. |
 | `on mainnet the gateway runs on its own host (use --mode standalone there)` | Run the gateway on a host of its own. |
 | `--reset is refused while GATEWAY_UPSTREAM is set` | Set `gateway_upstream=off` first; OPERATOR.md section 4.15 has the order. |
 | `GATEWAY_UPSTREAM in .node-meta names <host>: ...` | Keep the host in `--gateway-from`, or set `gateway_upstream=off` first. |
@@ -263,7 +276,9 @@ Every other script, library and UI file keeps its version. The runbook for the g
 - tn-release-signing refuses a `SHA256SUMS.asc` that carries any signature not good by one of its
   keys, and counts signatures per holder; these scripts only warn on a signature by a key they do
   not ship, and count distinct primary keys. The two policies are not reconciled yet.
-- No released worker-gateway image exists. Testnet and mainnet refuse the gateway until a scripts
-  release pins a digest in `lib/gateway.sh`; devnet takes one by digest from the repository above.
+- No signed telcoin-network release with a worker-gateway image exists yet. Testnet and mainnet
+  refuse the gateway until a scripts release pins the image of a signed release in
+  `lib/gateway.sh` and `tools/check-gateway-pin.sh` passes on it; devnet takes one by digest from
+  the three repositories above.
 - The per-client limit (100 requests a second, 32 connections) is keyed on the client IP address,
   so a relay that forwards many users' transactions counts as one client.
