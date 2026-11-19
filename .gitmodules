@@ -1,0 +1,3 @@
+[submodule "vendor/tn-release-signing"]
+	path = vendor/tn-release-signing
+	url = https://github.com/Telcoin-Association/tn-release-signing.git

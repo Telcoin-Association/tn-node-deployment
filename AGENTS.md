@@ -449,6 +449,68 @@ The fixture tests are `tools/tests/heartbeat_test.sh` (the runner), `tools/tests
 (the library) and `tools/tests/setup_alerts_test.sh` (the script); `tools/tests/vm.d/P0-alerts.sh`
 runs the whole path on a VM with systemd.
 
+## Worker gateway
+
+`setup-gateway.sh` and `lib/gateway.sh` install telcoin-network's worker gateway as
+`telcoin-gateway.service` (container `telcoin-gateway`), a public JSON-RPC front for transaction
+submissions, next to a node (`--mode same-host`) or on a host with no node in front of a
+validator's private address (`--mode standalone`). `install-caddy.sh` owns its `tn-gateway`
+site; `firewall-setup.sh --gateway-from` and `edit-config.sh --set gateway_upstream` are the
+validator side. Rules:
+
+- `setup-gateway.sh` and `lib/gateway.sh` never stop, start or restart the node and never write
+  `.node-meta`, the node's launch file or a firewall rule; a node restart belongs only to the
+  validator-side phases (`gateway_upstream`, `rpc-advertise`, `rpc-unadvertise`) and their guards.
+- An image is `<repository>@sha256:<64 lowercase hex>` and never a tag: on devnet from
+  `GW_DEVNET_IMAGE_REPOS`, on testnet and mainnet only `GW_TESTNET_IMAGE_PIN` /
+  `GW_MAINNET_IMAGE_PIN` in `lib/gateway.sh`, which the signed MANIFEST covers.
+- The unit never pulls (`--pull=never`): `gw_image_ensure` pulls by digest before anything is
+  written, and `gw_image_probe` needs every flag of `GW_REQUIRED_FLAGS` in the image's `--help`,
+  so a flag added to the unit goes into that list too.
+- The Caddyfile is rebuilt from its managed blocks on every write (`caddy_write_managed <dash>
+  <rpc> <gateway>`), so every writer passes back the blocks it does not change, the gateway one
+  included.
+- A gateway host may have no node and no `.node-meta`, so gateway code reads `gateway.meta`
+  (`tn_gateway_installed`, `tn_gateway_meta_get`) and never assumes a node, as
+  `firewall-setup.sh` (`FW_GW_ONLY`) and `caddy_gateway_gate` do.
+- The gateway's state lives only in `/etc/telcoin/gateway/gateway.meta` (root 0600,
+  `GATEWAY_META_VERSION=1`), and `--refresh` renders the unit from it alone (on testnet and
+  mainnet with the image the release pins).
+- On a host with a gateway and no node, the firewall's state (`SSH_ALLOW_FROM`) lives in
+  `gateway.meta` too: `firewall-setup.sh` writes it with `meta_set`, and `lib/gateway.sh` writes
+  that file key by key (`meta_set`), so each keeps the other's keys.
+- Every refusal ends "Nothing was changed." (`_gw_refuse` appends it), and exit 1 means nothing
+  on the host changed.
+- An enable or refresh whose inputs equal what is installed writes and restarts nothing, and a
+  failure after the first write puts back the files `tn_backup_file` saved.
+- The library takes the update lock (`addon_meta_lock`) for every change; `gw_status` takes none
+  and needs no root.
+- `remove-node.sh` removes the gateway (`remove_gateway node`) next to `remove_alerts`, before
+  the node stops, with fixed paths and no `lib/gateway.sh` call. With no node unit it removes only
+  a gateway whose `gateway.meta` says `MODE=same-host` (`rm_gateway_same_host`): any other
+  gateway, and the leftovers of a node next to it, stay, and it points at
+  `setup-gateway.sh --remove`.
+- `rpc-advertise` records `RPC_ADVERTISED_VIA=gateway`; `rpc-disable` leaves that advertisement
+  alone and `rpc-enable` refuses while it or a `tn-gateway` block exists, because one host never
+  serves both sites.
+- While `.node-meta` holds `GATEWAY_UPSTREAM`, `firewall-setup.sh` refuses, and never just warns
+  about, a run that would drop the gateway's rules or turn `ufw` off: `--reset`, and a
+  `--gateway-from` list or `none` that leaves out a host it names (`fw_gw_upstream_guard`).
+- Firewall sources are compared in the form `ufw` stores them, an IPv4 host without `/32` and a
+  CIDR by its network address (`fw_src_canon` and `fw_src_in` in `firewall-setup.sh`,
+  `tn_gateway_src_canon` in `lib/common.sh`), never as the text given.
+- The network chooses the image rule, so `--enable`, `--refresh` and `--status` check it: against
+  the node's `.node-meta NETWORK` on a node host, else against the upstream's `eth_chainId`
+  (`_gw_chain_check`, `_gw_chain_fits`); an upstream that does not answer is not a refusal.
+- `GATEWAY_VERSION` stays the first assignment of that name in `lib/gateway.sh`, and each pin
+  line keeps its `# network-gated:` marker.
+
+The fixture tests are `tools/tests/gateway_setup_test.sh`, `gateway_check_remove_test.sh`,
+`gateway_remove_test.sh`, `gateway_validator_test.sh`, `gateway_upstream_test.sh` and
+`caddy_gateway_test.sh`;
+`gateway_smoke.sh <image>` and `caddy_gateway_smoke.sh <image>` need Docker and are not run by
+`run.sh`.
+
 ## Partner documents
 
 `docs/partner/` holds one directory per partner document plus a shared `assets/` tree:
@@ -553,6 +615,23 @@ Before editing any of these, read the **"Sync note (vendored files)"** section i
 `docs/testnet-addons.md`. It records what each file mirrors upstream, which parts must
 stay byte-identical, and how to re-vendor without drifting.
 
+The release keys `lib/release-keys/*.asc` come from the git submodule `vendor/tn-release-signing`
+(`github.com/Telcoin-Association/tn-release-signing`, the maintainers' key allowlist): they are
+byte-for-byte copies of its `keys/*.asc` at the commit the tree records, the same names and the
+same bytes. The submodule is only their source. GitHub's tag archive, which `install.sh`
+downloads, never holds a submodule's files, and the updater installs what `MANIFEST` lists, so
+the keys ship as ordinary files, with their `SCRIPTS` rows, sidecars and the `install.sh` key
+block as before. `tools/check-release-keys.sh` fails when the copies drift: it reads the
+gitlink from the index and the keys from the submodule's object store at that commit, never
+from its checkout. The "checksum freshness" CI job checks the submodule out and runs it, and
+`tools/tests/release_keys_test.sh` tests it. To add, remove or rotate a key, the change lands
+in tn-release-signing first; then move the pointer, copy the files and run the check, as
+`lib/release-keys/README` ("Adding or removing a key") shows. The path is `vendor/`, not the
+`release/` of tn-release-signing's own docs: the root file `RELEASE` and a `release/` directory
+are one name on a case-insensitive filesystem (macOS). Nothing globs `vendor/` as shipped
+content: the `*.sh` sweeps run `git ls-files`, which does not enter a submodule, and the tests
+that copy the tree skip it.
+
 `lib/wgvpn/peers/ssh/KEYS` has no upstream copy yet, so nothing keeps it in sync for you.
 setup-vpn installs only the `.pub` files `KEYS` lists, each with a matching fingerprint: when a
 maintainer key is mirrored in, add its `KEYS` line by hand in the same commit (the Sync note
@@ -574,7 +653,8 @@ the repository root, and `RELEASE` on main (one line, `<tag> <date>`) names the 
   `tools/release-scripts.sh` builds it from the
   `SCRIPTS`, `UI_BUNDLE` and `TESTNET_ADDONS_BUNDLE` arrays in `update-scripts.sh`, plus
   `install.sh` and `open-ui.sh`. The release keys `lib/release-keys/*.asc` are `SCRIPTS` rows
-  like any other file. The three arrays stay the single source of truth for what operators
+  like any other file (copies of `keys/` in the `vendor/tn-release-signing` submodule; see
+  "Vendored files"). The three arrays stay the single source of truth for what operators
   receive.
 - `MANIFEST.asc` holds detached OpenPGP signatures over `MANIFEST`, one armored block per
   signer, by the maintainer release keys in `lib/release-keys/*.asc`: the same keys, and the
@@ -676,12 +756,18 @@ the repository root, and `RELEASE` on main (one line, `<tag> <date>`) names the 
   (`lib/release-keys/*.asc` on the host), `install.sh` against its embedded keys, and
   `release-scripts.sh --check` against the tree's `lib/release-keys`. A release that adds,
   removes or replaces a key must therefore be signed by a key that is in both the old and the
-  new set.
-- Key expiry: the release key's primary (`4E36D35A4AB61B589861D01AC7173F2377CA7573`) expires
-  2028-10-16. From that date `gpgv` reports `EXPKEYSIG` for it on a host whose installed copy
-  is the old one, and that host refuses every later release, script or node. Only a release
-  that verifies against the installed copy can renew it, so the extended key (re-exported
-  with the new expiry) must ship in a script release signed before that date. A host that has
+  new set. `scripts-v2.2.0` has none: it replaces grantkee's RSA key
+  (`4E36D35A4AB61B589861D01AC7173F2377CA7573`, the only key of `scripts-v2.1.0`, removed from
+  tn-release-signing) with the ed25519 keys of grantkee and MavenRain. The RSA key no longer
+  signs, so a host on 2.1.0 refuses 2.2.0 and re-runs the installer, whose embedded keys are
+  the new ones.
+- Key expiry: the release keys' primaries expire on 2028-11-16 (grantkee,
+  `95A38484E1CBD31D773F6AF928FD56AD2F9FAE47`) and 2028-11-10 (MavenRain,
+  `32F886ADE9C3A88218E4B67CA0A69159FC76DBFD`). From that date `gpgv` reports `EXPKEYSIG` for
+  a key on a host whose installed copy is the old one, and that host refuses every later
+  release that key signed, script or node. Only a release that verifies against the installed
+  copy can renew it, so the extended key (re-exported with the new expiry into
+  tn-release-signing) must ship in a script release signed before that date. A host that has
   not installed that release by then re-runs the installer, whose embedded keys are the
   extended ones.
 
@@ -896,7 +982,7 @@ no permissions by default (`permissions: {}`) and each job asks for `contents: r
 `persist-credentials: false`. `tools/tests/ci_pins_test.sh` checks these rules, and also that the hardening lints job
 runs the passphrase-print, perl and network-hits lints; the fixture jobs run
 `tools/tests/run.sh` (the macOS one under `/bin/bash`); the checksum job runs
-`tools/gen-checksums.sh`; the UI job installs the test requirements by hash and runs pytest;
+`tools/gen-checksums.sh`, checks out the submodule and runs `tools/check-release-keys.sh`; the UI job installs the test requirements by hash and runs pytest;
 the UI and macOS jobs run the three UI shell tests; the hardening lints and UI jobs have no
 `if [ -f` fallback and the UI job no unittest fallback; no required job, and no step of one,
 carries an `if:` or a `continue-on-error` (other than `false`), except the advisory
@@ -927,8 +1013,9 @@ into a pass. The jobs:
   is no unittest fallback), then the three UI shell tests under bash 5. As the runner user,
   not root, `install_ui_test.sh` checks only that the installer refuses a non-root run; its
   ownership and mode cases need root (run them in `bash:3.2`, which runs as root).
-- `checksums` ("checksum freshness"): runs `tools/gen-checksums.sh` and fails on a stale,
-  missing or uncommitted sidecar.
+- `checksums` ("checksum freshness"): checks out the submodule `vendor/tn-release-signing`,
+  runs `tools/check-release-keys.sh` (the release keys are its `keys/*.asc`), then runs
+  `tools/gen-checksums.sh` and fails on a stale, missing or uncommitted sidecar.
 
 `.github/workflows/integration.yml` has one job, `vm-assertions`: on an Ubuntu 24.04 runner
 (a full VM with systemd), it installs logrotate, ufw and openssh-server and runs every
@@ -960,7 +1047,8 @@ commits: sign every commit (`git commit -S`, or `commit.gpgsign=true` with an SS
 signing key registered on GitHub). `.github/CODEOWNERS` lists three owners on every line,
 so the ruleset can require that review from a code owner (`require_code_owner_review`);
 `ci_pins_test.sh` requires at least two owners on every owned path. The release path has lines
-of its own, among them `/lib/release-keys/`, `/tools/release-scripts.sh`,
+of its own, among them `/lib/release-keys/`, `/vendor/tn-release-signing` and `/.gitmodules`
+(the pointer decides which keys `lib/release-keys` must copy), `/tools/release-scripts.sh`,
 `/tools/cut-release.sh`, `/MANIFEST`, `/MANIFEST.asc` and `/RELEASE`. Do not rename a CI job
 and do not make a required job skippable (`if:`) or non-blocking (`continue-on-error`,
 `|| true`): `ci_pins_test.sh` rejects both.
@@ -1012,6 +1100,12 @@ line.
 - The P2P committee allowlist has `p2p_allow_install_test.sh` (the signed install of the tool and every refusal, each leaving an installed binary byte-identical) and `p2p_committee_mode_test.sh` (the verbs, the units, the kill switch, the lock rule and the `p2p_committee` status object), both on the stubs of `tools/tests/fwstub.sh`: a `#!/bin/sh` `tn-p2p-allow-sync` stand-in that records argv, environment and stdin and takes its output and exit codes from `TN_P2P_STUB_*`, and an nft stub that models `table inet tn_p2p_allow`; its systemctl stub prints `$SYSTEMCTL_SHOW` as it is for `show` (nothing when unset), which feeds check-node's and the status screen's read of the sync unit's last run.
   `p2p_reason_text_test.sh` checks that `fw_allow_reason_text rpc-method-missing` appears byte for byte in check-node.sh, and that both scripts word a failed sync and a failed unit run the same.
   `edit_config_resync_test.sh` covers edit-config's resync hook and its three call sites.
+- `release_keys_test.sh` drives `tools/check-release-keys.sh` on a fixture superproject and
+  submodule (a changed byte, a missing, extra or symlinked key file, a pointer moved without the
+  copies, an uninitialized submodule), then runs it over the tree; that last check is skipped
+  where git or the submodule is missing, and the "checksum freshness" job runs the tool itself.
+  `release_scripts_test.sh` and `cut_release_test.sh` copy the tracked files without the
+  submodule and keep one throwaway key in the `SCRIPTS` row of `grantkee.asc`.
 - The node admission settings have `network_config_test.sh` (the renderer), `setup_node_admission_test.sh` and `edit_config_admission_test.sh`.
 
 Nothing under `tools/tests/` is updater-tracked or carries a sidecar. The UI's own tests live

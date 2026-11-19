@@ -71,7 +71,9 @@ BR="release/$TAG"
 git init -q --bare "$ORIGIN"
 git -C "$ORIGIN" symbolic-ref HEAD refs/heads/main
 mkdir -p "$W"
-(cd "$REPO" && git ls-files | while IFS= read -r p; do [ -e "$p" ] && printf '%s\n' "$p"; done | tar -cf - -T -) | tar -xf - -C "$W"
+# The tracked files, without the submodule vendor/tn-release-signing: a
+# directory (holding a .git file once initialized) that no release ships.
+(cd "$REPO" && git ls-files | while IFS= read -r p; do [ -e "$p" ] && [ ! -d "$p" ] && printf '%s\n' "$p"; done | tar -cf - -T -) | tar -xf - -C "$W"
 # From here on the user's git configuration is not read: HOME and the global
 # file are in the temp dir (the copy above still read the repository the
 # usual way).
@@ -81,6 +83,10 @@ export GIT_CONFIG_GLOBAL="$T/home/.gitconfig"
 : > "$GIT_CONFIG_GLOBAL"
 cp "$REPO/tools/cut-release.sh" "$REPO/tools/release-scripts.sh" "$W/tools/"
 rm -f "$W/MANIFEST" "$W/MANIFEST.asc" "$W/RELEASE" "$W"/lib/release-keys/*.asc "$W"/lib/release-keys/*.asc.sha256
+# One throwaway key signs here, in the SCRIPTS row of grantkee.asc; the rows of
+# the other shipped key files go.
+awk '!/^ *"lib\/release-keys\/[^"]*\.asc:/ || /"lib\/release-keys\/grantkee\.asc:/' "$W/update-scripts.sh" > "$T/updater.rows"
+cat "$T/updater.rows" > "$W/update-scripts.sh"
 cp "$T/key1.asc" "$W/lib/release-keys/grantkee.asc"
 (cd "$W" && bash tools/gen-checksums.sh >/dev/null)
 gitw() { git -C "$W" "$@"; }

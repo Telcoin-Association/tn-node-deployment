@@ -902,6 +902,80 @@ check_rc "alerts hint, runner changed, no timer: exits 0" 0 "$RC"
 check "alerts hint, runner changed, no timer: not printed" "0 0" "$(hint_count)"
 unset TN_ROOT_PREFIX
 
+# GATEWAY
+# --- the worker gateway: two tracked rows, and the --refresh hint ----------------------------
+# The rows sit right after lib/tn-heartbeat.sh, each with its version variable.
+ROWS="$( (source "$T/us-lib.sh" >/dev/null 2>&1 || exit 1
+          for p in setup-gateway.sh lib/gateway.sh; do
+              printf '%s=%s\n' "$p" "$(version_var_for "$p")"
+          done
+          printf '%s\n' "${SCRIPTS[@]}" | awk '/^lib\/tn-heartbeat\.sh:/ {n = NR} n && NR > n && NR <= n + 2') )"
+check "gateway rows: version_var_for" "setup-gateway.sh=SCRIPT_VERSION
+lib/gateway.sh=GATEWAY_VERSION
+setup-gateway.sh:setup-gateway.sh:SCRIPT_VERSION
+lib/gateway.sh:lib/gateway.sh:GATEWAY_VERSION" "$ROWS"
+for row in setup-gateway.sh:SCRIPT_VERSION lib/gateway.sh:GATEWAY_VERSION; do
+    f="${row%%:*}"; var="${row#*:}"
+    if [[ -f "$REPO/$f" ]]; then
+        want="$(grep -E "^(readonly )?${var}=\"" "$REPO/$f" | head -n 1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
+        got="$( (source "$T/us-lib.sh" >/dev/null 2>&1 || exit 1; _file_version "$REPO/$f" "$var") )"
+        check "gateway rows: ${f} shows ${var} ${want:-?}" "yes" "$([[ -n "$want" && "$got" == "$want" ]] && echo yes || echo "no (${got})")"
+    else
+        skip "gateway rows: ${f} version" "${f} is not in this tree"
+    fi
+done
+
+# The hint: printed (never run) when setup-gateway.sh or lib/gateway.sh changed
+# and the gateway unit exists under TN_ROOT_PREFIX; otherwise not printed.
+GW="$SRC/gw"; cp -R "$R2" "$GW"
+printf '#!/usr/bin/env bash\nGATEWAY_VERSION="1.0.0"\n' > "$GW/lib/gateway.sh"
+write_manifest "$GW" scripts-v1.10.0 112 1.0.0; sign "$GW" key1; sidecars "$GW"
+GW2="$SRC/gw2"; cp -R "$R2" "$GW2"
+printf '#!/usr/bin/env bash\nreadonly SCRIPT_VERSION="1.0.0"\n' > "$GW2/setup-gateway.sh"
+write_manifest "$GW2" scripts-v1.11.0 113 1.0.0; sign "$GW2" key1; sidecars "$GW2"
+GWHINT1="  ->  The worker gateway script or its library changed. Render the gateway again on the host:"
+# gw_hint_count -- how often the last run printed the two gateway hint lines.
+gw_hint_count() {
+    printf '%s %s\n' "$(plain "$OUT" | grep -cxF -- "$GWHINT1")" \
+        "$(plain "$OUT" | grep -cE '^  ->    sudo bash .*/setup-gateway\.sh --refresh$')"
+}
+export TN_ROOT_PREFIX="$HBROOT"
+: > "$HBROOT/etc/systemd/system/telcoin-gateway.service"
+: > "$HBROOT/etc/systemd/system/telcoin-heartbeat.timer"
+rm -f "$T/sudo.log"
+install_release "$R2"
+publish "$GW" scripts-v1.10.0
+run_updater y
+check_rc "gateway hint, library changed, unit present: exits 0" 0 "$RC"
+check "gateway hint, library changed, unit present: printed once" "1 1" "$(gw_hint_count)"
+check_has "gateway hint: names this tree" "  ->    sudo bash $(cd "$INST" && pwd)/setup-gateway.sh --refresh" "$(plain "$OUT")"
+check "gateway hint: sudo never run" "" "$(cat "$T/sudo.log" 2>/dev/null)"
+check "gateway hint, library changed: no alerts hint" "0 0" "$(hint_count)"
+install_release "$R2"
+publish "$GW2" scripts-v1.11.0
+run_updater y
+check_rc "gateway hint, script changed, unit present: exits 0" 0 "$RC"
+check "gateway hint, script changed, unit present: printed once" "1 1" "$(gw_hint_count)"
+install_release "$R2"
+publish "$HB" scripts-v1.8.0
+run_updater y
+check_rc "gateway hint, only the alerts runner changed, unit present: exits 0" 0 "$RC"
+check "gateway hint, only the alerts runner changed, unit present: not printed" "0 0" "$(gw_hint_count)"
+check "gateway hint, only the alerts runner changed: the alerts hint is" "1 1" "$(hint_count)"
+rm -f "$HBROOT/etc/systemd/system/telcoin-heartbeat.timer"
+install_release "$R1"
+publish "$R2" scripts-v1.1.0
+run_updater y
+check_rc "gateway hint, neither changed, unit present: exits 0" 0 "$RC"
+check "gateway hint, neither changed, unit present: not printed" "0 0" "$(gw_hint_count)"
+rm -f "$HBROOT/etc/systemd/system/telcoin-gateway.service"
+install_release "$R2"
+publish "$GW" scripts-v1.10.0
+run_updater y
+check_rc "gateway hint, library changed, no unit: exits 0" 0 "$RC"
+check "gateway hint, library changed, no unit: not printed" "0 0" "$(gw_hint_count)"
+unset TN_ROOT_PREFIX
+
 # --- no release published yet ---------------------------------------------------------------
 rm -f "$RAW/main/RELEASE"
 install_release "$R1"

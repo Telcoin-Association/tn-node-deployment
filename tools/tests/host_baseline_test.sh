@@ -1021,8 +1021,13 @@ export HB_NOLIB=1
 addon_run install-caddy json-rpc-enable
 check "install-caddy --json rpc-enable, lib without tn_host_baseline_refresh: rc 0, done ok, silent" "0 yes yes" "$RC $(done_ok) $(no_cnf)"
 unset HB_NOLIB
-check "install-caddy: the refresh sits in do_rpc_enable and do_rpc_disable only" "2" \
-    "$(grep -c '^    caddy_baseline_refresh$' "$TN_TEST_REPO/install-caddy.sh")"
+# The phases that write a file the baseline covers (.node-meta, the launch file,
+# node-info.yaml) and restart the node refresh it; the Caddy-only phases (dashboard,
+# gateway-enable, gateway-disable) never do. Each call outside a comment is listed by
+# the function it sits in, so a refresh added anywhere else fails this check.
+check "install-caddy: the refresh sits in do_rpc_enable, do_rpc_disable, do_rpc_advertise and do_rpc_unadvertise only" \
+    "do_rpc_enable do_rpc_disable do_rpc_advertise do_rpc_unadvertise" \
+    "$(awk '/^[a-z_][a-z0-9_]*\(\) \{/ {fn=$1; sub(/\(\)/, "", fn)} /caddy_baseline_refresh/ && !/^[[:space:]]*#/ && !/^caddy_baseline_refresh\(\)/ {print fn}' "$TN_TEST_REPO/install-caddy.sh" | paste -sd' ' -)"
 
 # --- firewall-setup.sh: the menu enable, --json --enable, the health sources --------
 cat > "$T/firewall-setup/drv.sh" <<'DRV'

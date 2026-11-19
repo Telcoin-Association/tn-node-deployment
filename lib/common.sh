@@ -77,7 +77,7 @@ readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 # network-gated: the comment names the testnet fleet; 9101 is the default on every network
 readonly DEFAULT_METRICS_PORT="9101"   # node loopback Prometheus endpoint (matches the adiri fleet)
-readonly COMMON_VERSION="2.1.0"
+readonly COMMON_VERSION="2.2.0"
 
 # The operator runbook, for any message that should point operators at it.
 readonly TN_OPERATOR_GUIDE_URL="https://github.com/Telcoin-Association/tn-node-deployment/blob/main/OPERATOR.md"
@@ -7397,10 +7397,10 @@ readonly TN_RELEASE_BASE_URL="https://github.com/Telcoin-Association/telcoin-net
 # as root on every validator changes only with a reviewed scripts release, never
 # by fetching "latest".
 readonly TN_P2P_ALLOW_BASE_URL="https://github.com/Telcoin-Association/tn-p2p-allow-sync/releases/download"
-readonly TN_P2P_ALLOW_VERSION="v0.1.1"
+readonly TN_P2P_ALLOW_VERSION="v0.1.2"
 # The sha256 of the TN_P2P_ALLOW_VERSION tarball, from the SHA256SUMS of its signed
 # release; without a pin the install refuses.
-readonly TN_P2P_ALLOW_TARBALL_SHA256="dadbee0ab2088d18c0c8e4224a503cf1b480507ba3904a96af9bbe24f4fa1713"
+readonly TN_P2P_ALLOW_TARBALL_SHA256="1177ee11c48a5ff27a2de78fed8de8168360e4810ed23956cd169aa5cc0765d8"
 # The installed binary (root 0755), and the config format firewall-setup.sh writes
 # for it (CONFIG_VERSION=), which its --version must name as its config-version.
 readonly TN_P2P_ALLOW_BIN="${TN_ROOT_PREFIX:-}/usr/local/libexec/telcoin/tn-p2p-allow-sync"
@@ -9186,6 +9186,25 @@ fi
 : "${TN_ALLOY_IMAGE:=grafana/alloy:v1.5.1}"
 : "${TN_ALLOY_NATIVE_VERSION:=1.5.1}"
 
+# Worker gateway add-on (lib/gateway.sh, setup-gateway.sh; every network): the
+# names the installer, firewall-setup.sh, edit-config.sh, install-caddy.sh,
+# check-node.sh and remove-node.sh share. Plain values, not read from the
+# environment. Paths are the real ones: a reader adds ${TN_ROOT_PREFIX:-}
+# (tn_gateway_meta_path does). The two Caddy lines mark the gateway's block in a
+# Caddyfile that install-caddy.sh writes.
+# shellcheck disable=SC2034 # read by lib/gateway.sh and the scripts that source this file
+{
+    TN_GATEWAY_ETC_DIR="/etc/telcoin/gateway"
+    TN_GATEWAY_META="/etc/telcoin/gateway/gateway.meta"
+    TN_GATEWAY_UNIT="telcoin-gateway.service"
+    TN_GATEWAY_CONTAINER="telcoin-gateway"
+    TN_GATEWAY_LISTEN_PORT=8655
+    TN_GATEWAY_PROBE_PORT=8656
+    TN_GATEWAY_METRICS_PORT=9655
+    TN_CADDY_GW_BEGIN="# >>> tn-gateway >>>"
+    TN_CADDY_GW_END="# <<< tn-gateway <<<"
+}
+
 # -----------------------------------------------------------------------------
 # Network gate
 # -----------------------------------------------------------------------------
@@ -9581,14 +9600,29 @@ kuma_extra_add() {
 
 # kuma_extra_remove <src> — drop <src> from KUMA_EXTRA_SRC, persist the trimmed list,
 # then delete its ufw allow rule. Removing an entry that isn't present is harmless.
+# The rule stays when a worker gateway source (GATEWAY_ALLOW_FROM) is the same ufw
+# source (tn_gateway_src_canon), or when that list cannot be read (a duplicated key):
+# the gateway needs the same health-port rule.
 kuma_extra_remove() {
-    local src="$1" cur new="" s
+    local src="$1" cur new="" s gw="" rc=0
     cur="$(kuma_extra_list)" || return 1
     for s in $cur; do
         [[ "$s" == "$src" ]] && continue
         new="${new:+$new }$s"
     done
     meta_set KUMA_EXTRA_SRC "$new"
+    gw="$(tn_gateway_from_list)" || rc=$?
+    [[ $rc -ne 2 ]] || return 0
+    gw="${gw},"
+    while [[ -n "$gw" ]]; do
+        s="${gw%%,*}"
+        gw="${gw#*,}"
+        [[ -n "$s" ]] || continue
+        if [[ "$(tn_gateway_src_canon "$s")" == "$(tn_gateway_src_canon "$src")" ]]; then
+            print_info "Kept the ufw rule for ${src} on port ${TN_KUMA_PORT}: the worker gateway list (GATEWAY_ALLOW_FROM) still admits it" >&2
+            return 0
+        fi
+    done
     ufw delete allow from "$src" to any port "${TN_KUMA_PORT}" proto tcp >/dev/null 2>&1 || true
 }
 
@@ -11202,6 +11236,259 @@ step_testnet_addons() {
     echo ""
 }
 
+# -----------------------------------------------------------------------------
+# Worker gateway add-on: shared helpers
+# -----------------------------------------------------------------------------
+# lib/gateway.sh installs and runs the gateway. These helpers live here so the
+# scripts that only look at it (firewall-setup.sh, edit-config.sh, check-node.sh,
+# remove-node.sh) work without that file. The TN_GATEWAY_* constants are with the
+# other add-on constants above.
+
+# tn_gateway_meta_path — print the gateway's meta file,
+# ${TN_ROOT_PREFIX:-}${TN_GATEWAY_META}, whether it exists or not. rc 0.
+tn_gateway_meta_path() {
+    printf '%s\n' "${TN_ROOT_PREFIX:-}${TN_GATEWAY_META}"
+}
+
+# tn_gateway_installed — rc 0 when the gateway's meta file (tn_gateway_meta_path)
+# is a regular file, else 1. Prints nothing.
+tn_gateway_installed() {
+    [[ -f "$(tn_gateway_meta_path)" ]]
+}
+
+# tn_gateway_meta_get <key> [default] — strict read of the gateway's meta file,
+# with the contract of addon_meta_get: prints the value, or DEFAULT (may be
+# empty) when the key or the file is absent; rc 0. A key written on more than one
+# line has no single value: prints nothing, says so on stderr and returns 2, so
+# the caller stops instead of acting on a default.
+# Use as: v="$(tn_gateway_meta_get KEY dflt)" || exit 1
+tn_gateway_meta_get() {
+    local key="${1:-}" dflt="${2:-}" file v rc
+    file="$(tn_gateway_meta_path)"
+    rc=0
+    v="$(meta_get "$key" "$file" 2>/dev/null)" || rc=$?
+    if [[ "$rc" -eq 2 ]]; then
+        print_error "${key} is set more than once in ${file}; remove the extra lines and run this again." >&2
+        return 2
+    fi
+    if [[ "$rc" -ne 0 ]]; then
+        v="$dflt"
+    fi
+    printf '%s\n' "$v"
+}
+
+# tn_gateway_from_list — print the gateway hosts a validator admits to its RPC
+# and health ports: .node-meta GATEWAY_ALLOW_FROM, the comma list
+# firewall-setup.sh --gateway-from stored, or nothing when the key is absent;
+# rc 0. rc 1 (nothing printed) when no node is installed. rc 2 (nothing printed,
+# a message on stderr) when the key is on more than one line: the set is then
+# unknown and callers must not apply or rewrite it.
+tn_gateway_from_list() {
+    local meta v rc
+    meta="$(node_meta_path)" || return 1
+    rc=0
+    v="$(meta_get GATEWAY_ALLOW_FROM "$meta" 2>/dev/null)" || rc=$?
+    if [[ "$rc" -eq 2 ]]; then
+        print_warn "GATEWAY_ALLOW_FROM is set more than once in ${meta}; no gateway source is applied until the extra lines are removed." >&2
+        return 2
+    fi
+    [[ -n "$v" ]] && printf '%s\n' "$v"
+    return 0
+}
+
+# tn_gateway_src_canon <src> — print a firewall source the way ufw stores it: an
+# IPv4 host without /32, an IPv4 CIDR by its network address (10.0.0.5/24 is
+# 10.0.0.0/24); anything else as given. rc 0. Two spellings name the same ufw
+# rule exactly when their canonical forms are equal.
+tn_gateway_src_canon() {
+    local s="${1%/32}" a b c d mask n
+    if [[ "$s" == */* ]] && validate_cidr "$s"; then
+        IFS=. read -r a b c d <<<"${s%/*}"
+        mask=$((10#${s#*/}))
+        n=$(( ((10#$a << 24) | (10#$b << 16) | (10#$c << 8) | 10#$d) & ((0xFFFFFFFF << (32 - mask)) & 0xFFFFFFFF) ))
+        s="$((n >> 24 & 255)).$((n >> 16 & 255)).$((n >> 8 & 255)).$((n & 255))/${mask}"
+    fi
+    printf '%s\n' "$s"
+}
+
+# tn_gateway_from_rules_ok <list> <rpc-port> <health-port> — rc 0 when ufw is
+# active and, for every source in LIST (comma-separated IPv4 hosts or CIDRs, as
+# GATEWAY_ALLOW_FROM holds them; empty entries are skipped), `ufw status` shows
+# both `allow from <src> to any port <rpc-port> proto tcp` and the same rule for
+# <health-port>. A source matches as written, without a /32 (ufw shows a host
+# that way) and, for a CIDR, by its network address (ufw stores it that way). A
+# rule from Anywhere does not count. Else rc 1 with TN_GATEWAY_FROM_MISSING set
+# to "<src> <port>" (the first rule not found) or to "ufw-inactive"; it is empty
+# after rc 0. Prints nothing. Call it directly, not in $(...), to read
+# TN_GATEWAY_FROM_MISSING.
+# shellcheck disable=SC2034 # TN_GATEWAY_FROM_MISSING is the caller's to read
+tn_gateway_from_rules_ok() {
+    local list="${1:-}" rpc="${2:-}" health="${3:-}" out rest src want net port hit
+    local to act from more
+    TN_GATEWAY_FROM_MISSING=""
+    if ! ufw_active; then
+        TN_GATEWAY_FROM_MISSING="ufw-inactive"
+        return 1
+    fi
+    out="$(ufw status 2>/dev/null)" || out=""
+    rest="${list},"
+    while [[ -n "$rest" ]]; do
+        src="${rest%%,*}"
+        rest="${rest#*,}"
+        src="${src//[[:space:]]/}"
+        [[ -n "$src" ]] || continue
+        want="${src%/32}"
+        net="$(tn_gateway_src_canon "$want")"
+        for port in "$rpc" "$health"; do
+            hit=1
+            while read -r to act from more; do
+                if [[ "$from" == "IN" ]]; then
+                    from="${more%%[[:space:]]*}"
+                fi
+                [[ "$to" == "${port}/tcp" && "$act" == "ALLOW" ]] || continue
+                if [[ "${from%/32}" == "$want" || "${from%/32}" == "$net" ]]; then
+                    hit=0
+                    break
+                fi
+            done <<<"$out"
+            if [[ "$hit" -ne 0 ]]; then
+                TN_GATEWAY_FROM_MISSING="${src} ${port}"
+                return 1
+            fi
+        done
+    done
+    return 0
+}
+
+# tn_gateway_ports_private <rpc-port> <health-port> — the other half of the bind
+# guard: tn_gateway_from_rules_ok checks that the gateways get in, this checks
+# that nobody else does. rc 0 when `ufw status verbose` shows ufw active, a
+# default policy of deny or reject for incoming traffic, and no ALLOW or LIMIT
+# rule (incoming, v4 or v6) from Anywhere that covers either port: the port
+# itself with /tcp or no protocol, a list or range holding it, or every port (a
+# rule to Anywhere, or to an address with no port). A rule from a named source
+# (the gateways, the monitor's addresses) is fine; an application-profile rule is
+# not read. Else rc 1 with TN_GATEWAY_OPEN_FOUND set to "ufw-inactive",
+# "policy-<word>" (the policy ufw shows; "policy-unknown" when it shows none) or
+# "Anywhere <port>" (the first port a rule opens to every address); it is empty
+# after rc 0. Prints nothing. Call it directly, not in $(...), to read
+# TN_GATEWAY_OPEN_FOUND.
+# shellcheck disable=SC2034 # TN_GATEWAY_OPEN_FOUND is the caller's to read
+tn_gateway_ports_private() {
+    local rpc="${1:-}" health="${2:-}" out line re pol i n to act port
+    local -a w
+    TN_GATEWAY_OPEN_FOUND=""
+    out="$(ufw status verbose 2>/dev/null)" || out=""
+    if ! grep -q "Status: active" <<<"$out"; then
+        TN_GATEWAY_OPEN_FOUND="ufw-inactive"
+        return 1
+    fi
+    re='Default: ([a-z]+) \(incoming\)'
+    pol=unknown
+    if [[ "$out" =~ $re ]]; then
+        pol="${BASH_REMATCH[1]}"
+    fi
+    if [[ "$pol" != "deny" && "$pol" != "reject" ]]; then
+        TN_GATEWAY_OPEN_FOUND="policy-${pol}"
+        return 1
+    fi
+    while IFS= read -r line; do
+        line="${line// (v6)/}"
+        line="${line%%#*}"
+        [[ -n "${line//[[:space:]]/}" ]] || continue
+        read -r -a w <<<"$line"
+        n=${#w[@]}
+        # The To column ends at the action; keep its last word (the port spec),
+        # skipping an "on <interface>".
+        to=""
+        i=0
+        while (( i < n )); do
+            case "${w[i]}" in
+                ALLOW|DENY|REJECT|LIMIT) break ;;
+                on) i=$((i + 2)); continue ;;
+            esac
+            to="${w[i]}"
+            i=$((i + 1))
+        done
+        (( i < n )) || continue
+        act="${w[i]}"
+        i=$((i + 1))
+        [[ "$act" == "ALLOW" || "$act" == "LIMIT" ]] || continue
+        case "${w[i]:-}" in
+            IN) i=$((i + 1)) ;;
+            OUT|FWD) continue ;;
+        esac
+        case "${w[i]:-}" in
+            Anywhere|0.0.0.0/0|::/0) ;;
+            *) continue ;;
+        esac
+        for port in "$rpc" "$health"; do
+            if _tn_gateway_spec_has_port "$to" "$port"; then
+                TN_GATEWAY_OPEN_FOUND="Anywhere ${port}"
+                return 1
+            fi
+        done
+    done <<<"$out"
+    return 0
+}
+
+# _tn_gateway_spec_has_port <to> <port> — rc 0 when a ufw To column word covers
+# TCP <port>: Anywhere; <port>, <list> or <lo>:<hi> with /tcp or no protocol; an
+# IPv4 or IPv6 address (every port). rc 1 for /udp and anything else.
+_tn_gateway_spec_has_port() {
+    local spec="${1:-}" port="${2:-}" rest item lo hi re
+    [[ "$port" =~ ^[0-9]+$ ]] || return 1
+    case "$spec" in
+        Anywhere) return 0 ;;
+        */udp) return 1 ;;
+    esac
+    spec="${spec%/tcp}"
+    re='^[0-9]+([,:][0-9]+)*$'
+    if ! [[ "$spec" =~ $re ]]; then
+        re='^[0-9A-Fa-f.:]*[.:][0-9A-Fa-f.:]*(/[0-9]+)?$'
+        [[ "$spec" =~ $re ]]
+        return
+    fi
+    rest="${spec},"
+    while [[ -n "$rest" ]]; do
+        item="${rest%%,*}"
+        rest="${rest#*,}"
+        lo="${item%%:*}"
+        hi="${item##*:}"
+        if (( 10#$lo <= 10#$port && 10#$port <= 10#$hi )); then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# tn_node_health_bind — print the address the node's health endpoint binds, from
+# the --healthcheck value in its launch file (tn_node_launch_target +
+# tn_launch_flag_get): a <host>:<port> value as it is, a bare port as
+# 127.0.0.1:<port> (the node then binds loopback only). rc 0 printed; 1 the node
+# command has no --healthcheck flag; 2 no launch file was found, or its node
+# command or the flag's value cannot be read. Nothing is printed on rc 1 or 2;
+# tn_node_launch_target explains its refusals on stderr.
+tn_node_health_bind() {
+    local target file v rc
+    target="$(tn_node_launch_target)" || return 2
+    file="${target#* }"
+    file="${file#* }"
+    rc=0
+    v="$(tn_launch_flag_get "$file" --healthcheck)" || rc=$?
+    case "$rc" in
+        0) ;;
+        1) return 1 ;;
+        *) return 2 ;;
+    esac
+    [[ -n "$v" ]] || return 2
+    case "$v" in
+        *[!0-9]*) ;;
+        *) v="127.0.0.1:${v}" ;;
+    esac
+    printf '%s\n' "$v"
+}
+
 # Optional add-on libraries (function defs only; safe to source under set -e).
 # Sourced at the END so the helpers above are already defined. Guarded for older
 # checkouts that predate these files. MUST use if/fi (not `[[ ]] && source`): a
@@ -11212,5 +11499,8 @@ if [[ -f "${__COMMON_DIR}/observability.sh" ]]; then
 fi
 if [[ -f "${__COMMON_DIR}/alerts.sh" ]]; then
     source "${__COMMON_DIR}/alerts.sh"
+fi
+if [[ -f "${__COMMON_DIR}/gateway.sh" ]]; then
+    source "${__COMMON_DIR}/gateway.sh"
 fi
 : # ensure common.sh always sources with status 0

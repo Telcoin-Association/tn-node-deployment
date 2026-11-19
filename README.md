@@ -30,6 +30,7 @@ There is one node identity. Every node installs validator-capable and follows co
 | `setup-observability.sh` | Opt-in centralized logging + health monitoring (testnet add-on) |
 | `setup-vpn.sh` | Opt-in WireGuard admin SSH for the Telcoin Association (testnet add-on) |
 | `setup-alerts.sh` | Opt-in private alerts on every network: a heartbeat from the node host to a monitor you own (Uptime Kuma push, healthchecks.io or a JSON webhook). See [Private alerts](#private-alerts-every-network) |
+| `setup-gateway.sh` | Opt-in worker gateway: a public JSON-RPC front for transaction submissions, in front of this node or of a validator on another host (library `lib/gateway.sh`). See [OPERATOR.md section 4.15](OPERATOR.md#415-worker-gateway) |
 | `lib/common.sh` | Shared functions used by the above scripts (not run directly) |
 | `lib/alerts.sh`, `lib/tn-heartbeat.sh` | The private alerts library, and the heartbeat runner that `setup-alerts.sh` installs as `/usr/local/libexec/telcoin/tn-heartbeat` (not run directly) |
 | `lib/release-keys/` | The OpenPGP keys a script release and a node release must be signed with (see [How updates are verified](#how-updates-are-verified)) |
@@ -851,9 +852,9 @@ It is a server task: the Node Manager UI shows the allowlist but cannot turn it 
 
 **The tool and its pin.**
 `tn-p2p-allow-sync` comes from a signed release of `Telcoin-Association/tn-p2p-allow-sync`, checked against the same keys as node releases (`lib/release-keys`).
-`lib/common.sh` pins it: `TN_P2P_ALLOW_VERSION` names the tag (`v0.1.1`) and `TN_P2P_ALLOW_TARBALL_SHA256` the sha256 of its tarball.
+`lib/common.sh` pins it: `TN_P2P_ALLOW_VERSION` names the tag (`v0.1.2`) and `TN_P2P_ALLOW_TARBALL_SHA256` the sha256 of its tarball.
 The scripts never fetch "latest", so the binary changes only with a scripts release, which moves both values in one `chore` commit.
-Without a pin, `on` refuses: `These scripts pin no sha256 for the tn-p2p-allow-sync v0.1.1 tarball yet, so it cannot be installed; update the scripts (update-scripts.sh). Nothing was downloaded.`
+Without a pin, `on` refuses: `These scripts pin no sha256 for the tn-p2p-allow-sync v0.1.2 tarball yet, so it cannot be installed; update the scripts (update-scripts.sh). Nothing was downloaded.`
 `tn_p2p_allow_install` downloads `SHA256SUMS`, `SHA256SUMS.asc` and the tarball into a root-only staging dir over HTTPS, checks the signature with `gpgv`, the tarball's sha256 against its line and the pin, and its member list, then runs the binary's `--version` as the `tn-build` account.
 The first line must be `tn-p2p-allow-sync` and the tag without its `v`, with a `config-version 1` line and a `snapshot-versions` line that holds 1; `tn_install_root_binary` then installs it as `/usr/local/libexec/telcoin/tn-p2p-allow-sync` (root 0755).
 A failure at any step leaves an installed binary as it was.
@@ -898,7 +899,7 @@ The commands take the maintainer keys from the signing submodule at the commit t
 Run them in one shell in a new, empty directory, with `TAG` set to the pinned tag:
 
 ```sh
-TAG="v0.1.1"
+TAG="v0.1.2"
 REPO="Telcoin-Association/tn-p2p-allow-sync"
 TARBALL="tn-p2p-allow-sync-$TAG-x86_64-unknown-linux-musl.tar.gz"
 BASE="https://github.com/$REPO/releases/download/$TAG"
@@ -1362,7 +1363,7 @@ A script release is a `scripts-vX.Y.Z` tag of this repository; `RELEASE` on `mai
 - `MANIFEST`: `format=1`, `release=<tag>`, a `serial` that every release raises, `min_updater` (the oldest `update-scripts.sh` that may install it), from `scripts-v2.1.0` on `date=YYYY-MM-DD` (the release date) and `expires=YYYY-MM-DD` (see [Keeping Scripts Up to Date](#keeping-scripts-up-to-date)), and one `sha256  <hash>  <path>` line for every file in the release. Updaters and installers of 2.0.0 ignore the two date keys.
 - `MANIFEST.asc`: detached OpenPGP signatures over `MANIFEST`, one armored block per signer, by the release keys in `lib/release-keys/*.asc`. These are the same keys that sign node releases (below). `scripts-v2.1.0` is the first signed release (serial 1).
 
-The installer and the updater install a release only when the signature verifies, every file matches its manifest line, and the serial is not lower than the installed one. They install all of it or none of it. A signature verifies when `gpgv`, given a keyring made from `lib/release-keys/*.asc` alone, reports good signatures by at least `TN_SIG_THRESHOLD` of those keys (one today) and no bad, expired or revoked one: the status rules are the ones for node releases below. The installer carries its own copy of the keys, written into it at the release tag; the updater uses the `lib/release-keys/*.asc` already on the host, so a release that changes the key set must be signed by a key that is in both the old set and the new one. Both read the key files with `base64` and need `gpgv`, not `gpg`.
+The installer and the updater install a release only when the signature verifies, every file matches its manifest line, and the serial is not lower than the installed one. They install all of it or none of it. A signature verifies when `gpgv`, given a keyring made from `lib/release-keys/*.asc` alone, reports good signatures by at least `TN_SIG_THRESHOLD` of those keys (one today) and no bad, expired or revoked one: the status rules are the ones for node releases below. The installer carries its own copy of the keys, written into it at the release tag; the updater uses the `lib/release-keys/*.asc` already on the host, so a release that changes the key set must be signed by a key that is in both the old set and the new one. The key files are copies of the maintainer keys in `Telcoin-Association/tn-release-signing` (`lib/release-keys/README`). `scripts-v2.2.0` replaces grantkee's RSA key with the ed25519 keys of grantkee and MavenRain, and no key is in both sets: the RSA key no longer signs, so a host on `scripts-v2.1.0` refuses it (`The release manifest is not signed by a Telcoin release key`) and takes it by re-running the installer once. Both read the key files with `base64` and need `gpgv`, not `gpg`.
 
 To check a release by hand you need `gpg` and `gpgv`. Make the keyring once, in an empty directory, from the keys you already trust; the node release check below uses the same keyring:
 
@@ -1378,7 +1379,7 @@ gpgv --status-fd 1 --keyring ./release-keys.gpg ~/telcoin-node-scripts/MANIFEST.
 grep -E '^(release|serial|date|expires)=' ~/telcoin-node-scripts/MANIFEST
 ```
 
-`gpgv` must print a `[GNUPG:] GOODSIG` line and its `[GNUPG:] VALIDSIG` line, which ends in the primary fingerprint of a shipped key (`4E36D35A4AB61B589861D01AC7173F2377CA7573` today), and no `BADSIG`, `EXPSIG`, `EXPKEYSIG`, `REVKEYSIG` or `ERRSIG` line. Read those status lines, not the exit status: `gpgv` exits 0 for an expired or revoked key. Every file must print `OK`, and the last line shows which release it is and until when it is current. To check a release tag before you install it, clone the tag (`git clone --quiet --branch scripts-vX.Y.Z https://github.com/Telcoin-Association/tn-node-deployment.git tnd-check`) and run the same `gpgv` and `sha256sum` lines on its `MANIFEST.asc` and `MANIFEST`, with the keyring made from the keys you already trust; [OPERATOR.md section 4.10](OPERATOR.md#410-verifying-a-release-by-hand) walks through it.
+`gpgv` must print a `[GNUPG:] GOODSIG` line and its `[GNUPG:] VALIDSIG` line, which ends in the primary fingerprint of a shipped key (`95A38484E1CBD31D773F6AF928FD56AD2F9FAE47` or `32F886ADE9C3A88218E4B67CA0A69159FC76DBFD` today), and no `BADSIG`, `EXPSIG`, `EXPKEYSIG`, `REVKEYSIG` or `ERRSIG` line. Read those status lines, not the exit status: `gpgv` exits 0 for an expired or revoked key. Every file must print `OK`, and the last line shows which release it is and until when it is current. To check a release tag before you install it, clone the tag (`git clone --quiet --branch scripts-vX.Y.Z https://github.com/Telcoin-Association/tn-node-deployment.git tnd-check`) and run the same `gpgv` and `sha256sum` lines on its `MANIFEST.asc` and `MANIFEST`, with the keyring made from the keys you already trust; [OPERATOR.md section 4.10](OPERATOR.md#410-verifying-a-release-by-hand) walks through it.
 
 ### Node releases
 
@@ -2002,6 +2003,123 @@ prints the exact fix command.
 > **Versioning note (from v1.1.48 onwards):** each script bumps `SCRIPT_VERSION`
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
+
+### setup-gateway v2.2.0 — the worker gateway, a public JSON-RPC front for transaction submissions (new)
+`setup-gateway.sh` 2.2.0, with `lib/gateway.sh` 2.2.0 (`GATEWAY_VERSION`), is new. It runs
+telcoin-network's worker gateway as `telcoin-gateway.service`: a transaction submission goes to
+the worker of the node it fronts, and every other call is proxied to the `--redirect-queries` URL.
+
+- `--enable`, `--status`, `--refresh` and `--remove`, each with `--json`, in the shape of
+  `setup-alerts.sh`. Exit 0 done, 1 refused or rolled back, 2 older libraries, 3 a step failed
+  after something changed.
+- `--mode same-host` runs next to the node (not on mainnet; the node needs `--healthcheck`).
+  `--mode standalone` runs on a host with no node, in front of a validator's private IPv4
+  (`--upstream` and `--network`).
+- `--front caddy` (the default) serves `https://<domain>/` through this host's Caddy. `--front
+  none` listens on `0.0.0.0:8655` over plain HTTP, and no script opens that port.
+- The unit runs the image by digest under Docker: host network, uid 1101, read-only, no
+  capability, never pulled by the unit. An enable with unchanged inputs changes nothing, and a
+  failure after the first write puts the previous unit back. It never stops, starts or restarts
+  the node.
+- No released worker-gateway image exists. devnet takes a digest from
+  `us-docker.pkg.dev/telcoin-network/tn-public/worker-gateway`; testnet and mainnet refuse the
+  enable until a scripts release pins a digest.
+
+See [OPERATOR.md section 4.15](OPERATOR.md#415-worker-gateway). Full release note:
+[CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+
+### install-caddy v2.2.0 — the gateway site, rpc-advertise and rpc-unadvertise
+- A third managed site, `tn-gateway`, serves the gateway's public hostname in front of its
+  loopback listener: `POST` is proxied, the probe paths go to the probe listener, and a WebSocket
+  upgrade or any other method gets 405. New phases `gateway-status`, `gateway-check-dns`,
+  `gateway-enable` and `gateway-disable`; `gateway-enable` also runs on a host with a gateway and
+  no node.
+- `rpc-advertise` puts the gateway's `https://<host>/` (no WebSocket URL) into `node-info.yaml`
+  with one guarded node restart and no Caddy change. It refuses unless `https://<host>/health`
+  answers 200 from the node host. `rpc-unadvertise` clears the URL.
+- For every operator: each Caddy writer now keeps the gateway site, and the hostname clash check
+  and the teardown count three sites. `rpc-disable` leaves an advertisement made by
+  `rpc-advertise` alone, and `rpc-enable` refuses while a gateway site or advertisement is present.
+
+Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+
+### firewall-setup v2.2.0 — --gateway-from, and source lists compared the way ufw stores them
+- Fix for every operator: the cleanup of stale `--ssh-from` and `--p2p-from` sources compared
+  spellings as text, while `ufw` stores `1.2.3.4/32` as `1.2.3.4` and a CIDR by its network
+  address. Re-entering a source in another spelling, such as `1.2.3.4` after `1.2.3.4/32`,
+  re-allowed its rule and then deleted it as stale; on the SSH list that could lock the operator
+  out (reproduced on ufw 0.36.2). Sources are now compared in the form `ufw` stores them.
+- `--gateway-from <list>|none`, with `--enable` or `--reset`, lets a gateway host reach the node's
+  RPC and health ports. The list is stored as `GATEWAY_ALLOW_FROM` in `.node-meta` and applied
+  again by every `--enable` and `--reset`. While the node is bound for a gateway
+  (`GATEWAY_UPSTREAM`), `--reset`, `none` and a list that drops a bound host are refused.
+- `--json --status` gains `gateway_from`, and the status screen and the expected rules show two
+  rows per gateway source. A Caddyfile with the gateway site counts as a public edge, so 80 and
+  443 survive a `--reset`. `--enable` works on a host with a gateway and no node.
+
+Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+
+### edit-config v2.2.0 — gateway_upstream for a gateway on another host
+`edit-config.sh --set gateway_upstream=<IPv4>[,...]|off` binds the node's RPC and health listener
+to every interface for the listed gateway hosts; `off` puts both binds back.
+
+- Refused unless `ufw` is active, already admits those hosts (`firewall-setup.sh --gateway-from`)
+  and admits nobody else to either port.
+- Refused while the node is starting, stopping or waiting for its automatic restart, and on a node
+  whose RPC is already public. A node that was stopped stays stopped.
+
+Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+
+### check-node v2.2.0 — worker gateway checks
+- On a host with a gateway: the unit, the image, the three listeners, `/health`, the Caddy site,
+  and in same-host mode the node's health listener. `/ready` is reported and is not an issue while
+  the node is down. On a host with a gateway and no node, the node sections are skipped.
+- On a validator bound for a gateway on another host: the `ufw` rules for each listed host, the
+  RPC and health binds against `GATEWAY_UPSTREAM`, that no other source reaches either port, and
+  the advertised RPC URL.
+
+Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+
+### remove-node v2.2.0 — the worker gateway goes before the node
+- A gateway that serves a node on this host, or whose node this run removes, is removed before the
+  node stops: its unit, its container and `/etc/telcoin/gateway`. The image stays, and the Caddy
+  site is named, not removed.
+- A gateway that runs on its own host stays, and so do the node leftovers next to it; the script
+  points at `setup-gateway.sh --remove`.
+- The scan for other installs no longer offers the gateway's unit and container as a stray
+  install.
+
+Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+
+### update-scripts v2.2.0 — tracks the gateway files and the new release keys
+- Tracks `setup-gateway.sh` and `lib/gateway.sh`. When an update changes either on a host with
+  `telcoin-gateway.service`, it prints `The worker gateway script or its library changed. Render
+  the gateway again on the host:` and the `setup-gateway.sh --refresh` command; it never runs it.
+- The release keys change: `lib/release-keys/grantkee.asc` is grantkee's ed25519 key
+  (`95A38484E1CBD31D773F6AF928FD56AD2F9FAE47`, replacing the RSA key
+  `4E36D35A4AB61B589861D01AC7173F2377CA7573`), and `lib/release-keys/MavenRain.asc`
+  (`32F886ADE9C3A88218E4B67CA0A69159FC76DBFD`) is new and tracked. The files are copies of
+  `keys/` in tn-release-signing, carried as the submodule `vendor/tn-release-signing` and checked
+  by `tools/check-release-keys.sh`; `install.sh` embeds the same two keys.
+- A host on `scripts-v2.1.0` holds only the RSA key, so it refuses a `scripts-v2.2.0` signed only
+  by the new keys (`The release manifest is not signed by a Telcoin release key`) and takes it by
+  re-running the installer once.
+
+Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+
+### lib/common.sh v2.2.0 — shared gateway names and checks, tn-p2p-allow-sync v0.1.2
+- Pins `tn-p2p-allow-sync` v0.1.2 (`TN_P2P_ALLOW_TARBALL_SHA256`
+  `1177ee11c48a5ff27a2de78fed8de8168360e4810ed23956cd169aa5cc0765d8`), v0.1.1's code signed with
+  grantkee's new key; v0.1.1 is signed only by the retired RSA key. `--p2p-committee sync` and
+  `on` install it on a validator that runs v0.1.1.
+- The gateway's paths, unit and container names, default ports and Caddyfile fence
+  (`TN_GATEWAY_*`), and the readers the other scripts use: the gateway's meta file, the
+  `GATEWAY_ALLOW_FROM` list (`tn_gateway_from_list`), whether `ufw` holds both rules for each
+  listed host (`tn_gateway_from_rules_ok`) and whether nobody else reaches the two ports
+  (`tn_gateway_ports_private`).
+- Sources `lib/gateway.sh` at its end when the file is present, as it does `lib/alerts.sh`.
+
+Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
 
 ### update-scripts v2.1.0 — OpenPGP-signed releases, release expiry and a read-only --check
 `update-scripts.sh v2.1.0` installs `scripts-v2.1.0`, the first signed script release (serial 1).

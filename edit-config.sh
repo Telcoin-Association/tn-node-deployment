@@ -117,6 +117,35 @@
 #                                     /etc/telcoin/trusted-nodes.yaml and
 #                                     written into network-config under
 #                                     trusted_nodes; none removes both.
+#   gateway_upstream=<IPv4>[,<IPv4>...]|off
+#                                     worker gateways on the hosts listed
+#                                     reach this node's RPC and health check:
+#                                     --http.addr 0.0.0.0 and --healthcheck
+#                                     0.0.0.0:<health port>, recorded in
+#                                     .node-meta. Refused unless ufw is active,
+#                                     lets every address listed in to both
+#                                     ports (firewall-setup.sh --enable
+#                                     --gateway-from <list>) and keeps every
+#                                     other address out (default deny, no
+#                                     allow from Anywhere to either port),
+#                                     which is the guard on every network.
+#                                     Refused too when the RPC is already
+#                                     public (made so with the RPC access
+#                                     item). The list must name the
+#                                     --gateway-from entries as written (a
+#                                     CIDR there does not cover an address
+#                                     here). Not the public
+#                                     RPC: no RPC limits, no --http.api, and
+#                                     the WebSocket bind is left alone. off
+#                                     puts --http.addr back on 127.0.0.1 and
+#                                     --healthcheck back as it was. A node
+#                                     that is stopped (inactive or failed)
+#                                     stays stopped: the files are edited and
+#                                     nothing is started. A node that is
+#                                     starting or restarting (a crashed node
+#                                     waiting for its automatic restart
+#                                     included) is refused: run it again once
+#                                     the node is active, or stopped.
 # =============================================================================
 # --help prints the block above only. Not advertised there: --observer and
 # --validator are still accepted and ignored, because the node's role is
@@ -134,7 +163,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
         tn_restore_backup tn_migrate_credential _tn_cred_switch _tn_multiaddr_udp_port \
         tn_launch_runner tn_keytool_has tn_keytool _tn_cred_plain_ok _tn_passfile_trim_safe \
         tn_docker_resolve_ref tn_docker_network_ok _tn_guard_network tn_docker_image_network_ok \
-        tn_network_config_render tn_node_supports_admission >/dev/null; then
+        tn_network_config_render tn_node_supports_admission tn_gateway_from_rules_ok >/dev/null; then
     _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this edit-config.sh: run update-scripts.sh and try again."
     case " $* " in
         *" --json "*) printf '{"event":"error","msg":"%s"}\n{"event":"done","ok":false,"msg":"%s"}\n' "$_tn_old" "$_tn_old" ;;
@@ -144,7 +173,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
 fi
 unset _tn_old
 
-readonly SCRIPT_VERSION="2.1.0"
+readonly SCRIPT_VERSION="2.2.0"
 
 # The largest bootstrap peers file accepted. A map of a few dozen peers is a
 # few KiB, and the whole map travels as one command-line argument.
@@ -2083,7 +2112,7 @@ edit_field_known() {
     case "$1" in
         primary_listener|worker_listener|metrics|verbosity|docker_image) return 0 ;;
         bootstrap_peers|state_export|allow_private_forward_targets) return 0 ;;
-        admission|trusted_nodes) return 0 ;;
+        admission|trusted_nodes|gateway_upstream) return 0 ;;
     esac
     return 1
 }
@@ -2172,6 +2201,8 @@ set_field() {
             set_admission "$value" ;;
         trusted_nodes)
             set_trusted_nodes "$value" ;;
+        gateway_upstream)
+            set_gateway_upstream "$value" ;;
         *)
             edit_error "field not editable: ${field}"
             return 1
@@ -2736,7 +2767,7 @@ edit_rpc() {
 # also sets the public RPC limits. Anything else is refused before a file
 # changes; no value reaches sed or perl. rc as for the other setters.
 set_rpc_addr() {
-    local addr="$1" envf p w pair
+    local addr="$1" pair
     case "$addr" in
         127.0.0.1) ;;
         0.0.0.0)
@@ -2761,15 +2792,155 @@ set_rpc_addr() {
             edit_flag_change set "${pair%% *}" "${pair#* }" || return 1
         done
     fi
+    edit_rpc_addr_env "$addr"
+}
+
+# edit_rpc_addr_env ADDR -- TN_RPC_ADDR=ADDR in node.env when there is one,
+# rewritten whole through tn_write_node_env with the listeners it holds, after
+# edit_backup has recorded it. rc 0 done (or no node.env), 1 reported.
+edit_rpc_addr_env() {
+    local addr="$1" envf p w
     envf="$(node_env_file)"
-    if [[ -f "$envf" ]]; then
-        edit_backup "$envf" || return 1
-        p="$(grep -E '^PRIMARY_LISTENER_MULTIADDR=' "$envf" | head -1 | cut -d= -f2-)"
-        w="$(grep -E '^WORKER_LISTENER_MULTIADDR=' "$envf" | head -1 | cut -d= -f2-)"
-        if ! CONFIG_DIR="$DEFAULT_CONFIG_DIR" tn_write_node_env "$p" "$w" "$addr"; then
-            edit_error "could not write ${envf}"
+    [[ -f "$envf" ]] || return 0
+    edit_backup "$envf" || return 1
+    p="$(grep -E '^PRIMARY_LISTENER_MULTIADDR=' "$envf" | head -1 | cut -d= -f2-)"
+    w="$(grep -E '^WORKER_LISTENER_MULTIADDR=' "$envf" | head -1 | cut -d= -f2-)"
+    if ! CONFIG_DIR="$DEFAULT_CONFIG_DIR" tn_write_node_env "$p" "$w" "$addr"; then
+        edit_error "could not write ${envf}"
+        return 1
+    fi
+    return 0
+}
+
+# set_gateway_upstream LIST|off -- open the node's RPC and health check to the
+# worker gateways at LIST (comma-separated IPv4 addresses) on other hosts:
+# --http.addr 0.0.0.0 and --healthcheck 0.0.0.0:<health port> on the launch
+# line, TN_RPC_ADDR in node.env (edit_rpc_addr_env), GATEWAY_UPSTREAM=LIST in
+# .node-meta and, when not recorded yet, GATEWAY_PREV_HEALTHCHECK (the
+# --healthcheck value the launch line had, as written there, or none; nothing
+# when the key is already set, since the line then holds the gateway's value).
+# Refused before a file changes unless ufw is active and lets every address of
+# LIST in to the RPC port (as tn_local_rpc_url has it) and the health port
+# (TN_KUMA_PORT), tn_gateway_from_rules_ok, and keeps every other address out
+# (default deny or reject, no allow from Anywhere to either port),
+# tn_gateway_ports_private: the guard on every network, mainnet included. Also
+# refused when the RPC is already public (--http.addr a wildcard with no
+# GATEWAY_UPSTREAM), which off would take away. Unlike the public RPC bind
+# (set_rpc_addr) it sets no RPC limits and
+# no --http.api, and leaves --ws.addr alone. off: --http.addr 127.0.0.1,
+# --healthcheck back to GATEWAY_PREV_HEALTHCHECK (removed for none), both keys
+# unset; off on a node with no GATEWAY_UPSTREAM changes nothing. run_set leaves
+# a node that was stopped stopped. rc as for the other setters.
+set_gateway_upstream() {
+    local value="$1" meta up prev cur ip rest url rport hport miss rc=0
+    meta="$(node_meta_path 2>/dev/null)" || meta=""
+    if [[ -z "$meta" ]]; then
+        edit_error "no .node-meta to record GATEWAY_UPSTREAM in"
+        return 1
+    fi
+    up="$(meta_get GATEWAY_UPSTREAM 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        edit_error "GATEWAY_UPSTREAM is set more than once in .node-meta; remove the extra lines first"
+        return 1
+    fi
+    rc=0
+    prev="$(meta_get GATEWAY_PREV_HEALTHCHECK 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        edit_error "GATEWAY_PREV_HEALTHCHECK is set more than once in .node-meta; remove the extra lines first"
+        return 1
+    fi
+
+    if [[ "$value" == "off" ]]; then
+        [[ -n "$up" ]] || return 0
+        edit_launch_spec || return 1
+        edit_backup "$TARGET_LAUNCH_FILE" || return 1
+        edit_flag_change set --http.addr 127.0.0.1 || return 1
+        case "$prev" in
+            none) edit_flag_change unset --healthcheck || return 1 ;;
+            "")   edit_warn "GATEWAY_PREV_HEALTHCHECK is not recorded in .node-meta, so --healthcheck is left as it is" ;;
+            *)    edit_flag_change set --healthcheck "$prev" || return 1 ;;
+        esac
+        edit_rpc_addr_env 127.0.0.1 || return 1
+        edit_backup "$meta" || return 1
+        if ! meta_unset GATEWAY_UPSTREAM "$meta" || ! meta_unset GATEWAY_PREV_HEALTHCHECK "$meta"; then
+            edit_error "could not remove GATEWAY_UPSTREAM and GATEWAY_PREV_HEALTHCHECK from ${meta}"
             return 1
         fi
+        return 0
+    fi
+
+    rest="${value},"
+    while [[ -n "$rest" ]]; do
+        ip="${rest%%,*}"
+        rest="${rest#*,}"
+        # no leading zero: the address is compared as text with the ufw rules
+        if [[ "$ip" =~ (^|\.)0[0-9] || "$ip" == "0.0.0.0" ]] || ! validate_ipv4 "$ip"; then
+            edit_error "gateway_upstream is off or a comma-separated list of IPv4 addresses, not ${value}"
+            return 1
+        fi
+    done
+    url="$(tn_local_rpc_url 2>/dev/null)" || url=""
+    rport="${url##*:}"
+    rport="${rport%%/*}"
+    hport="${TN_KUMA_PORT:-}"
+    if [[ ! "$rport" =~ ^[0-9]{1,5}$ || ! "$hport" =~ ^[0-9]{1,5}$ ]]; then
+        edit_error "could not tell the node's RPC port (${rport:-none}) and health port (${hport:-none})"
+        return 1
+    fi
+    if ! tn_gateway_from_rules_ok "$value" "$rport" "$hport"; then
+        miss="${TN_GATEWAY_FROM_MISSING:-}"
+        case "$miss" in
+            ufw-inactive) miss="ufw is not active" ;;
+            *" "*)        miss="ufw has no rule letting ${miss%% *} in to port ${miss##* }" ;;
+            *)            miss="ufw does not let every address in to ports ${rport} and ${hport}" ;;
+        esac
+        edit_error "${miss}, so the gateways cannot reach the RPC and health check; open them first: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --enable --gateway-from ${value}"
+        return 1
+    fi
+    # ...and nobody else gets in once the ports listen on every interface.
+    if ! tn_gateway_ports_private "$rport" "$hport"; then
+        miss="${TN_GATEWAY_OPEN_FOUND:-}"
+        case "$miss" in
+            ufw-inactive)   miss="ufw is not active" ;;
+            policy-unknown) miss="ufw status verbose shows no default policy for incoming traffic" ;;
+            policy-*)       miss="ufw's default policy for incoming traffic is ${miss#policy-}, not deny or reject" ;;
+            Anywhere" "*)   miss="ufw has a rule letting any address (Anywhere) in to port ${miss#Anywhere }; delete it first (sudo ufw status numbered, then sudo ufw delete <number>)" ;;
+            *)              miss="ufw does not keep other addresses out of ports ${rport} and ${hport}" ;;
+        esac
+        edit_error "${miss}, so binding the RPC and health check to 0.0.0.0 would open them to more than the gateways; firewall-setup.sh --enable sets the default deny: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --enable --gateway-from ${value}"
+        return 1
+    fi
+
+    edit_launch_spec || return 1
+    # A gateway upstream is for a node whose RPC is private; off puts it back on
+    # 127.0.0.1, so an RPC already public (no GATEWAY_UPSTREAM) is refused.
+    rc=0
+    cur="$(tn_launch_flag_get "$TARGET_LAUNCH_FILE" --http.addr 2>/dev/null)" || rc=$?
+    if [[ -z "$up" && $rc -eq 0 ]]; then
+        case "$cur" in
+            0.0.0.0|::|"[::]")
+                edit_error "the node's RPC already listens on every interface (--http.addr ${cur}): it is public, and a gateway upstream is for a node whose RPC is private (gateway_upstream=off would put it on 127.0.0.1). Make it private first: run sudo bash ${SCRIPT_DIR}/edit-config.sh, choose 'RPC access', then '1) Private (recommended) -- RPC on 127.0.0.1'"
+                return 1 ;;
+        esac
+    fi
+    rc=0
+    cur="$(tn_launch_flag_get "$TARGET_LAUNCH_FILE" --healthcheck 2>/dev/null)" || rc=$?
+    case "$rc" in
+        0) ;;
+        1) cur=none ;;
+        *) edit_error "cannot read --healthcheck from ${TARGET_LAUNCH_FILE}"; return 1 ;;
+    esac
+    edit_backup "$TARGET_LAUNCH_FILE" || return 1
+    edit_flag_change set --http.addr 0.0.0.0 || return 1
+    edit_flag_change set --healthcheck "0.0.0.0:${hport}" || return 1
+    edit_rpc_addr_env 0.0.0.0 || return 1
+    edit_admission_meta GATEWAY_UPSTREAM "$value" || return 1
+    if [[ -z "$prev" && -z "$up" ]]; then
+        edit_admission_meta GATEWAY_PREV_HEALTHCHECK "$cur" || return 1
+    elif [[ -z "$prev" ]]; then
+        # Already set, record lost: the launch line holds the gateway's own
+        # wildcard, not the value from before, so nothing is recorded.
+        edit_warn "GATEWAY_PREV_HEALTHCHECK is not recorded in .node-meta and --healthcheck is already the gateway's, so the value from before is unknown; gateway_upstream=off will leave --healthcheck as it is"
     fi
     return 0
 }
@@ -3791,8 +3962,9 @@ main_menu() {
 #
 # Fields (the header lists their values): primary_listener worker_listener
 # metrics verbosity docker_image bootstrap_peers state_export
-# allow_private_forward_targets admission trusted_nodes. Each value is
-# validated here with the same validators the menu uses.
+# allow_private_forward_targets admission trusted_nodes gateway_upstream. Each
+# value is validated here with the same validators the menu uses
+# (gateway_upstream has no menu entry).
 # =============================================================================
 
 # run_set -- validate, take the update lock, save the edit, wait for the epoch
@@ -3800,8 +3972,12 @@ main_menu() {
 # service stays up. A failed restart puts every changed file back and restarts
 # once more, without waiting. An edit that changes nothing ends there, with no
 # restart, and so does one that changes only .node-meta (edit_only_meta_changed).
+# A gateway_upstream edit of a node whose unit was inactive or failed when the
+# run began ends after the files are written: systemd reloads, nothing starts.
+# One whose unit was activating (a crashed node waiting for its automatic
+# restart included), deactivating or reloading is refused before any change.
 run_set() {
-    local field value rc err
+    local field value rc err ustate stopped=false
     edit_require_root
     if [[ "$EDIT_SET_PAIR" != *=* || -z "${EDIT_SET_PAIR%%=*}" ]]; then
         edit_error "--set needs field=value, for example --set state_export=unlimited"
@@ -3821,6 +3997,22 @@ run_set() {
     resolve_target || return 1
     edit_lock || return 1
     edit_reset_backups
+    # gateway_upstream only: a node that systemd will not start on its own
+    # (inactive, failed) stays stopped. One that is starting, reloading or
+    # stopping, or a crashed one waiting for its automatic restart (activating),
+    # would pick up the edit without the guarded restart: refused.
+    if [[ "$field" == "gateway_upstream" ]]; then
+        ustate="$(systemctl is-active "$TARGET_SERVICE" 2>/dev/null)" || true
+        case "$ustate" in
+            active) ;;
+            inactive|failed) stopped=true ;;
+            *)
+                err="${TARGET_SERVICE} is ${ustate:-in a state systemctl did not report}: the node is starting or restarting (or stopping), neither active nor stopped; wait until it is active, or stop it (sudo systemctl stop ${TARGET_SERVICE}), and run this again"
+                edit_error "$err"
+                edit_done false "$field" "" "${err}; nothing was changed"
+                return 1 ;;
+        esac
+    fi
 
     edit_step "Setting ${field}=${value}"
     rc=0
@@ -3846,6 +4038,17 @@ run_set() {
         return 0
     fi
     edit_report_backups
+    if [[ "$stopped" == "true" ]]; then
+        # Nothing is started: systemd only reloads, so a changed unit is the
+        # one the node's next start runs. The edit is in place, no longer pending.
+        if ! systemctl daemon-reload >&2 2>&1; then
+            edit_warn "systemctl daemon-reload failed; run it before starting ${TARGET_SERVICE}"
+        fi
+        EDIT_PENDING=false
+        edit_baseline_refresh
+        edit_done true "$field" "$value" "applied; ${TARGET_SERVICE} was stopped and stays stopped (not started or restarted), so the change takes effect at its next start"
+        return 0
+    fi
 
     rc=0
     edit_restart || rc=$?
