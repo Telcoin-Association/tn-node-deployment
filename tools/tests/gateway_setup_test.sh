@@ -7,12 +7,14 @@
 #             caddy, same-host + none and standalone + caddy; every refusal of
 #             --enable leaves the tree byte-identical and runs neither systemctl
 #             nor docker run; the image trust rule (tags, the devnet allow-list,
-#             the testnet/mainnet pins, an image whose --help lacks a flag); a
-#             second enable with the same inputs writes and restarts nothing but
-#             still runs the Caddy phase; a failed first enable leaves nothing, a
-#             failed change over an installation puts the unit and meta back byte
-#             for byte, a failed put-back is rc 2; refresh; remove; status, also
-#             without root; the node's unit never reaches systemctl;
+#             the testnet/mainnet pins and the telcoin-network release recorded
+#             beside each, a pin that cannot be used, an image whose --help
+#             lacks a flag); a second enable with the same inputs writes and
+#             restarts nothing but still runs the Caddy phase; a failed first
+#             enable leaves nothing, a failed change over an installation puts
+#             the unit and meta back byte for byte, a failed put-back is rc 2;
+#             refresh, also to a new pin; remove; status, also without root; the
+#             node's unit never reaches systemctl;
 #   script    --help, no action, two actions, an unknown argument, a missing
 #             value, a flag outside its action (one done line each with --json);
 #             the done line's field names and JSON types; exit 1, 2, 3 and 143;
@@ -205,6 +207,12 @@ fi
 IMG="us-docker.pkg.dev/telcoin-network/tn-public/worker-gateway@sha256:$(printf '%064d' 0 | tr 0 a)"
 IMG2="us-docker.pkg.dev/telcoin-network/tn-public/worker-gateway@sha256:$(printf '%064d' 0 | tr 0 b)"
 OTHER="us-docker.pkg.dev/telcoin-network/tn-public/adiri@sha256:$(printf '%064d' 0 | tr 0 a)"
+# Testnet and mainnet pins: images in GW_RELEASE_IMAGE_REPO, each with the
+# telcoin-network release it comes from. IMG and IMG2 stay devnet images.
+PIMG="ghcr.io/telcoin-association/tn-worker-gateway@sha256:$(printf '%064d' 0 | tr 0 c)"
+PIMG2="ghcr.io/telcoin-association/tn-worker-gateway@sha256:$(printf '%064d' 0 | tr 0 d)"
+PREL_T="v0.18.0-adiri"
+PREL_M="v1.0.0"
 RQ="https://rpc.example.org/"
 D="$T/bin/docker"
 # shellcheck disable=SC2034  # read by lib/gateway.sh
@@ -402,27 +410,56 @@ rc=0; gw_image_allowed "$IMG" devnet || rc=$?
 check_rc "image trust: the allow-listed devnet repository by digest is taken" 0 "$rc"
 rc=0; gw_image_allowed "$IMG" testnet || rc=$?
 check_rc "image trust: testnet is refused while its pin is empty" 1 "$rc"
-check "image trust: the testnet refusal names the empty pin" "this scripts release pins no worker-gateway image for testnet" "$GW_ERR"
+check "image trust: the testnet refusal names the empty pin" "this scripts release pins no worker-gateway image for testnet yet (a later scripts release pins the image of a signed telcoin-network release; update-scripts.sh brings it)" "$GW_ERR"
 rc=0; gw_image_allowed "$IMG" mainnet || rc=$?
 check_rc "image trust: mainnet is refused while its pin is empty" 1 "$rc"
-GW_TESTNET_IMAGE_PIN="$IMG"
-GW_MAINNET_IMAGE_PIN="$IMG2"
-rc=0; gw_image_allowed "$IMG" testnet || rc=$?
+GW_TESTNET_IMAGE_PIN="$PIMG" GW_TESTNET_PIN_RELEASE="$PREL_T"
+GW_MAINNET_IMAGE_PIN="$PIMG2" GW_MAINNET_PIN_RELEASE="$PREL_M"
+rc=0; gw_image_allowed "$PIMG" testnet || rc=$?
 check_rc "image trust: with a testnet pin the pinned reference is taken" 0 "$rc"
-rc=0; gw_image_allowed "$IMG2" testnet || rc=$?
+rc=0; gw_image_allowed "$PIMG2" testnet || rc=$?
 check_rc "image trust: with a testnet pin another digest is refused" 1 "$rc"
-rc=0; gw_image_allowed "$IMG2" mainnet || rc=$?
+check "image trust: the testnet mismatch names the pin and its release" \
+    "image refused: testnet runs only the worker-gateway image this scripts release pins (${PIMG}, from telcoin-network v0.18.0-adiri)" "$GW_ERR"
+rc=0; gw_image_allowed "$PIMG2" mainnet || rc=$?
 check_rc "image trust: with a mainnet pin the pinned reference is taken" 0 "$rc"
-rc=0; gw_image_allowed "$IMG" mainnet || rc=$?
+rc=0; gw_image_allowed "$PIMG" mainnet || rc=$?
 check_rc "image trust: with a mainnet pin another digest is refused" 1 "$rc"
+check "image trust: the mainnet mismatch names the pin and its release" yes \
+    "$(has "$GW_ERR" "pins (${PIMG2}, from telcoin-network ${PREL_M})")"
 gin MODE=standalone NETWORK=testnet UPSTREAM=10.0.0.12 FRONT=none IMAGE=
 rc=0; gw_validate_inputs quiet || rc=$?
 check_rc "image trust: testnet without --image validates once a pin is set" 0 "$rc"
-check "image trust: testnet without --image takes the pin" "$IMG" "$GW_V_IMAGE"
+check "image trust: testnet without --image takes the pin" "$PIMG" "$GW_V_IMAGE"
+# A pin _gw_pin_ok refuses is a defect of the scripts release: not even the
+# pinned reference itself is taken.
+GW_TESTNET_IMAGE_PIN="$IMG"
+rc=0; gw_image_allowed "$IMG" testnet || rc=$?
+check "image trust: a testnet pin outside GW_RELEASE_IMAGE_REPO cannot be used" "1 yes" \
+    "${rc} $(has "$GW_ERR" "pin cannot be used")"
+GW_TESTNET_IMAGE_PIN="$PIMG" GW_TESTNET_PIN_RELEASE=""
+rc=0; gw_image_allowed "$PIMG" testnet || rc=$?
+check "image trust: a testnet pin with no release recorded cannot be used" "1 yes" \
+    "${rc} $(has "$GW_ERR" "no telcoin-network release is recorded")"
+GW_TESTNET_PIN_RELEASE="v1.0.0"
+rc=0; gw_image_allowed "$PIMG" testnet || rc=$?
+check "image trust: a testnet pin recorded with a mainnet tag cannot be used" "1 yes" \
+    "${rc} $(has "$GW_ERR" "is not a testnet release tag")"
+GW_MAINNET_PIN_RELEASE="v1.0.0-rc1"
+rc=0; gw_image_allowed "$PIMG2" mainnet || rc=$?
+check_rc "image trust: a mainnet pin recorded with a release candidate cannot be used" 1 "$rc"
+check "image trust: the refusal says the scripts release must be corrected" \
+    "this scripts release's mainnet worker-gateway pin cannot be used: the release recorded beside the pin, 'v1.0.0-rc1', is not a mainnet release tag; a corrected scripts release is needed (update-scripts.sh)" "$GW_ERR"
+for r in ghcr.io/telcoin-association/tn-dev ghcr.io/telcoin-association/tn-worker-gateway; do
+    rc=0; gw_image_allowed "${r}@sha256:$(printf '%064d' 0 | tr 0 e)" devnet || rc=$?
+    check_rc "image trust: devnet takes ${r} by digest" 0 "$rc"
+done
+rc=0; gw_image_allowed "ghcr.io/telcoin-association/tn-testnet@sha256:$(printf '%064d' 0 | tr 0 e)" devnet || rc=$?
+check_rc "image trust: devnet still refuses ghcr.io/telcoin-association/tn-testnet" 1 "$rc"
 # shellcheck disable=SC2034  # read by lib/gateway.sh
-GW_TESTNET_IMAGE_PIN=""
+GW_TESTNET_IMAGE_PIN="" GW_TESTNET_PIN_RELEASE=""
 # shellcheck disable=SC2034  # read by lib/gateway.sh
-GW_MAINNET_IMAGE_PIN=""
+GW_MAINNET_IMAGE_PIN="" GW_MAINNET_PIN_RELEASE=""
 
 : > "$T/help-lacks"
 printf '%s' "--trusted-proxies" > "$T/help-lacks"
@@ -924,12 +961,12 @@ check_rc "M1 no node: an upstream on a devnet chain fits devnet" 0 "$rc"
 # M2: a scripts release that changes the pin.
 gw_remove quiet
 # shellcheck disable=SC2034  # read by lib/gateway.sh
-GW_TESTNET_IMAGE_PIN="$IMG"
+GW_TESTNET_IMAGE_PIN="$PIMG" GW_TESTNET_PIN_RELEASE="$PREL_T"
 chain 0x7e1
 gin MODE=standalone NETWORK=testnet UPSTREAM=10.0.0.12 DOMAIN=gw.example.org IMAGE=
 rc=0; gw_enable quiet || rc=$?
 check_rc "M2: testnet with pin A enables" 0 "$rc"
-GW_TESTNET_IMAGE_PIN="$IMG2"
+GW_TESTNET_IMAGE_PIN="$PIMG2" GW_TESTNET_PIN_RELEASE="v0.18.1-adiri"
 : > "$T/say.log"
 rc=0; gw_status quiet || rc=$?
 check "M2: once the release pins B, status counts the running image A as an issue" "1 yes" \
@@ -938,18 +975,21 @@ GW_IN_IMAGE=""
 : > "$T/say.log"
 rc=0; gw_refresh quiet || rc=$?
 check "M2: --refresh without --image moves to the new pin" "0 refreshed" "${rc} ${GW_APPLIED}"
-check "M2: ... and says from which image to which" yes "$(has "$(cat "$T/say.log")" "from ${IMG} to ${IMG2}")"
-check "M2: the unit runs the new pin" yes "$(has "$(cat "$(UNIT_P)")" "--stop-timeout 60 ${IMG2} ")"
-check "M2: gateway.meta IMAGE is the new pin" "$IMG2" "$(tn_gateway_meta_get IMAGE '')"
+check "M2: ... and says from which image to which" yes "$(has "$(cat "$T/say.log")" "from ${PIMG} to ${PIMG2}")"
+check "M2: ... and from which telcoin-network release" yes "$(has "$(cat "$T/say.log")" "the image of telcoin-network v0.18.1-adiri")"
+check "M2: the unit runs the new pin" yes "$(has "$(cat "$(UNIT_P)")" "--stop-timeout 60 ${PIMG2} ")"
+check "M2: gateway.meta IMAGE is the new pin" "$PIMG2" "$(tn_gateway_meta_get IMAGE '')"
 rc=0; gw_status quiet || rc=$?
 check_rc "M2: status after the move: no issue" 0 "$rc"
-GW_IN_IMAGE="$IMG"
+GW_IN_IMAGE="$PIMG"
 rc=0; gw_refresh quiet || rc=$?
 check_rc "M2: --refresh --image with a digest other than the pin is still refused" 1 "$rc"
+check "M2: ... because it is not the pin" yes \
+    "$(has "$GW_ERR" "runs only the worker-gateway image this scripts release pins (${PIMG2}, from telcoin-network v0.18.1-adiri)")"
 # shellcheck disable=SC2034  # read by lib/gateway.sh
 GW_IN_IMAGE=""
 # shellcheck disable=SC2034  # read by lib/gateway.sh
-GW_TESTNET_IMAGE_PIN=""
+GW_TESTNET_IMAGE_PIN="" GW_TESTNET_PIN_RELEASE=""
 
 # An extra file in /etc/telcoin/gateway: --remove removes the gateway, names the file.
 printf 'note\n' > "$SA/etc/telcoin/gateway/NOTES"
