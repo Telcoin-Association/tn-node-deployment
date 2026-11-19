@@ -1,0 +1,5 @@
+03343ea1f680d86b5c5146ea84556d455fdf58bb1ee2ff6fd14b2d4008ff6145  IMAGE_DIGEST
+886f016b6ce8970f3019ec8f48c0847cf113950b6dc7a7d950e3be4aac50cd1f  chain-configs/testnet/committee.yaml
+670c94e3816686bd4da5aedbfa994d4f362452eaf2552b2757f05226608188c2  chain-configs/testnet/genesis.yaml
+7c6a44712faef1dc47dbc5b4f21f62d1eeabf1f0d54d2cb600ad6c65d4eda091  chain-configs/testnet/parameters.yaml
+1ebf3fac5686b1eccbe1abf6c47dd6b650eb440778dfedb5c8ca554bddcdb9d6  telcoin-network-v0.99.0-adiri-x86_64-unknown-linux-gnu.tar.gz

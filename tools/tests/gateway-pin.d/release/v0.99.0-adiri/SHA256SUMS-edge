@@ -1,0 +1,4 @@
+a6e79598bdeb44a5b1f52056fd58b77921ac8fceacbd9ab49ddf23fde59f90dc  IMAGE_DIGEST-node-record-api
+9f6047e55b349e3fa0cd8da81737036480c826d833b6a8a59b6f4fa2154b5e7d  IMAGE_DIGEST-worker-gateway
+7578d68e8104ee3a6629ce894152aa2b42cbebf01844d3eb35abcc11052d5068  node-record-api-v0.99.0-adiri-x86_64-unknown-linux-gnu.tar.gz
+353b4780a982c5e84fd2b55a2ded9233940ba24b4c2394a0914a3af104a5dfed  worker-gateway-v0.99.0-adiri-x86_64-unknown-linux-gnu.tar.gz
