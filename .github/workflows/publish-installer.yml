@@ -40,6 +40,10 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
         run: bash tools/release-scripts.sh --check --tag "$TAG"
+      # The worker-gateway pins this release ships must be the images of the
+      # signed telcoin-network releases recorded beside them (empty pins pass).
+      - name: The worker-gateway pins are the images of their signed releases
+        run: bash tools/check-gateway-pin.sh
       - name: Assemble site
         run: |
           mkdir -p _site

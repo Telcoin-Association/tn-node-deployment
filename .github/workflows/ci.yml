@@ -183,6 +183,26 @@ jobs:
           else
             echo "Not a release change: MANIFEST is not compared with the tree."
           fi
+      # Each worker-gateway pin in lib/gateway.sh must be the
+      # IMAGE_DIGEST-worker-gateway of the telcoin-network release recorded on
+      # its line, in a SHA256SUMS-edge that lists exactly that release's edge
+      # files and whose SHA256SUMS-edge.asc verifies against lib/release-keys.
+      # Empty pins pass without a download. A scripts-v* tag and a push to main
+      # always check; a pull request checks when it changes the pins, the
+      # verification code, the release keys, this check or a release.
+      - name: Check the worker-gateway pins against their signed releases
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT" = "pull_request" ] && [ -n "$BASE_SHA" ] && git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            changed="$(git diff --name-only "$BASE_SHA" HEAD)"
+            if ! grep -qE '^(lib/gateway\.sh|lib/common\.sh|lib/release-keys/.+|tools/check-gateway-pin\.sh|\.github/workflows/(ci|publish-installer)\.yml|MANIFEST|MANIFEST\.asc|RELEASE)$' <<< "$changed"; then
+              echo "No pin, release key, release or check changed: the worker-gateway pins are not checked."
+              exit 0
+            fi
+          fi
+          bash tools/check-gateway-pin.sh
 
   ui-tests:
     name: Node Manager UI tests
