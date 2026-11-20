@@ -7,6 +7,22 @@ For recent entries (v1.1.40 onwards), see the Changelog section of README.md.
 
 ## Unreleased
 
+### Partner documents at run.telcoin.network, November 2026 -- the four PDFs and their short links, and one-pagers 1.1 that link the guide there
+A new repo, `Telcoin-Association/tn-partner-site`, publishes the four partner PDFs at
+`https://run.telcoin.network`: `/testnet-node-requirements.pdf`,
+`/mainnet-node-requirements.pdf`, `/mno-node-guide.pdf` and `/technical-specification.pdf`, with
+the short links `/testnet`, `/mainnet`, `/guide` and `/spec`. File names carry no version, so
+each link serves the revision published last. The testnet and mainnet node requirements
+one-pagers, now at version 1.1, end their Contact section with a link to
+`https://run.telcoin.network/guide` instead of the guide's PDF on GitHub; nothing else on either
+page changed. The site reads `docs/partner` from `main` only when it builds, so after a change
+under `docs/partner` merges, run its Publish workflow from the Actions tab of tn-partner-site or
+with `gh workflow run publish.yml --repo Telcoin-Association/tn-partner-site --ref main`. The
+site is current when `source_tree` in `https://run.telcoin.network/source.txt` equals
+`git rev-parse origin/main:docs/partner` after `git fetch origin`. `README.md` and `AGENTS.md`
+("Partner documents") say how to link one partner document from another, how to publish and
+how to check.
+
 ### Technical specification 1.3, November 2026 -- no confidentiality footer, because the partner documents are published
 The partner documents are now published, so the Telcoin Network Technical Specification
 (`docs/partner/technical-specification/`, version 1.3) no longer prints "Telcoin Association
