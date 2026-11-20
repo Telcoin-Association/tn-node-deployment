@@ -586,7 +586,11 @@ backgrounds) and `covers/`. Record the provenance of every vendored file in
   or the oldest supported node release.
 - The build refuses partner-unsafe text in any document, in the Markdown and (when
   `pdftotext` is present) in the PDF text: `--observer`, `migrate-node-naming`,
-  `setup-observer.sh`, `setup-validator.sh`, personal addresses and repo-relative links.
+  `setup-observer.sh`, `setup-validator.sh`, personal addresses, repo-relative links and,
+  because the partner documents are published, the marking "Confidential and Proprietary"
+  that the specification's footer carried up to version 1.2. The marking is matched in any
+  case and across line breaks in each document's Markdown, `metadata.yaml`, `template.html`
+  and `theme.css`, and in the PDF text when `pdftotext` is present.
   The guide and the one-pagers may not say "legacy" either, because partner readers never
   see legacy installs; the specification may, since EVM legacy transactions are part of the
   protocol.

@@ -31,7 +31,9 @@
 #
 # Before rendering, the Markdown is linted for things that must never reach a
 # partner: personal addresses, removed flags and scripts, repo-relative links,
-# and (guide and one-pagers) "legacy" material. Presentation settings come from
+# and (guide and one-pagers) "legacy" material; the document's metadata.yaml,
+# template and stylesheet are also checked for the
+# confidentiality marking. Presentation settings come from
 # the document's metadata.yaml; the partner-safety policy (contact address,
 # forbidden text, page bounds) stays in this script, so no metadata edit can
 # switch a check off. The committed PDF is only replaced when a source file
@@ -233,7 +235,13 @@ readonly PDF_NEW="${BUILD_DIR}/${NAME}.pdf"
 declare -a SOURCES=("$DEFAULT_MD" "$META" "$TEMPLATE" "$CSS" "$ASSETS_DIR" "tools/build-partner-pdf.sh")
 
 # Text that must never appear in a partner document. Personal addresses, the removed
-# --observer flag and its scripts, and links that only resolve inside this repo.
+# --observer flag and its scripts, links that only resolve inside this repo, and the
+# confidentiality marking the specification's footer carried up to version 1.2: the
+# partner documents are published, and the marking was dropped with 1.3. The lint
+# also matches the marking in any case and spacing in the document's Markdown,
+# metadata.yaml, template.html and theme.css, and the check on the PDF text does the
+# same when pdftotext is present.
+readonly MARKING="Confidential and Proprietary"
 declare -a FORBIDDEN=(
     "grant@"
     "--observer"
@@ -244,6 +252,7 @@ declare -a FORBIDDEN=(
     "](docs/"
     "](WGVPN.md"
     "](OPERATOR.md"
+    "$MARKING"
 )
 
 # ---- helpers ----------------------------------------------------------------
@@ -458,6 +467,19 @@ for pat in "${FORBIDDEN[@]}"; do
         printf '%s\n' "$hits" | sed 's/^/    line /' >&2
     fi
 done
+# The marking is also matched in any case, with whitespace folded so a wrapped
+# Markdown line or a folded YAML scalar cannot split it, in each text source of the
+# document; a no-break space (U+00A0) between the words counts as a space.
+# It lived in metadata.yaml and the template, which the loop above never
+# reads, and metadata also reaches the PDF's document properties, which the check
+# on the PDF text cannot see. This check needs no pdftotext, so it holds where
+# poppler is missing.
+for f in "$MD" "$META" "$TEMPLATE" "$CSS"; do
+    flat="$(LC_ALL=C sed "s/$(printf '\302\240')/ /g" <"$f" | tr -s '[:space:]' ' ')"
+    if grep -q -i -F -e "$MARKING" <<<"$flat"; then
+        _lint_error "${f} contains '${MARKING}' (matched in any case and spacing); the partner documents are published"
+    fi
+done
 if [[ $LINT_LEGACY -eq 1 ]] && hits="$(grep -n -i -w -e "legacy" "$MD")"; then
     _lint_error "${MD} mentions 'legacy' (drop legacy material from this document):"
     printf '%s\n' "$hits" | sed 's/^/    line /' >&2
@@ -615,6 +637,15 @@ if command -v pdftotext >/dev/null 2>&1; then
     fi
     if ! grep -q -F -e "$CONTACT" "$txt"; then
         echo "error: the PDF text never shows ${CONTACT}" >&2
+        text_failed=1
+    fi
+    # The FORBIDDEN loop matches exact case within a line. The marking also fails the
+    # build in any case and across line breaks and table spacing. The lint has already
+    # matched it as written in the document's sources; this catches what only the
+    # rendered page puts together, such as the phrase split by markup.
+    flat="$(tr -s '[:space:]' ' ' <"$txt")"
+    if grep -q -i -F -e "$MARKING" <<<"$flat"; then
+        echo "error: the PDF text contains '${MARKING}' (matched in any case and spacing); the partner documents are published" >&2
         text_failed=1
     fi
     if [[ $text_failed -ne 0 ]]; then
