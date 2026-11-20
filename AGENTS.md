@@ -539,8 +539,7 @@ fixture `tools/tests/gateway-pin.d/`);
 
 Each directory holds `<name>.md` (the source), `<name>.pdf` (generated, never edited by hand,
 committed), `metadata.yaml` (version, date, subtitle, contact and `toc-depth`; the
-specification also sets `protocol` and `confidentiality`, the one-pagers `badge`),
-`template.html` and `theme.css`.
+specification also sets `protocol`, the one-pagers `badge`), `template.html` and `theme.css`.
 The shared `docs/partner/assets/` is vendored: the fonts (Geist and Geist Mono under
 `fonts/geist/` for the guide and the one-pagers, Inter under `fonts/inter/` for the
 specification, all under the SIL Open Font License 1.1 with their licence files beside

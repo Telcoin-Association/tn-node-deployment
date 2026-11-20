@@ -13,7 +13,7 @@
 # Each document lives in its own directory, docs/partner/<doc>/:
 #   <doc>.md        the source; its single "# " heading is the title
 #   metadata.yaml   version, date and any cover fields, plus toc-depth (0 on a
-#                   one-pager), contact and (spec) confidentiality
+#                   one-pager) and contact
 #   template.html   pandoc HTML5 template: cover, contents, body; a one-pager
 #                   has no cover and no contents
 #   theme.css       WeasyPrint paged-media stylesheet
@@ -174,28 +174,24 @@ fi
 #                          document, may say "legacy transactions")
 #   CONTACT_IN_MD          the Markdown must name CONTACT (the spec's contact is
 #                          the cover mailto: from metadata.yaml)
-#   NEED_CONFIDENTIALITY   metadata.yaml must set a confidentiality label
 #   MIN_PAGES, MAX_PAGES   the PDF's page count must lie within these bounds; a
 #                          one-pager must be exactly one page
 case "$DOC" in
     mno-node-guide)
         LINT_LEGACY=1
         CONTACT_IN_MD=1
-        NEED_CONFIDENTIALITY=0
         MIN_PAGES=15
         MAX_PAGES=150
         ;;
     technical-specification)
         LINT_LEGACY=0
         CONTACT_IN_MD=0
-        NEED_CONFIDENTIALITY=1
         MIN_PAGES=15
         MAX_PAGES=150
         ;;
     testnet-node-requirements|mainnet-node-requirements)
         LINT_LEGACY=1
         CONTACT_IN_MD=1
-        NEED_CONFIDENTIALITY=0
         MIN_PAGES=1
         MAX_PAGES=1
         ;;
@@ -203,7 +199,7 @@ case "$DOC" in
         _usage_error "unknown document: ${DOC} (known: ${DOCS[*]})"
         ;;
 esac
-readonly DOC LINT_LEGACY CONTACT_IN_MD NEED_CONFIDENTIALITY MIN_PAGES MAX_PAGES
+readonly DOC LINT_LEGACY CONTACT_IN_MD MIN_PAGES MAX_PAGES
 
 readonly PARTNER_DIR="docs/partner"
 readonly ASSETS_DIR="${PARTNER_DIR}/assets"
@@ -489,8 +485,7 @@ fi
 
 TOC_DEPTH="$(_meta "$META" toc-depth)"
 META_CONTACT="$(_meta "$META" contact)"
-CONFIDENTIALITY="$(_meta "$META" confidentiality)"
-readonly TOC_DEPTH META_CONTACT CONFIDENTIALITY
+readonly TOC_DEPTH META_CONTACT
 case "$TOC_DEPTH" in
     0|1|2|3) ;;
     "") _lint_error "${META} has no 'toc-depth:' line (contents depth, 0 to 3; 0 for no contents)" ;;
@@ -500,9 +495,6 @@ if [[ -z "$META_CONTACT" ]]; then
     _lint_error "${META} has no 'contact:' line; partner documents use ${CONTACT}"
 elif [[ "$META_CONTACT" != "$CONTACT" ]]; then
     _lint_error "${META} sets contact '${META_CONTACT}'; partner documents use ${CONTACT}"
-fi
-if [[ $NEED_CONFIDENTIALITY -eq 1 && -z "$CONFIDENTIALITY" ]]; then
-    _lint_error "${META} has no 'confidentiality:' line; the ${DOC} pages carry that label"
 fi
 
 if [[ $lint_failed -ne 0 ]]; then
@@ -627,10 +619,6 @@ if command -v pdftotext >/dev/null 2>&1; then
     fi
     if [[ $text_failed -ne 0 ]]; then
         exit 1
-    fi
-    # Layout may reflow or restyle the label, so a miss only warns.
-    if [[ -n "$CONFIDENTIALITY" ]] && ! grep -q -i -F -e "$CONFIDENTIALITY" "$txt"; then
-        echo "warn: the PDF text never shows the confidentiality label '${CONFIDENTIALITY}'" >&2
     fi
 else
     echo "note: pdftotext not found; skipped the checks on the PDF text (poppler)" >&2

@@ -18,7 +18,7 @@
  *
  * Colour tokens:
  *   body text, headings   #000000      cover title, footer site   #424761
- *   cover subtitle/meta   #7981A4      confidentiality line       #666666
+ *   cover subtitle/meta   #7981A4      footer version line        #666666
  *   hairlines             #C9CFED      footer divider             #D9D9D9
  *   table header          #C9CFED      table cells, code blocks   #F4F5FF
  *   header band           #EFEFFF -> #FFFFFF
@@ -117,7 +117,7 @@ img { max-width: 100%; }
 }
 .run-tab img { display: inline-block; height: 5.2mm; width: auto; vertical-align: top; }
 
-/* ---- Running footer: confidentiality line and the pill ---------------------- */
+/* ---- Running footer: version line and the pill ------------------------------ */
 /* The footer starts 42 mm above the page bottom (255 mm): grey 7.4pt line from
    258.9 mm, pill 268.8 to 285 mm and 6.6 mm from either page edge, as the
    original. */
@@ -135,7 +135,7 @@ img { max-width: 100%; }
   font: 400 10pt/1.21 "Inter", sans-serif;
   color: #000;
 }
-.run-conf {
+.run-meta {
   margin: 0;
   text-align: center;
   font: 400 7.4pt/1.21 "Inter", sans-serif;
