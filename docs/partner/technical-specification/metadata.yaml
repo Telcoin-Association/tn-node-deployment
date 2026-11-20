@@ -9,12 +9,10 @@
 # original does; the document title (the Markdown "# " heading) runs the header and TOC.
 cover-title: Telcoin Network
 subtitle: Technical Specification
-version: "1.2"
+version: "1.3"
 date: November 2026
 # The telcoin-network release the text describes, and the main commit it reads up to.
 protocol: v0.16.0-adiri, main at 7167e7800
-# The running footer prints this, followed by the date.
-confidentiality: Telcoin Association Confidential and Proprietary Information.
 author: Telcoin Association
 description: >-
   Technical specification of the Telcoin Network protocol: consensus and execution

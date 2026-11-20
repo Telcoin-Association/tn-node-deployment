@@ -7,6 +7,18 @@ For recent entries (v1.1.40 onwards), see the Changelog section of README.md.
 
 ## Unreleased
 
+### Technical specification 1.3, November 2026 -- no confidentiality footer, because the partner documents are published
+The partner documents are now published, so the Telcoin Network Technical Specification
+(`docs/partner/technical-specification/`, version 1.3) no longer prints "Telcoin Association
+Confidential and Proprietary Information." in its running footer. The footer line prints the
+version and date instead, as the cover does, and keeps its place: the specification is still 37
+pages, and its content is otherwise unchanged from 1.2. `metadata.yaml` drops the
+`confidentiality:` key, and `tools/build-partner-pdf.sh` no longer requires it. The build now
+fails when "Confidential and Proprietary" appears, in any case and across line breaks, in a
+partner document's Markdown, `metadata.yaml`, `template.html` or `theme.css` (checked before
+anything is built) or, when `pdftotext` is installed, in the PDF text.
+`AGENTS.md` ("Partner documents") lists it with the other forbidden text.
+
 ### Release keys from tn-release-signing, November 2026 -- grantkee's ed25519 key and MavenRain's key, tn-p2p-allow-sync v0.1.2
 Part of `scripts-v2.2.0`; see "The release keys" in
 [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).

@@ -13,7 +13,7 @@
 # Each document lives in its own directory, docs/partner/<doc>/:
 #   <doc>.md        the source; its single "# " heading is the title
 #   metadata.yaml   version, date and any cover fields, plus toc-depth (0 on a
-#                   one-pager), contact and (spec) confidentiality
+#                   one-pager) and contact
 #   template.html   pandoc HTML5 template: cover, contents, body; a one-pager
 #                   has no cover and no contents
 #   theme.css       WeasyPrint paged-media stylesheet
@@ -31,7 +31,9 @@
 #
 # Before rendering, the Markdown is linted for things that must never reach a
 # partner: personal addresses, removed flags and scripts, repo-relative links,
-# and (guide and one-pagers) "legacy" material. Presentation settings come from
+# and (guide and one-pagers) "legacy" material; the document's metadata.yaml,
+# template and stylesheet are also checked for the
+# confidentiality marking. Presentation settings come from
 # the document's metadata.yaml; the partner-safety policy (contact address,
 # forbidden text, page bounds) stays in this script, so no metadata edit can
 # switch a check off. The committed PDF is only replaced when a source file
@@ -174,28 +176,24 @@ fi
 #                          document, may say "legacy transactions")
 #   CONTACT_IN_MD          the Markdown must name CONTACT (the spec's contact is
 #                          the cover mailto: from metadata.yaml)
-#   NEED_CONFIDENTIALITY   metadata.yaml must set a confidentiality label
 #   MIN_PAGES, MAX_PAGES   the PDF's page count must lie within these bounds; a
 #                          one-pager must be exactly one page
 case "$DOC" in
     mno-node-guide)
         LINT_LEGACY=1
         CONTACT_IN_MD=1
-        NEED_CONFIDENTIALITY=0
         MIN_PAGES=15
         MAX_PAGES=150
         ;;
     technical-specification)
         LINT_LEGACY=0
         CONTACT_IN_MD=0
-        NEED_CONFIDENTIALITY=1
         MIN_PAGES=15
         MAX_PAGES=150
         ;;
     testnet-node-requirements|mainnet-node-requirements)
         LINT_LEGACY=1
         CONTACT_IN_MD=1
-        NEED_CONFIDENTIALITY=0
         MIN_PAGES=1
         MAX_PAGES=1
         ;;
@@ -203,7 +201,7 @@ case "$DOC" in
         _usage_error "unknown document: ${DOC} (known: ${DOCS[*]})"
         ;;
 esac
-readonly DOC LINT_LEGACY CONTACT_IN_MD NEED_CONFIDENTIALITY MIN_PAGES MAX_PAGES
+readonly DOC LINT_LEGACY CONTACT_IN_MD MIN_PAGES MAX_PAGES
 
 readonly PARTNER_DIR="docs/partner"
 readonly ASSETS_DIR="${PARTNER_DIR}/assets"
@@ -237,7 +235,13 @@ readonly PDF_NEW="${BUILD_DIR}/${NAME}.pdf"
 declare -a SOURCES=("$DEFAULT_MD" "$META" "$TEMPLATE" "$CSS" "$ASSETS_DIR" "tools/build-partner-pdf.sh")
 
 # Text that must never appear in a partner document. Personal addresses, the removed
-# --observer flag and its scripts, and links that only resolve inside this repo.
+# --observer flag and its scripts, links that only resolve inside this repo, and the
+# confidentiality marking the specification's footer carried up to version 1.2: the
+# partner documents are published, and the marking was dropped with 1.3. The lint
+# also matches the marking in any case and spacing in the document's Markdown,
+# metadata.yaml, template.html and theme.css, and the check on the PDF text does the
+# same when pdftotext is present.
+readonly MARKING="Confidential and Proprietary"
 declare -a FORBIDDEN=(
     "grant@"
     "--observer"
@@ -248,6 +252,7 @@ declare -a FORBIDDEN=(
     "](docs/"
     "](WGVPN.md"
     "](OPERATOR.md"
+    "$MARKING"
 )
 
 # ---- helpers ----------------------------------------------------------------
@@ -462,6 +467,19 @@ for pat in "${FORBIDDEN[@]}"; do
         printf '%s\n' "$hits" | sed 's/^/    line /' >&2
     fi
 done
+# The marking is also matched in any case, with whitespace folded so a wrapped
+# Markdown line or a folded YAML scalar cannot split it, in each text source of the
+# document; a no-break space (U+00A0) between the words counts as a space.
+# It lived in metadata.yaml and the template, which the loop above never
+# reads, and metadata also reaches the PDF's document properties, which the check
+# on the PDF text cannot see. This check needs no pdftotext, so it holds where
+# poppler is missing.
+for f in "$MD" "$META" "$TEMPLATE" "$CSS"; do
+    flat="$(LC_ALL=C sed "s/$(printf '\302\240')/ /g" <"$f" | tr -s '[:space:]' ' ')"
+    if grep -q -i -F -e "$MARKING" <<<"$flat"; then
+        _lint_error "${f} contains '${MARKING}' (matched in any case and spacing); the partner documents are published"
+    fi
+done
 if [[ $LINT_LEGACY -eq 1 ]] && hits="$(grep -n -i -w -e "legacy" "$MD")"; then
     _lint_error "${MD} mentions 'legacy' (drop legacy material from this document):"
     printf '%s\n' "$hits" | sed 's/^/    line /' >&2
@@ -489,8 +507,7 @@ fi
 
 TOC_DEPTH="$(_meta "$META" toc-depth)"
 META_CONTACT="$(_meta "$META" contact)"
-CONFIDENTIALITY="$(_meta "$META" confidentiality)"
-readonly TOC_DEPTH META_CONTACT CONFIDENTIALITY
+readonly TOC_DEPTH META_CONTACT
 case "$TOC_DEPTH" in
     0|1|2|3) ;;
     "") _lint_error "${META} has no 'toc-depth:' line (contents depth, 0 to 3; 0 for no contents)" ;;
@@ -500,9 +517,6 @@ if [[ -z "$META_CONTACT" ]]; then
     _lint_error "${META} has no 'contact:' line; partner documents use ${CONTACT}"
 elif [[ "$META_CONTACT" != "$CONTACT" ]]; then
     _lint_error "${META} sets contact '${META_CONTACT}'; partner documents use ${CONTACT}"
-fi
-if [[ $NEED_CONFIDENTIALITY -eq 1 && -z "$CONFIDENTIALITY" ]]; then
-    _lint_error "${META} has no 'confidentiality:' line; the ${DOC} pages carry that label"
 fi
 
 if [[ $lint_failed -ne 0 ]]; then
@@ -625,12 +639,17 @@ if command -v pdftotext >/dev/null 2>&1; then
         echo "error: the PDF text never shows ${CONTACT}" >&2
         text_failed=1
     fi
+    # The FORBIDDEN loop matches exact case within a line. The marking also fails the
+    # build in any case and across line breaks and table spacing. The lint has already
+    # matched it as written in the document's sources; this catches what only the
+    # rendered page puts together, such as the phrase split by markup.
+    flat="$(tr -s '[:space:]' ' ' <"$txt")"
+    if grep -q -i -F -e "$MARKING" <<<"$flat"; then
+        echo "error: the PDF text contains '${MARKING}' (matched in any case and spacing); the partner documents are published" >&2
+        text_failed=1
+    fi
     if [[ $text_failed -ne 0 ]]; then
         exit 1
-    fi
-    # Layout may reflow or restyle the label, so a miss only warns.
-    if [[ -n "$CONFIDENTIALITY" ]] && ! grep -q -i -F -e "$CONFIDENTIALITY" "$txt"; then
-        echo "warn: the PDF text never shows the confidentiality label '${CONFIDENTIALITY}'" >&2
     fi
 else
     echo "note: pdftotext not found; skipped the checks on the PDF text (poppler)" >&2
