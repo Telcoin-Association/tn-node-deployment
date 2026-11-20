@@ -93,6 +93,6 @@ It takes four steps; before you stake, sync the node and advertise a publicly ro
 ## Contact
 
 Email devs@telcoin.org about running a node, validator onboarding, approval or hardware.
-The full operator guide is [`docs/partner/mno-node-guide/mno-node-guide.pdf`](https://github.com/Telcoin-Association/tn-node-deployment/blob/main/docs/partner/mno-node-guide/mno-node-guide.pdf) in the repository below.
+The full operator guide is at [run.telcoin.network/guide](https://run.telcoin.network/guide).
 
 </div>

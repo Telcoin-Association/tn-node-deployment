@@ -632,3 +632,92 @@ A changed table cell squeezed its neighbours and tipped the page to two, twice. 
 exactly 1` caught it each time before a render was looked at. When a page overflows,
 `pdftotext -layout` of the candidate PDF's two pages shows which column ran over and how the
 edited lines wrapped, faster than reading the PNG.
+
+## Partner documents site round (2026-11-20): a clean `git status` is not provenance
+
+### `git status` clean does not mean the working tree is what HEAD records
+
+**Symptom:** the site build's first gate ran `git status --porcelain -- docs/partner` and
+called a clean result "source_tree describes exactly what is served". Two verifiers
+independently published a file from outside the checkout with exit 0: a licence text committed
+as a symlink to `/proc/self/environ`. A PDF edited under `git update-index --skip-worktree`
+was served too, with `source.txt` naming a commit that did not hold those bytes.
+
+**Cause:** git calls a committed symlink tracked and clean, `[[ -f ]]` and `cp` follow links,
+and index flags exist to hide edits from `status`. The contract itself defined the gate in
+terms of `git status`, so the writer's 115 checks all passed.
+
+**Rule:** when a build claims its output comes from a commit, compare what it reads with the
+commit, per file: not a symlink, and `git hash-object --no-filters -- <path>` equals
+`git rev-parse HEAD:<path>`. That needs no index, runs no filter, and makes "a function of
+HEAD" literal. Write the gate in the contract as the property ("every file read holds the
+bytes HEAD records"), not as the command that was meant to show it.
+
+### A guard against text returning must read where the text lived
+
+**Symptom:** the plan said "add the marking to `FORBIDDEN` so it cannot return". `FORBIDDEN`
+is matched against the Markdown and the PDF text. The marking had lived in `metadata.yaml` and
+the template, so the Markdown lint never saw it, the PDF-text check is skipped without
+`pdftotext`, and metadata also lands in the PDF's document properties, which `pdftotext` never
+reads. Two verifier rounds found, in turn: the document properties and the no-poppler case;
+then a no-break space between the words (`tr` is bytewise).
+
+**Rule:** for a "must not come back" check, list the routes the thing took before (which
+files, which output channels) and test each route with the optional tools absent. Then state
+in the PR what wording and which routes the guard does not cover, and stop: after the routes
+an accident can take are closed, further rounds chase evasion, which is not the guard's job.
+
+### "Mirrors the reference workflow" copies its weak points
+
+The installer workflow's shared `pages` concurrency group was copied as specified. A verifier
+showed that a run started from another branch, which builds without deploying, can replace a
+pending run of `main` in that group. The group is now per ref. The same reference writes a
+`CNAME` file that Pages ignores with the Actions source. A reference is a starting point for
+the verifier's questions, not an answer to them.
+
+### A test of a protection must go through the protected path
+
+The README's "confirm a branch cannot deploy" step removed both the `if:` and the
+`environment:` block from the deploy job. Environment rules apply only to a job that names the
+environment, so that run could never exercise the branch limit; any refusal would have come
+from somewhere else and been read as proof. The step is now two runs: one with only the `if:`
+removed (this is the proof), one with both (this shows what the Pages API does, which is not
+documented). When writing a negative test for a control, name the component that is expected
+to refuse and check the test still reaches it.
+
+### Budgets and splits
+
+- The site fix round (script, workflow, README, and adapting the earlier harness) finished at
+  281k tokens against a 200k budget. Adapting someone else's harness is a package of its own:
+  twelve expectations had to change with a reason each. Next time the script fix and the
+  harness adaptation go to one agent, the prose to another.
+- Splitting the site verification by file ownership (script; workflow, README and served
+  output) kept both near 200k and gave two independent reports of the same hole from different
+  directions, which settled its severity without a discussion.
+- One-line fixes that a verifier has already validated in its own clone (the no-break-space
+  fold) went to a small writer and were then checked by the orchestrator from a fresh clone
+  with the two decisive commands. A third full verifier would have cost more than the fix
+  could be wrong.
+
+### Orchestrator commands: no `rm -rf` on a variable path
+
+A built-in safety check refused a compound command that began with `rm -rf "$SP/…"` before a
+container run; nothing ran. Cleaning up before a test is unnecessary when every run gets a
+directory name that does not exist yet (`if [ -e "$D" ]; then exit 3; fi; mkdir -p "$D"`).
+Agent briefs carried the same rule from then on, and one agent replaced the inherited
+harness's removals with a move-aside helper.
+
+### Close "unproven until deploy" items locally when a container can
+
+Two items on the verifiers' unproven lists were cheap to settle before any deploy: the build
+on a checkout shaped like the runner's (shallow, blob-less, cone sparse) and on Ubuntu 24.04
+with its own poppler (24.02 against the container's 22.12, which matters because one gate
+compares whole lines of `pdftotext` output). Both passed. They are emulations and are reported
+as such; what stays unproven is what only GitHub and DNS can show.
+
+### A PR body claims only what ran on the final tip
+
+The first draft of the PR-1 body said the four PDFs rebuild unchanged "with and without
+`pdftotext`" at each commit. That had been run on the previous tip, not on the one-line
+amendment after it. The sentence was cut back to what the final tip was checked for. After an
+amend, reread each claim in the body against the list of commands run since.

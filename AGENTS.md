@@ -642,7 +642,10 @@ backgrounds) and `covers/`. Record the provenance of every vendored file in
   any other value.
 - Links to repository files are absolute URLs under `https://github.com/Telcoin-Association/`
   (for this repo, `https://github.com/Telcoin-Association/tn-node-deployment/blob/main/`),
-  because the PDF has no repo around it. Cross-references inside a document are heading
+  because the PDF has no repo around it. A link to another partner document is instead its
+  short link (`https://run.telcoin.network/guide`, `/spec`, `/testnet` or `/mainnet`), never
+  its PDF on GitHub: the reader has the PDF outside the repo, and the short link always serves
+  the revision published last. Cross-references inside a document are heading
   links such as `[Back up the keys now](#back-up-the-keys-now)`, and the build fails on one
   that matches no heading. Headings and prose carry no manual numbers; pandoc numbers the
   chapters at build time when `toc-depth` is 1 to 3, and `toc-depth: 0` (a one-pager)
@@ -651,6 +654,43 @@ backgrounds) and `covers/`. Record the provenance of every vendored file in
   (a pandoc or WeasyPrint upgrade), the script keeps the committed PDF and warns "toolchain
   drift"; pass `--force` to overwrite it deliberately. Same inputs and same toolchain give
   byte-identical output; a second run prints "PDF unchanged".
+- [tn-partner-site](https://github.com/Telcoin-Association/tn-partner-site) serves the four
+  PDFs at `https://run.telcoin.network`: `/testnet-node-requirements.pdf`,
+  `/mainnet-node-requirements.pdf`, `/mno-node-guide.pdf` and `/technical-specification.pdf`,
+  and the short links `/testnet`, `/mainnet`, `/guide` and `/spec` forward to them. File names
+  carry no version, so each link serves the revision published last. That repo stores no copy:
+  its Publish workflow reads `docs/partner` from `main` of this repo each time it runs, so a
+  merge here publishes nothing. After a change under `docs/partner` merges, run Publish on
+  `main` from the Actions tab of tn-partner-site, or with:
+
+  ```
+  gh workflow run publish.yml --repo Telcoin-Association/tn-partner-site --ref main
+  ```
+
+  The site is current when `source_tree` in `https://run.telcoin.network/source.txt` equals
+  `git rev-parse origin/main:docs/partner` after `git fetch origin`. Compare the tree, not
+  the commit: a merge that changes nothing under `docs/partner` moves `main` and leaves the
+  served files as they are.
+- Among its checks, the site's build refuses to publish when a document's `version` does not
+  look like `1.2` or `1.2.3`, when its `date` is not an English month name and a four-digit
+  year (such as `November 2026`), when page 1 of its PDF does not print the line
+  `Version <version> · <date>` with the values in its `metadata.yaml` (a PDF not rebuilt after
+  a metadata bump), or when the text of any PDF contains "Confidential and Proprietary",
+  matched in any case and across line breaks. Every partner template must print that version
+  line on page 1. `tools/build-partner-pdf.sh` only checks that `version` and `date` exist, so
+  `date: 20 November 2026` builds here and is refused there. A refused run leaves the live
+  site as it was: fix the document here and publish again.
+- Every file the site reads must be a regular file committed as it is; a symbolic link, or a
+  file that differs from its blob in `HEAD`, is refused. It reads the three files of each
+  document (`<name>.md`, `metadata.yaml` and `<name>.pdf`) and five shared assets: four under
+  `assets/fonts/geist/` (`Geist-Regular.woff2`, `Geist-SemiBold.woff2`, `LICENSE.txt` and
+  `OFL.txt`) and `assets/logos/telcoin-network-light.svg`. Renaming or removing one of the five
+  fails every Publish run until `build-site.sh` in tn-partner-site is changed to match. The
+  logo is pinned: `build-site.sh` holds the SHA-256 of `telcoin-network-light.svg` in
+  `LOGO_SHA256`, so a changed logo is refused until someone reviews it and updates the
+  constant in tn-partner-site. A new document or a renamed directory needs a matching change
+  in tn-partner-site once the change here has merged; "Add or rename a document" in its
+  README lists the places. A short link, once sent to partners, is never renamed or removed.
 - Reference toolchain: pandoc 3.12.1, WeasyPrint 70.0 and poppler 26.10.0 from Homebrew
   (`brew install pandoc weasyprint poppler`). poppler provides `pdftotext` for the checks on
   the PDF text and is optional. The `tn-pdf-tools` container is a locally built Debian 12

@@ -918,3 +918,92 @@ Left to the maintainer: rulesets (#30) with `require_code_owner_review`; the sig
 scripts-v2.1.0 --serial 1`, merge, `tag`); PR #1784 review and the package access lists after the
 first pushes; a one-time check that `DEFAULT_DOCKER_IMAGE` prints `Build Features: adiri`;
 closing #49 if wanted.
+
+## Review: partner documents at run.telcoin.network (2026-11-20)
+
+Three deliverables: a new repo `tn-partner-site` (local at `~/coding/telcoin/tn-partner-site`,
+four commits, tip ad25b0b, no remote until the maintainer creates it), PR-1
+`docs/spec-1.3-public` (35214c4, 2e6ce45, pushed) and PR-2 `docs/run-telcoin-network-links`
+(797dcb5, 0e21144, stacked on PR-1). Plan and unit-by-unit record: `tasks/plan.md`. Site
+contract with both amendments: `tasks/spec-run-site.md`. PR texts: `tasks/pr-body-run-1-spec.md`,
+`tasks/pr-body-run-2-links.md`.
+
+What landed:
+
+- Site repo: `build-site.sh <src> <out>` builds the Pages tree from a tn-node-deployment
+  checkout and refuses to build when a gate fails (0: every file read is a regular file with
+  the bytes `HEAD` records; 1: files and the five shared assets exist, the logo matches
+  `LOGO_SHA256`; 2: whole PDFs; 3: version, date and title shapes; 4: page 1 prints
+  `Version <v> · <date>`; 5: no "Confidential and Proprietary" in any PDF's text; 6: exactly
+  the 18 expected files, no placeholder left). Landing page, four alias stubs, 404, robots,
+  `source.txt` with source commit, tree, site commit and a SHA-256 per PDF. Workflow on push
+  to `main`, manual run and `repository_dispatch`, same pinned actions as the installer
+  workflow, deploy only from `main`, one concurrency group per ref. README with publish,
+  currency check, gates, local build, setup and retirement.
+- PR-1: specification 1.3, the footer prints version and date; `tools/build-partner-pdf.sh`
+  loses the `confidentiality` handling and its lint refuses the marking in a document's
+  Markdown, `metadata.yaml`, template and stylesheet (any case, folded whitespace, no-break
+  space), with the PDF text checked the same way when `pdftotext` is present.
+- PR-2: both one-pagers at 1.1 link `https://run.telcoin.network/guide`; README, AGENTS.md and
+  CHANGELOG say how to link, publish and check, and what the site's build requires of the
+  documents here.
+
+Where the result differs from the approved plan:
+
+- The plan added the marking to `FORBIDDEN` only. Review showed that list never read the files
+  the marking had lived in; the lint now reads the four sources of each document.
+- The plan's gate 0 was a clean `git status`. Two verifiers published a file from outside the
+  checkout through a committed symlink; gate 0 now compares each file read with its blob in
+  `HEAD`. An untracked or edited file the build does not read no longer fails it.
+- The logo is pinned by SHA-256 (the plan fetched it at build time unchecked; an SVG can carry
+  script).
+- `concurrency.group` is `pages-${{ github.ref }}`, not the installer workflow's shared
+  `pages`.
+- A `.gitignore` for `/src/` and `/_site/`, and README sections the plan did not list (who
+  decides what is published, the branch-deploy test, retirement).
+- VA was split in two (script; workflow, README and served output). Fix rounds: B2 and B3 on
+  PR-1, C2 on PR-2, A3, A4 and A5 on the site, each followed by a fresh verifier or, for the two
+  one-line fixes a verifier had already validated, by the orchestrator from a fresh clone.
+
+Verification:
+
+- PR-1: VB and VB2 from fresh clones at other paths. Four "PDF unchanged" (77, 37, 1, 1) at
+  each commit; 37 pages; the word sequence equal on 37 of 37 pages; pixels differ only at the
+  cover's version line and the footer band; no marking in page text, document properties or raw
+  bytes; every named route for the marking fails before anything is built; shellcheck as CI
+  runs it and `check-bash32.sh` clean. Final tip checked by the orchestrator from a third clone.
+- PR-2: VC from a fresh clone. Nine files; four "PDF unchanged" at each commit; each one-pager
+  one page at 1.1 with one link annotation to `https://run.telcoin.network/guide`; text and
+  pixels differ only in the version line and the Contact sentence. VA2-W checked every
+  statement about the site against the site repo and violated six of the stated constraints in
+  clones; each was refused.
+- Site: VA-S (FAIL, the symlink and index-flag holes) and VA-W (PASS WITH NOTES) on 0ee1951;
+  VA2-S and VA2-W (both PASS WITH NOTES) on a3c70b8. The inherited harness: 385 passed, 0
+  failed, on a3c70b8 and again after the last script change. The build on a checkout shaped
+  like the runner's (shallow, blob-less, cone sparse) and on Ubuntu 24.04 with poppler 24.02:
+  exit 0, 18 files, versions 1.1, 1.1, 1.9, 1.3, hashes verify; the marked specification on
+  `main` is refused on gate 5; a symlinked licence text is refused on gate 0.
+
+Known limits, accepted:
+
+- The marking guard matches the wording the 1.2 footer used. Other wordings pass. Without
+  `pdftotext`, a phrase that only the rendered page puts together passes the PDF build; the
+  site's gate 5 requires `pdftotext`.
+- The site build checks each file and copies it afterwards, so a process writing into `<src>`
+  during a build could get other bytes published. A CI job has none; the README says so.
+- A SIGTERM sent to the build's bash alone left a temporary directory once in 450 signalled
+  runs. One hang at 100% CPU after a SIGINT was seen once by a writer and not again.
+- Gate 5 reads page text only, not PDF document properties. The PDF build's lint covers
+  `metadata.yaml`, which is where those properties come from.
+
+Unproven until the real deploy: Pages serving the PDFs inline as `application/pdf`, the 301
+from `/guide` to `/guide/`, the custom 404, the certificate and the HTTPS redirect, the
+`github-pages` environment's branch rule (setup step 9 tests it), and the first run on a real
+runner.
+
+Left to the maintainer: open both PRs (texts in `tasks/`); confirm the domain is verified;
+create `Telcoin-Association/tn-partner-site` and set Pages to GitHub Actions and the
+environment to `main`; merge PR-1; after the site code is pushed and the first deploy checked
+on the github.io URL, set the custom domain and the `run` CNAME, wait for the certificate,
+enforce HTTPS, run the branch-deploy test; then merge PR-2 and publish once more. The live-site
+check (VD) follows those steps.
