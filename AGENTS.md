@@ -462,8 +462,18 @@ validator side. Rules:
   `.node-meta`, the node's launch file or a firewall rule; a node restart belongs only to the
   validator-side phases (`gateway_upstream`, `rpc-advertise`, `rpc-unadvertise`) and their guards.
 - An image is `<repository>@sha256:<64 lowercase hex>` and never a tag: on devnet from
-  `GW_DEVNET_IMAGE_REPOS`, on testnet and mainnet only `GW_TESTNET_IMAGE_PIN` /
-  `GW_MAINNET_IMAGE_PIN` in `lib/gateway.sh`, which the signed MANIFEST covers.
+  `GW_DEVNET_IMAGE_REPOS` (the Artifact Registry repository
+  `us-docker.pkg.dev/telcoin-network/tn-public/worker-gateway`, telcoin-network's dev package
+  `ghcr.io/telcoin-association/tn-dev` and `GW_RELEASE_IMAGE_REPO`), on testnet and mainnet only
+  `GW_TESTNET_IMAGE_PIN` / `GW_MAINNET_IMAGE_PIN` in `lib/gateway.sh`, which the signed MANIFEST
+  covers.
+- A pin is the `IMAGE_DIGEST-worker-gateway` line of a signed telcoin-network release, an image
+  in `GW_RELEASE_IMAGE_REPO` (`ghcr.io/telcoin-association/tn-worker-gateway`, the package every
+  release publishes the gateway to), and that release's tag shares its line:
+  `GW_TESTNET_IMAGE_PIN="..." GW_TESTNET_PIN_RELEASE="..."`, the same for mainnet. The tag is a
+  release tag of that network (`tn_release_tag_ok`), and `_gw_pin_ok` refuses a pin of another
+  form or one without such a tag. Set a pin and its release together in a `chore` commit of a
+  scripts release; `tools/check-gateway-pin.sh` must pass.
 - The unit never pulls (`--pull=never`): `gw_image_ensure` pulls by digest before anything is
   written, and `gw_image_probe` needs every flag of `GW_REQUIRED_FLAGS` in the image's `--help`,
   so a flag added to the unit goes into that list too.
@@ -503,11 +513,13 @@ validator side. Rules:
   the node's `.node-meta NETWORK` on a node host, else against the upstream's `eth_chainId`
   (`_gw_chain_check`, `_gw_chain_fits`); an upstream that does not answer is not a refusal.
 - `GATEWAY_VERSION` stays the first assignment of that name in `lib/gateway.sh`, and each pin
-  line keeps its `# network-gated:` marker.
+  line keeps its `# network-gated:` marker; the pin and its release stay on one line, below its
+  marker.
 
 The fixture tests are `tools/tests/gateway_setup_test.sh`, `gateway_check_remove_test.sh`,
-`gateway_remove_test.sh`, `gateway_validator_test.sh`, `gateway_upstream_test.sh` and
-`caddy_gateway_test.sh`;
+`gateway_remove_test.sh`, `gateway_validator_test.sh`, `gateway_upstream_test.sh`,
+`caddy_gateway_test.sh` and `gateway_pin_test.sh` (`tools/check-gateway-pin.sh`, with its
+fixture `tools/tests/gateway-pin.d/`);
 `gateway_smoke.sh <image>` and `caddy_gateway_smoke.sh <image>` need Docker and are not run by
 `run.sh`.
 
@@ -1007,7 +1019,11 @@ into a pass. The jobs:
   (step "network hits").
 - `manifest` ("release manifest"): on a `scripts-v*` tag, `release-scripts.sh --check --tag
   <tag>`; on a change that touches `MANIFEST`, `MANIFEST.asc` or `RELEASE`,
-  `release-scripts.sh --check --require-sig`; otherwise nothing is compared.
+  `release-scripts.sh --check --require-sig`; otherwise nothing is compared. A second step runs
+  `tools/check-gateway-pin.sh` on every `scripts-v*` tag and every push to main, and on a pull
+  request that changes `lib/gateway.sh`, `lib/common.sh`, `lib/release-keys/`, the tool, `ci.yml`,
+  `publish-installer.yml`, `MANIFEST`, `MANIFEST.asc` or `RELEASE`; with both pins empty it
+  downloads nothing and passes.
 - `ui-tests` ("Node Manager UI tests"): on Python 3.10, installs `ui/requirements.txt` and
   `ui/tests/requirements-dev.txt` with `--require-hashes`, runs `python -m pytest -q ui` (there
   is no unittest fallback), then the three UI shell tests under bash 5. As the runner user,
@@ -1023,8 +1039,9 @@ into a pass. The jobs:
 new assertion file needs the `P0-` prefix.
 
 `.github/workflows/publish-installer.yml` runs on a `scripts-v*` tag (or by hand on one). Its
-`build` job checks that the tag is on main and that `release-scripts.sh --check --tag` passes,
-then assembles the Pages site (`index.html`, `install.sh` and `CNAME`; no `.nojekyll`, since
+`build` job checks that the tag is on main, that `release-scripts.sh --check --tag` passes and
+that `tools/check-gateway-pin.sh` passes, then assembles the Pages site (`index.html`,
+`install.sh` and `CNAME`; no `.nojekyll`, since
 `upload-pages-artifact` v4 and later drop dotfiles and artifact deploys never run Jekyll);
 `deploy` publishes it to GitHub Pages.
 
@@ -1049,9 +1066,9 @@ so the ruleset can require that review from a code owner (`require_code_owner_re
 `ci_pins_test.sh` requires at least two owners on every owned path. The release path has lines
 of its own, among them `/lib/release-keys/`, `/vendor/tn-release-signing` and `/.gitmodules`
 (the pointer decides which keys `lib/release-keys` must copy), `/tools/release-scripts.sh`,
-`/tools/cut-release.sh`, `/MANIFEST`, `/MANIFEST.asc` and `/RELEASE`. Do not rename a CI job
-and do not make a required job skippable (`if:`) or non-blocking (`continue-on-error`,
-`|| true`): `ci_pins_test.sh` rejects both.
+`/tools/cut-release.sh`, `/tools/check-gateway-pin.sh`, `/MANIFEST`, `/MANIFEST.asc` and
+`/RELEASE`. Do not rename a CI job and do not make a required job skippable (`if:`) or
+non-blocking (`continue-on-error`, `|| true`): `ci_pins_test.sh` rejects both.
 
 ## Fixture tests (`tools/tests/`)
 
@@ -1090,7 +1107,7 @@ line.
   `lib/common.sh`; refresh the files and the pins together.
 - `tools/tests/perl-interp.d/` holds the perl lint's fixtures, and `tools/tests/signing.sh`
   the OpenPGP release-signing helpers of `updater_manifest_test.sh`, `install_test.sh`,
-  `release_scripts_test.sh`, `cut_release_test.sh` and `p2p_allow_install_test.sh`: `newkey NAME [EXPIRY|--expired|--revoked]`,
+  `release_scripts_test.sh`, `cut_release_test.sh`, `p2p_allow_install_test.sh` and `gateway_pin_test.sh`: `newkey NAME [EXPIRY|--expired|--revoked]`,
   `sign_file FILE KEYNAME...` and `sign_file_bad FILE KEYNAME`, with throwaway keys in a
   temporary `GNUPGHOME`. `REAL_GPG` is 1 when the real `gpg` and `gpgv` work there; elsewhere
   (the `bash:3.2` and `ubuntu:24.04` images), or with `TN_TEST_FAKE_GPG=1`, stand-in `gpg` and
@@ -1106,6 +1123,11 @@ line.
   where git or the submodule is missing, and the "checksum freshness" job runs the tool itself.
   `release_scripts_test.sh` and `cut_release_test.sh` copy the tracked files without the
   submodule and keep one throwaway key in the `SCRIPTS` row of `grantkee.asc`.
+- `tools/tests/gateway-pin.d/` holds a release from a local dry run of telcoin-network's release script (`RELEASE_DRY_RUN=1`), signed by a throwaway key that is never a release key: `release/<tag>/` with its `SHA256SUMS-edge`, `SHA256SUMS-edge.asc` and `IMAGE_DIGEST-*` files, `node/` with the same run's `SHA256SUMS` and its signature, and the key's public half in `keys/rehearsal.asc`.
+  Its digest lines name the dry run's local registry, so `gateway_pin_test.sh` passes a `--gateway-lib` file that sets `GW_RELEASE_IMAGE_REPO` to that repository.
+  The test trusts the throwaway key through `TN_RELEASE_KEYS_DIR` with `--release-dir`, so `lib/release-keys` is never touched.
+  The key does not expire; the cases on its real signature skip without a working real `gpg` (`REAL_GPG`), and every other case re-signs copies of the files with `signing.sh` keys and runs in all three environments.
+  Every file is as the dry run wrote it, and all of them are refreshed together from a new dry run (`gateway-pin.d/README`).
 - The node admission settings have `network_config_test.sh` (the renderer), `setup_node_admission_test.sh` and `edit_config_admission_test.sh`.
 
 Nothing under `tools/tests/` is updater-tracked or carries a sidecar. The UI's own tests live

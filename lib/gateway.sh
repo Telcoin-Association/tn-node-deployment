@@ -52,14 +52,29 @@
 GATEWAY_VERSION="2.2.0"
 
 # Image trust (contract 3.4). Only <repository>@sha256:<64 lowercase hex>.
+# The package every signed telcoin-network release publishes its worker-gateway
+# image to, for mainnet and testnet tags alike. The release names the image in
+# IMAGE_DIGEST-worker-gateway, whose hash is a line of SHA256SUMS-edge, which
+# the release keys sign in SHA256SUMS-edge.asc. A testnet or mainnet pin is an
+# image in this package.
+GW_RELEASE_IMAGE_REPO="ghcr.io/telcoin-association/tn-worker-gateway"
+# Devnet takes any digest from these repositories: the Artifact Registry
+# repository of devnet builds, telcoin-network's dev package (its
+# make docker-worker-gateway pushes dev-worker-gateway-<tag> there) and the
+# release package.
 # network-gated: devnet allow-list of worker-gateway repositories; gw_image_allowed reads it for devnet only
-GW_DEVNET_IMAGE_REPOS="us-docker.pkg.dev/telcoin-network/tn-public/worker-gateway"
-# The digests this scripts release pins (full <repo>@sha256:... references; the
-# signed MANIFEST covers this file). Empty: no gateway on that network yet.
-# network-gated: the testnet pin; gw_image_allowed reads it for testnet only
-GW_TESTNET_IMAGE_PIN=""
-# network-gated: the mainnet pin; gw_image_allowed reads it for mainnet only
-GW_MAINNET_IMAGE_PIN=""
+GW_DEVNET_IMAGE_REPOS="us-docker.pkg.dev/telcoin-network/tn-public/worker-gateway ghcr.io/telcoin-association/tn-dev ghcr.io/telcoin-association/tn-worker-gateway"
+# The image this scripts release pins per network, and on the same line the
+# telcoin-network release it comes from: the pin is that release's
+# IMAGE_DIGEST-worker-gateway line (GW_RELEASE_IMAGE_REPO@sha256:<64 hex>), and
+# the release is a tag of the network (tn_release_tag_ok). Set both or neither.
+# tools/check-gateway-pin.sh checks a set pin against the signed release in CI
+# and before an installer is published. Empty: no gateway on that network yet.
+# The signed MANIFEST covers this file.
+# network-gated: the testnet pin and its release (vX.Y.Z-adiri); gw_image_allowed reads them for testnet only
+GW_TESTNET_IMAGE_PIN="" GW_TESTNET_PIN_RELEASE=""
+# network-gated: the mainnet pin and its release (vX.Y.Z); gw_image_allowed reads them for mainnet only
+GW_MAINNET_IMAGE_PIN="" GW_MAINNET_PIN_RELEASE=""
 # Every flag the unit passes; gw_image_probe needs each in the image's --help.
 GW_REQUIRED_FLAGS="--listen-addr --probe-addr --metrics --upstream-rpc-url --upstream-readiness-url --worker-id --redirect-queries --trusted-proxies"
 # docker for the unit text when `command -v docker` gives no absolute path.
@@ -446,22 +461,47 @@ gw_validate_inputs() {
 # Image
 # -----------------------------------------------------------------------------
 
+# _gw_pin_ok NETWORK PIN RELEASE -- rc 0 when NETWORK's pin can be used: PIN is
+# ${GW_RELEASE_IMAGE_REPO}@sha256:<64 lowercase hex> and RELEASE, the
+# telcoin-network release recorded beside it, is a NETWORK release tag
+# (tn_release_tag_ok). rc 1 with GW_ERR: a defect of this scripts release,
+# which tools/check-gateway-pin.sh refuses before a release is published.
+_gw_pin_ok() {
+    local net="$1" pin="$2" rel="$3" hex re why=""
+    re="^[${_GW_DIGITS}abcdef]{64}$"
+    hex="${pin#"${GW_RELEASE_IMAGE_REPO}@sha256:"}"
+    if [[ "$hex" == "$pin" || ! "$hex" =~ $re ]]; then
+        why="the pin ${pin} is not ${GW_RELEASE_IMAGE_REPO}@sha256:<64 lowercase hex>"
+    elif [[ -z "$rel" ]]; then
+        why="no telcoin-network release is recorded beside the pin"
+    elif ! tn_release_tag_ok "$net" "$rel"; then
+        why="the release recorded beside the pin, '${rel}', is not a ${net} release tag"
+    fi
+    [[ -n "$why" ]] || return 0
+    GW_ERR="this scripts release's ${net} worker-gateway pin cannot be used: ${why}; a corrected scripts release is needed (update-scripts.sh)"
+    return 1
+}
+
 # gw_image_allowed IMAGE NETWORK -- rc 0 when the trust rule of contract 3.4
-# takes IMAGE on NETWORK; rc 1 with GW_ERR. No output.
+# takes IMAGE on NETWORK; rc 1 with GW_ERR. No output. On testnet and mainnet
+# IMAGE must be the network's pin, and the pin must pass _gw_pin_ok.
 gw_image_allowed() {
-    local img="${1:-}" net="${2:-}" pin="" repo re
+    local img="${1:-}" net="${2:-}" pin="" rel="" repo re
     GW_ERR=""
     case "$net" in
         devnet) ;;
         # network-gated: testnet runs only its pin
-        testnet) pin="$GW_TESTNET_IMAGE_PIN" ;;
+        testnet) pin="$GW_TESTNET_IMAGE_PIN" rel="$GW_TESTNET_PIN_RELEASE" ;;
         # network-gated: mainnet runs only its pin
-        mainnet) pin="$GW_MAINNET_IMAGE_PIN" ;;
+        mainnet) pin="$GW_MAINNET_IMAGE_PIN" rel="$GW_MAINNET_PIN_RELEASE" ;;
         *) GW_ERR="unknown network '${net}' (testnet, mainnet or devnet)"; return 1 ;;
     esac
-    if [[ "$net" != "devnet" && -z "$pin" ]]; then
-        GW_ERR="this scripts release pins no worker-gateway image for ${net}"
-        return 1
+    if [[ "$net" != "devnet" ]]; then
+        if [[ -z "$pin" ]]; then
+            GW_ERR="this scripts release pins no worker-gateway image for ${net} yet (a later scripts release pins the image of a signed telcoin-network release; update-scripts.sh brings it)"
+            return 1
+        fi
+        _gw_pin_ok "$net" "$pin" "$rel" || return 1
     fi
     if [[ -z "$img" ]]; then
         GW_ERR="give the worker-gateway image as --image <repository>@sha256:<digest>"
@@ -479,7 +519,7 @@ gw_image_allowed() {
         return 1
     fi
     if [[ "$img" != "$pin" ]]; then
-        GW_ERR="image refused: ${net} runs only the worker-gateway image this scripts release pins (${pin})"
+        GW_ERR="image refused: ${net} runs only the worker-gateway image this scripts release pins (${pin}, from telcoin-network ${rel})"
         return 1
     fi
     return 0
@@ -1028,7 +1068,7 @@ gw_refresh() {
 }
 
 _gw_refresh_locked() {
-    local fn="${1:-}" rc=0 nnet="" pin="" moved=""
+    local fn="${1:-}" rc=0 nnet="" pin="" rel="" moved=""
     tn_gateway_installed || { _gw_refuse "the worker gateway is not installed (enable it with setup-gateway.sh --enable)" "$fn" || return 1; }
     _gw_load_meta || rc=$?
     [[ "$rc" -eq 0 ]] || { _gw_refuse "${GW_ERR}; run setup-gateway.sh --enable again with the settings you want" "$fn" || return 1; }
@@ -1048,13 +1088,13 @@ _gw_refresh_locked() {
     else
         case "$GW_V_NETWORK" in
             # network-gated: a refresh moves testnet to its pin
-            testnet) pin="$GW_TESTNET_IMAGE_PIN" ;;
+            testnet) pin="$GW_TESTNET_IMAGE_PIN" rel="$GW_TESTNET_PIN_RELEASE" ;;
             # network-gated: a refresh moves mainnet to its pin
-            mainnet) pin="$GW_MAINNET_IMAGE_PIN" ;;
+            mainnet) pin="$GW_MAINNET_IMAGE_PIN" rel="$GW_MAINNET_PIN_RELEASE" ;;
         esac
         if [[ -n "$pin" && "$pin" != "$GW_V_IMAGE" ]]; then
-            moved=" The image moved from ${GW_V_IMAGE} to ${pin}."
-            _gw_say step "Moving the worker gateway from ${GW_V_IMAGE} to ${pin}, the image this scripts release pins for ${GW_V_NETWORK}" "$fn"
+            moved=" The image moved from ${GW_V_IMAGE} to ${pin} (telcoin-network ${rel})."
+            _gw_say step "Moving the worker gateway from ${GW_V_IMAGE} to ${pin}, the image of telcoin-network ${rel} this scripts release pins for ${GW_V_NETWORK}" "$fn"
             GW_V_IMAGE="$pin"
         fi
     fi

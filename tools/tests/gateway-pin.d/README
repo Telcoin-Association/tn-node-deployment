@@ -1,0 +1,30 @@
+The files of one telcoin-network release, v0.99.0-adiri, as a dry run of
+telcoin-network's etc/release.sh wrote them (RELEASE_DRY_RUN=1, three
+components: the node, the worker gateway and the node record API).
+gateway_pin_test.sh runs tools/check-gateway-pin.sh on them.
+
+  keys/rehearsal.asc     the public half of the key the dry run signed with:
+                         a throwaway key made for the dry run, never a release
+                         key. Only its file name is changed, because a key file
+                         in lib/release-keys is named after a maintainer's login.
+  release/v0.99.0-adiri/ the release's edge files:
+    SHA256SUMS-edge              the edge manifest: the IMAGE_DIGEST file and
+                                 the tarball of the worker gateway and of the
+                                 node record API
+    SHA256SUMS-edge.asc          its signature by the throwaway key
+    IMAGE_DIGEST-worker-gateway  the worker-gateway image the release names
+    IMAGE_DIGEST-node-record-api the node record API image
+  node/SHA256SUMS        the node manifest of the same dry run
+  node/SHA256SUMS.asc    its signature by the same key
+
+The files the manifests list are left out (the tarballs, the node's
+IMAGE_DIGEST and chain configs), except the two edge IMAGE_DIGEST files: the
+tool reads only the manifest lines and IMAGE_DIGEST-worker-gateway. The images
+were pushed to the dry run's local registry, so both IMAGE_DIGEST files name
+127.0.0.1:<port>/<name>, never ghcr.io.
+
+Every file is as the dry run wrote it, byte for byte. Refresh them all together
+from one new dry run: one directory under release/, named by a testnet or a
+mainnet release tag. The test checks the release under the throwaway key only
+with real gpg, and skips those checks once the key has expired; its other
+checks copy these files and sign them with keys of their own.

@@ -68,11 +68,22 @@ Fix for every operator: `firewall-setup.sh` compared the sources of `--ssh-from`
 CIDR by its network address. Re-entering a source in another spelling, such as `1.2.3.4` after
 `1.2.3.4/32`, confirmed its rule and then deleted it as stale; for the SSH list that could lock
 the operator out (confirmed on ufw 0.36.2). Sources are now compared the way `ufw` stores them.
-Limits: no released worker-gateway image exists. devnet takes a digest from
-`us-docker.pkg.dev/telcoin-network/tn-public/worker-gateway`; testnet and mainnet refuse the
-enable until a scripts release pins a digest. Each client IP gets 100 requests a second and 32
-connections, so a relay that forwards many users' transactions counts as one client. The
-runbook is OPERATOR.md section 4.15.
+Limits: no signed telcoin-network release with a worker-gateway image exists yet. devnet takes a
+digest from `ghcr.io/telcoin-association/tn-dev`, `ghcr.io/telcoin-association/tn-worker-gateway`
+or `us-docker.pkg.dev/telcoin-network/tn-public/worker-gateway`; testnet and mainnet refuse the
+enable until a scripts release pins the image of a signed release (next entry). Each client IP
+gets 100 requests a second and 32 connections, so a relay that forwards many users'
+transactions counts as one client. The runbook is OPERATOR.md section 4.15.
+
+### Worker-gateway pins from signed telcoin-network releases, November 2026 -- testnet and mainnet pins name tn-worker-gateway and the release they come from, checked in CI
+Part of `scripts-v2.2.0`; see "setup-gateway 2.2.0 and lib/gateway 2.2.0" in [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+`lib/gateway.sh` takes a testnet or mainnet worker-gateway image only from `ghcr.io/telcoin-association/tn-worker-gateway`, the package every signed telcoin-network release publishes it to, and records beside each pin the telcoin-network release it comes from: `GW_TESTNET_IMAGE_PIN` with `GW_TESTNET_PIN_RELEASE`, `GW_MAINNET_IMAGE_PIN` with `GW_MAINNET_PIN_RELEASE`, one line per network.
+Both pins stay empty: no signed release with a worker-gateway image exists yet.
+On testnet and mainnet nothing changes for an operator until a scripts release sets a pin: the enable is refused as before, and the refusal now says that a later scripts release pins the image of a signed telcoin-network release.
+Devnet also takes `ghcr.io/telcoin-association/tn-dev`, where telcoin-network's unsigned gateway builds go, and the release package.
+The maintainer tool `tools/check-gateway-pin.sh` checks a set pin against its release: the release must be a tag of that network, so a release candidate never backs the mainnet pin; `SHA256SUMS-edge.asc` must verify against `lib/release-keys` under the rule node releases follow; `SHA256SUMS-edge` must list only that release's edge files, the worker gateway's among them; and the `IMAGE_DIGEST-worker-gateway` it lists must hold the pin.
+The "release manifest" CI job runs it on every `scripts-v*` tag, on every push to main and on a pull request that changes the pins, the verification code, the release keys, the check or a release, and the installer is published only when it passes.
+With both pins empty it downloads nothing and passes.
 
 ### Node requirements one-pagers 1.0, November 2026 -- one A4 page each for the Adiri testnet and mainnet, from guide 1.9
 Two new partner documents for prospective node operators, each a single A4 page with no cover

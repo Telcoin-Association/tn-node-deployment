@@ -2021,9 +2021,15 @@ the worker of the node it fronts, and every other call is proxied to the `--redi
   capability, never pulled by the unit. An enable with unchanged inputs changes nothing, and a
   failure after the first write puts the previous unit back. It never stops, starts or restarts
   the node.
-- No released worker-gateway image exists. devnet takes a digest from
-  `us-docker.pkg.dev/telcoin-network/tn-public/worker-gateway`; testnet and mainnet refuse the
-  enable until a scripts release pins a digest.
+- devnet takes a digest from `ghcr.io/telcoin-association/tn-dev` (telcoin-network's unsigned
+  builds), `ghcr.io/telcoin-association/tn-worker-gateway` (the release images) or
+  `us-docker.pkg.dev/telcoin-network/tn-public/worker-gateway`. testnet and mainnet take only
+  the pin in `lib/gateway.sh`: an image in `ghcr.io/telcoin-association/tn-worker-gateway`, as
+  the `IMAGE_DIGEST-worker-gateway` of a signed telcoin-network release names it, recorded with
+  that release. No signed release with a worker-gateway image exists yet, so both pins are empty
+  and testnet and mainnet refuse the enable until a scripts release sets one.
+- For maintainers: `tools/check-gateway-pin.sh` checks a set pin against its release's signed
+  `SHA256SUMS-edge`, in the "release manifest" CI job and before the installer is published.
 
 See [OPERATOR.md section 4.15](OPERATOR.md#415-worker-gateway). Full release note:
 [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).

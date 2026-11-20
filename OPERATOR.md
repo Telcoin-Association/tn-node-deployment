@@ -1653,10 +1653,13 @@ The gateway has two more listeners, on `127.0.0.1` only: the probe listener on 8
 
 Images.
 The gateway runs from a Docker image given by digest, `<repository>@sha256:<64 lowercase hex>`; a tag is refused.
-On devnet the repository must be `us-docker.pkg.dev/telcoin-network/tn-public/worker-gateway`.
-On testnet and mainnet only the digest this scripts release pins in `lib/gateway.sh` is taken, and `--image` may then be left out.
-This release pins none, so `--enable` there refuses with `this scripts release pins no worker-gateway image for <network>`.
-No released worker-gateway image exists yet.
+On testnet and mainnet only the image this scripts release pins in `lib/gateway.sh` is taken, and `--image` may be left out.
+Each pin is the image a signed telcoin-network release names in its `IMAGE_DIGEST-worker-gateway`, an image in `ghcr.io/telcoin-association/tn-worker-gateway`, and `lib/gateway.sh` records that release beside it.
+CI checks each pin against that release's signed `SHA256SUMS-edge`, and the installer of a scripts release is published only when the check passes.
+This release pins none, so `--enable` there refuses with `this scripts release pins no worker-gateway image for <network> yet`, and names `update-scripts.sh`, which brings a later scripts release that pins one.
+No signed telcoin-network release with a worker-gateway image exists yet.
+A pin that is not such an image, or that has no release of the network's own tag form beside it, is refused as a defect of the scripts release: `this scripts release's <network> worker-gateway pin cannot be used: ...`.
+On devnet the repository must be one of `ghcr.io/telcoin-association/tn-dev` (telcoin-network's unsigned builds, tagged `dev-worker-gateway-<tag>`), `ghcr.io/telcoin-association/tn-worker-gateway` (the release images) or `us-docker.pkg.dev/telcoin-network/tn-public/worker-gateway`.
 Before it writes anything, the enable pulls the digest when Docker does not hold it, then runs the image's `--help` and refuses an image that lacks a flag the unit passes.
 The unit itself never pulls (`--pull=never`).
 Docker must be installed and running; `setup-gateway.sh` does not install it.
@@ -1670,7 +1673,7 @@ docker inspect --format '{{index .RepoDigests 0}}' us-docker.pkg.dev/telcoin-net
 ```
 
 The last command prints the `<repository>@sha256:<digest>` reference to pass as `--image`.
-The push needs write access to that repository, the only one devnet takes.
+The push needs write access to that repository, one of the three devnet takes.
 
 Same host, behind Caddy.
 
@@ -1887,7 +1890,7 @@ sudo bash ~/telcoin-node-scripts/setup-gateway.sh --refresh
 
 A refresh renders the unit again from `gateway.meta` with the scripts on disk and, when the result differs from the installed unit, writes it and restarts the gateway only.
 With `--image <repository>@sha256:<digest>` it moves the gateway to that image, under the same image rules as an enable.
-On testnet and mainnet, without `--image`, it moves the gateway to the image this scripts release pins when `gateway.meta` holds another, and says so: `Moving the worker gateway from <old> to <new>, the image this scripts release pins for testnet`.
+On testnet and mainnet, without `--image`, it moves the gateway to the image this scripts release pins when `gateway.meta` holds another, and says so: `Moving the worker gateway from <old> to <new>, the image of telcoin-network <release> this scripts release pins for testnet`.
 It checks the network first: on a node host it refuses when `gateway.meta` names another network than the node's, and on a host with no node it asks the upstream for its chain id, as the enable does.
 When nothing differs it says `the worker gateway was already current; nothing had to change`.
 A scripts update (section 4.1) replaces the scripts on disk and nothing else: the installed unit, `gateway.meta` and the running container stay as they were.
