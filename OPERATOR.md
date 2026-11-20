@@ -666,6 +666,116 @@ Read the lines above the verdict: while the syncs fail the allowlist keeps its l
 - `--enable` with committee mode on and an older `lib/common.sh` prints the resync's error but exits 0, because the `ufw` rules went through.
 - A run of `--p2p-committee sync` stopped between a unit rewrite and its reload is not finished on exit; run it again.
 
+### 2.11 AWS one-click
+
+On AWS, a CloudFormation stack in your own account builds a ready node host: the network, the instance, the data volume, the host preparation and the scripts.
+It does not run setup: you run it from a Session Manager shell, so the BLS passphrase never enters AWS.
+The stack is for the Adiri testnet; setup's network menu picks the network as on any host, and mainnet stays off (section 1.5).
+The template is [aws/node.yaml](aws/node.yaml).
+
+**Launch.**
+Telcoin publishes the template with every script release, as `templates/<scripts-vX.Y.Z>/node.yaml` in its template bucket, and the launch link opens it on the CloudFormation console's quick-create page.
+Pick the region at the top of the console first.
+Without the link, download `aws/node.yaml` from the release tag and create the stack from it (CloudFormation, `Create stack`, `Upload a template file`).
+Launch it signed in as an administrator of the account, or as a user allowed to create the VPC, EC2, IAM role and Systems Manager resources listed below: CloudFormation creates them with your permissions.
+On the console page, leave `Permissions` (the IAM role) empty and leave deployment validations on.
+The stack creates one IAM role, the instance's, so tick `I acknowledge that AWS CloudFormation might create IAM resources`.
+
+| Parameter | Choices |
+|---|---|
+| `Preset` | `FullNode` (default): c7i.2xlarge, 8 vCPU (4 cores), 16 GiB. `PublicRPC`: c7i.4xlarge, 16 vCPU (8 cores), 32 GiB, plus TCP 80 and 443 for Caddy (section 5). `Validator`: c7i.8xlarge, 32 vCPU (16 cores), 64 GiB. |
+| `InstanceType` | Empty for the preset's type, or another x86_64 type. Graviton (arm64) types are refused: the image is amd64. |
+| `DataVolumeSize` | `2000` (default) or `4000` GiB. |
+| `AutoUpdate` | `Enabled` (default) or `Disabled`: the daily update association below. |
+| `ImageId` | Canonical's public SSM parameter for the current Ubuntu 24.04 amd64 image. Leave it as it is. |
+
+The presets follow the recommended column of section 1.1. A validator also needs the Association's approval and a stake (section 6); the host is the same.
+
+**What the stack creates.**
+
+- A VPC (`10.0.0.0/16`) with one public subnet in the region's first availability zone, an internet gateway and a default route.
+- An Elastic IP on the instance's network interface, in place before the instance boots, so setup detects it as the public IP and advertises it in the multiaddrs.
+- A security group: UDP 49590 and 49594 in from everywhere, TCP 80 and 443 on `PublicRPC` only, no SSH, everything out. TCP 43174, the testnet health monitor's port (section 4.6), stays closed; add a rule for `104.155.184.201/32` yourself if you turn the health monitor on.
+- An Ubuntu 24.04 instance from Canonical's image, with IMDSv2 required and an encrypted 50 GiB gp3 root volume. Its role trusts `ec2.amazonaws.com` only and carries only `AmazonSSMManagedInstanceCore`, the policy Session Manager and Run Command need.
+- An encrypted gp3 data volume (10,000 IOPS, 300 MB/s), mounted at `/var/lib/telcoin` by UUID with `nofail`, and kept when you delete the stack. The stack takes no snapshots and sets up no backups: a snapshot of this volume is a copy of the node keys (section 4.12).
+- First-boot preparation, as root: the CVE-2026-31431 mitigation (`/etc/modprobe.d/telcoin-algif-aead.conf`, section 1.2) before anything else, swap off, the data volume formatted ext4 only when it carries no filesystem, and the scripts installed for the `ubuntu` user in `/home/ubuntu/telcoin-node-scripts` by the installer of section 2.1. Time sync stays as Canonical's image sets it up (chrony with the Amazon Time Sync Service).
+- The stack reaches `CREATE_COMPLETE` only once that preparation reported success. On a failure it rolls back, the `HostReady` event gives the reason, and `/var/log/cloud-init-output.log` on the instance has the detail.
+- The daily update association and two Run Command documents (below).
+
+**Set up the node.**
+Open the `SessionManagerUrl` output, or the instance in the EC2 console, `Connect`, `Session Manager`.
+The shell runs as `ssm-user`, which has `sudo`.
+Run the two commands from the outputs, in this order:
+
+```bash
+sudo bash /home/ubuntu/telcoin-node-scripts/setup-node.sh
+sudo bash /home/ubuntu/telcoin-node-scripts/firewall-setup.sh --enable --ssh-from 10.0.0.0/16
+```
+
+Setup runs as in section 2.2.
+Press Enter at `Data directory [/var/lib/telcoin]`: that is the data volume, and setup hands the mount point (root-owned, holding only `lost+found`) to the `telcoin` user.
+The second command is the `FirewallCommand` output: it turns `ufw` on as in section 2.6 and allows SSH from inside the VPC only.
+Session Manager needs no inbound port, so neither `ufw` nor the security group gets in its way.
+
+To copy the key archive of section 2.5 off the host, run SSH through Session Manager: add your SSH public key to `~/.ssh/authorized_keys` of `ssm-user` in the Session Manager shell, then from your own machine, with the AWS CLI and its Session Manager plugin (the `InstanceId` output in place of the example ID):
+
+```bash
+scp -o ProxyCommand="aws ssm start-session --target %h --document-name AWS-StartSSHSession --parameters portNumber=%p" \
+  ssm-user@i-0123456789abcdef0:telcoin-keys.tgz .
+```
+
+The stack does not install the Node Manager UI (section 4.5).
+To use it, run `sudo bash /home/ubuntu/telcoin-node-scripts/ui/install-ui.sh`, forward its port through Session Manager, and open `http://127.0.0.1:8080/#t=<token>` with the token from `sudo cat /etc/telcoin-ui/token`:
+
+```bash
+aws ssm start-session --target i-0123456789abcdef0 \
+  --document-name AWS-StartPortForwardingSession --parameters portNumber=8080,localPortNumber=8080
+```
+
+`open-ui.sh` needs SSH, so it does not apply here.
+
+**Updates.**
+With `AutoUpdate` enabled, a State Manager association runs the stack's update document on the instance every day at 03:00 UTC, after a random wait of up to an hour.
+It does nothing until setup has written `/etc/telcoin/.node-meta`; then it runs:
+
+1. `update-scripts.sh` as `ubuntu`, answered `y` (section 4.1).
+2. `update-node.sh --json --check`.
+3. When it reports `update_available`: `update-node.sh --json --prepare --ref <latest_ref>`, then `update-node.sh --json --apply`, without `--yes`. An update that is already prepared is applied, not prepared again.
+
+The apply runs the quorum check and the epoch wait of section 4.2 like any other.
+On a node that is not a staked validator it goes ahead.
+On a staked validator, or one whose stake cannot be read, `update-node.sh` refuses an apply without `--yes`: the prepared update waits, and the run ends with `the update is prepared and waits`.
+Apply it when the node may restart: in Systems Manager, `Run Command`, run the document the `ApplyUpdateDocument` output names on the instance.
+It runs `update-node.sh --json --apply --yes`.
+A one-way update (section 4.2; the check reports `storage_migration` true) waits on every node: the association prepares it, never applies it, and ends with `The update is prepared and waits`.
+Apply it with the same document once you accept that older releases cannot open the data dir afterwards.
+The association never runs `ui/install-ui.sh --update` or `setup-alerts.sh --refresh`: when its output (State Manager, the association, `Execution history`) shows `update-scripts.sh` printing one of them, run it yourself.
+
+**Telcoin's access.**
+None.
+The stack creates no cross-account role and no Systems Manager hybrid activation, and names no Telcoin principal: the only principal is `ec2.amazonaws.com`.
+Updates are pulled: Telcoin publishes signed releases, and the association on your instance downloads and verifies them (section 4.10).
+The cfn-guard rules in `aws/rules/` pin this, and CI checks the template against them on every change.
+
+**Changing the stack later.**
+Every stack update reads Canonical's image parameter again.
+Once a newer Ubuntu image is out, an update tries to replace the instance, which fails while the old instance holds the network interface, and the stack rolls back unchanged.
+Make later changes on the resources instead: change the instance type in the EC2 console (stop the instance, `Actions`, `Instance settings`, `Change instance type`, start it), and stop the daily updates by deleting the association in State Manager.
+Stopping the instance stops the node; on a committee node, keep clear of the epoch boundary (section 4.2).
+
+**Deleting the stack.**
+It deletes everything but the data volume (the `DataVolumeId` output), which holds the node keys and the chain data.
+Back up the keys first (section 2.5), then delete the volume in the EC2 console, `Volumes`, once you no longer need it.
+A stack whose creation failed leaves its data volume behind too.
+
+**Quotas.**
+Each stack takes one VPC and one Elastic IP, and an AWS region allows 5 of each by default.
+Ask for more in Service Quotas before a sixth node in one region.
+
+**Cost.**
+You pay AWS directly, mainly for the instance (by the hour, by type), the data volume (its size, plus the provisioned 10,000 IOPS and 300 MB/s above what gp3 includes, 3,000 IOPS and 125 MB/s), the Elastic IP (public IPv4 addresses are billed by the hour), and data transfer out to the internet: P2P traffic to peers, and on `PublicRPC` the RPC traffic.
+The AWS Pricing Calculator gives the figures for your region.
+
 ## 3. Confirm the node is syncing, then synced
 
 Check that the service is up and watch its log for a minute:

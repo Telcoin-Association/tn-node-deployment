@@ -267,3 +267,39 @@ jobs:
             exit 1
           fi
           echo "All sidecars are fresh and committed."
+
+  # The AWS one-click stack (aws/node.yaml) and the cfn-guard rules that pin its security
+  # posture (aws/rules/*.guard, with their test cases in aws/rules/tests/). Not a required check.
+  cfn-lint:
+    name: cfn lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      # cfn-lint and every dependency pinned by hash; pip refuses any other file.
+      - name: Install cfn-lint
+        run: python -m pip install --require-hashes -r aws/requirements-ci.txt
+      # cfn-guard from its GitHub release, checked against the sha256 below before it runs.
+      - name: Install cfn-guard
+        env:
+          GUARD_VERSION: 3.2.2
+          GUARD_SHA256: 65ce4d16c4cc26fac37176a7127ba3f36b5aef12e3afd9b847f7c1e8c3d823d7
+        run: |
+          curl --proto '=https' --tlsv1.2 -fsSL -o "$RUNNER_TEMP/cfn-guard.tar.gz" \
+            "https://github.com/aws-cloudformation/cloudformation-guard/releases/download/${GUARD_VERSION}/cfn-guard-v3-x86_64-ubuntu-latest.tar.gz"
+          echo "${GUARD_SHA256}  $RUNNER_TEMP/cfn-guard.tar.gz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/cfn-guard"
+          tar -xzf "$RUNNER_TEMP/cfn-guard.tar.gz" -C "$RUNNER_TEMP/cfn-guard" --strip-components=1
+          echo "$RUNNER_TEMP/cfn-guard" >> "$GITHUB_PATH"
+      - name: cfn-lint the template
+        run: cfn-lint aws/node.yaml
+      - name: cfn-guard rules on the template
+        run: cfn-guard validate --rules aws/rules --data aws/node.yaml --show-summary fail
+      - name: cfn-guard rule tests
+        run: cfn-guard test --dir aws/rules

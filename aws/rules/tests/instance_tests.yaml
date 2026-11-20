@@ -1,0 +1,39 @@
+# cfn-guard test cases for aws/rules/instance.guard: cfn-guard test --dir aws/rules
+---
+- name: an instance that requires IMDSv2 passes
+  input:
+    Resources:
+      NodeInstance:
+        Type: AWS::EC2::Instance
+        Properties:
+          ImageId: ami-0123456789abcdef0
+          MetadataOptions:
+            HttpEndpoint: enabled
+            HttpTokens: required
+  expectations:
+    rules:
+      imdsv2_required: PASS
+
+- name: an instance that also takes IMDSv1 fails
+  input:
+    Resources:
+      NodeInstance:
+        Type: AWS::EC2::Instance
+        Properties:
+          ImageId: ami-0123456789abcdef0
+          MetadataOptions:
+            HttpTokens: optional
+  expectations:
+    rules:
+      imdsv2_required: FAIL
+
+- name: an instance without metadata options fails
+  input:
+    Resources:
+      NodeInstance:
+        Type: AWS::EC2::Instance
+        Properties:
+          ImageId: ami-0123456789abcdef0
+  expectations:
+    rules:
+      imdsv2_required: FAIL

@@ -738,3 +738,74 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   `admission: Closed` admits; the extra disk the tndb copy needs. Add any of them if operators
   ask, with the then-current citations. (guide-1.5)
   Why: the guide names only what an operator acts on; these are maintainer or dashboard facts.
+
+## AWS one-click stack
+
+The CloudFormation stack under `aws/` (design agreed 2026-11-17, branch
+`rogerrrosas/cloudformation-aws`). Telcoin gets no access to customer accounts or nodes; updates
+are pulled through the customer's own State Manager association. The account side lives in
+`Telcoin-Association/ta-aws-infra` (`docs/backlog.md`, section 6).
+
+- **Immutable OIDC subjects.** The publish role in ta-aws-infra (PR #3) trusts only the immutable
+  subject. A repository admin opts this repository in
+  (`gh api -X PUT repos/Telcoin-Association/tn-node-deployment/actions/oidc/customization/sub -F use_default=true -F use_immutable_subject=true`),
+  then reruns Publish installer on the current tag
+  (`gh workflow run publish-installer.yml --ref scripts-v2.1.0`) to confirm the Pages deploy still
+  works; it republishes the same `install.sh`. If it fails, the setting goes back.
+- **Signed commits.** The branch's commits are unsigned: no signing key is configured on the
+  maintainer machine that made them. Re-sign them (`git rebase -S`) before merge once the issue #30
+  ruleset requires signatures.
+- **Publishing is not wired yet.** The publish workflow needs the GitHub environment
+  `aws-templates` (deployment refs limited to `scripts-v*` tags) and its variables
+  `AWS_TEMPLATES_ROLE_ARN` and `AWS_TEMPLATES_BUCKET`, the outputs of the `tn-node-templates`
+  account in ta-aws-infra (applied 2026-11-18, merged with its PR #3 on 2026-11-20). Until then,
+  the workflow fails on a `scripts-v*` tag.
+- **The widget link.** The frontend's quick-create link names a pinned
+  `templates/<tag>/node.yaml`. Move it with each scripts release that changes the template.
+- **Verify on a first real launch** (a sandbox account): Canonical's SSM parameter path resolves;
+  the SSM agent registers to the customer's account; `algif_aead` is not loaded at first boot, so
+  setup's CVE-2026-31431 check passes; interactive setup detects the Elastic IP and advertises it;
+  setup accepts the data volume mounted at `/var/lib/telcoin` (owner, mode, `lost+found`);
+  `printf 'y\n' | update-scripts.sh` works under Run Command; the association prepares and applies
+  on a full node and leaves the apply to the operator on a staked validator; c7i is offered in the
+  subnet's availability zone.
+- **Before mainnet.** Check that Canonical's Ubuntu 24.04 AMI supports NitroTPM (`describe-images`:
+  `BootMode` `uefi`, `TpmSupport` `v2.0`). Mainnet seals the passphrase credential with the TPM
+  unless the operator passes `--allow-no-tpm`; without NitroTPM the stack needs its own AMI. Then
+  revisit the presets and the firewall's `--ssh-from` for mainnet.
+- **The partner guide PDF was built with pandoc 3.14**, WeasyPrint 70.0 and poppler 26.11.0 from
+  Homebrew, newer than the reference pandoc 3.12.1 in AGENTS.md, which Homebrew no longer ships.
+  A maintainer on 3.12.1 who rebuilds it may get different bytes; move the reference to 3.14, or
+  rebuild with `--force` on 3.12.1 before merge.
+- **A stack update can try to replace the instance.** CloudFormation reads Canonical's AMI
+  parameter again on every update, so once a newer image exists an update replaces the instance,
+  which fails on the network interface it holds and rolls back (reasoned from the docs, not
+  tested). The docs tell operators to change the instance type in EC2 instead. A fix is an
+  optional `ImageId` parameter that pins the current image.
+- **The subnet takes the region's first availability zone**, which may not offer c7i. An
+  `AvailabilityZone` parameter fixes it if a launch hits that.
+- **Not checked without AWS:** the root device name `/dev/sda1` on Canonical's images, the Session
+  Manager console URL in the Outputs, and a home directory for `ssm-user` (the docs copy the key
+  backup off the host through Session Manager).
+- **Check the template against scripts-v2.2.0.** The branch is rebased onto main after PR #68
+  (the worker gateway) and #69 (scripts-v2.2.0: tn-p2p-allow-sync v0.1.2 and the release keys from
+  tn-release-signing). The 2.2.0 notes say 2.1.0 hosts re-run the installer to take a release
+  signed only by the new keys, so on a stack launched before 2.2.0 the association's
+  `update-scripts.sh` step should fail until the operator runs the installer once (not tested on a
+  stack).
+- **A least-privilege deployer role (after the 2026-11-20 demo).** The docs ask for an account
+  administrator, or a user allowed to create the VPC, EC2, IAM role and Systems Manager resources.
+  For accounts that hand out neither: launch once in a sandbox account, generate the policy from
+  that launch's CloudTrail record (IAM Access Analyzer policy generation), test it with a second
+  launch, and ship it as a small template that creates a CloudFormation service role the operator
+  picks under the console's Permissions. Publish it beside `node.yaml`, give it cfn-guard rules,
+  and document it with the launch steps. Not before a real launch: a hand-written list would be a
+  guess. The generator reads a CloudTrail trail, not Event history, so the sandbox account needs a
+  trail delivering to S3 before that launch. A trail of the account's own is simpler than the
+  organization trail, whose bucket in another account would have to grant Access Analyzer read
+  access.
+- **After the sandbox launch.** Delete the stack, then delete the data volume by hand: the stack
+  retains it (`DeletionPolicy: Retain`), it keeps billing for its size and IOPS, and it holds a
+  copy of the node keys.
+- **Later, if operators ask.** An existing-VPC option (the default quotas are 5 VPCs and 5 Elastic
+  IPs per region); `open-ui.sh` reaching the Node Manager UI through Session Manager instead of SSH.

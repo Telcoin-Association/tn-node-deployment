@@ -1,0 +1,71 @@
+#
+# aws/node.yaml: Telcoin gets no access to the account or the node. The only IAM principal is
+# ec2.amazonaws.com (the instance role), the role carries AmazonSSMManagedInstanceCore and nothing
+# else, and no other resource in the template can carry a principal: every resource type must be
+# on the list below, none of which takes a resource policy.
+#
+
+let iam_roles = Resources.*[ Type == 'AWS::IAM::Role' ]
+
+# The resource types node.yaml may use. A new type is a review question first: one that takes a
+# policy (a bucket, a key, a topic, a VPC endpoint, ...) could name a principal outside the account.
+let allowed_types = [
+    'AWS::CloudFormation::WaitCondition',
+    'AWS::CloudFormation::WaitConditionHandle',
+    'AWS::EC2::EIP',
+    'AWS::EC2::EIPAssociation',
+    'AWS::EC2::Instance',
+    'AWS::EC2::InternetGateway',
+    'AWS::EC2::NetworkInterface',
+    'AWS::EC2::Route',
+    'AWS::EC2::RouteTable',
+    'AWS::EC2::SecurityGroup',
+    'AWS::EC2::SecurityGroupIngress',
+    'AWS::EC2::Subnet',
+    'AWS::EC2::SubnetRouteTableAssociation',
+    'AWS::EC2::Volume',
+    'AWS::EC2::VolumeAttachment',
+    'AWS::EC2::VPC',
+    'AWS::EC2::VPCGatewayAttachment',
+    'AWS::IAM::InstanceProfile',
+    'AWS::IAM::Role',
+    'AWS::SSM::Association',
+    'AWS::SSM::Document'
+]
+
+rule only_allowed_resource_types {
+    Resources.* {
+        Type in %allowed_types
+            <<Resource type is not on the allowed list in aws/rules/iam.guard (it could carry a principal outside the account)>>
+    }
+}
+
+rule role_trusts_only_ec2 when %iam_roles !empty {
+    %iam_roles.Properties.AssumeRolePolicyDocument.Statement[*] {
+        NotPrincipal !exists
+            <<A trust statement may not use NotPrincipal>>
+        Principal is_struct
+            <<The trust principal must be { Service: ec2.amazonaws.com }, never "*">>
+        Principal.AWS !exists
+            <<No AWS account or role principal: Telcoin gets no cross-account access>>
+        Principal.Federated !exists
+            <<No federated principal>>
+        Principal.CanonicalUser !exists
+            <<No canonical user principal>>
+        Principal.Service[*] == 'ec2.amazonaws.com'
+            <<The only trusted service is ec2.amazonaws.com>>
+    }
+}
+
+rule role_has_only_ssm_core when %iam_roles !empty {
+    %iam_roles.Properties {
+        Policies !exists
+            <<No inline policies on the instance role>>
+        ManagedPolicyArns exists
+        ManagedPolicyArns[*] {
+            this == /^arn:aws(-[a-z]+)*:iam::aws:policy\/AmazonSSMManagedInstanceCore$/ or
+            'Fn::Sub' == 'arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore'
+                <<The only managed policy is AmazonSSMManagedInstanceCore>>
+        }
+    }
+}

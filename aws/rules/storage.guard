@@ -1,0 +1,35 @@
+#
+# aws/node.yaml: every EBS volume is encrypted, the root volume included (an instance must map its
+# block devices explicitly, because the AMI's default mapping may not encrypt), and the data volume
+# (the node keys and the chain data) is kept when the stack is deleted or the volume replaced.
+#
+
+let instances = Resources.*[ Type == 'AWS::EC2::Instance' ]
+let volumes = Resources.*[ Type == 'AWS::EC2::Volume' ]
+
+rule instance_volumes_encrypted when %instances !empty {
+    %instances.Properties {
+        BlockDeviceMappings exists
+            <<Map the root volume explicitly, with Encrypted true>>
+        BlockDeviceMappings[*] {
+            when Ebs exists {
+                Ebs.Encrypted == true
+                    <<Every EBS block device of the instance must be encrypted>>
+            }
+        }
+    }
+}
+
+rule data_volumes_encrypted when %volumes !empty {
+    %volumes.Properties.Encrypted == true
+        <<Every EBS volume must be encrypted>>
+}
+
+rule data_volumes_retained when %volumes !empty {
+    %volumes {
+        DeletionPolicy == 'Retain'
+            <<The data volume holds the node keys: DeletionPolicy Retain>>
+        UpdateReplacePolicy == 'Retain'
+            <<The data volume holds the node keys: UpdateReplacePolicy Retain>>
+    }
+}

@@ -523,6 +523,48 @@ fixture `tools/tests/gateway-pin.d/`);
 `gateway_smoke.sh <image>` and `caddy_gateway_smoke.sh <image>` need Docker and are not run by
 `run.sh`.
 
+## AWS one-click stack
+
+`aws/node.yaml` is a hand-written CloudFormation template that operators launch from a
+quick-create link to get a ready node host in their own AWS account (OPERATOR.md section 2.11).
+It leaves a host, not a running node: the operator runs `setup-node.sh` and `firewall-setup.sh`
+from a Session Manager shell, so the BLS passphrase never enters AWS. Rules:
+
+- Telcoin gets no access to the account or the node, on any network: no cross-account role, no
+  Systems Manager hybrid activation, no Telcoin principal anywhere in the template. The instance
+  role trusts `ec2.amazonaws.com` only and carries `AmazonSSMManagedInstanceCore` only. Mainnet
+  refuses Telcoin access (`require_testnet`); never work around that from here.
+- `aws/rules/*.guard` pins the posture: the role's principal and policy, no ingress on TCP 22 (no
+  all-protocol ingress either), IMDSv2 required, every EBS volume encrypted, the data volume
+  retained, and an allowed list of resource types that take no resource policy. A new resource
+  type goes on that list only after review, and every rule keeps passing and failing cases in
+  `aws/rules/tests/`.
+- Updates are pull-only, through the State Manager association: `update-scripts.sh` answered
+  `y`, then `update-node.sh --json --check`, `--prepare --ref <latest_ref>` and `--apply`. The
+  association never passes `--yes` to `--apply`, so a staked validator's prepared update waits for
+  the operator's apply document, the one place `--yes` appears. It never applies an update whose
+  check reports `storage_migration` true, on any node: that update waits for the apply document
+  too, because `update-node.sh` asks for no snapshot in `--json` mode. It never runs
+  `ui/install-ui.sh --update` or `setup-alerts.sh --refresh`.
+- No snapshots or backup plan for the data volume: a snapshot is a copy of the node keys. The
+  volume keeps `DeletionPolicy: Retain` and `UpdateReplacePolicy: Retain`, and the user data
+  formats it only when it carries no signature.
+- `aws/` is not updater-tracked: no `.sha256` sidecars, never a row of `SCRIPTS`, `UI_BUNDLE` or
+  `TESTNET_ADDONS_BUNDLE`. When the template would need a script to change, change the script in
+  a scripts release first.
+- CI checks the template with cfn-lint and cfn-guard, not the shell inside it. After editing the
+  user data or a document's `runCommand`, extract them and run `bash -n` and `shellcheck` (the
+  documents' scripts with `-s sh`: Run Command may run them with `sh`, so keep them POSIX).
+- Publishing is a contract with ta-aws-infra: `publish-aws-templates.yml` runs on a `scripts-v*`
+  tag on main, in the GitHub environment `aws-templates`, assumes `vars.AWS_TEMPLATES_ROLE_ARN`
+  (the role `tn-node-templates-publish`) in us-east-1, and writes
+  `templates/<tag>/node.yaml` in `vars.AWS_TEMPLATES_BUCKET` with one `s3:PutObject`. The role
+  may only put objects under `templates/*`, so the workflow never lists, deletes or sets ACLs.
+  Change the environment, the variables or the key layout only together with ta-aws-infra.
+- The `cfn lint` CI job (not a required check) installs cfn-lint by hash from
+  `aws/requirements-ci.txt` and cfn-guard by sha256; the cfn-guard version and sha256 appear in
+  `ci.yml` and in `publish-aws-templates.yml`, so move them together.
+
 ## Partner documents
 
 `docs/partner/` holds one directory per partner document plus a shared `assets/` tree:

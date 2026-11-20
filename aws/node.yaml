@@ -1,0 +1,650 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Telcoin Network node host (Adiri testnet) in your own AWS account: a VPC with one public
+  subnet, an Elastic IP, a security group for the node's P2P ports, an Ubuntu 24.04 instance
+  reached through Session Manager only, and an encrypted gp3 data volume mounted at
+  /var/lib/telcoin that is kept when the stack is deleted. The stack leaves a ready host, not a
+  running node: open a Session Manager shell and run the SetupCommand and FirewallCommand from
+  the Outputs. Telcoin gets no access to this account or the node; updates are pulled from signed
+  releases by a daily State Manager association in your account.
+
+# Rules that pin this template's security posture are in aws/rules/*.guard (cfn-guard); CI runs
+# them with cfn-lint on every change. In short: the only IAM principal is ec2.amazonaws.com, the
+# instance role carries AmazonSSMManagedInstanceCore and nothing else, no ingress on TCP 22,
+# IMDSv2 required, every EBS volume encrypted, and the data volume is retained.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Node
+        Parameters:
+          - Preset
+          - InstanceType
+          - DataVolumeSize
+          - AutoUpdate
+      - Label:
+          default: Image (leave as it is)
+        Parameters:
+          - ImageId
+    ParameterLabels:
+      Preset:
+        default: Node preset
+      InstanceType:
+        default: Instance type override
+      DataVolumeSize:
+        default: Data volume size (GiB)
+      AutoUpdate:
+        default: Daily pull of signed updates
+      ImageId:
+        default: Ubuntu 24.04 image (Canonical's public SSM parameter)
+
+Parameters:
+  Preset:
+    Type: String
+    Default: FullNode
+    AllowedValues:
+      - FullNode
+      - PublicRPC
+      - Validator
+    Description: >-
+      FullNode (c7i.2xlarge), PublicRPC (c7i.4xlarge, also opens TCP 80 and 443 for Caddy) or
+      Validator (c7i.8xlarge). Validating also needs the Telcoin Association's approval and an
+      on-chain stake; the host is the same.
+  InstanceType:
+    Type: String
+    Default: ''
+    # Empty, or an x86_64 instance type: the image is amd64, so Graviton (arm64) types, whose
+    # family carries a "g" after the generation digit, and a1 are refused here rather than at launch.
+    AllowedPattern: '^$|^(?!a1\.)[a-z]+[0-9]+[a-fh-z-]*\.[a-z0-9-]+$'
+    ConstraintDescription: >-
+      must be empty (the preset's type) or an x86_64 instance type such as c7i.4xlarge; Graviton
+      (arm64) types do not run the amd64 image.
+    Description: Leave empty for the preset's type, or name another x86_64 type.
+  DataVolumeSize:
+    Type: Number
+    Default: 2000
+    AllowedValues:
+      - 2000
+      - 4000
+    Description: >-
+      Size of the encrypted gp3 data volume in GiB: 2000 (2 TB, the minimum for every role) or
+      4000 (4 TB, recommended). It runs at 10000 IOPS and 300 MB/s.
+  AutoUpdate:
+    Type: String
+    Default: Enabled
+    AllowedValues:
+      - Enabled
+      - Disabled
+    Description: >-
+      Enabled adds a daily State Manager association that installs the newest signed script
+      release and prepares and applies a newer node release. It never applies a one-way update
+      or confirms the restart of a staked validator: there the prepared update waits for you to
+      run the apply document.
+  ImageId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
+    Description: >-
+      Canonical's public SSM parameter for the current Ubuntu Server 24.04 LTS amd64 image. Every
+      stack update resolves it again: once a newer image is out, an update tries to replace the
+      instance and rolls back. Change the instance in the EC2 console instead (see the runbook).
+
+Mappings:
+  PresetInstanceType:
+    FullNode:
+      InstanceType: c7i.2xlarge
+    PublicRPC:
+      InstanceType: c7i.4xlarge
+    Validator:
+      InstanceType: c7i.8xlarge
+
+Conditions:
+  IsPublicRPC: !Equals [!Ref Preset, PublicRPC]
+  HasInstanceTypeOverride: !Not [!Equals [!Ref InstanceType, '']]
+  AutoUpdateEnabled: !Equals [!Ref AutoUpdate, Enabled]
+
+Resources:
+  # ---------------------------------------------------------------------------------------------
+  # Network: one VPC with one public subnet. The instance's network interface gets the Elastic IP
+  # before the instance exists, so the host boots with the public address it keeps (the address
+  # setup advertises in the node's multiaddrs) and its first-boot downloads never see the address
+  # change under them.
+  # ---------------------------------------------------------------------------------------------
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-vpc
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-igw
+
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.0.0.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-public
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-public
+
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # Inbound: the node's two P2P ports (UDP/QUIC) from everywhere, because peers are any address,
+  # and TCP 80 and 443 on the PublicRPC preset only, for Caddy. No SSH: the host is reached
+  # through Session Manager, which needs no inbound port. Outbound is open: the node dials peers
+  # on any address, and Session Manager, the updates and time sync go out from the host.
+  NodeSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Telcoin Network node - P2P ports in, everything out
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - Description: Primary P2P (QUIC)
+          IpProtocol: udp
+          FromPort: 49590
+          ToPort: 49590
+          CidrIp: 0.0.0.0/0
+        - Description: Worker P2P (QUIC)
+          IpProtocol: udp
+          FromPort: 49594
+          ToPort: 49594
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - Description: Peers, Session Manager, updates and time sync
+          IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-node
+
+  PublicRpcHttpIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: IsPublicRPC
+    Properties:
+      GroupId: !GetAtt NodeSecurityGroup.GroupId
+      Description: Caddy certificate issuance and the redirect to https
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      CidrIp: 0.0.0.0/0
+
+  PublicRpcHttpsIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: IsPublicRPC
+    Properties:
+      GroupId: !GetAtt NodeSecurityGroup.GroupId
+      Description: Caddy public RPC (https and wss)
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      CidrIp: 0.0.0.0/0
+
+  NodeNetworkInterface:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      Description: !Sub ${AWS::StackName} node
+      SubnetId: !Ref PublicSubnet
+      GroupSet:
+        - !Ref NodeSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-node
+
+  NodeElasticIp:
+    Type: AWS::EC2::EIP
+    DependsOn: GatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-node
+
+  NodeElasticIpAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt NodeElasticIp.AllocationId
+      NetworkInterfaceId: !Ref NodeNetworkInterface
+
+  # ---------------------------------------------------------------------------------------------
+  # Identity: the instance role trusts ec2.amazonaws.com only and carries only the managed policy
+  # Session Manager and Run Command need. No other principal, no inline policy, nothing for
+  # Telcoin: no cross-account role and no hybrid activation, on any network.
+  # ---------------------------------------------------------------------------------------------
+  NodeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  NodeInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref NodeRole
+
+  # ---------------------------------------------------------------------------------------------
+  # Storage. The data volume holds the node's keys and chain data, so it is kept when the stack is
+  # deleted or the volume would be replaced; delete it yourself once you no longer need it. No
+  # snapshots or backup plan: a snapshot of this volume is a copy of the node keys.
+  # ---------------------------------------------------------------------------------------------
+  DataVolume:
+    Type: AWS::EC2::Volume
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      AvailabilityZone: !GetAtt PublicSubnet.AvailabilityZone
+      Size: !Ref DataVolumeSize
+      VolumeType: gp3
+      Iops: 10000
+      Throughput: 300
+      Encrypted: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-data
+
+  # ---------------------------------------------------------------------------------------------
+  # The instance. The user data prepares the host and reports to HostReady: SUCCESS once the data
+  # volume is mounted and the node scripts are installed, FAILURE with the reason otherwise (the
+  # stack then rolls back; the retained data volume stays behind).
+  # ---------------------------------------------------------------------------------------------
+  HostReadyHandle:
+    Type: AWS::CloudFormation::WaitConditionHandle
+
+  NodeInstance:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - NodeElasticIpAssociation
+      - DefaultRoute
+      - PublicSubnetRouteTableAssociation
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: !If
+        - HasInstanceTypeOverride
+        - !Ref InstanceType
+        - !FindInMap [PresetInstanceType, !Ref Preset, InstanceType]
+      IamInstanceProfile: !Ref NodeInstanceProfile
+      NetworkInterfaces:
+        - NetworkInterfaceId: !Ref NodeNetworkInterface
+          DeviceIndex: '0'
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpTokens: required
+      BlockDeviceMappings:
+        # The root volume holds the OS, the node binary or Docker image, and a source build's
+        # toolchain and cargo cache; the chain data lives on the data volume.
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: 50
+            Encrypted: true
+            DeleteOnTermination: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-node
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # Host preparation for a Telcoin Network node. cloud-init runs this once, as root, on
+          # the first boot. It leaves a ready host, not a running node: the operator runs
+          # setup-node.sh from a Session Manager shell. The result goes to the stack's wait
+          # condition: SUCCESS, or FAILURE with the reason. Output: /var/log/cloud-init-output.log
+          set -Eeuo pipefail
+
+          wait_url='${HostReadyHandle}'
+          data_volume='${DataVolume}'
+          data_dir=/var/lib/telcoin
+          scripts_dir=/home/ubuntu/telcoin-node-scripts
+
+          # signal STATUS REASON -- report to the wait condition. REASON is plain text with no
+          # quotes or backslashes, because it goes into the JSON body as it is.
+          signal() {
+              curl --proto '=https' --tlsv1.2 -fsS --retry 5 --retry-delay 5 --retry-all-errors \
+                  -X PUT -H 'Content-Type:' \
+                  --data-binary "{\"Status\":\"$1\",\"Reason\":\"$2\",\"UniqueId\":\"host-prep\",\"Data\":\"$2\"}" \
+                  "$wait_url"
+          }
+
+          fail() {
+              trap - ERR
+              echo "host preparation failed: $1" >&2
+              signal FAILURE "$1" || echo "could not signal the wait condition" >&2
+              exit 1
+          }
+          trap 'fail "unexpected error on line $LINENO of the user data, see /var/log/cloud-init-output.log"' ERR
+
+          # 1. CVE-2026-31431 (Copy Fail), first. setup-node.sh stops unless a file under
+          #    /etc/modprobe.d holds this exact line and algif_aead is not loaded
+          #    (check_cve_2026_31431 in lib/common.sh). Nothing loads the module on a fresh
+          #    boot; if something did, unload it.
+          printf 'install algif_aead /bin/false\n' > /etc/modprobe.d/telcoin-algif-aead.conf
+          if grep -q '^algif_aead ' /proc/modules; then
+              modprobe -r algif_aead || fail "algif_aead is loaded and could not be unloaded"
+          fi
+
+          # 2. Swap off, as the node's hardware requirements ask. The image ships no swap.
+          swapoff -a
+          if [ -n "$(swapon --show --noheadings)" ]; then
+              fail "swap is still on after swapoff -a"
+          fi
+
+          # 3. The data volume. On Nitro instances an EBS volume is an NVMe device whose by-id
+          #    name carries the volume ID without its dash. CloudFormation attaches it after the
+          #    instance starts, so wait for it.
+          dev=/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_$(printf '%s' "$data_volume" | tr -d -)
+          tries=0
+          until [ -b "$dev" ]; do
+              tries=$((tries + 1))
+              [ "$tries" -le 120 ] || fail "data volume $data_volume did not appear within 10 minutes"
+              sleep 5
+          done
+          udevadm settle
+
+          # Format it only when it carries no signature at all (blkid -p exits 2 when it finds
+          # none): a volume that already holds a filesystem keeps its data. A new EBS volume
+          # holds nothing to discard.
+          probe=0
+          blkid -p "$dev" > /dev/null 2>&1 || probe=$?
+          case "$probe" in
+              0) echo "The data volume already carries a filesystem; it is not formatted." ;;
+              2) mkfs.ext4 -q -E nodiscard "$dev" ;;
+              *) fail "blkid could not probe the data volume (exit $probe)" ;;
+          esac
+          fstype=$(blkid -p -s TYPE -o value "$dev" 2> /dev/null) || fstype=""
+          if [ "$fstype" != ext4 ]; then
+              fail "the data volume holds no ext4 filesystem (found: $fstype); it was left untouched"
+          fi
+          uuid=$(blkid -p -s UUID -o value "$dev")
+          [ -n "$uuid" ] || fail "the filesystem on the data volume has no UUID"
+
+          # Mount it at the node's data dir by UUID. nofail keeps a boot without the volume out
+          # of emergency mode. setup-node.sh takes the mount point as it is (root-owned, holding
+          # only lost+found) and hands it to the node's service user.
+          mkdir -p "$data_dir"
+          if ! grep -q "^UUID=$uuid " /etc/fstab; then
+              printf 'UUID=%s %s ext4 defaults,nofail 0 2\n' "$uuid" "$data_dir" >> /etc/fstab
+          fi
+          systemctl daemon-reload
+          mountpoint -q "$data_dir" || mount "$data_dir"
+          mountpoint -q "$data_dir" || fail "the data volume did not mount at $data_dir"
+
+          # 4. The node scripts: the signed release the published installer names, installed as
+          #    the ubuntu user the way the runbook installs them. pipefail turns a failed
+          #    download into a failed attempt.
+          installed=no
+          for attempt in 1 2 3; do
+              if sudo -u ubuntu -H bash -c "set -o pipefail; curl --proto '=https' --tlsv1.2 -fsSL https://install.telcoin.network | bash -s -- --yes"; then
+                  installed=yes
+                  break
+              fi
+              echo "installer attempt $attempt failed" >&2
+              sleep 30
+          done
+          [ "$installed" = yes ] || fail "the node scripts installer failed three times"
+          [ -f "$scripts_dir/setup-node.sh" ] || fail "the installer left no $scripts_dir/setup-node.sh"
+
+          signal SUCCESS "Host ready: data volume mounted at $data_dir, node scripts in $scripts_dir. Next: the SetupCommand output, from a Session Manager shell."
+
+  DataVolumeAttachment:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      InstanceId: !Ref NodeInstance
+      VolumeId: !Ref DataVolume
+      Device: /dev/sdf
+
+  HostReady:
+    Type: AWS::CloudFormation::WaitCondition
+    DependsOn:
+      - NodeInstance
+      - DataVolumeAttachment
+    Properties:
+      Handle: !Ref HostReadyHandle
+      Count: 1
+      Timeout: '1800'
+
+  # ---------------------------------------------------------------------------------------------
+  # Updates, pulled: Telcoin cuts signed releases, this host fetches them. Nothing here lets
+  # anyone outside this account act on the host.
+  # ---------------------------------------------------------------------------------------------
+  NodeUpdateDocument:
+    Type: AWS::SSM::Document
+    Condition: AutoUpdateEnabled
+    Properties:
+      DocumentType: Command
+      Content:
+        schemaVersion: '2.2'
+        description: >-
+          Daily, pulled update of a Telcoin Network node: the newest signed script release, then
+          the node, prepared and applied without --yes, so a staked validator's prepared update
+          waits for the operator. A one-way update is prepared and never applied here.
+        mainSteps:
+          - action: aws:runShellScript
+            name: updateTelcoinNode
+            precondition:
+              StringEquals:
+                - platformType
+                - Linux
+            inputs:
+              # Up to an hour of jitter, a source build (20 to 40 minutes), the epoch wait
+              # (TN_EPOCH_WAIT_MAX, 1800 s) and the post-restart checks (up to 600 s each).
+              timeoutSeconds: '14400'
+              runCommand:
+                - |
+                  #!/bin/sh
+                  # Never passes --yes to --apply: on a staked validator, or one whose stake
+                  # cannot be read, update-node.sh refuses the apply and the prepared update
+                  # waits for the apply document. Never runs ui/install-ui.sh --update or
+                  # setup-alerts.sh --refresh: update-scripts.sh leaves those to the operator.
+                  set -u
+                  export HOME=/root
+                  scripts=/home/ubuntu/telcoin-node-scripts
+
+                  if [ ! -f /etc/telcoin/.node-meta ]; then
+                      echo "setup-node.sh has not run on this host yet; nothing to update."
+                      exit 0
+                  fi
+
+                  # Spread the downloads of many hosts over an hour.
+                  sleep "$(shuf -i 0-3600 -n 1)"
+
+                  # update-scripts.sh has no --yes; this is its scripted answer.
+                  echo "== update-scripts.sh"
+                  if ! printf 'y\n' | sudo -u ubuntu -H bash "$scripts/update-scripts.sh"; then
+                      echo "update-scripts.sh failed; the node was not updated." >&2
+                      exit 1
+                  fi
+
+                  echo "== update-node.sh --json --check"
+                  if ! check=$(bash "$scripts/update-node.sh" --json --check); then
+                      echo "update-node.sh --check failed." >&2
+                      exit 1
+                  fi
+                  if ! fields=$(TN_CHECK_JSON="$check" python3 -c '
+                  import json, os, sys
+                  found = None
+                  for line in os.environ["TN_CHECK_JSON"].splitlines():
+                      line = line.strip()
+                      if not line.startswith("{"):
+                          continue
+                      try:
+                          obj = json.loads(line)
+                      except ValueError:
+                          continue
+                      if isinstance(obj, dict) and "update_available" in obj:
+                          found = obj
+                  if found is None:
+                      sys.exit(1)
+                  print("yes" if found.get("update_available") is True else "no")
+                  print("yes" if found.get("pending") else "no")
+                  print(found.get("latest_ref") or "")
+                  print("yes" if found.get("storage_migration") is True else "no")
+                  '); then
+                      echo "update-node.sh --check printed no result line:" >&2
+                      printf '%s\n' "$check" >&2
+                      exit 1
+                  fi
+                  available=$(printf '%s\n' "$fields" | sed -n 1p)
+                  pending=$(printf '%s\n' "$fields" | sed -n 2p)
+                  ref=$(printf '%s\n' "$fields" | sed -n 3p)
+                  migration=$(printf '%s\n' "$fields" | sed -n 4p)
+
+                  # A prepared update that waits (a validator's) is applied as it is, not
+                  # prepared again every day.
+                  if [ "$pending" = yes ]; then
+                      echo "An update is already prepared; trying to apply it."
+                  elif [ "$available" = yes ]; then
+                      case "$ref" in
+                          v[0-9]*) ;;
+                          *) echo "The update check named no release tag: '$ref'." >&2; exit 1 ;;
+                      esac
+                      echo "== update-node.sh --json --prepare --ref $ref"
+                      if ! bash "$scripts/update-node.sh" --json --prepare --ref "$ref"; then
+                          echo "Preparing $ref failed; the running node was not touched." >&2
+                          exit 1
+                      fi
+                  else
+                      echo "The node runs the newest release."
+                      exit 0
+                  fi
+
+                  # A one-way update (storage_migration) waits for the operator on every node:
+                  # older releases cannot open the data dir afterwards, and update-node.sh does
+                  # not ask for a snapshot in --json mode.
+                  if [ "$migration" = yes ]; then
+                      echo "This update migrates the data dir one way: older releases cannot open it afterwards, and a failed health check will not roll back. The update is prepared and waits. Run the apply document (stack output ApplyUpdateDocument) when you accept that."
+                      exit 0
+                  fi
+
+                  echo "== update-node.sh --json --apply"
+                  rc=0
+                  out=$(bash "$scripts/update-node.sh" --json --apply) || rc=$?
+                  printf '%s\n' "$out"
+                  if [ "$rc" -eq 0 ]; then
+                      echo "Update applied."
+                      exit 0
+                  fi
+                  case "$out" in
+                      *'validator apply requires explicit confirmation (--yes)'*)
+                          echo "This node is a staked validator, or its stake could not be read: the update is prepared and waits. Run the apply document (stack output ApplyUpdateDocument) when the node may restart."
+                          exit 0
+                          ;;
+                  esac
+                  echo "update-node.sh --apply failed (exit $rc)." >&2
+                  exit 1
+
+  NodeUpdateAssociation:
+    Type: AWS::SSM::Association
+    Condition: AutoUpdateEnabled
+    DependsOn: HostReady
+    Properties:
+      Name: !Ref NodeUpdateDocument
+      Targets:
+        - Key: InstanceIds
+          Values:
+            - !Ref NodeInstance
+      # Daily at 03:00 UTC plus the document's random wait. Not at creation: setup has not run.
+      ScheduleExpression: cron(0 3 * * ? *)
+      ApplyOnlyAtCronInterval: true
+
+  ApplyUpdateDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      DocumentType: Command
+      Content:
+        schemaVersion: '2.2'
+        description: >-
+          Apply the Telcoin Network node update that is already prepared, confirming the restart
+          (--yes). update-node.sh still runs the committee quorum check and waits for the epoch
+          boundary before it stops the node.
+        mainSteps:
+          - action: aws:runShellScript
+            name: applyPreparedUpdate
+            precondition:
+              StringEquals:
+                - platformType
+                - Linux
+            inputs:
+              # The epoch wait (TN_EPOCH_WAIT_MAX, 1800 s) and the post-restart checks.
+              timeoutSeconds: '7200'
+              runCommand:
+                - |
+                  #!/bin/sh
+                  set -u
+                  export HOME=/root
+                  if [ ! -f /etc/telcoin/.node-meta ]; then
+                      echo "setup-node.sh has not run on this host yet; there is nothing to apply." >&2
+                      exit 1
+                  fi
+                  exec bash /home/ubuntu/telcoin-node-scripts/update-node.sh --json --apply --yes
+
+Outputs:
+  InstanceId:
+    Description: The node host.
+    Value: !Ref NodeInstance
+  PublicIp:
+    Description: The Elastic IP. Setup detects it and advertises it in the node's P2P addresses.
+    Value: !GetAtt NodeElasticIp.PublicIp
+  SessionManagerUrl:
+    Description: Opens a shell on the host in the Systems Manager console (Session Manager).
+    Value: !Sub https://${AWS::Region}.console.aws.amazon.com/systems-manager/session-manager/${NodeInstance}?region=${AWS::Region}
+  SetupCommand:
+    Description: >-
+      Run first, in the Session Manager shell. It asks for the network, the execution address and
+      the BLS passphrase, and waits while you back up the keys.
+    Value: sudo bash /home/ubuntu/telcoin-node-scripts/setup-node.sh
+  FirewallCommand:
+    Description: >-
+      Run after setup. It turns on ufw with the node's ports and limits SSH to this VPC (the
+      security group opens no SSH port at all).
+    Value: !Sub sudo bash /home/ubuntu/telcoin-node-scripts/firewall-setup.sh --enable --ssh-from ${Vpc.CidrBlock}
+  ApplyUpdateDocument:
+    Description: >-
+      The Run Command document that applies a prepared update with --yes. Run it on the instance
+      when a staked validator may restart.
+    Value: !Ref ApplyUpdateDocument
+  DataVolumeId:
+    Description: The data volume (node keys and chain data). Deleting the stack keeps it.
+    Value: !Ref DataVolume
