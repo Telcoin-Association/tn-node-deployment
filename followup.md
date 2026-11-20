@@ -746,8 +746,6 @@ The CloudFormation stack under `aws/` (design agreed 2026-11-17, branch
 are pulled through the customer's own State Manager association. The account side lives in
 `Telcoin-Association/ta-aws-infra` (`docs/backlog.md`, section 6).
 
-- **The branch is local only.** Its author has read access to this repository, so the branch
-  waits for a maintainer with write access to push it and open the pull request. No fork.
 - **Immutable OIDC subjects.** The publish role in ta-aws-infra (PR #3) trusts only the immutable
   subject. A repository admin opts this repository in
   (`gh api -X PUT repos/Telcoin-Association/tn-node-deployment/actions/oidc/customization/sub -F use_default=true -F use_immutable_subject=true`),
@@ -759,8 +757,9 @@ are pulled through the customer's own State Manager association. The account sid
   ruleset requires signatures.
 - **Publishing is not wired yet.** The publish workflow needs the GitHub environment
   `aws-templates` (deployment refs limited to `scripts-v*` tags) and its variables
-  `AWS_TEMPLATES_ROLE_ARN` and `AWS_TEMPLATES_BUCKET`, which come from applying the
-  `tn-node-templates` account in ta-aws-infra. Until then, the workflow fails on a `scripts-v*` tag.
+  `AWS_TEMPLATES_ROLE_ARN` and `AWS_TEMPLATES_BUCKET`, the outputs of the `tn-node-templates`
+  account in ta-aws-infra (applied 2026-11-18, merged with its PR #3 on 2026-11-20). Until then,
+  the workflow fails on a `scripts-v*` tag.
 - **The widget link.** The frontend's quick-create link names a pinned
   `templates/<tag>/node.yaml`. Move it with each scripts release that changes the template.
 - **Verify on a first real launch** (a sandbox account): Canonical's SSM parameter path resolves;
@@ -788,12 +787,12 @@ are pulled through the customer's own State Manager association. The account sid
 - **Not checked without AWS:** the root device name `/dev/sda1` on Canonical's images, the Session
   Manager console URL in the Outputs, and a home directory for `ssm-user` (the docs copy the key
   backup off the host through Session Manager).
-- **Rebase onto main before the pull request.** PR #68 (the worker gateway) and #69
-  (scripts-v2.2.0: tn-p2p-allow-sync v0.1.2 and the release keys from tn-release-signing) merged
-  on 2026-11-19. A test merge conflicts in `AGENTS.md` only. After the rebase, check the template
-  against 2.2.0: its notes say 2.1.0 hosts re-run the installer to take a release signed only by
-  the new keys, so on a stack launched before 2.2.0 the association's `update-scripts.sh` step
-  should fail until the operator runs the installer once (not tested on a stack).
+- **Check the template against scripts-v2.2.0.** The branch is rebased onto main after PR #68
+  (the worker gateway) and #69 (scripts-v2.2.0: tn-p2p-allow-sync v0.1.2 and the release keys from
+  tn-release-signing). The 2.2.0 notes say 2.1.0 hosts re-run the installer to take a release
+  signed only by the new keys, so on a stack launched before 2.2.0 the association's
+  `update-scripts.sh` step should fail until the operator runs the installer once (not tested on a
+  stack).
 - **A least-privilege deployer role (after the 2026-11-20 demo).** The docs ask for an account
   administrator, or a user allowed to create the VPC, EC2, IAM role and Systems Manager resources.
   For accounts that hand out neither: launch once in a sandbox account, generate the policy from
