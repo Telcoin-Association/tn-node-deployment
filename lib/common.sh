@@ -22,8 +22,10 @@ readonly TESTNET_RPC_URL="https://rpc.adiri.tel"  # network-gated: testnet const
 readonly TESTNET_EXPLORER="https://telscan.io"
 
 # Mainnet has not launched. The chain id matches chain-configs/mainnet/genesis.yaml
-# in telcoin-network; the RPC URL is the planned public endpoint.
-readonly MAINNET_CHAIN_ID="487"
+# on telcoin-network main and MAINNET_CHAIN_ID in crates/types/src/genesis.rs
+# since #1716 (it was 487 before; upstream devnet genesis files use 487 now). The
+# RPC URL is the planned public endpoint.
+readonly MAINNET_CHAIN_ID="731"
 readonly MAINNET_CHAIN_NAME="telcoin"
 readonly MAINNET_RPC_URL="https://rpc.telcoin.network"
 readonly MAINNET_EXPLORER="https://telscan.io"
@@ -77,7 +79,7 @@ readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 # network-gated: the comment names the testnet fleet; 9101 is the default on every network
 readonly DEFAULT_METRICS_PORT="9101"   # node loopback Prometheus endpoint (matches the adiri fleet)
-readonly COMMON_VERSION="2.2.3"
+readonly COMMON_VERSION="2.2.4"
 
 # The operator runbook, for any message that should point operators at it.
 readonly TN_OPERATOR_GUIDE_URL="https://github.com/Telcoin-Association/tn-node-deployment/blob/main/OPERATOR.md"
@@ -3227,7 +3229,7 @@ tn_cargo_features_for() {
 # NETWORK in META (default: node_meta_path) decides when the key is present:
 # testnet and mainnet print; any other value (devnet, empty, a typo) is rc 1; a
 # key listed more than once (meta_get rc 2) is rc 1 with no fallback. Without
-# the key, the chain id in <data-dir>/genesis/genesis.yaml decides: 487
+# the key, the chain id in <data-dir>/genesis/genesis.yaml decides: 731
 # mainnet, 2017 testnet, anything else or no readable genesis rc 1. The data
 # dir is META's DATA_DIR when that directory exists (honouring TN_ROOT_PREFIX),
 # else tn_resolve_data_dir; no caller global is read. Reads files only, builds

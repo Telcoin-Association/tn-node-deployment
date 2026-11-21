@@ -75,7 +75,7 @@ logging.getLogger("werkzeug").setLevel(logging.WARNING)
 # of the update engine copies in /opt/telcoin-ui-update/ (install-caddy 1.3.0).
 # 1.8.8: on-chain stake status (getValidator) selects the validator view;
 # warn-only hardware preflight; refreshes the engine copies
-UI_VERSION = "2.1.1"
+UI_VERSION = "2.1.2"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -1403,9 +1403,12 @@ def node_version(t):
 # Known networks keyed by EVM chain id. `slug` selects the public status page
 # (status-page/<slug>) and the public-RPC map below; `name` is the display label.
 # Adding a network here makes the whole UI (identity, network panel, status-page
-# link) work on it -- nothing else is hardcoded to testnet.
+# link) work on it -- nothing else is hardcoded to testnet. Mainnet is chain 731,
+# MAINNET_CHAIN_ID in lib/common.sh and in telcoin-network since #1716. 487, its
+# earlier id, is what upstream devnet genesis files use now: it is not listed, so
+# it resolves like any unknown chain id.
 NETWORKS = {
-    487: {"name": "Telcoin Mainnet", "slug": "mainnet"},
+    731: {"name": "Telcoin Mainnet", "slug": "mainnet"},
     2017: {"name": "Adiri Testnet", "slug": "testnet"},  # network-gated: display name of chain 2017, picked by the node's chain id
     32285: {"name": "Adiri Devnet", "slug": "devnet"},  # network-gated: display name of the devnet chain 32285, picked by the node's chain id
 }
@@ -1419,9 +1422,9 @@ NETWORKS = {
 # 2017 until mainnet launches. A chain id omitted here degrades the "Network
 # Block"/"Consensus Lag" compare cards to "—".
 NETWORK_PUBLIC_RPC = {
-    # Mainnet (chain 487): the public endpoint is set at launch. Until then the
+    # Mainnet (chain 731): the public endpoint is set at launch. Until then the
     # list stays empty and the compare cards show "—".
-    487:   [],
+    731:   [],
     2017:  ["https://rpc.adiri.tel"],  # network-gated: testnet public RPC, looked up by the node's chain id
     32285: [
         "https://rpc.devnet.telcoin.network",

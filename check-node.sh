@@ -40,7 +40,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 # else should abort the run.
 set +e
 
-readonly SCRIPT_VERSION="2.2.0"
+readonly SCRIPT_VERSION="2.2.1"
 readonly STALE_THRESHOLD_SECONDS=60
 # WorkerConfigs system contract: numWorkers() is the number of workers every
 # committee member must run.
@@ -2877,7 +2877,7 @@ case "$LOCAL_RPC_MODE" in
         # configured for a different network (wrong genesis, copy-pasted
         # config) would otherwise pass every downstream check while comparing
         # against the wrong network. Without a recorded network any Telcoin
-        # chain id passes: testnet 2017, mainnet 487, devnet 32285.
+        # chain id passes: testnet 2017, mainnet 731, devnet 32285.
         if [[ -n "$LOCAL_CHAIN_ID" ]]; then
             chain_dec=$(hex_to_dec "$LOCAL_CHAIN_ID")
             chain_net="$(chain_network "$chain_dec")"

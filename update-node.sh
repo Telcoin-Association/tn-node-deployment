@@ -112,7 +112,7 @@ unset _tn_old
 # point of the two-phase design. Restore the intended semantics.
 set +e
 
-readonly SCRIPT_VERSION="2.1.0"
+readonly SCRIPT_VERSION="2.1.1"
 # GAR_TAGS_URL is provided by lib/common.sh (sourced above). Re-declaring it
 # readonly here threw "GAR_TAGS_URL: readonly variable" to stderr, which the UI
 # surfaced as "update checks aren't available on this host".
@@ -320,7 +320,7 @@ existing_update_refusal() {
 }
 
 # detect_network -- print testnet or mainnet: NETWORK in .node-meta (CRLF-safe),
-# else the chain id of the node's genesis (487 mainnet, 2017 testnet). A thin
+# else the chain id of the node's genesis (731 mainnet, 2017 testnet). A thin
 # wrapper over tn_detect_network (lib/common.sh), kept for its callers. Prints
 # nothing and returns 1 when the network cannot be told: a NETWORK listed more
 # than once, any other value (devnet, a typo, empty), or no NETWORK and no known
@@ -1201,7 +1201,7 @@ _uc_vote_setting() {
 
 # verify_consensus_participation -- the post-restart check every apply runs after
 # verify_health_after_restart: the node answers eth_chainId with its network's chain
-# id (2017 testnet, 487 mainnet, 32285 devnet; the network as image_network takes
+# id (2017 testnet, 731 mainnet, 32285 devnet; the network as image_network takes
 # it, _tn_guard_network); its tn_latestConsensusHeader number advances
 # between reads TN_UPDATE_VOTE_POLL seconds apart (default 10); and a node that was
 # CvvActive before the stop (UPDATE_MODE_BEFORE, recorded by update_epoch_wait)

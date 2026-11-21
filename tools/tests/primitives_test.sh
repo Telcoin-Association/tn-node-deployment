@@ -599,25 +599,28 @@ for fn in meta_get _tn_meta_get; do
 done
 
 # ---- tn_detect_network ---------------------------------------------------------------
-mkdir -p "$T/bin" "$T/dd487/genesis" "$T/dd2017/genesis" "$T/dddev/genesis" "$T/ddnone"
+mkdir -p "$T/bin" "$T/dd731/genesis" "$T/dd2017/genesis" "$T/dddev/genesis" "$T/ddnone" "$T/dd487/genesis"
 printf '#!/bin/sh\n: > "%s/cargo-called"\n' "$T" > "$T/bin/cargo"
 chmod +x "$T/bin/cargo"
-printf 'config:\n  chainId: 487\n' > "$T/dd487/genesis/genesis.yaml"
+printf 'config:\n  chainId: 731\n' > "$T/dd731/genesis/genesis.yaml"
 printf 'config:\n  chainId: 2017\n' > "$T/dd2017/genesis/genesis.yaml"
 printf 'config:\n  chainId: 32285\n' > "$T/dddev/genesis/genesis.yaml"
+# 487 was the mainnet id before #1716; upstream devnet genesis files use it now.
+printf 'config:\n  chainId: 487\n' > "$T/dd487/genesis/genesis.yaml"
 mkmeta() { local f="$T/$1"; shift; printf '%s\n' "$@" > "$f"; }
-mkmeta net-testnet NETWORK=testnet "DATA_DIR=$T/dd487"
+mkmeta net-testnet NETWORK=testnet "DATA_DIR=$T/dd731"
 mkmeta net-mainnet NETWORK=mainnet "DATA_DIR=$T/dd2017"
 printf 'NETWORK=mainnet\r\nDATA_DIR=%s\r\n' "$T/dd2017" > "$T/net-crlf"
-mkmeta net-devnet NETWORK=devnet "DATA_DIR=$T/dd487"
-mkmeta net-foo NETWORK=foo "DATA_DIR=$T/dd487"
-mkmeta net-empty NETWORK= "DATA_DIR=$T/dd487"
+mkmeta net-devnet NETWORK=devnet "DATA_DIR=$T/dd731"
+mkmeta net-foo NETWORK=foo "DATA_DIR=$T/dd731"
+mkmeta net-empty NETWORK= "DATA_DIR=$T/dd731"
+mkmeta gen-731 "DATA_DIR=$T/dd731"
 mkmeta gen-487 "DATA_DIR=$T/dd487"
 mkmeta gen-2017 "DATA_DIR=$T/dd2017"
 mkmeta gen-dev "DATA_DIR=$T/dddev"
 mkmeta gen-none "DATA_DIR=$T/ddnone"
 mkmeta dup-nogen NETWORK=testnet NETWORK=testnet "DATA_DIR=$T/ddnone"
-mkmeta dup-gen487 NETWORK=testnet NETWORK=mainnet "DATA_DIR=$T/dd487"
+mkmeta dup-gen731 NETWORK=testnet NETWORK=mainnet "DATA_DIR=$T/dd731"
 saved_path="$PATH"
 PATH="$T/bin:$PATH"
 saved_prefix="$TN_ROOT_PREFIX"
@@ -629,18 +632,21 @@ net_case() {
     check_rc "detect_network: $1 rc" "$3" "$RC"
     check "detect_network: $1 output" "$4" "$OUT"
 }
-net_case 'NETWORK=testnet (genesis says 487)'  net-testnet 0 testnet
+net_case 'NETWORK=testnet (genesis says 731)'  net-testnet 0 testnet
 net_case 'NETWORK=mainnet (genesis says 2017)' net-mainnet 0 mainnet
 net_case 'CRLF file'                           net-crlf    0 mainnet
 net_case 'NETWORK=devnet'                      net-devnet  1 ''
 net_case 'NETWORK=foo'                         net-foo     1 ''
 net_case 'NETWORK= (empty)'                    net-empty   1 ''
-net_case 'no key, genesis 487'                 gen-487     0 mainnet
+net_case 'no key, genesis 731'                 gen-731     0 mainnet
+net_case 'no key, genesis 487 (the old mainnet id)' gen-487 1 ''
+check "detect_network: genesis 487: the neither-nor reason" "yes" \
+    "$(has "$ERR" "genesis.yaml (487) is neither 731 nor 2017")"
 net_case 'no key, genesis 2017'                gen-2017    0 testnet
 net_case 'no key, devnet genesis 32285'        gen-dev     1 ''
 net_case 'no key, no genesis'                  gen-none    1 ''
 net_case 'duplicate NETWORK, no genesis'       dup-nogen   1 ''
-net_case 'duplicate NETWORK, genesis 487 (no fallback)' dup-gen487 1 ''
+net_case 'duplicate NETWORK, genesis 731 (no fallback)' dup-gen731 1 ''
 check "detect_network: duplicate warning names NETWORK" "yes" "$(has "$ERR" NETWORK)"
 # Default .node-meta, through TN_ROOT_PREFIX.
 TN_ROOT_PREFIX="$T/root1"
@@ -656,12 +662,20 @@ check "detect_network: no .node-meta, default data dir genesis 2017" "testnet" "
 TN_ROOT_PREFIX="$T/root3"
 mkdir -p "$T/root3/etc/telcoin" "$T/root3/srv/tn/genesis"
 printf 'DATA_DIR=/srv/tn\n' > "$T/root3/etc/telcoin/.node-meta"
-printf 'chainId: 487\n' > "$T/root3/srv/tn/genesis/genesis.yaml"
+printf 'chainId: 731\n' > "$T/root3/srv/tn/genesis/genesis.yaml"
 run tn_detect_network
 check "detect_network: DATA_DIR from .node-meta, under TN_ROOT_PREFIX" "mainnet" "$OUT"
 check "detect_network: never runs cargo" "absent" "$([[ -e "$T/cargo-called" ]] && echo present || echo absent)"
 PATH="$saved_path"
 TN_ROOT_PREFIX="$saved_prefix"
+
+# ---- tn_is_public_chain_id: testnet, devnet, mainnet 731; not the old id 487 ----------
+for id in 2017 32285 731 0x2db; do
+    run tn_is_public_chain_id "$id"
+    check_rc "is_public_chain_id: ${id}" 0 "$RC"
+done
+run tn_is_public_chain_id 487
+check_rc "is_public_chain_id: 487 (the old mainnet id) is not" 1 "$RC"
 
 # ---- tn_start_script_path -------------------------------------------------------------
 run tn_start_script_path source

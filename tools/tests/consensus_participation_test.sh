@@ -132,10 +132,10 @@ rpc_seq tn_latestConsensusHeader "$(hdr 100)" "$(hdr 101)"
 rpc_seq tn_nodeMode '"CvvInactive"'
 cpv "mode unknown before the stop: no vote requirement" "" 0 false
 
-rpc_seq eth_chainId '"0x1e7"'
+rpc_seq eth_chainId '"0x2db"'
 rpc_seq tn_latestConsensusHeader "$(hdr 100)" "$(hdr 101)"
-cpv "testnet node on chain 487: refused" Observer 1 false
-check "wrong chain: says so" yes "$(grep -q 'runs chain id 487, not 2017' "$T/out" && echo yes || echo no)"
+cpv "testnet node on the mainnet chain 731: refused" Observer 1 false
+check "wrong chain: says so" yes "$(grep -q 'runs chain id 731, not 2017' "$T/out" && echo yes || echo no)"
 
 rm -f "$SEQ/eth_chainId"
 cpv "no eth_chainId answer: refused" Observer 1 false
@@ -155,6 +155,17 @@ rpc_seq eth_chainId '"0x7e1"'
 rpc_seq tn_latestConsensusHeader "$(hdr 100)" "$(hdr 101)"
 cpv "devnet node on chain 2017: refused" Observer 1 false
 check "devnet wrong chain: says so" yes "$(grep -q 'runs chain id 2017, not 32285 (devnet)' "$T/out" && echo yes || echo no)"
+# A mainnet node is checked against 731; 487, the old mainnet id, is a devnet
+# genesis id upstream now and is refused.
+printf 'NETWORK=mainnet\nRPC_PORT=8545\n' > "$T/root/etc/telcoin/.node-meta"
+rpc_seq eth_chainId '"0x2db"'
+rpc_seq tn_latestConsensusHeader "$(hdr 100)" "$(hdr 101)"
+rpc_seq tn_nodeMode '"Observer"'
+cpv "mainnet node on chain 731: passes" Observer 0 false
+rpc_seq eth_chainId '"0x1e7"'
+rpc_seq tn_latestConsensusHeader "$(hdr 100)" "$(hdr 101)"
+cpv "mainnet node on chain 487: refused" Observer 1 false
+check "mainnet wrong chain: says so" yes "$(grep -q 'runs chain id 487, not 731 (mainnet)' "$T/out" && echo yes || echo no)"
 printf 'NETWORK=testnet\nRPC_PORT=8545\n' > "$T/root/etc/telcoin/.node-meta"
 
 # update_epoch_wait records the mode before the stop, also with --no-epoch-wait;

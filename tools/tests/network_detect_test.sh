@@ -81,11 +81,21 @@ meta $'INSTALL_METHOD=source\r\n' $'NETWORK=testnet\r\n'
 run detect_network
 check "CRLF NETWORK=testnet: testnet" "testnet" "$OUT"
 
-genesis 487
+genesis 731
 meta $'INSTALL_METHOD=source\n'
 run detect_network
-check_rc "no NETWORK, genesis 487: rc 0" 0 "$RC"
-check "no NETWORK, genesis 487: mainnet" "mainnet" "$OUT"
+check_rc "no NETWORK, genesis 731: rc 0" 0 "$RC"
+check "no NETWORK, genesis 731: mainnet" "mainnet" "$OUT"
+genesis 0x2db
+run detect_network
+check "no NETWORK, genesis 0x2db: mainnet" "mainnet" "$OUT"
+# 487 was the mainnet id before #1716; upstream devnet genesis files use it now.
+genesis 487
+run detect_network
+check_rc "no NETWORK, genesis 487 (the old mainnet id): rc 1" 1 "$RC"
+check "no NETWORK, genesis 487: nothing printed" "" "$OUT"
+check "no NETWORK, genesis 487: the reason names 487, 731 and 2017" yes \
+    "$(has "$ERR" "(487) is neither 731 nor 2017")"
 genesis 2017
 run detect_network
 check "no NETWORK, genesis 2017: testnet" "testnet" "$OUT"
@@ -97,7 +107,7 @@ no_genesis
 run detect_network
 check_rc "no NETWORK, no genesis: rc 1" 1 "$RC"
 
-genesis 487
+genesis 731
 meta $'NETWORK=foo\n'
 run detect_network
 check_rc "NETWORK=foo: rc 1 (no genesis fallback)" 1 "$RC"
@@ -145,7 +155,7 @@ pick() {
         printf "picked: %s|%s|%s|%s|%s\n" "$NETWORK" "$CHAIN_ID" "$CHAIN_NAME" "$RPC_URL" "$EXPLORER_URL"' _ "$1" 2>&1
 }
 TESTNET_PICK="picked: testnet|2017|adiri|https://rpc.adiri.tel|https://telscan.io"
-MAINNET_PICK="picked: mainnet|487|telcoin|https://rpc.telcoin.network|https://telscan.io"
+MAINNET_PICK="picked: mainnet|731|telcoin|https://rpc.telcoin.network|https://telscan.io"
 # "2", then one line for the Enter prompt, then "1": no "Please enter 1 or 2."
 # shows that the Enter prompt took the second line. Every input ends in "1", so
 # the menu returns whatever it does with "2" (at end of input it would ask forever).
@@ -181,7 +191,7 @@ run jsn "$T/off" testnet
 check_has "json_set_network testnet, disabled: testnet" "set: testnet|2017|adiri|https://rpc.adiri.tel|https://telscan.io" "$OUT"
 run jsn "$T/on" mainnet
 check_rc "json_set_network mainnet, enabled: rc 0" 0 "$RC"
-check_has "json_set_network mainnet, enabled: the mainnet values" "set: mainnet|487|telcoin|https://rpc.telcoin.network|https://telscan.io" "$OUT"
+check_has "json_set_network mainnet, enabled: the mainnet values" "set: mainnet|731|telcoin|https://rpc.telcoin.network|https://telscan.io" "$OUT"
 
 # The whole script: --network mainnet stops at the gate, before the install
 # flags are even read (the launch copy goes on to ask for --install-method).
@@ -412,7 +422,7 @@ prep_case() {
     check "${name}: --json git never ran" no "$(exists "$T/git-ran")"
 }
 
-genesis 487
+genesis 731
 meta $'NETWORK=foo\n'
 prep_case "NETWORK=foo"
 meta $'NETWORK=mainnet\n' $'NETWORK=mainnet\n'

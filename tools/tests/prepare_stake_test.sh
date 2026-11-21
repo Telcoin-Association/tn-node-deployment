@@ -239,4 +239,9 @@ psr() {  # psr AFTER-RC -- "<order>|<RESTARTED>" for one ps_restart_node
 }
 check "rotate restart: guard, wait, guard, restart" "guard wait guard restart|true" "$(psr 0)"
 check "rotate restart: refused after the wait, not restarted" "guard wait guard|false" "$(psr 1)"
+
+# ps_chain_name: the mainnet chain id is 731; 487, the old one, is a devnet
+# genesis id upstream now and names no network here.
+check "ps_chain_name: 731 / 2017 / 32285 / 487" "mainnet|testnet|devnet|not a Telcoin network" \
+    "$(ps_chain_name 731)|$(ps_chain_name 2017)|$(ps_chain_name 32285)|$(ps_chain_name 487)"
 finish

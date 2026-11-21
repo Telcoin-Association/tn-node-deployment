@@ -927,14 +927,14 @@ check_rc "M1 node host: with the node's network again, no issue" 0 "$rc"
 # M1 on a host without a node: the upstream's eth_chainId, when it answers.
 chain() { _GW_CHAIN_KEY=""; rm -f "$T/chain-id"; if [[ -n "${1:-}" ]]; then printf '%s' "$1" > "$T/chain-id"; fi; }
 host "$SA"
-chain 0x1e7
+chain 0x2db
 : > "$T/curl.args"
 gin MODE=standalone NETWORK=devnet UPSTREAM=10.0.0.12 DOMAIN=gw.example.org
 before="$(snap)"
 logs_reset
 rc=0; gw_enable quiet || rc=$?
 check "M1 no node: --enable devnet with the upstream on the mainnet chain is refused, naming both" "1 yes yes" \
-    "${rc} $(has "$GW_ERR" "chain 487 (mainnet)") $(has "$GW_ERR" "the network given is devnet")"
+    "${rc} $(has "$GW_ERR" "chain 731 (mainnet)") $(has "$GW_ERR" "the network given is devnet")"
 check "M1 no node: refused, the tree is byte-identical, no change, no docker run" "$before  0" "$(snap) $(sys_changes) $(docker_runs)"
 check "M1 no node: one eth_chainId POST, to the upstream, no proxy, no redirect, 3 s" "1 yes yes" \
     "$(grep -c eth_chainId "$T/curl.args") $(has "$(grep eth_chainId "$T/curl.args")" "-q -sS --noproxy * --proto =http --max-redirs 0 --connect-timeout 2 --max-time 3") $(has "$(grep eth_chainId "$T/curl.args")" " http://10.0.0.12:8545/")"
@@ -943,20 +943,26 @@ chain ""
 rc=0; gw_enable quiet || rc=$?
 check_rc "M1 no node: an upstream that does not answer: --enable goes on" 0 "$rc"
 check "M1 no node: ... with a warning that the network could not be confirmed" yes "$(has "$(cat "$T/say.log")" "warn The network could not be confirmed")"
-chain 0x1e7
+chain 0x2db
 : > "$T/say.log"
 rc=0; gw_status quiet || rc=$?
 check "M1 no node: status counts an upstream on another chain, naming both" "1 yes" \
-    "${rc} $(has "$(cat "$T/say.log")" "says NETWORK=devnet but the upstream http://10.0.0.12:8545 is on chain 487 (mainnet)")"
+    "${rc} $(has "$(cat "$T/say.log")" "says NETWORK=devnet but the upstream http://10.0.0.12:8545 is on chain 731 (mainnet)")"
 before="$(snap)"
 logs_reset
 GW_IN_IMAGE=""
 rc=0; gw_refresh quiet || rc=$?
-check "M1 no node: --refresh with the upstream on another chain is refused" "1 yes" "${rc} $(has "$GW_ERR" "chain 487 (mainnet)")"
+check "M1 no node: --refresh with the upstream on another chain is refused" "1 yes" "${rc} $(has "$GW_ERR" "chain 731 (mainnet)")"
 check "M1 no node: refused refresh, the tree is byte-identical, nothing restarted" "$before " "$(snap) $(sys_changes)"
 chain 0x7e1d
 rc=0; gw_status quiet || rc=$?
 check_rc "M1 no node: an upstream on a devnet chain fits devnet" 0 "$rc"
+# 487, the mainnet id before #1716, is a devnet genesis id upstream now.
+chain 0x1e7
+: > "$T/say.log"
+rc=0; gw_status quiet || rc=$?
+check "M1 no node: an upstream on chain 487 (the old mainnet id) fits devnet" "0 no" \
+    "${rc} $(has "$(cat "$T/say.log")" "(mainnet)")"
 
 # M2: a scripts release that changes the pin.
 gw_remove quiet

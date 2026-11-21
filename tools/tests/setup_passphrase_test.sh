@@ -234,7 +234,7 @@ check_rc "prompt: end of input stops" 1 "$(prompt /dev/null testnet)"
 # the launch release (network_detect_test.sh covers the gate itself).
 check "mainnet, not enabled in this release: json_set_network refuses" "1" "$( (json_set_network mainnet) >/dev/null 2>&1; echo $? )"
 tn_mainnet_enabled() { return 0; }
-check "mainnet: json_set_network" "mainnet 487" "$( json_set_network mainnet; printf '%s %s' "$NETWORK" "$CHAIN_ID" )"
+check "mainnet: json_set_network" "mainnet 731" "$( json_set_network mainnet; printf '%s %s' "$NETWORK" "$CHAIN_ID" )"
 KGM=()
 for a in "${KG[@]}"; do
     if [[ "$a" == testnet ]]; then KGM+=(mainnet); else KGM+=("$a"); fi
@@ -247,7 +247,7 @@ reset
 printf 'abcdefghijklmnop\n' > "$T/in"
 step_config() { printf '%s %s\n' "$NETWORK" "$CHAIN_ID" > "$REC/network"; }
 check_rc "mainnet: keygen with 16 bytes rc" 0 "$(run_main "$T/in" "${KGM[@]}" --passphrase-stdin)"
-check "mainnet: the steps run with NETWORK=mainnet, chain 487" "mainnet 487" "$(cat "$REC/network" 2>/dev/null)"
+check "mainnet: the steps run with NETWORK=mainnet, chain 731" "mainnet 731" "$(cat "$REC/network" 2>/dev/null)"
 step_config() { :; }
 
 # ---- finalize refuses empty listeners before it writes anything (Docker too) --------------
