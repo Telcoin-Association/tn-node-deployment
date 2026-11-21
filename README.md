@@ -332,7 +332,7 @@ table below and reports any path that differs.
 | `/var/log/telcoin/node/` | service user:telcoin-log | 2750 (setgid) | Logs the node writes itself, only with observability on (`NODE_LOG_DIR`); new files take group `telcoin-log` |
 | `/var/backups/telcoin/` | root | 0700 | Copies of files the scripts are about to change (see [Backups and the update lock](#backups-and-the-update-lock)) |
 | `/var/lib/telcoin-staging/` | root | 0700 | Release downloads and build logs while they are checked |
-| `/var/lib/private/telcoin-heartbeat/` | the heartbeat's dynamic user | 0700 | The private alerts runner's `state` file, written only by the runner |
+| `/var/lib/private/telcoin-heartbeat/` | the heartbeat's dynamic user (on disk `nobody` (65534) with systemd 257 or later) | 0700 | The private alerts runner's `state` file, written only by the runner |
 | `/var/lib/telcoin-p2p-allow/` | root | 0700 | The allowlist's state: `config` (written by `firewall-setup.sh`), `floor`, `current.nft`, `state.json`, `status` and `lock` (written by the tool, each 0600), only while committee mode is on |
 | `/run/telcoin/update.lock` | root | 0600 (directory 0755) | The update lock |
 | `/opt/telcoin-source/` | root | | The telcoin-network checkout, at a release tag (source builds) |
@@ -547,7 +547,7 @@ An enable (menu item 2, or `--enable`) first checks that the node is installed, 
 | `/etc/systemd/system/telcoin-heartbeat.timer` | root 0644 | `OnBootSec=120`, `OnUnitActiveSec=<interval>`, `AccuracySec=5` |
 | `/etc/telcoin/alerts/targets` | root 0600 | The targets, at most five lines, in `/etc/telcoin/alerts/` (root 0755) |
 | `/etc/telcoin/alerts/alerts.env` | root 0644 | `ALERTS_SERVICE`, `ALERTS_RPC_URL`, `ALERTS_NETWORK`, `ALERTS_CHAIN_ID`, `ALERTS_LABEL`, `ALERTS_HEALTH_PORT`, `ALERTS_INTERVAL`, `ALERTS_STALL_AFTER`, `ALERTS_INACTIVE_AFTER`, `ALERTS_RESTART_GRACE`. No URL |
-| `/var/lib/private/telcoin-heartbeat/state` | the dynamic user, directory 0700 | `key=value` lines the runner keeps between runs (never sourced, never a URL) |
+| `/var/lib/private/telcoin-heartbeat/state` | the dynamic user (on disk `nobody` (65534) with systemd 257 or later), directory 0700 | `key=value` lines the runner keeps between runs (never sourced, never a URL) |
 | `/run/telcoin/heartbeat-service` | root 0644 | The node service's `systemctl show` (`LoadState`, `ActiveState`, `SubState`, `NRestarts` and two timestamps), rewritten by the service as root before each run and read by the runner, because a dynamic user cannot reach the system bus. Never sourced; without it the runner asks `systemctl show` itself |
 | `ENABLE_ALERTS` in `.node-meta` | | `true`, `pending` or `false`; absent means off |
 

@@ -1694,7 +1694,7 @@ The files:
 | `/etc/telcoin/alerts/` | root 0755 | The two files below. |
 | `/etc/telcoin/alerts/targets` | root 0600 | One `<provider> <url>` per line, at most five. The only secret. |
 | `/etc/telcoin/alerts/alerts.env` | root 0644 | The node's service name and local RPC URL, the network and its chain ID, the label, the health port, the interval and the thresholds. No URL of a monitor. |
-| `/var/lib/private/telcoin-heartbeat/state` | the runner's account, directory 0700 | What the runner remembers between runs: the last status and reason, the consensus header it last saw, and each target's last result. Never a URL. |
+| `/var/lib/private/telcoin-heartbeat/state` | the runner's account (on disk `nobody` (65534) with systemd 257 or later), directory 0700 | What the runner remembers between runs: the last status and reason, the consensus header it last saw, and each target's last result. Never a URL. |
 | `/run/telcoin/heartbeat-service` | root 0644 | The node service's state (`systemctl show` of `telcoin.service`). The service rewrites it as root before each run, and the runner reads it. Gone after a reboot until the next run. |
 | `ENABLE_ALERTS` in `.node-meta` | | `true`, `pending` (asked for during setup, not enabled yet) or `false`. Absent means off. |
 

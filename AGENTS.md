@@ -125,7 +125,10 @@ the node binary and every directory above it, the log dir (`/var/log/telcoin`,
 root:telcoin-log 0750), `/var/backups/telcoin`, `/var/lib/telcoin-staging`, the P2P committee allowlist's tool `/usr/local/libexec/telcoin/tn-p2p-allow-sync`, state dir `/var/lib/telcoin-p2p-allow` (0700) and units, and the update lock
 under `/run/telcoin`. One more tree is not root's: the state dir of the private alerts runner
 (`/var/lib/private/telcoin-heartbeat`, 0700), which systemd creates for the heartbeat service's
-dynamic user (`DynamicUser=yes`, `StateDirectory=telcoin-heartbeat`). Only the runner writes in
+dynamic user (`DynamicUser=yes`, `StateDirectory=telcoin-heartbeat`). With systemd 257 or later
+(Ubuntu 26.04) and ID-mapped mounts, systemd leaves its files owned by `nobody` (65534) on disk and
+maps them to the dynamic user while the service runs; `/var/lib/private` (root 0700) keeps every
+other account out either way, so do not "fix" that owner. Only the runner writes in
 it; the teardown removes it with `systemctl clean --what=state` (see "Private alerts").
 `.node-meta` records the layout as `OWNERSHIP_LAYOUT=2`, `check-node.sh`
 checks the owners and modes (`check_ownership_layout`), and the README has the full table.
