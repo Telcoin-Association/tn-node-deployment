@@ -228,6 +228,9 @@ A4_FIELDS = {
     "/api/system": ("cpu_threads",),
 }
 A4_PREFLIGHT = ("cpu_physical", "cpu_threads")   # top level of /api/setup/preflight
+# Fields the per-network hardware check adds to the preflight's `hardware` (with
+# validator_recommended.ecc). `legacy` strips them too.
+NET_HARDWARE = ("network", "cpu_kind")
 A4_VALIDATOR = ("epoch_started_at", "epoch_duration", "epoch_ends_at", "now",
                 "earliest_seat_epoch", "seat_epoch")
 OPERATOR_ONLY = ("helper", "role_source", "role_checked_at", "role_address")   # never public
@@ -574,11 +577,18 @@ def overlay(resp):
     if path == "/api/setup/preflight":
         threads = data.get("cpu_threads")
         if legacy:
-            # Today's server: no top-level counts, and hardware.cpu is the logical count.
+            # An older server: no top-level counts, hardware.cpu is the logical count,
+            # and hardware has no network, cpu_kind or validator_recommended.ecc.
             for k in A4_PREFLIGHT:
                 data.pop(k, None)
-            if isinstance(data.get("hardware"), dict) and threads is not None:
-                data["hardware"]["cpu"] = threads
+            hw = data.get("hardware")
+            if isinstance(hw, dict):
+                if threads is not None:
+                    hw["cpu"] = threads
+                for k in NET_HARDWARE:
+                    hw.pop(k, None)
+                if isinstance(hw.get("validator_recommended"), dict):
+                    hw["validator_recommended"].pop("ecc", None)
         elif "cpu_physical" not in data:
             data.update({"cpu_physical": 8, "cpu_threads": 16})
     elif legacy:

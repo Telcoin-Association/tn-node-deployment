@@ -1843,6 +1843,27 @@ class PhysicalCoresTest(ServerTestCase):
         self.assertEqual(server.physical_cores(), 6)
         self.assertEqual(server.logical_cpus(), 6)
 
+    def test_hardware_cpu_kind_follows_the_source_that_answered(self):
+        def kind():
+            hw = server.hardware_profile("testnet")
+            return hw["cpu"], hw["cpu_kind"]
+
+        self.host_replies = {"lscpu": (0, LSCPU_8C16T.strip(), ""), "nproc": (0, "16", "")}
+        self.assertEqual(kind(), (8, "physical"))
+        del self.host_replies["lscpu"]
+        self.cpuinfo(CPUINFO_2S2C2T)
+        self.assertEqual(kind(), (4, "physical"))
+        self.cpuinfo(CPUINFO_ARM)
+        self.host_replies["sysctl"] = (0, "10", "")
+        self.assertEqual(kind(), (10, "physical"))
+        del self.host_replies["sysctl"]
+        self.assertEqual(kind(), (16, "logical"))
+        self.assertEqual(server.physical_cores(), 16, "physical_cores keeps its fallback")
+        self.host_replies = {}
+        self.patch(server.os, "cpu_count", lambda: None)
+        self.assertEqual(kind(), (None, None))
+        self.assertIsNone(server.physical_cores())
+
     def test_system_and_preflight_report_both_counts(self):
         self.host_replies = {"lscpu": (0, LSCPU_8C16T.strip(), ""), "nproc": (0, "16", "")}
         system = self.client.get("/api/system").get_json()
@@ -1860,8 +1881,8 @@ class PhysicalCoresTest(ServerTestCase):
 
 class HardwareTiersTest(ServerTestCase):
     """The preflight's hardware tiers per network. The host is the testnet
-    validator, a c3-highcpu-8: 4 physical cores, 16 GB of RAM (MemTotal about
-    15.6 GiB) and a 350 GB disk."""
+    validator, a c3-highcpu-8: 4 physical cores (8 logical CPUs), 16 GB of RAM
+    (MemTotal about 15.6 GiB) and a 350 GB disk."""
 
     RAM_16GB_KB = 16375000              # MemTotal of a 16 GB machine, about 15.6 GiB
     DISK_350GB = 350 * 1000 ** 3        # bytes: disks are sold in decimal GB
@@ -1871,11 +1892,18 @@ class HardwareTiersTest(ServerTestCase):
                   "validator": (False, ["cpu", "ram", "disk"])}
     PREFLIGHT_KEYS = {"tpm2", "systemd", "internet", "disk", "docker", "rust", "hardware",
                       "cpu_physical", "cpu_threads"}
+    HARDWARE_KEYS = {"network", "cpu", "cpu_kind", "ram_kb", "disk", "tiers",
+                     "validator_recommended"}
+    NO_VERDICT = {role: (False, []) for role in ("node", "rpc", "validator")}
+    MEM_TOTAL_KB = staticmethod(server._mem_total_kb)   # the reader setUp replaces
 
     def setUp(self):
         super().setUp()
-        self.host = {"cpu": 4, "ram_kb": self.RAM_16GB_KB, "disk_bytes": self.DISK_350GB}
-        self.patch(server, "physical_cores", lambda: self.host["cpu"])
+        # cpu: the physical count (None: it cannot be counted); threads: the logical one.
+        self.host = {"cpu": 4, "threads": 8, "ram_kb": self.RAM_16GB_KB,
+                     "disk_bytes": self.DISK_350GB}
+        self.patch(server, "_counted_physical_cores", lambda: self.host["cpu"])
+        self.patch(server, "logical_cpus", lambda: self.host["threads"])
         self.patch(server, "_mem_total_kb", lambda: self.host["ram_kb"])
         self.patch(server.shutil, "disk_usage", self.disk_usage)
         self.patch(server, "DEFAULT_DATA_DIR", os.path.join(self.tmp.name, "var-lib-telcoin"))
@@ -1915,9 +1943,8 @@ class HardwareTiersTest(ServerTestCase):
     def test_the_profile_applies_one_set_and_names_it(self):
         for net in ("testnet", "mainnet"):
             hw = server.hardware_profile(net)
-            self.assertEqual(set(hw), {"network", "cpu", "ram_kb", "disk", "tiers",
-                                       "validator_recommended"})
-            self.assertEqual(hw["network"], net)
+            self.assertEqual(set(hw), self.HARDWARE_KEYS)
+            self.assertEqual((hw["network"], hw["cpu_kind"]), (net, "physical"))
             self.assertEqual([(t["role"], t["label"], t["min_cpu"], t["min_ram_gb"],
                                t["min_disk_gb"]) for t in hw["tiers"]],
                              list(server.HW_TIERS[net]))
@@ -1942,6 +1969,7 @@ class HardwareTiersTest(ServerTestCase):
                  ("?network=bogus", "testnet"), ("?network=", "testnet"))
         for query, net in cases:
             hw = self.preflight(query)["hardware"]
+            self.assertEqual(set(hw), self.HARDWARE_KEYS, query)
             self.assertEqual(hw["network"], net, query)
             self.assertEqual(self.verdicts(hw),
                              self.MAINNET_C3 if net == "mainnet" else self.TESTNET_PASS, query)
@@ -1984,8 +2012,69 @@ class HardwareTiersTest(ServerTestCase):
         self.host.update({"ram_kb": self.RAM_16GB_KB, "disk_bytes": None})
         hw = server.hardware_profile("testnet")
         self.assertIsNone(hw["disk"]["total_kb"])
-        self.assertEqual(self.verdicts(hw),
-                         {role: (False, []) for role in ("node", "rpc", "validator")})
+        self.assertEqual(self.verdicts(hw), self.NO_VERDICT)
+
+    def meminfo(self, text):
+        path = os.path.join(self.tmp.name, "meminfo")
+        with open(path, "w") as f:
+            f.write(text)
+        self.patch(server, "MEMINFO_PATH", path)
+        self.patch(server, "_mem_total_kb", self.MEM_TOTAL_KB)
+
+    def test_a_memtotal_of_zero_is_not_measured(self):
+        # check_hardware reads a value that is not a positive integer as "could
+        # not check", never as below the minimum.
+        self.meminfo("MemTotal:       16375000 kB\nMemFree:  1 kB\n")
+        self.assertEqual(server._mem_total_kb(), self.RAM_16GB_KB)
+        self.assertEqual(self.verdicts(server.hardware_profile("testnet")), self.TESTNET_PASS)
+        for value in ("0", "-5", "x"):
+            self.meminfo("MemTotal:       %s kB\n" % value)
+            self.assertIsNone(server._mem_total_kb(), value)
+            hw = server.hardware_profile("testnet")
+            self.assertIsNone(hw["ram_kb"], value)
+            self.assertEqual(self.verdicts(hw), self.NO_VERDICT, value)
+        self.patch(server, "MEMINFO_PATH", os.path.join(self.tmp.name, "no-meminfo"))
+        self.assertIsNone(server._mem_total_kb())
+
+    def test_a_filesystem_of_zero_kb_is_not_measured(self):
+        for size in (0, 1023):                       # bytes: 0 kB once divided
+            self.host["disk_bytes"] = size
+            hw = server.hardware_profile("testnet")
+            self.assertEqual(hw["disk"], {"path": self.tmp.name, "total_kb": None,
+                                          "free_kb": None, "used_pct": None}, size)
+            self.assertEqual(self.verdicts(hw), self.NO_VERDICT, size)
+        self.host["disk_bytes"] = 1024               # 1 kB is measured, and far too small
+        self.assertEqual(self.verdicts(server.hardware_profile("testnet")),
+                         {role: (False, ["disk"]) for role in ("node", "rpc", "validator")})
+
+    def test_cores_are_compared_exactly(self):
+        # With the 95 % slack of RAM and disk, 19 cores would pass a 20-core tier
+        # (1900 >= 1900); check_hardware compares cores exactly.
+        self.patch(server, "HW_TIERS", {"testnet": (("validator", "Validator (minimum)",
+                                                     20, 16, 350),)})
+        self.host["cpu"] = 19
+        self.assertEqual(self.verdicts(server.hardware_profile("testnet")),
+                         {"validator": (False, ["cpu"])})
+        self.host["cpu"] = 20
+        self.assertEqual(self.verdicts(server.hardware_profile("testnet")),
+                         {"validator": (True, [])})
+
+    def test_cpu_kind_names_the_count_cpu_is(self):
+        hw = server.hardware_profile("testnet")
+        self.assertEqual((hw["cpu"], hw["cpu_kind"]), (4, "physical"))
+        # Physical cores cannot be counted: the logical count is compared with the
+        # tiers, as check_hardware does, and the verdicts do not change.
+        self.host["cpu"] = None
+        body = self.preflight()
+        hw = body["hardware"]
+        self.assertEqual(set(hw), self.HARDWARE_KEYS)
+        self.assertEqual((hw["cpu"], hw["cpu_kind"]), (8, "logical"))
+        self.assertEqual(self.verdicts(hw), self.TESTNET_PASS)
+        self.assertEqual((body["cpu_physical"], body["cpu_threads"]), (8, 8))
+        self.host["threads"] = None
+        hw = server.hardware_profile("testnet")
+        self.assertEqual((hw["cpu"], hw["cpu_kind"]), (None, None))
+        self.assertEqual(self.verdicts(hw), self.NO_VERDICT)
 
 
 # ---------------------------------------------------------------------------

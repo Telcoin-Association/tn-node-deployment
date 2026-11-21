@@ -75,7 +75,7 @@ logging.getLogger("werkzeug").setLevel(logging.WARNING)
 # of the update engine copies in /opt/telcoin-ui-update/ (install-caddy 1.3.0).
 # 1.8.8: on-chain stake status (getValidator) selects the validator view;
 # warn-only hardware preflight; refreshes the engine copies
-UI_VERSION = "2.1.2"
+UI_VERSION = "2.1.3"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -3032,6 +3032,13 @@ def physical_cores():
     hw.physicalcpu` (macOS), else the logical count. The hardware tiers are in
     physical cores, and a cloud vCPU is usually a hyperthread, so a logical
     count can read twice the real size. None when nothing answers."""
+    return _counted_physical_cores() or logical_cpus()
+
+
+def _counted_physical_cores():
+    """physical_cores without the logical fallback: the count from lscpu,
+    /proc/cpuinfo or sysctl, None when none of them answers (hardware_profile
+    tells the two apart)."""
     rc, out, _ = run(["lscpu", "--parse=CORE,SOCKET"])
     if rc == 0:
         pairs = set()
@@ -3067,7 +3074,7 @@ def physical_cores():
         return len(pairs)
 
     rc, out, _ = run(["sysctl", "-n", "hw.physicalcpu"])
-    return (_positive_int(out) if rc == 0 else None) or logical_cpus()
+    return _positive_int(out) if rc == 0 else None
 
 
 def system_info():
@@ -5202,8 +5209,9 @@ HW_VALIDATOR_RECOMMENDED = {
     "testnet": {"cpu": 4, "ram_gb": 16, "disk_gb": 500, "ecc": False},
     "mainnet": {"cpu": 16, "ram_gb": 64, "disk_gb": 4000, "ecc": True},
 }
-# A measured value passes at >= 95% of the tier, so a "32 GB" machine whose
-# MemTotal reads a little under 32 GiB (kernel reservations) still counts.
+# A measured RAM or disk size passes at >= 95% of the tier, so a "32 GB" machine
+# whose MemTotal reads a little under 32 GiB (kernel reservations) still counts.
+# Cores are compared exactly, as check_hardware compares them.
 HW_PASS_PCT = 95
 
 
@@ -5220,14 +5228,20 @@ def _hw_disk_floor_kb(gb):
     return gb * 1000 ** 3 * HW_PASS_PCT // 100 // 1024
 
 
+# Read by _mem_total_kb. A plain assignment so a test can point it at a fixture.
+MEMINFO_PATH = "/proc/meminfo"
+
+
 def _mem_total_kb():
-    """MemTotal in kB from /proc/meminfo. None when unreadable (e.g. macOS)."""
+    """MemTotal in kB from /proc/meminfo. None when unreadable (e.g. macOS) or
+    not a positive number: like check_hardware, a 0 is not measured, never a
+    gap."""
     try:
-        with open("/proc/meminfo") as f:
+        with open(MEMINFO_PATH) as f:
             for line in f:
                 k, _, v = line.partition(":")
                 if k.strip() == "MemTotal":
-                    return int(v.split()[0])
+                    return _positive_int(v.split()[0])
     except (OSError, IOError, ValueError, IndexError):
         pass
     return None
@@ -5245,14 +5259,19 @@ def _nearest_existing_dir(path):
 def _hw_disk(path):
     """{path, total_kb, free_kb, used_pct} for the filesystem that will hold
     `path`. free_kb is what an unprivileged writer can use; used_pct is rounded up
-    like df's Use%. Numbers are None when the filesystem can't be statted."""
+    like df's Use%. Numbers are None when the filesystem can't be statted or
+    reports a size of 0 kB (a pseudo or autofs mount): like check_hardware, that
+    is not measured, never a gap."""
     p = _nearest_existing_dir(path)
     out = {"path": p, "total_kb": None, "free_kb": None, "used_pct": None}
     try:
         du = shutil.disk_usage(p)
     except OSError:
         return out
-    out["total_kb"] = du.total // 1024
+    total_kb = du.total // 1024
+    if total_kb <= 0:
+        return out
+    out["total_kb"] = total_kb
     out["free_kb"] = du.free // 1024
     if du.used + du.free > 0:
         out["used_pct"] = -(-du.used * 100 // (du.used + du.free))
@@ -5267,16 +5286,22 @@ def hardware_profile(network="testnet"):
     `gaps` names the measured values below the tier ("cpu", "ram", "disk"). A
     value we could not read is neither a pass nor a gap, so such a tier reads
     ok:false with no gaps (the UI says it could not be measured). CPU is judged
-    on physical cores (physical_cores), as the tiers are; RAM on MemTotal in
-    binary GB; disk on the filesystem's total size in decimal GB."""
+    on physical cores, as the tiers are, compared exactly as check_hardware
+    does; when they cannot be counted, on the logical count, and `cpu_kind`
+    ("physical", "logical", None when no count is known) says which `cpu` is.
+    RAM is judged on MemTotal in binary GB; disk on the filesystem's total size
+    in decimal GB."""
     net = "mainnet" if network == "mainnet" else "testnet"
-    cpu = physical_cores()
+    cpu, cpu_kind = _counted_physical_cores(), "physical"
+    if cpu is None:
+        cpu = logical_cpus()
+        cpu_kind = None if cpu is None else "logical"
     ram_kb = _mem_total_kb()
     disk = _hw_disk(DEFAULT_DATA_DIR)
     tiers = []
     for role, label, min_cpu, min_ram_gb, min_disk_gb in HW_TIERS[net]:
         checks = (
-            ("cpu", cpu, None if cpu is None else cpu * 100 >= min_cpu * HW_PASS_PCT),
+            ("cpu", cpu, None if cpu is None else cpu >= min_cpu),
             ("ram", ram_kb, None if ram_kb is None else ram_kb >= _hw_ram_floor_kb(min_ram_gb)),
             ("disk", disk["total_kb"], None if disk["total_kb"] is None
              else disk["total_kb"] >= _hw_disk_floor_kb(min_disk_gb)),
@@ -5291,6 +5316,7 @@ def hardware_profile(network="testnet"):
     return {
         "network": net,
         "cpu": cpu,
+        "cpu_kind": cpu_kind,
         "ram_kb": ram_kb,
         "disk": disk,
         "tiers": tiers,

@@ -3634,7 +3634,7 @@ function hwTierRows(hw){
       : gaps.length ? 'below minimum — '+gaps.join(', ')
       : 'could not be measured';
     return ['hardware', !!t.ok,
-      `${t.label}: ${verdict} (${hwCores(t.min_cpu)} / ${t.min_ram_gb} GB RAM / ${hwDiskLabel(t.min_disk_gb)} disk)`, false];
+      `${t.label}: ${verdict} (${hwCores(t.min_cpu)} / ${t.min_ram_gb ?? '?'} GB RAM / ${hwDiskLabel(t.min_disk_gb)} disk)`, false];
   });
 }
 
@@ -3645,6 +3645,9 @@ function hwTierRows(hw){
 // ecc: those parts are left out.
 // UI 1.9.0 servers add cpu_physical and cpu_threads (in hardware, or at the top
 // level of the preflight reply: pf); the CPU then reads "8 cores (16 threads)".
+// hw.cpu_kind 'logical' means only logical CPUs could be counted: the CPU then
+// reads "8 logical CPUs", with the shell's note on what the tiers compared.
+// Absent, null or 'physical': the cores wording above.
 function hwInfoRow(hw, pf){
   if(!hw) return '';
   const gb = kb => kb==null ? '?' : String(Math.round(kb/1048576));   // RAM: binary GiB
@@ -3653,14 +3656,18 @@ function hwInfoRow(hw, pf){
   const diskGb = kb => kb==null ? '?' : String(Math.round(kb*1024/1e9));
   const pick = k => hw[k]!=null ? hw[k] : ((pf && pf[k]!=null) ? pf[k] : null);
   const phys = pick('cpu_physical'), threads = pick('cpu_threads');
-  const cpu = phys!=null ? `${phys} cores${threads!=null ? ` (${threads} threads)` : ''}` : `${hw.cpu??'?'} cores`;
+  const logical = hw.cpu_kind === 'logical', nLogical = hw.cpu ?? phys;
+  const cpu = logical ? `${nLogical ?? '?'} logical CPU${Number(nLogical)===1 ? '' : 's'}`
+    : phys!=null ? `${phys} cores${threads!=null ? ` (${threads} threads)` : ''}` : `${hw.cpu??'?'} cores`;
   const parts = [];
-  if(hw.cpu!=null || phys!=null || hw.ram_kb!=null || hw.disk?.total_kb!=null)
+  if(hw.cpu!=null || phys!=null || hw.ram_kb!=null || hw.disk?.total_kb!=null){
     parts.push(`Detected ${cpu} / ${gb(hw.ram_kb)} GB RAM / ${diskGb(hw.disk?.total_kb)} GB disk`
       + (hw.disk?.path ? ` (${hw.disk.path})` : '') + '.');
+    if(logical) parts.push('Physical cores could not be counted, so the tiers are compared with logical CPUs; with hyperthreading that is up to twice the physical cores.');
+  }
   if(hw.network) parts.push(`Compared with the ${hw.network} hardware tiers.`);
   const r = hw.validator_recommended;
-  if(r) parts.push(`Recommended to validate: ${hwCores(r.cpu)} / ${r.ram_gb} ${r.ecc ? 'GB ECC RAM' : 'GB RAM'} / ${hwDiskLabel(r.disk_gb)} disk.`);
+  if(r) parts.push(`Recommended to validate: ${hwCores(r.cpu)} / ${r.ram_gb ?? '?'} ${r.ecc ? 'GB ECC RAM' : 'GB RAM'} / ${hwDiskLabel(r.disk_gb)} disk.`);
   if(!parts.length) return '';
   parts.push('Prioritise single-core performance: EVM execution is single-threaded, so a high clock speed matters more than extra cores.');
   return `<div class="check"><div class="ci"><span style="color:var(--text3)">i</span></div><div class="cl"><div class="ct">Hardware</div><div class="cd">${esc(parts.join(' '))}</div></div></div>`;
