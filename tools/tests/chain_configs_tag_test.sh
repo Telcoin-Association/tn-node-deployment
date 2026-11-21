@@ -769,8 +769,15 @@ dest_clear
 ft "$T/broken" testnet pf
 check "a .git git cannot read: refused (rc 1), nothing installed" "1 no" \
     "$FT_RC $([[ -e "$D/genesis.yaml" ]] && echo yes || echo no)"
-check "a .git git cannot read: git's reason" yes \
-    "$(has "$PFL" "warn|Git cannot read the repository in ${T}/broken (fatal: not a git repository: ")"
+# Git words this differently from version to version ("not a git repository: <path>",
+# "not a git repository (or any of the parent directories): .git"), so the check is
+# that git's own fatal line is carried, and a failure prints the line that came.
+GW="$(grep -F "warn|Git cannot read the repository in ${T}/broken (" <<< "$PFL" || true)"
+case "$GW" in
+    *"(fatal: not a git repository"*"); nothing was installed.") GWR=yes ;;
+    *) GWR="no: ${GW:-no such warning}" ;;
+esac
+check "a .git git cannot read: git's reason" yes "$GWR"
 if [[ $IS_ROOT == 1 ]]; then
     S10="$T/src10"
     G clone -q "$O" "$S10" 2>/dev/null
