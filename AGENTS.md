@@ -1118,8 +1118,10 @@ into a pass. The jobs:
   runs `tools/check-release-keys.sh` (the release keys are its `keys/*.asc`), then runs
   `tools/gen-checksums.sh` and fails on a stale, missing or uncommitted sidecar.
 
-`.github/workflows/integration.yml` has one job, `vm-assertions`: on an Ubuntu 24.04 runner
-(a full VM with systemd), it installs logrotate, ufw and openssh-server and runs every
+`.github/workflows/integration.yml` has two jobs with the same steps: `vm-assertions` ("Ubuntu
+24.04 VM assertions") on an Ubuntu 24.04 runner and `vm-assertions-2604` ("Ubuntu 26.04 VM
+assertions", not required) on an Ubuntu 26.04 runner. On the runner (a full VM with systemd),
+each installs logrotate, ufw, openssh-server and nftables and runs every
 `tools/tests/vm.d/P0-*.sh` assertion file as root with `TN_VM_TEST=1`. Only that glob runs: a
 new assertion file needs the `P0-` prefix.
 
