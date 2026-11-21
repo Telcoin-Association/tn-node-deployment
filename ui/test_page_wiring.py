@@ -214,6 +214,90 @@ class SetupWizardTest(unittest.TestCase):
         self.assertIn("'/api/setup/defaults?network='+setupNetwork()", function_body("loadSetupDefaults"))
 
 
+class PreflightHardwareTest(unittest.TestCase):
+    """The preflight step asks for the wizard's network's hardware tiers and
+    words them like the documentation: physical cores with vCPU beside them,
+    disks in GB or TB, ECC only when the server says so, and the single-core
+    advice."""
+
+    SINGLE_CORE = ("Prioritise single-core performance: EVM execution is single-threaded, "
+                   "so a high clock speed matters more than extra cores.")
+
+    def test_the_preflight_request_carries_the_wizards_network(self):
+        body = function_body("stepPreflight")
+        self.assertIn("api('/api/setup/preflight?network='+encodeURIComponent(setupNetwork()))", body)
+        self.assertNotIn("api('/api/setup/preflight')", page())
+
+    def test_cores_and_disks_read_like_the_docs(self):
+        self.assertIn("`${n} cores (${2*n} vCPU)`", function_body("hwCores"))
+        disk = function_body("hwDiskLabel")
+        # Whole thousands of GB read as TB, like the shell's _tn_hw_disk_label.
+        self.assertIn("(gb>=1000 && gb%1000===0) ? `${gb/1000} TB` : `${gb} GB`", disk)
+
+    def test_the_tier_row_uses_the_helpers(self):
+        body = function_body("hwTierRows")
+        self.assertIn("${t.label}: ${verdict} (${hwCores(t.min_cpu)} / ${t.min_ram_gb ?? '?'} GB RAM / "
+                      "${hwDiskLabel(t.min_disk_gb)} disk)", body)
+        self.assertNotIn("${t.min_cpu} cores / ${t.min_ram_gb} GB RAM / ${t.min_disk_gb} GB disk", page())
+        # The rows reach innerHTML through the escaped row template.
+        self.assertIn("${esc(desc)}", function_body("stepPreflight"))
+
+    def test_the_info_row_names_the_tier_set_only_when_the_server_does(self):
+        body = function_body("hwInfoRow")
+        self.assertIn("if(hw.network) parts.push(`Compared with the ${hw.network} hardware tiers.`);", body)
+        # hw.network is server text: the whole row is escaped.
+        self.assertIn("${esc(parts.join(' '))}", body)
+
+    def test_the_recommendation_uses_the_helpers_and_ecc_only_when_sent(self):
+        body = function_body("hwInfoRow")
+        self.assertIn("Recommended to validate: ${hwCores(r.cpu)} / ${r.ram_gb ?? '?'} "
+                      "${r.ecc ? 'GB ECC RAM' : 'GB RAM'} / ${hwDiskLabel(r.disk_gb)} disk.", body)
+        self.assertEqual(page().count("GB ECC RAM"), 1)
+        self.assertNotIn("${r.cpu} cores / ${r.ram_gb} GB RAM / ${r.disk_gb} GB disk", page())
+
+    def test_the_detected_disk_is_decimal_gb_like_the_tiers(self):
+        body = function_body("hwInfoRow")
+        self.assertIn("const diskGb = kb => kb==null ? '?' : String(Math.round(kb*1024/1e9));", body)
+        self.assertIn("${diskGb(hw.disk?.total_kb)} GB disk", body)
+        self.assertNotIn("${gb(hw.disk?.total_kb)}", body)
+        # RAM stays binary GiB, as the shell prints it.
+        self.assertIn("const gb = kb => kb==null ? '?' : String(Math.round(kb/1048576));", body)
+        self.assertIn("${gb(hw.ram_kb)} GB RAM", body)
+
+    def test_missing_ram_figures_read_as_unknown(self):
+        # A partial object (a null min_ram_gb, a validator_recommended of {})
+        # shows "?" like the cores and disk helpers, never undefined or null.
+        self.assertIn("${t.min_ram_gb ?? '?'} GB RAM", function_body("hwTierRows"))
+        self.assertNotIn("${t.min_ram_gb}", function_body("hwTierRows"))
+        body = function_body("hwInfoRow")
+        self.assertIn("${r.ram_gb ?? '?'} ${r.ecc", body)
+        self.assertNotIn("${r.ram_gb}", body)
+
+    LOGICAL_NOTE = ("Physical cores could not be counted, so the tiers are compared with logical "
+                    "CPUs; with hyperthreading that is up to twice the physical cores.")
+
+    def test_a_logical_cpu_count_is_worded_as_such_only_when_the_server_says_so(self):
+        self.assertEqual(page().count(self.LOGICAL_NOTE), 1)
+        body = function_body("hwInfoRow")
+        self.assertIn("const logical = hw.cpu_kind === 'logical'", body)
+        self.assertIn("const cpu = logical ? `${nLogical ?? '?'} logical CPU${Number(nLogical)===1 ? '' : 's'}`", body)
+        # Absent, null or "physical": the cores wording as before.
+        self.assertIn(": phys!=null ? `${phys} cores${threads!=null ? ` (${threads} threads)` : ''}` "
+                      ": `${hw.cpu??'?'} cores`;", body)
+        self.assertIn("if(logical) parts.push('%s');" % self.LOGICAL_NOTE, body)
+        # The note follows the detected sentence, before the tier set and the advice.
+        self.assertLess(body.index("parts.push(`Detected "), body.index(self.LOGICAL_NOTE))
+        self.assertLess(body.index(self.LOGICAL_NOTE), body.index("Compared with the "))
+        self.assertEqual(body.count("logical ?"), 1)
+
+    def test_the_single_core_advice_follows_the_rest_of_the_row(self):
+        self.assertIn(self.SINGLE_CORE, page())
+        body = function_body("hwInfoRow")
+        self.assertIn("parts.push('%s');" % self.SINGLE_CORE, body)
+        # Only a row with something else in it gets the advice.
+        self.assertLess(body.index("if(!parts.length) return '';"), body.index(self.SINGLE_CORE))
+
+
 class UpdatePanelTest(unittest.TestCase):
 
     def test_done_fields_are_shown(self):

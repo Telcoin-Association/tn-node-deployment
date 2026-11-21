@@ -404,7 +404,16 @@ node_is_staked_validator() {
     if [[ "${2:-}" == "$MAINNET_RPC_URL" ]]; then return "${NSV_RC2:-1}"; fi
     return "${NSV_RC:-1}"
 }
-gate() { : > "$NSV_LOG"; ( CADDY_GATE_DONE=false; caddy_mainnet_gate ) >"$T/out" 2>&1; }
+# The public RPC answers eth_chainId with PUB_CHAIN (default 0x2db, chain 731) and
+# nothing else; every call is logged. The real tn_rpc_call comes back after the gate cases.
+RPC_LOG="$T/rpc.log"
+REAL_RPC_CALL="$(declare -f tn_rpc_call)"
+tn_rpc_call() {
+    printf '%s %s\n' "$1" "$2" >> "$RPC_LOG"
+    [[ "$2" == "eth_chainId" ]] || return 1
+    printf '{"jsonrpc":"2.0","id":1,"result":"%s"}\n' "${PUB_CHAIN:-0x2db}"
+}
+gate() { : > "$NSV_LOG"; : > "$RPC_LOG"; ( CADDY_GATE_DONE=false; caddy_mainnet_gate ) >"$T/out" 2>&1; }
 ADDR=0x1111111111111111111111111111111111111111
 printf 'NETWORK=mainnet\nOWNERSHIP_LAYOUT=2\nVALIDATOR_ADDRESS=%s\n' "$ADDR" > "$RP/etc/telcoin/.node-meta"
 NSV_RC=0 gate; check_rc "mainnet staked validator refused" 1 $?
@@ -432,6 +441,58 @@ printf 'NETWORK=mainnet\nOWNERSHIP_LAYOUT=2\nVALIDATOR_ADDRESS=%s\n' "$ADDR" > "
 check_rc "dashboard precheck refuses a staked mainnet node" 1 $?
 ( NSV_RC=0; CADDY_GATE_DONE=false; caddy_rpc_enable_precheck rpc.example.org "" ) >"$T/out" 2>&1
 check_rc "rpc-enable precheck refuses a staked mainnet node" 1 $?
+
+# --- mainnet gate: the network read from the genesis, the public RPC's chain ---------------------
+# With no NETWORK the genesis decides (731 mainnet, 2017 testnet) and any other chain id is
+# refused with the id that was read. A public RPC is asked for the stake only once it answers
+# eth_chainId with chain 731.
+GEN="$RP/var/lib/telcoin/genesis/genesis.yaml"
+mkdir -p "$RP/var/lib/telcoin/genesis"
+said() { grep -qF -- "$1" "$T/out"; }
+printf 'OWNERSHIP_LAYOUT=2\nVALIDATOR_ADDRESS=%s\n' "$ADDR" > "$RP/etc/telcoin/.node-meta"
+printf 'config:\n  chainId: 487\n' > "$GEN"
+NSV_RC=1 gate; check_rc "no NETWORK, genesis 487: refused" 1 $?
+check "genesis 487: the id read is named, with both known ids" "yes" \
+    "$(said 'genesis.yaml (487) is neither 731 nor 2017' && echo yes)"
+check "genesis 487: no longer says no genesis chain id was readable" "" "$(said 'no readable genesis chain id' && echo yes)"
+check "genesis 487: what is refused and that nothing changed" "yes" \
+    "$(said 'cannot be told (no NETWORK in .node-meta' && said 'Caddy (dashboard and public RPC) is not offered on mainnet validators. Nothing was changed.' && echo yes)"
+check "genesis 487: neither the stake nor any RPC asked" "|" "$(cat "$NSV_LOG")|$(cat "$RPC_LOG")"
+rm -f "$GEN"
+NSV_RC=1 gate; check_rc "no NETWORK, no genesis: refused" 1 $?
+check "no genesis: said it could not be read" "yes" \
+    "$(said 'no NETWORK in .node-meta, and the chain id of' && said 'genesis.yaml (unreadable) is neither 731 nor 2017' && echo yes)"
+printf 'config:\n  chainId: 731\n' > "$GEN"
+NSV_RC=1 gate; check_rc "no NETWORK, genesis 731, not staked: allowed" 0 $?
+check "genesis 731: treated as mainnet, the stake asked" "$ADDR local" "$(cat "$NSV_LOG")"
+NSV_RC=0 gate; check_rc "no NETWORK, genesis 731, staked: refused" 1 $?
+check "genesis 731, staked: refused as a staked validator" "yes" "$(said 'is a staked validator' && echo yes)"
+printf 'config:\n  chainId: 2017\n' > "$GEN"
+NSV_RC=0 gate; check_rc "no NETWORK, genesis 2017: allowed as testnet" 0 $?
+check "genesis 2017: neither the stake nor any RPC asked" "|" "$(cat "$NSV_LOG")|$(cat "$RPC_LOG")"
+rm -f "$GEN"
+printf 'NETWORK=mainnet\nOWNERSHIP_LAYOUT=2\nVALIDATOR_ADDRESS=%s\n' "$ADDR" > "$RP/etc/telcoin/.node-meta"
+PUB_CHAIN=0x7e1 NSV_RC=2 NSV_RC2=1 gate; check_rc "local unreadable, public RPC on chain 2017: refused" 1 $?
+check "public RPC on 2017: its chain asked" "$MAINNET_RPC_URL eth_chainId" "$(cat "$RPC_LOG")"
+check "public RPC on 2017: the stake not read there" "$ADDR local" "$(cat "$NSV_LOG")"
+check "public RPC on 2017: the stake status refusal" "yes" "$(said "Could not read the stake status of ${ADDR}" && echo yes)"
+check "public RPC on 2017: says the endpoint does not serve chain 731" "yes" \
+    "$(said 'https://rpc.telcoin.network does not answer with chain 731, so the stake was not read there.' && echo yes)"
+PUB_CHAIN=0x2db NSV_RC=2 NSV_RC2=1 gate; check_rc "local unreadable, public RPC on 731, not staked: allowed" 0 $?
+check "public RPC on 731: chain checked, then the stake read there" \
+    "$MAINNET_RPC_URL eth_chainId|$ADDR local $ADDR $MAINNET_RPC_URL" \
+    "$(cat "$RPC_LOG")|$(tr '\n' ' ' < "$NSV_LOG" | sed 's/ $//')"
+PUB_CHAIN=0x2db NSV_RC=2 NSV_RC2=0 gate; check_rc "local unreadable, public RPC on 731, staked: refused" 1 $?
+check "public RPC on 731, staked: refused as a staked validator" "yes" "$(said 'is a staked validator' && echo yes)"
+PUB_CHAIN=junk NSV_RC=2 NSV_RC2=1 gate; check_rc "local unreadable, public chain unreadable: refused" 1 $?
+check "public chain unreadable: the stake not read there" "$ADDR local" "$(cat "$NSV_LOG")"
+for n in testnet devnet; do
+    printf 'NETWORK=%s\nOWNERSHIP_LAYOUT=2\nVALIDATOR_ADDRESS=%s\n' "$n" "$ADDR" > "$RP/etc/telcoin/.node-meta"
+    NSV_RC=2 gate; check_rc "${n}: allowed" 0 $?
+    check "${n}: neither the stake nor any RPC asked" "|" "$(cat "$NSV_LOG")|$(cat "$RPC_LOG")"
+done
+eval "$REAL_RPC_CALL"
+unset -f said
 
 # --- DATA_DIR on more than one line stops rpc-enable before any write ---------------------------
 mkdir -p "$RP/data"

@@ -100,18 +100,47 @@ node on the box, the binary is launched with no node-instance flag and serves RP
 
 ### Hardware
 
-Size the machine for the role you plan to run. The figures come from the telcoin-network hardware requirements and count physical cores: cloud vCPUs are usually hyperthreads, so an 8 vCPU instance has about 4 physical cores. The validator row only matters if you intend to stake and validate.
+Size the machine for the role you plan to run and the network it joins.
+The figures count physical cores, written `N cores (2N vCPU)`: cloud vCPUs are usually hyperthreads, two per core, so an 8 vCPU instance has about 4 physical cores.
+The validator rows only matter if you intend to stake and validate.
+
+Testnet (Adiri):
 
 | Role | Minimum | Recommended |
 |---|---|---|
-| Observer, follower (RPC on localhost) | 2 cores, 8 GB RAM | 4 cores, 16 GB RAM |
-| Observer, public RPC | 4 cores, 16 GB RAM | 8 cores, 32 GB RAM |
-| Validator | 8 cores, 32 GB ECC RAM | 16 cores, 64 GB ECC RAM |
-| Storage, every role | 2 TB TLC NVMe SSD | 4 TB TLC NVMe SSD |
+| Observer, follower | 2 cores (4 vCPU), 8 GB RAM | 4 cores (8 vCPU), 16 GB RAM |
+| Observer, public RPC | 4 cores (8 vCPU), 16 GB RAM | 8 cores (16 vCPU), 32 GB RAM |
+| Validator | 3 cores (6 vCPU), 16 GB RAM | 4 cores (8 vCPU), 16 GB RAM |
+| Storage, every role | 350 GB SSD (15,000 IOPS, 240 MB/s) | 500 GB TLC NVMe |
+| Validator bandwidth | 200 Mbps symmetric | 1 Gbps |
 
-Validators also need 200 Mbps symmetric bandwidth at minimum, 1 Gbps recommended.
+Mainnet:
 
-The hardware preflight in `setup-node.sh` prints one line per role and only warns; it never blocks setup. It compares the tiers with physical cores, counted from `lscpu`, `/proc/cpuinfo` or `sysctl hw.physicalcpu`, and the report says what it measured ("4 physical cores"). When only the logical count can be read it says so ("8 logical CPUs"); halve a cloud instance's vCPU count yourself in that case. It does not check for ECC memory or NVMe.
+| Role | Minimum | Recommended |
+|---|---|---|
+| Observer, follower | 2 cores (4 vCPU), 8 GB RAM | 4 cores (8 vCPU), 16 GB RAM |
+| Observer, public RPC | 4 cores (8 vCPU), 16 GB RAM | 8 cores (16 vCPU), 32 GB RAM |
+| Validator | 8 cores (16 vCPU), 32 GB ECC RAM | 16 cores (32 vCPU), 64 GB ECC RAM |
+| Storage, validator | 2 TB TLC NVMe (20,000 write IOPS, 300 MB/s) | 4 TB |
+| Storage, observer | 2 TB TLC NVMe (10,000 write IOPS, 300 MB/s) | 4 TB |
+| Validator bandwidth | 200 Mbps symmetric | 1 Gbps |
+
+Prioritise single-core performance: EVM execution is single-threaded, so a high clock speed matters more than extra cores.
+
+The testnet figures follow the five Adiri validators: Google Cloud c3-highcpu-8 machines (4 cores (8 vCPU), 16 GB, Intel Sapphire Rapids), each with a 350 GB pd-ssd disk, which Google caps at 15,000 IOPS and 240 MiB/s on that machine size.
+
+The mainnet validator storage figure comes from Telcoin's published benchmarks at [benchmark.telcoin.network](https://benchmark.telcoin.network).
+In the [latest run](https://benchmark.telcoin.network/runs/r20261115-1653/), 10 validators on 8 vCPU and 16 GB with a 20,000 IOPS, 800 MiB/s volume averaged about 9,300 transactions a second, with write IOPS at about 20,000 at the 95th percentile and about 286 MiB/s written.
+Execution ran strictly in sequence: the engine was busy about 978 ms of every second while the machine used about 56 % of its 8 vCPUs.
+The other mainnet figures come from the hardware requirements page in the telcoin-network documentation.
+
+The hardware check in `setup-node.sh` runs during preflight, once the network is picked, and prints one line per role against that network's table, such as `Validator (minimum): meets minimum (3 cores (6 vCPU) / 16 GB / 350 GB)` on testnet.
+It only warns; it never blocks setup.
+It counts physical cores, from `lscpu`, `/proc/cpuinfo` or `sysctl hw.physicalcpu`, so an 8 vCPU instance with 4 cores meets the testnet validator minimum, 3 cores (6 vCPU), but not the mainnet one, 8 cores (16 vCPU).
+When only the logical count can be read it says so ("8 logical CPUs") and compares that count with the tiers; halve a cloud instance's vCPU count yourself in that case.
+It does not check ECC, NVMe, IOPS or throughput, and devnet uses the testnet table.
+
+A `[WARN] <role>: below minimum — needs ≥ ... (have ...)` line means the host is under that role's minimum for the chosen network, and names only the values that fall short, such as `needs ≥ 2 TB disk (have 350 GB disk)`; setup goes on.
 
 > Storage note: TLC NVMe drives are specifically required over QLC. TLC supports 1,000-3,000 P/E cycles vs 100-1,000 for QLC, making TLC significantly more durable for continuous blockchain write operations.
 
@@ -201,9 +230,13 @@ sudo bash ~/telcoin-node-scripts/remove-node.sh
 | `aws/requirements-ci.txt` | cfn-lint for CI, every file pinned by hash. |
 | `.github/workflows/publish-aws-templates.yml` | Uploads the template of each `scripts-v*` tag for the launch link. |
 
-Parameters: `Preset` (`FullNode` c7i.2xlarge, `PublicRPC` c7i.4xlarge with TCP 80 and 443 open, `Validator` c7i.8xlarge), `InstanceType` (empty for the preset's type, or another x86_64 type), `DataVolumeSize` (2000 or 4000 GiB), `AutoUpdate` (`Enabled` or `Disabled`) and `ImageId` (Canonical's public SSM parameter `/aws/service/canonical/ubuntu/server/26.04/stable/current/amd64/hvm/ebs-gp3/ami-id`).
+Parameters: `Preset` (`FullNode`, the default, `c7i.2xlarge, 4 cores (8 vCPU), 16 GiB`; `PublicRPC` `c7i.4xlarge, 8 cores (16 vCPU), 32 GiB` with TCP 80 and 443 open; `Validator` `c7i.2xlarge, 4 cores (8 vCPU), 16 GiB`, the same size as `FullNode`), `InstanceType` (empty for the preset's type, or another x86_64 type), `DataVolumeSize` (`500` GiB, the default, or `350`; `2000` and `4000` stay allowed for stacks launched with them), `AutoUpdate` (`Enabled` or `Disabled`) and `ImageId` (Canonical's public SSM parameter `/aws/service/canonical/ubuntu/server/26.04/stable/current/amd64/hvm/ebs-gp3/ami-id`).
 
-The stack creates a VPC with one public subnet, an internet gateway and route, an Elastic IP on the instance's network interface, and a security group with UDP 49590 and 49594 in from everywhere (plus TCP 80 and 443 on `PublicRPC`), no SSH and everything out. The instance runs Ubuntu 26.04 with IMDSv2 required, an encrypted gp3 root volume and an instance role that trusts `ec2.amazonaws.com` only and carries only `AmazonSSMManagedInstanceCore`. The data volume is encrypted gp3 (10,000 IOPS, 300 MB/s) with `DeletionPolicy: Retain` and `UpdateReplacePolicy: Retain`, and no snapshots. The user data writes `install algif_aead /bin/false` to `/etc/modprobe.d/telcoin-algif-aead.conf` first (and unloads the module if it is loaded), turns swap off, formats the data volume ext4 only when it carries no filesystem, mounts it at `/var/lib/telcoin` by UUID with `nofail` (found under `/dev/disk/by-id/` by its volume ID), installs the scripts as `ubuntu` with `install.sh --yes`, and signals a `WaitCondition` with `curl`, `SUCCESS` or `FAILURE` and the reason.
+The stack creates a VPC with one public subnet, an internet gateway and route, an Elastic IP on the instance's network interface, and a security group with UDP 49590 and 49594 in from everywhere (plus TCP 80 and 443 on `PublicRPC`), no SSH and everything out. The instance runs Ubuntu 26.04 with IMDSv2 required, an encrypted gp3 root volume and an instance role that trusts `ec2.amazonaws.com` only and carries only `AmazonSSMManagedInstanceCore`. The data volume is encrypted gp3, provisioned at 15,000 IOPS and 300 MiB/s, with `DeletionPolicy: Retain` and `UpdateReplacePolicy: Retain`, and no snapshots. The user data writes `install algif_aead /bin/false` to `/etc/modprobe.d/telcoin-algif-aead.conf` first (and unloads the module if it is loaded), turns swap off, formats the data volume ext4 only when it carries no filesystem, mounts it at `/var/lib/telcoin` by UUID with `nofail` (found under `/dev/disk/by-id/` by its volume ID), installs the scripts as `ubuntu` with `install.sh --yes`, and signals a `WaitCondition` with `curl`, `SUCCESS` or `FAILURE` and the reason.
+
+Cores, RAM and disk size follow the recommended column of the testnet table in [Hardware](#hardware); the disk is an EBS network volume, not a local NVMe drive.
+A `c7i.2xlarge` sustains 12,000 IOPS and 312.5 MB/s to EBS and bursts above that for 30 minutes at least once every 24 hours, so on `FullNode` and `Validator` the volume gives 12,000 IOPS sustained and 15,000 in bursts.
+A `c7i.4xlarge` sustains the full 15,000.
 
 | Output | Value |
 |---|---|
@@ -215,6 +248,18 @@ The stack creates a VPC with one public subnet, an internet gateway and route, a
 | `DataVolumeId` | The data volume, which deleting the stack keeps. |
 
 With `AutoUpdate` enabled, a State Manager association runs a Command document daily (03:00 UTC, then a random wait of up to an hour): nothing before setup has written `/etc/telcoin/.node-meta`; then `printf 'y\n' | sudo -u ubuntu -H bash update-scripts.sh`, `update-node.sh --json --check`, and when `update_available` is true (read with `python3`) `--json --prepare --ref <latest_ref>` and `--json --apply` without `--yes`. A prepared update that is already pending is applied, not prepared again. On a staked validator, or one whose stake cannot be read, the apply refuses without `--yes` and the prepared update waits for the apply document. When the check reports `storage_migration` true (a one-way update), the association prepares the update and never applies it, on any node; it waits for the apply document too. The association never runs `ui/install-ui.sh --update` or `setup-alerts.sh --refresh`.
+
+A stack launched from an earlier template keeps running as it is; nothing in this release needs a change on it.
+Do not update a stack to this template.
+Every stack update reads Canonical's image parameter again.
+Once a newer image is out, the update tries to replace the instance, fails because the old instance holds the network interface, and rolls back.
+The volume's IOPS change is made before that failure, so the rollback waits until the volume modification completes, which can take hours, and the stack shows `UPDATE_ROLLBACK_IN_PROGRESS` meanwhile.
+If the image has not changed, a `Validator` stack's update stops and starts the instance to change its type, outside the epoch-boundary wait of `update-node.sh`.
+Make changes on the resources instead:
+
+- To raise the data volume to 15,000 IOPS, use the EC2 console (`Volumes`, `Modify volume`). The node keeps running, and the volume takes no other modification until this one shows `completed` (at most four modifications in 24 hours).
+- To move a `Validator` to `c7i.2xlarge`, change the instance type in the EC2 console at a time when the node may restart.
+- A volume can grow but not shrink, and a stack update that picks a smaller `DataVolumeSize` fails. After you grow a volume, grow its filesystem on the host: `sudo resize2fs "$(findmnt -no SOURCE /var/lib/telcoin)"` (the volume has no partition table, and ext4 grows while mounted). Do not snapshot the volume first: a snapshot is a copy of the node keys.
 
 Telcoin gets no access to the account or the node: no cross-account role, no Systems Manager hybrid activation, no Telcoin principal. The guard rules check that the only IAM principal is `ec2.amazonaws.com`, that the role carries `AmazonSSMManagedInstanceCore` and nothing else (no inline policy), that every resource type is on an allowed list of types that take no resource policy, that no ingress rule covers TCP 22 (no all-protocol ingress either), that the instance requires IMDSv2, that every EBS volume is encrypted and that the data volume is retained.
 
@@ -240,12 +285,12 @@ Each script walks through numbered steps:
 **Step 1: Pre-flight Checks, Network and Install Method**
 - Checks you are running as root
 - Detects your Linux distribution and package manager
-- Reports the hardware against each role's minimum (warns only, never blocks)
 - Checks the required ports
+- Installs any missing tools (curl, git)
 - Asks which network to connect to (Adiri testnet; mainnet is offered once it launches), then offers the testnet add-ons and, on every network, [private alerts](#private-alerts-every-network), which it sets up once the node runs. The network is chosen here, so the script's own step headers go from Step 1 to Step 3. While this script release keeps mainnet off (`TN_MAINNET_ENABLED=0` in `lib/common.sh`), option 2 answers `Mainnet has not launched yet.` and asks again, and `--json --network mainnet` stops with `Mainnet is not enabled in this script release (lib/common.sh TN_MAINNET_ENABLED); nothing on this host was changed.`
 - Checks internet connectivity against the chosen network's public RPC (testnet `https://rpc.adiri.tel`, mainnet `https://rpc.telcoin.network`, devnet `https://rpc.devnet.telcoin.network`), then `https://1.1.1.1`
+- Reports the hardware against each role's minimum in the chosen network's table (see [Hardware](#hardware); warns only, never blocks)
 - Checks the systemd version against the network's floor (see [Supported Operating Systems](#supported-operating-systems))
-- Installs any missing tools (curl, git)
 - Asks how to obtain the binary: build from source, a signed release binary, Docker, or a binary already on the machine (see [Binary Installation Options](#binary-installation-options))
 - Takes release tags only: `vX.Y.Z-adiri` on testnet (or a release candidate, `vX.Y.Z-adiri-rcN`, that you name), `vX.Y.Z` on mainnet. A branch, a commit id or `latest` is refused. On testnet a release older than `v0.13.0-adiri`, the first release that has all three of `keytool set-rpc`, proof-of-possession signing and state export, is refused too
 - Installs all dependencies upfront before configuration begins (build tools and the build account's Rust toolchain, the verified release, or the Docker engine and image)
@@ -264,6 +309,16 @@ Each script walks through numbered steps:
 - With `--bootstrap-peers`, `--enable-state-export` or `--state-export-keep`, asks the release whether it has each flag and stops, before any key is made, when it does not. A bootstrap peers map is checked with the release's own parser and installed as `/etc/telcoin/bootstrap-peers.yaml` (see [Bootstrap peers](#bootstrap-peers))
 - With `--admission`, checks that the release is `MIN_ADMISSION_VERSION` (0.17.0) or later and stops when it is older.
   A `--trusted-nodes` map is installed as `/etc/telcoin/trusted-nodes.yaml` (see [Node admission settings](#node-admission-settings))
+- Gets the chain configs from the tag this script release pins (testnet: `v0.16.0-adiri`), never from the default branch.
+  It fetches that tag from origin into the `/opt/telcoin-source` checkout, reads `genesis.yaml`, `committee.yaml` and `parameters.yaml` at the tag, checks them against the pins and installs them root-owned in `/etc/telcoin/chain-configs/<network>/` (directories 0755, files 0644).
+  It never pulls or checks out an existing checkout: the checkout's branch, working tree and submodules stay as they are, and no git runs when `/etc/telcoin/chain-configs/<network>/` already holds the pinned files.
+  When the fetch fails, it reads the checkout's own copy of the tag: `Could not fetch v0.16.0-adiri from origin (<git's reason>); reading the testnet chain configs from the local copy of v0.16.0-adiri.`
+- A Docker, signed-release or existing-binary install may have no checkout. Then, unless `/etc/telcoin/chain-configs/<network>/` already holds the pinned files, setup asks to clone the repository at the tag into `/opt/telcoin-source` (`Clone the repository now to get the chain-config files?`).
+  A path there that is not a checkout is refused before the question (`/opt/telcoin-source exists but is not a git checkout; move it aside first.`).
+  A refusal stops setup with `The testnet chain configs were refused (see above); nothing was copied.`, and a failed clone, fetch or install with `Could not get the testnet chain configs (see above).`
+  `--genesis-dir <dir>` replaces all of this: the files in that directory are checked against the pins, with no git and no prompt.
+  Mainnet has no tag or pins yet, so a mainnet install stops here until a script release publishes them.
+  Devnet has neither: it still pulls or clones the checkout's default branch and uses its files unchecked
 
 **Step 5: Key Generation**
 - Asks for your Ethereum address and P2P multiaddrs
@@ -274,7 +329,7 @@ Each script walks through numbered steps:
 - Stores the passphrase as the encrypted credential `/etc/telcoin/bls-passphrase.cred` (root, mode 0600); on a testnet host below systemd 250, in the root-only file `/etc/telcoin/bls-passphrase` (mode 0600) instead
 
 **Step 6: Configuration**
-- Copies the official chain-config files (genesis.yaml, committee.yaml, parameters.yaml) after checking each against the SHA-256 this script release pins for the network (testnet: `chain-configs/testnet` at `v0.16.0-adiri`). A mismatch stops setup. Mainnet has no pins yet, so a mainnet install stops here until a script release publishes them
+- Copies the official chain-config files (genesis.yaml, committee.yaml, parameters.yaml) after checking each against the SHA-256 this script release pins for the network (testnet: `chain-configs/testnet` at `v0.16.0-adiri`). It takes the first directory that holds all three: `--genesis-dir`, then on testnet `/etc/telcoin/chain-configs/testnet/` (step 4 put them there), then the checkout's `chain-configs/<network>/` and `/etc/telcoin/chain-configs/<network>/`. A mismatch stops setup. When none holds them (for example, you declined the clone), setup links the files at the tag (`https://github.com/Telcoin-Association/telcoin-network/tree/v0.16.0-adiri/chain-configs/testnet/`), asks you to copy the three raw files into `/etc/telcoin/chain-configs/<network>/` or to run setup again with `--genesis-dir <dir>`, and waits; a `--json` run stops
 
 **Step 7/8: Systemd Service**
 - Writes the start script `/usr/local/libexec/telcoin/tn-start` (Docker installs: `tn-start-docker`), root-owned, mode 0755. It holds no secret: it reads the listener addresses from `/etc/telcoin/node.env` and hands the node the passphrase on its standard input (`--bls-passphrase-source stdin`) from the credential systemd provides
@@ -319,6 +374,7 @@ table below and reports any path that differs.
 | `/etc/telcoin/bls-passphrase` | root | 0600 | The passphrase in plain text, only on a testnet host below systemd 250 |
 | `/etc/telcoin/bootstrap-peers.yaml` | root | 0644 | The bootstrap peers map, only with `--bootstrap-peers` |
 | `/etc/telcoin/trusted-nodes.yaml` | root | 0644 | The trusted nodes map, only with `--trusted-nodes` or `edit-config.sh --set trusted_nodes=` (see [Node admission settings](#node-admission-settings)) |
+| `/etc/telcoin/chain-configs/<network>/` | root | 0755 | `genesis.yaml`, `committee.yaml` and `parameters.yaml` (0644) as they are at the tag this script release pins for the network (testnet `v0.16.0-adiri`). Setup and `edit-config.sh` menu 13 copy them into the data directory from here. Only on a network with a pinned tag, so testnet today |
 | `/etc/telcoin/.pending-update` | root | 0600 | An update prepared by `update-node.sh` and not yet applied |
 | `/etc/telcoin/build-info` | root | 0644 | The release tag and commit of a source build |
 | `/etc/telcoin/alerts/` | root | 0755 | Private alerts configuration, only with private alerts on |
@@ -335,7 +391,7 @@ table below and reports any path that differs.
 | `/var/lib/private/telcoin-heartbeat/` | the heartbeat's dynamic user (on disk `nobody` (65534) with systemd 257 or later) | 0700 | The private alerts runner's `state` file, written only by the runner |
 | `/var/lib/telcoin-p2p-allow/` | root | 0700 | The allowlist's state: `config` (written by `firewall-setup.sh`), `floor`, `current.nft`, `state.json`, `status` and `lock` (written by the tool, each 0600), only while committee mode is on |
 | `/run/telcoin/update.lock` | root | 0600 (directory 0755) | The update lock |
-| `/opt/telcoin-source/` | root | | The telcoin-network checkout, at a release tag (source builds) |
+| `/opt/telcoin-source/` | root | | The telcoin-network checkout: at a release tag on a source build; on other installs, a clone you let setup or menu 13 make (at the pinned chain-config tag; on devnet, the default branch). The scripts fetch the pinned tag into it and read the chain configs from there without moving it |
 | `/var/lib/tn-build/` | tn-build | 0700 | The build account's home: its Rust toolchain, cargo cache and build output (source builds) |
 
 The private alerts state directory is the one path the scripts set up that belongs to neither
@@ -745,7 +801,7 @@ sudo bash ~/telcoin-node-scripts/check-node.sh --audit
 Run it with `sudo`. `/etc/telcoin/.node-meta` is root-only (mode 600), and without root the script can't read the recorded network, execution address, data directory, RPC port or public RPC domain. There is no `--validator` or `--observer` switch any more: the script still accepts both, prints a note and ignores them. A value flag given without its value (`--rpc` as the last argument, say) prints a usage error.
 
 The health check verifies:
-- **Network** — a `Network:` header line names the network from `.node-meta` (testnet, devnet or mainnet), its chain ID and where that came from. The local chain ID must match that network's; with no network recorded, any Telcoin chain ID (2017, 487, 32285) passes with a note. When the network RPC itself serves another chain (today `https://rpc.telcoin.network` answers for testnet, 2017), the report warns that the RPC serves chain X and skips the comparison instead of blaming the node.
+- **Network** — a `Network:` header line names the network from `.node-meta` (testnet, devnet or mainnet), its chain ID and where that came from. The local chain ID must match that network's; with no network recorded, any Telcoin chain ID (2017, 731, 32285) passes with a note. When the network RPC itself serves another chain (today `https://rpc.telcoin.network` answers for testnet, 2017), the report warns that the RPC serves chain X and skips the comparison instead of blaming the node.
 - **Execution address** — compares `VALIDATOR_ADDRESS` in `.node-meta` with the address the node runs with (its `tn_info` answer, else `node-info.yaml` on disk) and warns near the top of the report when they differ, also with `--no-network` or the local RPC down. The warning says what to do: restart the node when `node-info.yaml` already holds the `.node-meta` address (as after `prepare-stake.sh --rotate-address --no-restart`); otherwise restart it if you rotated with `--no-restart`, or set `VALIDATOR_ADDRESS` in `.node-meta` to the node's address.
 - **Systemd service status** — running, with restart-loop detection (warns if the unit has restarted more than 5 times). The section also lists what the node runs (Docker image or binary), its bootstrap peers and state export when set, its P2P ports and the RPC URLs it advertises.
 - **Local RPC mode** — classified as `HEALTHY`, `SLOW` (responding but >6s), `DISABLED` (HTTP 200 but `-32601 method not found`), or `DOWN` (connection refused). Previously all four looked the same.
@@ -1142,7 +1198,7 @@ sudo bash ~/telcoin-node-scripts/edit-config.sh --json --set metrics=off
 | 10 | Private forward targets (private networks only) |
 | 11 | Admission mode (open, grace or closed; see [Node admission settings](#node-admission-settings)) |
 | 12 | Trusted nodes (the hubs a closed node admits), or none |
-| 13 | Refresh chain configs (pull the latest genesis, committee and parameters). It replaces `parameters.yaml`, so set item 10 again afterwards |
+| 13 | Refresh chain configs (the genesis, committee and parameters this script release pins; on devnet, the latest). It replaces `parameters.yaml`, so set item 10 again afterwards |
 | 14 | Restart node |
 | 15 | Exit |
 
@@ -1156,7 +1212,7 @@ Items 8 to 10 came with edit-config 1.3.0, and items 11 and 12 with edit-config 
 | `docker_image` | A release tag of the node's network (such as `vX.Y.Z-adiri`, or on testnet a release candidate `vX.Y.Z-adiri-rcN`), resolved to the release's image digest, or the network's image by digest (`<repository>@sha256:<digest>`; see [Docker Install Notes](#docker-install-notes) for the repositories). `latest` and other tags are refused. Docker installs only; the image is pulled first and must be held under that digest, and the start script is rewritten with the digest. A release older than the network's oldest supported one is refused (`<ref> is older than v<floor>, the oldest <network> release these scripts support (...). Pick v<floor> or a newer release. The image is not changed.`); a digest alone is checked by the release `.node-meta` records for it. On mainnet a change is refused until a mainnet release can be verified, and after that a digest alone is taken only for a mainnet release this node has installed |
 | `bootstrap_peers` | An absolute path to a peers map, or `none` to remove the flag and the installed file. See [Bootstrap peers](#bootstrap-peers) |
 | `state_export` | `off`; `unlimited` (`--enable-state-export`, every export kept, `v0.13.0-adiri` or later); or `N` from 1 to 999999 (`--state-export-keep N` as well, only the newest N kept, `v0.15.0-adiri` or later) |
-| `allow_private_forward_targets` | `true` or `false`: the `parameters.yaml` key that lets the node forward transactions to committee RPC endpoints on private addresses. `true` is refused on testnet (2017) and mainnet (487), and when the genesis chain ID cannot be read |
+| `allow_private_forward_targets` | `true` or `false`: the `parameters.yaml` key that lets the node forward transactions to committee RPC endpoints on private addresses. `true` is refused on testnet (2017) and mainnet (731), and when the genesis chain ID cannot be read |
 | `admission` | `open`, `grace` or `closed` (the node's `Open`, `Grace` and `Closed` are taken too): the node's connection admission mode, written into `<data dir>/network-config` with the recorded trusted nodes map and, as `committee_peers`, the installed bootstrap peers map when the node command loads one. Needs node release 0.17.0 or later. See [Node admission settings](#node-admission-settings) |
 | `trusted_nodes` | An absolute path to a trusted nodes map, checked and installed as `/etc/telcoin/trusted-nodes.yaml`, or `none` to remove the map and its `trusted_nodes` entry. A map needs an admission mode set first. See [Node admission settings](#node-admission-settings) |
 
@@ -1177,7 +1233,15 @@ How an edit runs:
 - An edit is written before that wait, so a run stopped before its restart (Ctrl-C, SIGTERM, SIGHUP, or the Node Manager UI page closing) puts every file it changed back and exits 130, 143 or 129: "Stopped by SIGTERM before the restart, so the edit was rolled back". Once the restart has been issued, the edit stays. Refresh chain configs is the exception: a run stopped during its wait keeps the new chain files for the next restart.
 - On a host with the host baseline (see [Host baseline](#host-baseline-auditd-and-aide)), the AIDE baseline is made again after a `--set` restart came back healthy, after a menu edit's restart came back active, after menu item 14 (Restart node) came back active (which folds in an edit saved with "restart later"), and after `--migrate-credential`, `--reseal` or a menu 5 passphrase action that went through. A failure there is a warning.
 - A launch file with more than one node command carrying `--http` is refused rather than half edited. Remove or comment out the extra command and try again.
-- Refresh chain configs reads `NETWORK` from `.node-meta` and refuses unless the node's genesis and the new one declare the same chain ID. It copies the network's `genesis.yaml`, `committee.yaml` and `parameters.yaml` over the node's, which drops an `allow_private_forward_targets` value, so set that again afterwards. On a source build checked out at a release tag, the usual testnet install, `git pull` fails: refresh prints git's error and "git pull failed in <dir>. Chain configs unchanged."
+- Refresh chain configs reads `NETWORK` from `.node-meta` and refuses unless the node's genesis and the new one declare the same chain ID. It copies the network's `genesis.yaml`, `committee.yaml` and `parameters.yaml` over the node's, which drops an `allow_private_forward_targets` value, so set that again afterwards.
+- On testnet it installs the files at the tag this script release pins (`v0.16.0-adiri`) into `/etc/telcoin/chain-configs/testnet/`, as setup does, and copies them from there.
+  It never pulls or checks out `/opt/telcoin-source`; a git worktree there counts as a checkout.
+  When the node's data dir already holds the pinned files, it asks nothing, takes no lock and restarts nothing: `Nothing to refresh: the node's data dir already holds the testnet chain configs this script release pins (v0.16.0-adiri), so <service> was not restarted.`, followed by a pointer to `14) Restart node` for a node whose restart was put off.
+  With no checkout and no pinned files in `/etc/telcoin/chain-configs/testnet/`, it runs setup's two checks for a path in the way, then offers the clone setup makes: `Clone the repository at v0.16.0-adiri into /opt/telcoin-source now?`.
+  Declined or failed, it prints the manual `sudo git clone --branch v0.16.0-adiri ...` line and the three raw-file URLs at the tag; it never tells you to run setup again.
+  The update lock is free at every "Press Enter", and on a host with the [host baseline](#host-baseline-auditd-and-aide) the AIDE baseline is made again whenever the refresh wrote files under `/etc/telcoin/chain-configs/`.
+- On mainnet it stops before any prompt: `This script release pins no mainnet chain configs yet, so there is nothing to install. Chain configs unchanged.`
+  On devnet it still pulls the checkout's default branch; a failed pull prints git's error and `git pull failed in <dir>. Chain configs unchanged.`
 - edit-config needs the `lib/common.sh` shipped with it; with an older library it stops and says to run `update-scripts.sh`.
 
 ### Bootstrap peers
@@ -1440,7 +1504,7 @@ A network's newest release, where a script picks one (setup's Docker default, a 
 
 On testnet only, a Docker install or update given a release tag falls back to the digest the registry serves for that tag (`ghcr.io/telcoin-association/tn-testnet`, then the legacy repository), with a warning, when no key file is installed or the release publishes no signed files; a release that fails a check is never replaced by the registry's answer. The newest-image fallback for a testnet without a release on GitHub is in [Docker Install Notes](#docker-install-notes).
 
-A source build verifies the git tag itself: the tag's signature is checked against the same `lib/release-keys` (a bad signature refuses everywhere, one that cannot be checked refuses on mainnet and warns on testnet), the tag must match the one on origin, and the chain configs in the checkout must match the pins.
+A source build verifies the git tag itself: the tag's signature is checked against the same `lib/release-keys` (a bad signature refuses everywhere, one that cannot be checked refuses on mainnet and warns on testnet), the tag must match the one on origin, and the chain configs, read from the tag this script release pins (testnet `v0.16.0-adiri`) rather than from the tag being built, must match the pins.
 
 Release tarballs are built for x86_64 only. On aarch64 a release install stops with "Release TAG has no aarch64-unknown-linux-gnu tarball"; use a source or Docker install there. To check a release by hand, in an empty directory:
 
@@ -1521,7 +1585,7 @@ Enable it from the UI under **Settings → External Dashboard Access**, or on th
 sudo bash ~/telcoin-node-scripts/install-caddy.sh
 ```
 
-Choose **Dashboard** from the menu, then pick the domain, a login username (not forced to `admin`), and a password of at least 16 characters (the menu offers to generate one). A script passes the password on standard input with `--password-stdin`, never on the command line. The dashboard and public RPC are refused on a staked mainnet validator, and on a mainnet node whose stake cannot be read.
+Choose **Dashboard** from the menu, then pick the domain, a login username (not forced to `admin`), and a password of at least 16 characters (the menu offers to generate one). A script passes the password on standard input with `--password-stdin`, never on the command line. The dashboard and public RPC are refused on a staked mainnet validator, and on a mainnet node whose stake cannot be read. When the local node cannot give the stake, it is read from `https://rpc.telcoin.network` only if that endpoint answers with chain 731; until launch it answers for testnet, so the refusal says the stake was not read there. A node with no `NETWORK` in `.node-meta` and a genesis on neither 731 nor 2017 is refused too, and the message names the chain id it found.
 
 - **Set the DNS A record first.** Point your domain at the server's public IP (the router's public IP if it's behind NAT) **before** enabling — Caddy requests the certificate on first start, so the record must already resolve or issuance fails and Let's Encrypt rate-limits retries. The wizard checks propagation before continuing.
 - **Give it its own hostname.** The dashboard can't share a name with the [public RPC endpoint](#public-rpc-endpoint-https--wss). If your node has a public name like `node7.adiri.telcoin.network`, keep that for RPC and put the dashboard on `dashboard.node7.adiri.telcoin.network`.
@@ -1560,7 +1624,12 @@ The card cannot turn the allowlist on or off; see [P2P committee allowlist](#p2p
 
 The Network tab links the network's status page only where one exists: testnet links `https://status.adiri.telcoin.network/`, and mainnet, devnet and an unknown network show no link (`STATUS_PAGE_LINKS` in `ui/server.py`; the page renders only an https link).
 
-The firewall card lists node ports beyond its three toggles, read-only. CPU counts are physical cores, shown as "8 (16 threads)", and the setup preflight judges the hardware tiers on physical cores too.
+The firewall card lists node ports beyond its three toggles, read-only. CPU counts are physical cores, shown as "8 (16 threads)".
+
+The setup wizard's preflight judges the hardware tiers of the wizard's network, the tables in [Hardware](#hardware). It comes before the Network step, so it shows the testnet tiers until you pick another network and go back to it, which fetches that network's tiers.
+It judges cores exactly and RAM and disk with the shell's 5 % slack, and a RAM or disk size read as zero counts as not measured, as in the shell.
+Each tier reads like the tables, cores with vCPU (`3 cores (6 vCPU)`) and disks as `350 GB` or `2 TB`, followed by the detected host (its disk in decimal GB), the tier set it compared with and the single-core note.
+When the server could count only logical CPUs, the detected line reads `Detected 8 logical CPUs / ...`, followed by `Physical cores could not be counted, so the tiers are compared with logical CPUs; with hyperthreading that is up to twice the physical cores.`
 
 ### Validator view
 
@@ -1801,19 +1870,19 @@ sudo bash ~/telcoin-node-scripts/edit-config.sh
 | Network | Chain ID | Public RPC | Explorer | Release tags |
 |---|---|---|---|---|
 | Adiri testnet | 2017 (`0x7e1`) | `https://rpc.adiri.tel` | `https://telscan.io` or `https://www.telscan.xyz` | `vX.Y.Z-adiri`; `vX.Y.Z-adiri-rcN` when named |
-| Mainnet | 487 (`0x1e7`) | `https://rpc.telcoin.network`, not launched yet | Not launched yet | `vX.Y.Z` |
+| Mainnet | 731 (`0x2db`) | `https://rpc.telcoin.network`, not launched yet | Not launched yet | `vX.Y.Z` |
 | Devnet | 32285 (`0x7e1d`) | `https://rpc.devnet.telcoin.network` | None | none |
 
-Mainnet has not launched. Until it does, `https://rpc.telcoin.network` answers for testnet (chain 2017), so check `eth_chainId` before you trust an answer from it. The scripts use the testnet RPC for testnet nodes, and `check-node.sh` warns and skips its chain comparison when the network RPC serves a different chain. The public RPCs answer JSON-RPC over HTTPS only; for `wss://`, use a node that serves [public RPC](#public-rpc-endpoint-https--wss).
+Mainnet has not launched. Until it does, `https://rpc.telcoin.network` answers for testnet (chain 2017), so check `eth_chainId` before you trust an answer from it: mainnet will answer `0x2db` (731). The scripts use the testnet RPC for testnet nodes, and `check-node.sh` warns and skips its chain comparison when the network RPC serves a different chain. The public RPCs answer JSON-RPC over HTTPS only; for `wss://`, use a node that serves [public RPC](#public-rpc-endpoint-https--wss).
 
 These mainnet values are still open in this script release, and mainnet installs are refused until a script release sets them:
 
 | Still open | Effect today |
 |---|---|
-| The mainnet `genesis.yaml`, `committee.yaml` and `parameters.yaml` hashes | Mainnet chain configs cannot be checked and no mainnet release can be verified, so a mainnet install (any method) is refused: a Docker install or image change before anything on the host changes, the other methods before the chain configs are copied |
+| The mainnet `genesis.yaml`, `committee.yaml` and `parameters.yaml` hashes, and the tag they are read from | Mainnet chain configs cannot be checked and no mainnet release can be verified, so a mainnet install (any method) is refused: a Docker install or image change before anything on the host changes, the other methods before the chain configs are copied |
 | The mainnet public RPC set | Fixed at launch. Interactive setup does not offer mainnet yet |
 
-The testnet values are pinned: chain configs from `chain-configs/testnet` at `v0.16.0-adiri`. The image packages are set, one per network, where the release pipeline publishes: testnet `ghcr.io/telcoin-association/tn-testnet`, mainnet `ghcr.io/telcoin-association/tn-mainnet`; testnet also takes the legacy `us-docker.pkg.dev/telcoin-network/tn-public/adiri` (see [Docker Install Notes](#docker-install-notes)). Devnet pulls images by digest only, from the legacy repository or `ghcr.io/telcoin-association/tn-dev` (`TN_DEVNET_IMAGE_REPOS`); its tags end in `-devnet` and have no signed release.
+The testnet values are pinned: chain configs from `chain-configs/testnet` at `v0.16.0-adiri`, read from that tag and never from the default branch. The image packages are set, one per network, where the release pipeline publishes: testnet `ghcr.io/telcoin-association/tn-testnet`, mainnet `ghcr.io/telcoin-association/tn-mainnet`; testnet also takes the legacy `us-docker.pkg.dev/telcoin-network/tn-public/adiri` (see [Docker Install Notes](#docker-install-notes)). Devnet pulls images by digest only, from the legacy repository or `ghcr.io/telcoin-association/tn-dev` (`TN_DEVNET_IMAGE_REPOS`); its tags end in `-devnet` and have no signed release.
 
 ### RPC queries
 
@@ -1895,6 +1964,7 @@ Interactive setup prompts for everything. The public RPC flags (`--rpc-domain` t
 | `--binary-path <path>` | Absolute path to the node binary of an `existing` install, of letters, digits and `. _ / -`; with `--json` it implies `--install-method existing`. Without it, setup searches `PATH`, `/usr/local/bin`, `/opt` and `/home`, and a `--json` run stops when nothing is found |
 | `--address <0x...>` | Execution address that stakes and receives rewards: `0x` and 40 hex digits. Required for a `--json` keygen |
 | `--data-dir <path>` | Data directory (default `/var/lib/telcoin`): an absolute path of letters, digits and `. _ / -`, with no `..`. A directory under `/home` is refused |
+| `--genesis-dir <dir>` | A directory that holds `genesis.yaml`, `committee.yaml` and `parameters.yaml`. Setup copies the chain configs from it after checking them against the network's pins (devnet has none), with no git and no clone prompt. Setup's own hint names it when it cannot find the files |
 | `--service-user <name>`, `--service-group <name>` | The account the node runs as (default `telcoin`). An existing account is accepted only with a `nologin` or `false` shell and no admin group; the UID is not forced |
 | `--passphrase-stdin` | Read the BLS key passphrase from standard input: one line, read once, without echo, a trailing CR dropped. Giving `TN_BLS_PASSPHRASE` as well is an error. See [Passphrase delivery](#passphrase-delivery) |
 | `--passphrase-method credential\|stdin` | Force how the passphrase is kept (default: `credential` wherever `systemd-creds` works). Mainnet takes `credential` only; `tpm` is no longer offered |
@@ -2046,6 +2116,101 @@ prints the exact fix command.
 > **Versioning note (from v1.1.48 onwards):** each script bumps `SCRIPT_VERSION`
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
+
+### install-caddy v2.2.1 — the mainnet gate names the chain it found and checks the public RPC's chain
+With no `NETWORK` in `.node-meta` and a genesis on neither mainnet nor testnet, such as a devnet genesis on chain 487 now that the mainnet id is 731, the gate refused with "no readable genesis chain id" although it had read the id.
+The refusal stays, with the reason `tn_detect_network` gives: `The network of this node cannot be told (no NETWORK in .node-meta, and the chain id of <datadir>/genesis/genesis.yaml (487) is neither 731 nor 2017), so this run cannot confirm it is not a staked mainnet validator. ...`
+When the local node cannot give the stake, it is read from `https://rpc.telcoin.network` only if that endpoint answers with chain 731; until launch it answers for testnet, so the refusal adds `; https://rpc.telcoin.network does not answer with chain 731, so the stake was not read there`.
+Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+
+### telcoin-ui v2.1.3 — a measured zero is unmeasured, logical CPUs worded as such
+The setup preflight treats a MemTotal of 0 and a filesystem of 0 kB as "could not measure", as the shell does, not as "below minimum".
+Cores are compared exactly; RAM and disk keep the 5 % slack.
+The hardware object gains `cpu_kind` (`physical` or `logical`): with `logical` the page reads `Detected 8 logical CPUs / ...` and adds the shell's sentence about what the tiers were compared with.
+A missing RAM figure shows `?`.
+Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+
+### edit-config v2.2.2 — menu 13 offers the clone and frees the lock before its prompts
+With no repository checkout and no pinned files, menu 13 runs setup's checks for a path in the way, then offers to clone the repository at the pinned tag into `/opt/telcoin-source`, the clone setup makes.
+Declined or failed, it prints a manual `sudo git clone --branch <tag> ...` line and the three raw-file URLs; it no longer tells you to re-run `setup-node.sh`.
+After `Nothing to refresh: ...` a line points to `14) Restart node`, and a network this release pins nothing for (mainnet today) is refused before any prompt: `This script release pins no mainnet chain configs yet, so there is nothing to install. Chain configs unchanged.`
+The update lock is free at every "Press Enter", a git worktree checkout is read, and the AIDE baseline is made again whenever the refresh wrote under `/etc/telcoin/chain-configs/`, a reinstall that only corrects owner or modes included.
+Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+
+### lib/common.sh v2.2.5 — chain-config helpers after verification
+A failed fetch gives git's own reason, `Could not fetch <tag> from origin (<git's reason>); reading the <network> chain configs from the local copy of <tag>.`, in place of the blanket "Could not reach origin", and a repository git cannot read is refused with git's reason.
+"Already in place" means what the install makes: root-owned directories 0755 holding regular files 0644.
+The right files with another owner or mode are reinstalled from where they are, with no git (`Reinstalled the <network> chain configs in <dir> root-owned, directories 0755 and files 0644: ...`).
+A symlinked destination, a stray entry under one of the three names and a source path that is not a checkout (`... exists but is not a git checkout; move it aside first.`) are refused before anything is fetched or written; a git worktree checkout is read.
+A failed clone's reason and the manual clone line reach a `--json` run, a pin mismatch names the file at the tag, and the helpers' git commands run over https only, without the update lock's descriptor or a stray `GIT_DIR`.
+Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+
+### setup-node v2.1.4 — "were refused", each directory once, a manual hint that names the tag
+A refused chain-config step reads `The <network> chain configs were refused (see above); nothing was copied.` instead of "not the pinned ones", which was wrong for a refused checkout.
+When the files cannot be found, the error lists each directory once, and the hint says where the files are at the tag and names `--genesis-dir <dir>`.
+Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+
+### update-node v2.1.2 — comment only: no git pull runs there
+A comment no longer lists a `git pull`, which update-node never runs.
+Nothing changes for the operator.
+Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+
+### lib/common.sh v2.2.4 — the mainnet chain id is 731
+The mainnet chain id is 731 (`0x2db`), as on telcoin-network main since #1716; it was 487, which upstream devnet genesis files use now.
+`MAINNET_CHAIN_ID` is 731, so a genesis on chain 487 with no `NETWORK` recorded in `.node-meta` is no longer detected as mainnet.
+Mainnet has not launched and stays switched off, so no running node changes.
+
+### check-node v2.2.1 — comments only: the mainnet chain id is 731
+Comments only: they name the mainnet chain id as 731 (it was 487); check-node reads the id from `lib/common.sh`.
+Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+
+### update-node v2.1.1 — comments only: the mainnet chain id is 731
+Comments only: they name the mainnet chain id as 731 (it was 487); update-node reads the id from `lib/common.sh`.
+
+### telcoin-ui v2.1.2 — mainnet keyed by chain id 731
+The network tables key mainnet by 731 (`0x2db`) instead of 487, which upstream devnet genesis files use now (telcoin-network #1716).
+A node on chain 487 is no longer named mainnet: the UI has no name for 487 and names such a node by the `NETWORK` in its `.node-meta`.
+
+### aws/node.yaml — the Validator preset is c7i.2xlarge, a 500 GiB data volume at 15,000 IOPS
+The presets follow the recommended column of the testnet table for cores and RAM: `Validator` moves from c7i.8xlarge to `c7i.2xlarge, 4 cores (8 vCPU), 16 GiB`, the size of `FullNode`.
+`DataVolumeSize` defaults to 500 GiB (was 2000) and allows 350, 500, 2000 and 4000; the two old sizes stay because a volume cannot shrink and stacks were launched with them.
+The volume is provisioned at 15,000 IOPS (was 10,000) and 300 MiB/s, and the console's `DataVolumeSize` description says that a c7i.2xlarge (`FullNode`, `Validator`) sustains 12,000 IOPS to EBS and 15,000 in bursts, and a c7i.4xlarge (`PublicRPC`) the full 15,000.
+The template has no version.
+Existing stacks need no change, and should not be updated to this template: see [AWS one-click](#aws-one-click-cloudformation).
+
+### telcoin-ui v2.1.1 — the setup preflight judges the tiers of the wizard's network
+The wizard's preflight compared every host with the mainnet tiers.
+The page now sends the wizard's network, and the server answers with that network's tiers, which mirror `lib/common.sh`; a missing or unknown network reads as testnet.
+The disk floor is decimal GB with the shell's 5 % slack, so a 350 GB disk gets the same verdict as in setup.
+The rows read like the documentation (`3 cores (6 vCPU)`, `350 GB`, `2 TB`) and name the tier set, followed by the single-core note; the reply's `hardware` object gains `network`, and `validator_recommended` gains `ecc`.
+
+### lib/common.sh v2.2.3 — hardware tiers per network
+`check_hardware` compared every host with the mainnet tiers, so it warned "below minimum" on the machines the testnet validators run on.
+The tiers are now per network, as in [Hardware](#hardware): testnet and devnet use the testnet table, mainnet the mainnet one.
+CPU is printed as `N cores (2N vCPU)`, the report names the tier set (`Comparing with the testnet hardware tiers.`) and adds the single-core note.
+The network is a new third argument; a caller that passes two arguments gets the mainnet tiers, as before, and the check still only warns.
+
+### setup-node v2.1.3 — the hardware check runs after the network is chosen
+Setup checks the hardware once the network is picked, after the internet check, and passes the network to `check_hardware`, so a testnet host is judged against the testnet table.
+
+### edit-config v2.2.1 — menu 13 installs the pinned chain configs instead of pulling
+Menu 13 ran `git pull` in the telcoin-network checkout and copied its files. On a source install, whose checkout is detached at a release tag, the pull failed (`git pull failed in /opt/telcoin-source. Chain configs unchanged.`); on the default-branch clone setup made for other installs, it moved the checkout to the branch's tip, and the copy was then refused because those files no longer match the pins.
+On testnet it now installs the files at the pinned tag into `/etc/telcoin/chain-configs/testnet/`, as setup does, and copies them from there, with no pull and no submodule command; the host baseline is made again when it installed files.
+When the node's data dir already holds the pinned files it prints "Nothing to refresh" and returns without a prompt, the lock or a restart.
+The menu label reads `(pinned genesis/committee/parameters)`.
+Mainnet keeps its refusal; devnet still pulls.
+
+### lib/common.sh v2.2.2 — chain configs from the pinned tag, not from main
+Fresh testnet Docker, signed-release and existing-binary installs failed at step 4 of 8, before any key is made: setup cloned the telcoin-network default branch, whose testnet `committee.yaml` has not matched the pin since 2026-11-14.
+The library now reads `genesis.yaml`, `committee.yaml` and `parameters.yaml` at the tag this release pins (`v0.16.0-adiri`), checks them and installs them root-owned in `/etc/telcoin/chain-configs/testnet/`.
+The checkout's HEAD, index, working tree and submodules are never touched, and nothing runs when the files are already there.
+With no checkout it clones at the tag, without submodules, after the same consent prompt; a failed clone returns an error instead of exiting.
+With origin unreachable a local copy of the tag is read, and a checkout that is a symlink or another account's is refused.
+`--genesis-dir` is used as given, devnet still pulls, and mainnet has no tag yet and runs no git.
+
+### setup-node v2.1.2 — reads the pinned chain-config directory
+On testnet, setup looks for the chain configs in `/etc/telcoin/chain-configs/testnet/` right after `--genesis-dir`, ahead of any checkout.
+Its not-found hint links the files at the pinned tag instead of `main`, and a failed clone or fetch reads `Could not get the <network> chain configs (see above).`, apart from a pin mismatch.
 
 ### lib/common.sh v2.2.1 — Ubuntu 26.04 recommended
 Ubuntu 26.04 LTS is the recommended OS; 24.04 stays supported. The systemd floor messages

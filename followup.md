@@ -111,15 +111,20 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   `existing_update_refusal`, check-node's `--observer` warning, install-caddy's domain prompts and
   same-domain messages, and the page's `DEFAULT_RPC_HOST` placeholder. Closes when they use a
   neutral example host (`node1.example.com`) and per-network tag examples, and the markers go.
-- `MAINNET_GENESIS_SHA256`, `MAINNET_COMMITTEE_SHA256` and `MAINNET_PARAMETERS_SHA256` in
-  `lib/common.sh` are empty, so every mainnet install stops at the chain-config check and a
-  mainnet release refuses its chain-config lines in `SHA256SUMS`. Closes after the genesis
-  ceremony, when the final files are published (U-13) and the three hashes are set.
-- The public RPC for chain 487 is not settled. The UI's `NETWORK_PUBLIC_RPC` has an empty list for
-  487, so its comparison cards show "-", while `MAINNET_RPC_URL` in `lib/common.sh` is
+- `MAINNET_CHAIN_CONFIGS_TAG`, `MAINNET_GENESIS_SHA256`, `MAINNET_COMMITTEE_SHA256` and
+  `MAINNET_PARAMETERS_SHA256` in `lib/common.sh` are empty, so every mainnet install stops at the
+  chain-config check, edit-config's menu 13 refuses mainnet, and a mainnet release refuses its
+  chain-config lines in `SHA256SUMS`. Closes after the genesis ceremony, when the final files are
+  published (U-13) and the tag and the three hashes are set.
+- The public RPC for chain 731 (`0x2db`) is not settled. The UI's `NETWORK_PUBLIC_RPC` has an empty
+  list for 731, so its comparison cards show "-", while `MAINNET_RPC_URL` in `lib/common.sh` is
   `https://rpc.telcoin.network`, which check-node and the restart-window epoch reads use and which
-  answers for chain 2017 until launch. Closes at launch: confirm the endpoint answers chain 487 and
+  answers for chain 2017 until launch. Closes at launch: confirm the endpoint answers `0x2db` and
   fill the UI list.
+- Once mainnet is enabled, the setup wizard shows the mainnet hardware tiers at step 1 only when
+  the operator goes back to it after picking mainnet at step 2; going forward, the verdict shows
+  only in the setup log (V-HW-UI F9). Closes when the page fetches the preflight again when the
+  network changes (`setSetupNetwork`), or the Review step shows the hardware verdict.
 
 ## Upstream and maintainer repos
 
@@ -129,14 +134,18 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   `/etc/telcoin/bootstrap-peers.yaml` onto the command line. Closes when it ships in a release and
   the start script switches to `--bls-passphrase-source credential` (gated on `--version`) and
   `--bootstrap-peers-file`.
-- U-3 and U-5, the chain 487 guard (faucet opt-in, build features in `--version` and the startup
-  line, cleartext BLS key refused on 487): issues #1725 and #1727, branch `mainnet-chain-guard`,
-  telcoin-network PR #1716 (open). The devnet deployment runs a faucet image on a chain-487 genesis and
-  must set `TN_ALLOW_FAUCET_ON_CHAIN_487=true` before it takes a release with the guard. Closes
-  when it merges and the devnet deployment is updated.
+- U-3 and U-5, the mainnet chain guard: merged on telcoin-network main as PR #1716 (2026-11-12),
+  issues #1725 and #1727; no release carries it yet. It moved mainnet to chain id 731 (`0x2db`);
+  487, the old id, is what upstream devnet genesis files use. On chain 731 the node refuses a
+  cleartext BLS key and a faucet build, and no flag lifts either; it logs
+  `node build: faucet=<bool> adiri=<bool> chain_id=<n> genesis_hash=<0x..>` at startup and lists
+  `faucet` in `--version`. A faucet build starts on a chain other than adiri only with
+  `--allow-faucet-on-chain` (env `TN_ALLOW_FAUCET_ON_CHAIN=true`), so the devnet's faucet image
+  (chain 32285) must set `TN_ALLOW_FAUCET_ON_CHAIN=true` before it takes a release with #1716.
+  Closes when a node release carries #1716 and the devnet image sets it.
 - U-4, part of U-6 and the release side of U-12, the release pipeline: telcoin-network PR #694
   merged on 2026-10-28, and U-4 (#1726) is closed. Still open: the node refusing fork-epoch
-  overrides on chains 487 and 2017, and the release check that depends on it (U-12, #1734). When
+  overrides on mainnet (731) and testnet (2017), and the release check that depends on it (U-12, #1734). When
   last checked (the scripts-v2.0.0 round), the telcoin-network README, SECURITY,
   validator-operations and maintainers pages described a release as the tarball and
   `IMAGE_DIGEST`, without the chain-config lines. Closes when #1734 lands and those pages name the
@@ -163,7 +172,8 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   dumps. Open.
 - U-11 (#1733): a remote signer with an equivocation guard. Needs a design proposal first.
 - U-13 (#1735): the final mainnet genesis embedded as `MAINNET_GENESIS`, with its hash logged at INFO
-  (the chain 487 guard branch adds the startup line). Waits for the genesis ceremony.
+  (#1716 added the startup line with the genesis hash; no release carries it yet). Waits for the
+  genesis ceremony.
 - The operator docs backlog merged upstream as telcoin-network #1573, but README and OPERATOR.md
   still warn that the upstream stake and unstake signatures are out of date. Closes when
   docs.telcoin.network is redeployed from it and the warnings are dropped.
@@ -186,6 +196,9 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   merged 2026-11-04). The other consumers of that file upstream (`docker-compose.yml` and the
   start-script heredocs) still pass the token in the environment, so a compose self-host on the
   new config fails every push. Closes when those consumers move to the token file upstream.
+- telcoin-network's hardware requirements page
+  (`docs/src/getting-started/hardware-requirements.md`) still shows one table for every network,
+  while these scripts, the UI and the partner documents now have one per network. Closes when the page carries the testnet and mainnet tables.
 
 ## Host soak
 
@@ -332,6 +345,11 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   maintenance marker under `/run/telcoin` (bounded in size and age, root 0644) that those scripts
   write before their own stop and remove after it, which the runner reports as
   `up maintenance: ...` while the marker is fresh (from #60).
+- A rehearsal host whose `alerts.env` was written with `NETWORK=mainnet` before this release keeps
+  `ALERTS_CHAIN_ID=487`; once that node answers `0x2db`, the heartbeat reports
+  `wrong chain: rpc reports 731, expected 487` (V-CHAIN VC-7). Setup refuses mainnet, so only a
+  hand-made rehearsal host has such a file. Closes when `setup-alerts.sh` rewrites it there
+  (`--refresh`, or an enable).
 
 ## UI
 
@@ -442,6 +460,16 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   as down in the dashboard, without the panic reason from the journal or the `start-limit-hit`
   state from systemd. (guide-1.4)
   Why: the operator sees a dead node and has to find the cause in the journal by hand.
+- The wizard's preflight measures the disk of the default data dir (`/var/lib/telcoin`), while
+  setup's hardware check measures the data dir chosen later in the wizard, so with a drive mounted
+  below `/var/lib/telcoin` the preflight can read `below minimum` for the disk while the setup log
+  reads a pass (V-HW-UI F10, older than this round). Closes when the preflight measures the data
+  dir the wizard will use.
+- For a node on a chain the UI does not list (487, for example), the page shows the network that
+  `.node-meta` names, with `· chain id 487` in the tooltip and no mismatch note, while the shell
+  reports a chain mismatch for the same node (V-CHAIN VC-6). Nothing is asked of the wrong
+  network: stake reads and the compare cards key on the chain id. Closes if the page notes a
+  chain id that does not fit the recorded network.
 
 ## Scripts
 
@@ -489,16 +517,36 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   script could stop expanding the peers map onto the command line, which would also drop the
   character limit on a custom config directory. (guide-1.5)
   Why: both flags exist on main only; nothing the scripts write changes until a tag carries them.
+- setup-node 2.1.1 with the new library, on a host whose checkout sits on a diverged default
+  branch, searches the checkout first and refuses at finalize, after keygen: the keys,
+  `node-info.yaml`, `.node-meta`, the service account and the directories exist, and there is no
+  unit (V-FIX-S-06). edit-config 2.2.0 with the new library still pulls in menu 13, which moves
+  the checkout to `main` and force-updates its submodules, then refuses on the pins (V-FIX-E-9).
+  Both fail safe, and only a partial update reaches them: `update-scripts.sh` installs the set
+  together, and the new scripts refuse an older library. Closes if
+  `ensure_chain_configs_available` also warns when the checkout's `chain-configs/<network>` does
+  not match the pins.
+- `setup-node.sh` still defines `run_streamed`, which nothing calls, and its comment still names
+  the git clone (V-FIX-S-12). Closes when it is removed.
 
 ### edit-config
 
 - edit-config's `bootstrap_peers` and `state_export` edits change the launch line but leave
   `BOOTSTRAP_PEERS_FILE` and `STATE_EXPORT` in `.node-meta` as setup-node wrote them.
 - "Refresh chain configs" (`refresh_chain_configs`) still runs `git pull` in `/opt/telcoin-source`
-  on testnet and devnet, which fails on the detached checkout of a release tag, and refuses when
-  `.node-meta` has no `NETWORK` although the genesis chain id would tell it. Mainnet never pulls.
-  Closes when it checks out only the chain-config path at the pinned tag and takes the network
-  from the genesis.
+  on devnet, which fails on the detached checkout of a release tag, and refuses when
+  `.node-meta` has no `NETWORK` although the genesis chain id would tell it. Testnet reads the
+  pinned tag since edit-config 2.2.1, and mainnet never pulls. Closes when it takes the network
+  from the genesis and the devnet pull works on a detached checkout.
+- Menu 13 on a first install that ends in a successful restart makes the host baseline twice:
+  once after the pinned files are installed and again in `apply_changes` (V-FIX-E-3). With
+  `HOST_BASELINE=true` each runs `aide --update` over the whole AIDE tree. Closes when
+  `apply_changes` can skip its refresh, or the menu refreshes only on the paths that return
+  without that restart.
+- Menu 13's chain-id guard reads the node's `genesis/genesis.yaml` with `tn_genesis_chain_id` as
+  root, although the file sits in the data dir the service user owns; the "Nothing to refresh"
+  test reads through the service user. Older than this round (V-FIX-E-8). Closes when the guard
+  reads it as the service user too.
 - "Refresh chain configs" copies the new genesis, committee and parameters files without backups,
   so a run stopped during its epoch wait keeps them for the next restart. By design: they are the
   files the network restart needs.
@@ -585,6 +633,11 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   migrate-node-naming 2.0.0 removes it when it migrates a legacy node and setup-node when it runs
   again, but nothing removes it from a host 1.2.0 already migrated. Only the deprecated
   `tn_resolve_node_type` stub in `lib/fallback.sh` reads it.
+- On a host with the older `/etc/telcoin/<role>` config layout, removing the node removes only
+  that directory and leaves `/etc/telcoin/chain-configs/<network>/`, which `rmdir /etc/telcoin`
+  cannot remove; the next remove-node run offers it as a leftover and removes it (V-FIX-S-13).
+  The files are public. Closes if remove-node also removes `/etc/telcoin/chain-configs` when the
+  config dir is a role directory.
 
 ### check-node
 
@@ -664,9 +717,18 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
 - `print_validator_onchain_status` tells an address with no record to call `stake()` by hand instead
   of naming `prepare-stake.sh`.
 - `tn_sync_submodules` hands the update-lock descriptor to `git submodule`; add `9>&-`.
+- Devnet means "exactly 32285" in check-node, update-node (`verify_consensus_participation`) and
+  the heartbeat (`alerts_write_env`), and "any other chain id" in the gateway (`_gw_chain_fits`)
+  and `OPERATOR.md`. A `NETWORK=devnet` node on upstream's chain-487 devnet genesis is a chain
+  mismatch for the first three and fits the gateway (V-CHAIN VC-5, older than this round).
+  Closes when one rule is picked and documented, if devnets on upstream's genesis matter.
 - `lib/common.sh` and `ui/server.py` decode `getValidator` words 5 and 6 as `stakeVersion` and
   `region` (tn-contracts 10cc12b7). Live testnet replies have zero in both, so the deployed layout is
   unconfirmed until a validator with a non-zero value is checked.
+- When the second of the three writes of a chain-config install fails,
+  `/etc/telcoin/chain-configs/<network>/` holds one new file beside the other two as they were
+  (rc 2, no rollback). The next run installs all three, and the pre-check refuses an entry in the
+  way before anything is written (FIX-T F2). Accepted.
 
 ## Tooling and docs
 
@@ -697,6 +759,30 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   missing. Install poppler on the build machine or make the skip loud.
 - In `docs/partner/mno-node-guide/theme.css`, `td code { overflow-wrap: break-word }` lets inline
   code in a table break after a leading `--`. Cosmetic.
+- In the partner guide, six section headings sit alone on an otherwise empty page, with the
+  section's table on the next page (3.6, 8.3, 9.1, 9.2, 9.3 and 9.5; in 1.12 and in 1.13). The
+  cause is `table { break-inside: avoid }` in the guide's `theme.css` together with the rules that
+  keep a heading with what follows. A trial with `break-inside: auto` gave 69 pages and no such
+  heading, at the cost of short tables splitting. Closes when long tables may split and short ones
+  may not; rebuild with `--all` and look at the specification too, which shares the rules.
+- The Debian 12 `tn-pdf-tools` container (Pango 1.50.12, HarfBuzz 6.0.0) breaks some lines of the
+  guide earlier than the published PDFs do, with pandoc 3.8.3 and with 3.14 alike; one break split
+  an `ssh -o` option after its hyphen. The 1.13 and 1.3 PDFs were therefore built on Ubuntu 26.04
+  (`AGENTS.md`, "Partner documents"). Closes when a Dockerfile for that toolchain is committed, or
+  the Debian container is retired.
+- The mainnet node requirements one-pager 1.3 has no spare line: the gap above its footer is about
+  2.5 mm. Any added line needs another cut; the next ones are the firewall sentence with the
+  `2) Mainnet` sentence, then the callout. Its "Every node" bullet was shortened to fit and no
+  longer names the data directory.
+- `tools/tests/chain_configs_tag_test.sh` still compares three warnings with git's own sentences
+  (a fetch from an origin that is not a repository, a tag the origin does not have, a repository
+  another account owns). They pass with git 2.49, 2.53 and the versions on the CI runners. A
+  fourth such check failed on the runners, whose git words an unreadable repository differently,
+  and now only requires a `fatal: ` line of git's. Closes when the other three do the same.
+- `README.md`, "Node releases", still describes the release key that script releases ship as
+  `grantkee.asc` with the earlier RSA key's fingerprint and expiry, while the update-scripts 2.2.0
+  changelog entry names the ed25519 key and adds `MavenRain.asc`. Closes when that sentence names
+  the keys `lib/release-keys/` holds.
 - `--help` gaps. `setup-node.sh --help` omits `--network`, `--binary-path`, `--docker-image`,
   `--address`, the `--external-*` and `--listener-*` flags, `--data-dir`, `--advertised-name`,
   `--service-user`, `--service-group`, `--genesis-dir` and `--enable-healthcheck-monitor`;
@@ -781,7 +867,17 @@ are pulled through the customer's own State Manager association. The account sid
   parameter again on every update, so once a newer image exists an update replaces the instance,
   which fails on the network interface it holds and rolls back (reasoned from the docs, not
   tested). The docs tell operators to change the instance type in EC2 instead. A fix is an
-  optional `ImageId` parameter that pins the current image.
+  optional `ImageId` parameter that pins the current image. With the 15,000 IOPS volume of
+  `scripts-v2.2.0` the IOPS change of an older stack lands before that failure, so the rollback
+  waits, possibly for hours, until the volume modification completes (V-AWS-3).
+- **CI does not check the volume's figures or the preset types.** cfn-lint passes a gp3 `Iops`
+  above 80,000, a `Throughput` above 2,000, IOPS-to-size and throughput-to-IOPS ratios beyond
+  gp3's limits, and a typo in a preset's instance type (V-AWS-7). A guard rule is the wrong place for
+  these; a plain `tools/tests` case that reads the template could assert them.
+- **Nothing grows the filesystem after the volume grows.** The user data formats the whole device
+  with no partition table, so after a volume is grown in the console the operator runs
+  `sudo resize2fs "$(findmnt -no SOURCE /var/lib/telcoin)"`, which OPERATOR.md section 2.11
+  gives, without a snapshot first (V-AWS-4). Closes if a stack document or a script grows it.
 - **The subnet takes the region's first availability zone**, which may not offer c7i. An
   `AvailabilityZone` parameter fixes it if a launch hits that.
 - **Not checked without AWS:** the root device name `/dev/sda1` on Canonical's images, the Session

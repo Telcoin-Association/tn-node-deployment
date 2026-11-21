@@ -22,8 +22,10 @@ readonly TESTNET_RPC_URL="https://rpc.adiri.tel"  # network-gated: testnet const
 readonly TESTNET_EXPLORER="https://telscan.io"
 
 # Mainnet has not launched. The chain id matches chain-configs/mainnet/genesis.yaml
-# in telcoin-network; the RPC URL is the planned public endpoint.
-readonly MAINNET_CHAIN_ID="487"
+# on telcoin-network main and MAINNET_CHAIN_ID in crates/types/src/genesis.rs
+# since #1716 (it was 487 before; upstream devnet genesis files use 487 now). The
+# RPC URL is the planned public endpoint.
+readonly MAINNET_CHAIN_ID="731"
 readonly MAINNET_CHAIN_NAME="telcoin"
 readonly MAINNET_RPC_URL="https://rpc.telcoin.network"
 readonly MAINNET_EXPLORER="https://telscan.io"
@@ -77,17 +79,29 @@ readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 # network-gated: the comment names the testnet fleet; 9101 is the default on every network
 readonly DEFAULT_METRICS_PORT="9101"   # node loopback Prometheus endpoint (matches the adiri fleet)
-readonly COMMON_VERSION="2.2.1"
+readonly COMMON_VERSION="2.2.5"
 
 # The operator runbook, for any message that should point operators at it.
 readonly TN_OPERATOR_GUIDE_URL="https://github.com/Telcoin-Association/tn-node-deployment/blob/main/OPERATOR.md"
 
-# Per-role hardware tiers (telcoin-network docs/src/getting-started/hardware-requirements.md,
-# physical cores; cloud vCPUs are usually hyperthreads, so 8 vCPU ~ 4 physical cores).
-readonly HW_NODE_MIN_CPU=2;  readonly HW_NODE_MIN_RAM_GB=8;  readonly HW_NODE_MIN_DISK_GB=2000   # observer (follower)
-readonly HW_RPC_MIN_CPU=4;   readonly HW_RPC_MIN_RAM_GB=16; readonly HW_RPC_MIN_DISK_GB=2000    # observer serving public RPC
-readonly HW_VAL_MIN_CPU=8;   readonly HW_VAL_MIN_RAM_GB=32; readonly HW_VAL_MIN_DISK_GB=2000    # validator minimum (ECC, NVMe)
-readonly HW_VAL_REC_CPU=16;  readonly HW_VAL_REC_RAM_GB=64; readonly HW_VAL_REC_DISK_GB=4000    # validator recommended
+# Per-role hardware tiers, one set per network; check_hardware picks the set (devnet uses
+# the testnet one). CPU is physical cores: a cloud vCPU is usually one hyperthread, so
+# 8 vCPU is about 4 cores. Disk is decimal GB, as disks are sold.
+#   testnet: the deployed testnet validators, Google Cloud c3-highcpu-8 machines
+#            (4 cores (8 vCPU), 16 GB) with a 350 GB pd-ssd each.
+#   mainnet: the hardware requirements page of the telcoin-network documentation
+#            (docs/src/getting-started/hardware-requirements.md), plus Telcoin's published
+#            benchmarks (benchmark.telcoin.network) for the validator storage.
+# ui/server.py mirrors these in HW_TIERS and HW_VALIDATOR_RECOMMENDED; keep one
+# `readonly NAME=value` per statement, which is how the UI's mirror test reads them.
+readonly HW_TESTNET_NODE_MIN_CPU=2;  readonly HW_TESTNET_NODE_MIN_RAM_GB=8;  readonly HW_TESTNET_NODE_MIN_DISK_GB=350   # observer (follower)
+readonly HW_TESTNET_RPC_MIN_CPU=4;   readonly HW_TESTNET_RPC_MIN_RAM_GB=16;  readonly HW_TESTNET_RPC_MIN_DISK_GB=350   # observer serving public RPC
+readonly HW_TESTNET_VAL_MIN_CPU=3;   readonly HW_TESTNET_VAL_MIN_RAM_GB=16;  readonly HW_TESTNET_VAL_MIN_DISK_GB=350   # validator minimum
+readonly HW_TESTNET_VAL_REC_CPU=4;   readonly HW_TESTNET_VAL_REC_RAM_GB=16;  readonly HW_TESTNET_VAL_REC_DISK_GB=500   # validator recommended (NVMe)
+readonly HW_MAINNET_NODE_MIN_CPU=2;  readonly HW_MAINNET_NODE_MIN_RAM_GB=8;  readonly HW_MAINNET_NODE_MIN_DISK_GB=2000  # observer (follower)
+readonly HW_MAINNET_RPC_MIN_CPU=4;   readonly HW_MAINNET_RPC_MIN_RAM_GB=16;  readonly HW_MAINNET_RPC_MIN_DISK_GB=2000  # observer serving public RPC
+readonly HW_MAINNET_VAL_MIN_CPU=8;   readonly HW_MAINNET_VAL_MIN_RAM_GB=32;  readonly HW_MAINNET_VAL_MIN_DISK_GB=2000  # validator minimum (ECC, NVMe)
+readonly HW_MAINNET_VAL_REC_CPU=16;  readonly HW_MAINNET_VAL_REC_RAM_GB=64;  readonly HW_MAINNET_VAL_REC_DISK_GB=4000  # validator recommended (ECC, NVMe)
 
 # Set by check_hardware for callers that embed them in JSON log lines (plain ASCII).
 TN_HW_SUMMARY=""
@@ -2199,6 +2213,13 @@ _tn_hw_disk_label() {
     fi
 }
 
+# _tn_hw_cores_label <n> — "<n> cores (<2n> vCPU)", e.g. "3 cores (6 vCPU)": a tier's
+# physical cores with the cloud vCPU count (two hyperthreads per core) that matches.
+_tn_hw_cores_label() {
+    local n="${1:-0}"
+    printf '%s cores (%s vCPU)' "$n" "$(( n * 2 ))"
+}
+
 # tn_physical_cores — print "<n> physical" with the number of physical CPU cores,
 # or "<n> logical" when only the logical CPU count (every hyperthread counted) can
 # be read. Sources, first answer wins:
@@ -2279,20 +2300,21 @@ _tn_hw_cpu_text() {
 # _tn_hw_role <label> <min_cpu> <min_ram_gb> <min_disk_gb> <cpu> <ram_kb> <disk_kb>
 # [cpu_kind] — print one line for a role tier. Empty cpu/ram_kb/disk_kb mean "could
 # not measure" and never count as a shortfall. cpu_kind (physical or logical, from
-# tn_physical_cores) only words the count. rc 1 when a measured value is below the
-# tier, else 0. RAM and disk get 5 % slack: a "16 GB" box reports ~15.6 GiB and a
-# formatted "2 TB" disk a little under 2000 GB.
+# tn_physical_cores) only words the count. The tier's CPU is written as
+# _tn_hw_cores_label words it ("3 cores (6 vCPU)"). rc 1 when a measured value is
+# below the tier, else 0. RAM and disk get 5 % slack: a "16 GB" box reports ~15.6 GiB
+# and a formatted "2 TB" disk a little under 2000 GB.
 _tn_hw_role() {
     local label="$1" min_cpu="$2" min_ram="$3" min_disk="$4" cpu="$5" ram_kb="$6" disk_kb="$7"
     local cpu_kind="${8:-logical}" spec need have unknown
-    spec="${min_cpu} cores / ${min_ram} GB / $(_tn_hw_disk_label "$min_disk")"
+    spec="$(_tn_hw_cores_label "$min_cpu") / ${min_ram} GB / $(_tn_hw_disk_label "$min_disk")"
     need=""
     have=""
     unknown=""
     if [[ -z "$cpu" ]]; then
         unknown="CPU"
     elif [[ "$cpu" -lt "$min_cpu" ]]; then
-        need="${min_cpu} cores"
+        need="$(_tn_hw_cores_label "$min_cpu")"
         have="$(_tn_hw_cpu_text "$cpu" "$cpu_kind")"
     fi
     if [[ -z "$ram_kb" ]]; then
@@ -2322,13 +2344,16 @@ _tn_hw_role() {
     return 0
 }
 
-# check_hardware [legacy_arg] [data_dir] — informational hardware report against the
-# per-role tiers above. It never blocks setup and ALWAYS returns 0: every node is
+# check_hardware [unused] [data_dir] [network] — informational hardware report against
+# the per-role tiers above. It never blocks setup and ALWAYS returns 0: every node is
 # provisioned validator-capable, but the role is decided on-chain each epoch and a
 # node below the validator tier still runs fine as a follower. $1 (the old
 # node_type) is accepted for call-site compatibility and ignored. data_dir (default
 # /) picks the filesystem to measure; it may not exist yet (created later in
-# setup), so the nearest existing parent is used.
+# setup), so the nearest existing parent is used. network picks the tier set:
+# testnet and devnet compare with the HW_TESTNET_* tiers; mainnet, an empty value
+# or anything else with the HW_MAINNET_* tiers, so a caller that passes only two
+# arguments keeps the mainnet verdicts. A line before the role lines names the set.
 #   * CPU: tn_physical_cores. The tiers are physical cores; when only the logical
 #     count can be read (every hyperthread counted, so up to twice the cores), the
 #     tiers are compared with that and the report says so.
@@ -2340,12 +2365,37 @@ _tn_hw_role() {
 # Sets TN_HW_SUMMARY (the "Detected" text) and TN_HW_GAPS (comma-separated roles
 # below minimum, from node, rpc, validator; empty when all pass), both plain ASCII.
 check_hardware() {
-    local data_dir="${2:-/}"
+    local data_dir="${2:-/}" network="${3:-}"
     local meminfo cpu cpu_kind cores ram_kb ram_gb check_path df_line disk_kb disk_avail_kb disk_pct
     local mount_point disk_gb disk_free_gb cpu_txt ram_txt disk_txt gaps
+    local tier_net tier_why rec_ecc rec_unchecked
+    local -a tier_node tier_rpc tier_val tier_rec
     TN_HW_SUMMARY=""
     TN_HW_GAPS=""
     print_step "Checking hardware..."
+
+    # The tier set: each array is (cpu, ram_gb, disk_gb).
+    case "$network" in
+        testnet) tier_net="testnet"; tier_why="" ;;
+        devnet)  tier_net="testnet"; tier_why=" (devnet uses them)" ;;
+        mainnet) tier_net="mainnet"; tier_why="" ;;
+        *)       tier_net="mainnet"; tier_why=" (no network given)" ;;
+    esac
+    if [[ "$tier_net" == "testnet" ]]; then
+        tier_node=("$HW_TESTNET_NODE_MIN_CPU" "$HW_TESTNET_NODE_MIN_RAM_GB" "$HW_TESTNET_NODE_MIN_DISK_GB")
+        tier_rpc=("$HW_TESTNET_RPC_MIN_CPU" "$HW_TESTNET_RPC_MIN_RAM_GB" "$HW_TESTNET_RPC_MIN_DISK_GB")
+        tier_val=("$HW_TESTNET_VAL_MIN_CPU" "$HW_TESTNET_VAL_MIN_RAM_GB" "$HW_TESTNET_VAL_MIN_DISK_GB")
+        tier_rec=("$HW_TESTNET_VAL_REC_CPU" "$HW_TESTNET_VAL_REC_RAM_GB" "$HW_TESTNET_VAL_REC_DISK_GB")
+        rec_ecc=""
+        rec_unchecked="NVMe is"
+    else
+        tier_node=("$HW_MAINNET_NODE_MIN_CPU" "$HW_MAINNET_NODE_MIN_RAM_GB" "$HW_MAINNET_NODE_MIN_DISK_GB")
+        tier_rpc=("$HW_MAINNET_RPC_MIN_CPU" "$HW_MAINNET_RPC_MIN_RAM_GB" "$HW_MAINNET_RPC_MIN_DISK_GB")
+        tier_val=("$HW_MAINNET_VAL_MIN_CPU" "$HW_MAINNET_VAL_MIN_RAM_GB" "$HW_MAINNET_VAL_MIN_DISK_GB")
+        tier_rec=("$HW_MAINNET_VAL_REC_CPU" "$HW_MAINNET_VAL_REC_RAM_GB" "$HW_MAINNET_VAL_REC_DISK_GB")
+        rec_ecc=" ECC"
+        rec_unchecked="ECC and NVMe are"
+    fi
 
     cpu=""
     cpu_kind=""
@@ -2423,25 +2473,24 @@ check_hardware() {
     if [[ "$cpu_kind" == "logical" ]]; then
         print_info "Physical cores could not be counted, so the tiers below are compared with logical CPUs; with hyperthreading that is up to twice the physical cores."
     fi
+    print_info "Comparing with the ${tier_net} hardware tiers${tier_why}."
     if [[ -n "$disk_pct" ]] && [[ "$disk_pct" -ge 90 ]]; then
         print_warn "Disk ${mount_point} is ${disk_pct}% used (${disk_free_gb:-?} GB free)."
     fi
 
     gaps=""
-    if ! _tn_hw_role "Full node (follower)" "$HW_NODE_MIN_CPU" "$HW_NODE_MIN_RAM_GB" "$HW_NODE_MIN_DISK_GB" \
-        "$cpu" "$ram_kb" "$disk_kb" "$cpu_kind"; then
+    if ! _tn_hw_role "Full node (follower)" "${tier_node[@]}" "$cpu" "$ram_kb" "$disk_kb" "$cpu_kind"; then
         gaps="node"
     fi
-    if ! _tn_hw_role "Public RPC node" "$HW_RPC_MIN_CPU" "$HW_RPC_MIN_RAM_GB" "$HW_RPC_MIN_DISK_GB" \
-        "$cpu" "$ram_kb" "$disk_kb" "$cpu_kind"; then
+    if ! _tn_hw_role "Public RPC node" "${tier_rpc[@]}" "$cpu" "$ram_kb" "$disk_kb" "$cpu_kind"; then
         gaps="${gaps:+${gaps},}rpc"
     fi
-    if ! _tn_hw_role "Validator (minimum)" "$HW_VAL_MIN_CPU" "$HW_VAL_MIN_RAM_GB" "$HW_VAL_MIN_DISK_GB" \
-        "$cpu" "$ram_kb" "$disk_kb" "$cpu_kind"; then
+    if ! _tn_hw_role "Validator (minimum)" "${tier_val[@]}" "$cpu" "$ram_kb" "$disk_kb" "$cpu_kind"; then
         gaps="${gaps:+${gaps},}validator"
     fi
     TN_HW_GAPS="$gaps"
-    print_info "Validator (recommended): ${HW_VAL_REC_CPU} cores / ${HW_VAL_REC_RAM_GB} GB ECC / $(_tn_hw_disk_label "$HW_VAL_REC_DISK_GB") NVMe — ECC and NVMe are not checked here."
+    print_info "Validator (recommended): $(_tn_hw_cores_label "${tier_rec[0]}") / ${tier_rec[1]} GB${rec_ecc} / $(_tn_hw_disk_label "${tier_rec[2]}") NVMe — ${rec_unchecked} not checked here."
+    print_info "Prioritise single-core performance: EVM execution is single-threaded, so a high clock speed matters more than extra cores."
     print_info "Hardware checks never block setup; the node role is decided on-chain each epoch."
     return 0
 }
@@ -3180,7 +3229,7 @@ tn_cargo_features_for() {
 # NETWORK in META (default: node_meta_path) decides when the key is present:
 # testnet and mainnet print; any other value (devnet, empty, a typo) is rc 1; a
 # key listed more than once (meta_get rc 2) is rc 1 with no fallback. Without
-# the key, the chain id in <data-dir>/genesis/genesis.yaml decides: 487
+# the key, the chain id in <data-dir>/genesis/genesis.yaml decides: 731
 # mainnet, 2017 testnet, anything else or no readable genesis rc 1. The data
 # dir is META's DATA_DIR when that directory exists (honouring TN_ROOT_PREFIX),
 # else tn_resolve_data_dir; no caller global is read. Reads files only, builds
@@ -3253,18 +3302,95 @@ tn_sync_submodules() {
     return 0
 }
 
-# ensure_chain_configs_available [NETWORK] -- make the telcoin-network checkout
-# (TN_SOURCE_DIR) that holds the chain configs available: clone it (with the
-# operator's consent) when it is missing; on testnet and devnet pull it
-# (--ff-only), never on mainnet, whose files come only as published. Then the
-# directory setup will copy from (TN_GENESIS_DIR when set, else the checkout's
-# chain-configs/<network>) is compared with the network's pins
-# (tn_chain_configs_check) before anything is copied. NETWORK defaults to the
-# NETWORK global; TN_ROOT_PREFIX is honoured for the checkout. rc 0 ready (or
-# skipped by the operator: setup asks for the files later), 1 refused: the files
-# do not match their pins or the network has none. Exits 1 when the clone fails.
+# _tn_chain_configs_consent DIR -- say why the chain configs need the
+# telcoin-network repository and ask before cloning it into DIR. rc 0 agreed; 1
+# declined (a warning says the files are asked for later).
+_tn_chain_configs_consent() {
+    echo ""
+    print_info "The chain-config YAML files (genesis.yaml, committee.yaml, parameters.yaml)"
+    print_info "are required to run a node. They live in the Telcoin Network GitHub repo."
+    print_info "Repository: ${TN_REPO}"
+    print_info "Clone destination: ${1:-}"
+    echo ""
+    if confirm "Clone the repository now to get the chain-config files?"; then
+        return 0
+    fi
+    print_warn "Skipped. You will need to provide chain-config files manually in the next step."
+    return 1
+}
+
+# _tn_chain_configs_clone_target DIR [progress-fn] -- rc 0 when DIR can be
+# cloned into: it does not exist, or it is an empty directory (not a symlink).
+# Anything else at DIR (a non-empty directory without a usable .git, a file, a
+# symlink) is in the way: a warning says so and rc 1, so the operator is not
+# asked to clone into it.
+_tn_chain_configs_clone_target() {
+    local dir="${1:-}" fn="${2:-}"
+    if [[ ! -e "$dir" && ! -L "$dir" ]]; then
+        return 0
+    fi
+    if [[ -d "$dir" && ! -L "$dir" && -z "$(ls -A -- "$dir" 2>/dev/null)" ]]; then
+        return 0
+    fi
+    _tn_guard_say warn "${dir} exists but is not a git checkout; move it aside first." "$fn"
+    return 1
+}
+
+# _tn_chain_configs_clone DIR [TAG] [progress-fn] -- clone TN_REPO into DIR for
+# the chain configs, after the operator agreed. With TAG: over https only, at
+# TAG, without submodules (the chain configs are plain files of the
+# superproject), through _tn_chain_configs_git. Without (devnet): the default
+# branch with its submodules. rc 0 cloned, 2 the clone failed: the message and
+# the command to clone by hand go to progress-fn as warnings when one is given
+# (so a --json run shows them), else they are printed.
+_tn_chain_configs_clone() {
+    local dir="${1:-}" tag="${2:-}" fn="${3:-}" ok=0 manual
+    print_step "Cloning repository..."
+    if [[ -n "$tag" ]]; then
+        _tn_chain_configs_git "" clone --quiet --branch "$tag" -- "$TN_REPO" "$dir" || ok=1
+        manual="Manual clone: git clone --branch ${tag} ${TN_REPO} ${dir}"
+    else
+        git clone --recurse-submodules -- "$TN_REPO" "$dir" 9>&- || ok=1
+        manual="Manual clone: git clone ${TN_REPO} ${dir}"
+    fi
+    if [[ $ok -eq 0 ]]; then
+        print_ok "Repository cloned to: ${dir}"
+        return 0
+    fi
+    if [[ -n "$fn" ]] && declare -F "$fn" >/dev/null 2>&1; then
+        _tn_guard_say warn "Clone failed. Check your internet connection." "$fn"
+        _tn_guard_say warn "$manual" "$fn"
+    else
+        print_error "Clone failed. Check your internet connection."
+        print_info "$manual"
+    fi
+    return 2
+}
+
+# ensure_chain_configs_available [NETWORK] [progress-fn] -- make the chain
+# configs setup copies available and compare them with the network's pins
+# (tn_chain_configs_check) before anything is copied. TN_GENESIS_DIR, when set,
+# is used as given: no git, no prompt. A network with a pinned tag (testnet;
+# mainnet once it has one) gets the files at that tag into
+# tn_chain_configs_dir NETWORK through tn_chain_configs_from_tag, which never
+# moves the checkout: no git runs when they are already there; otherwise the
+# telcoin-network checkout (TN_SOURCE_DIR under TN_ROOT_PREFIX; a git worktree
+# counts, its .git a file) is read, and cloned at the tag first, with the
+# operator's consent, when it is missing. Before that question, a destination
+# that cannot be installed into (_tn_chain_configs_dest_ok) and a source path
+# that is in the way (_tn_chain_configs_clone_target) are refused, so the
+# operator is not asked to clone for nothing. Mainnet without a tag runs no git
+# and checks the checkout's files as published (it refuses while the pins are
+# empty). Devnet pulls the checkout (--ff-only) or clones it, and its files are
+# used unchecked. NETWORK defaults to the NETWORK global; progress-fn receives
+# the messages of the helpers. rc 0 ready (or skipped by the operator: setup
+# asks for the files later); 1 refused: an unknown network, files that do not
+# match their pins, a network without pins, a checkout that is a symlink,
+# another account's or one git cannot read, a source path in the way, a
+# destination that is a symlink; 2 failed: the clone, the fetch or the install
+# did not work, or an entry in the destination is in the way.
 ensure_chain_configs_available() {
-    local net="${1:-${NETWORK:-}}" source_dir="${TN_ROOT_PREFIX:-}${TN_SOURCE_DIR}" dir
+    local net="${1:-${NETWORK:-}}" fn="${2:-}" source_dir="${TN_ROOT_PREFIX:-}${TN_SOURCE_DIR}" dir tag rc=0
 
     print_step "Ensuring chain-config files are available..."
     case "$net" in
@@ -3275,44 +3401,46 @@ ensure_chain_configs_available() {
             ;;
     esac
 
-    if [[ -d "${source_dir}/.git" ]]; then
-        if [[ "$net" == "mainnet" ]]; then
-            print_info "Repository present; mainnet chain configs are used as published (no pull)."
-        else
+    tag="$(tn_chain_configs_tag "$net")"
+    if [[ -n "${TN_GENESIS_DIR:-}" ]]; then
+        dir="$TN_GENESIS_DIR"
+    elif [[ -n "$tag" ]]; then
+        dir="$(tn_chain_configs_dir "$net")"
+        if [[ ! -e "${source_dir}/.git" ]] && ! tn_chain_configs_check "$dir" "$net" 2>/dev/null; then
+            _tn_chain_configs_dest_ok "$dir" "$fn" || return $?
+            _tn_chain_configs_clone_target "$source_dir" "$fn" || return 1
+            _tn_chain_configs_consent "$source_dir" || return 0
+            _tn_chain_configs_clone "$source_dir" "$tag" "$fn" || return 2
+        fi
+        tn_chain_configs_from_tag "$source_dir" "$net" "$fn" || return $?
+        print_ok "Chain configs in ${dir} match the ${net} pins"
+        return 0
+    elif [[ "$net" == "devnet" ]]; then
+        dir="${source_dir}/chain-configs/${net}"
+        if [[ -e "${source_dir}/.git" ]]; then
             print_info "Repository already present -- pulling latest..."
-            git -C "$source_dir" pull --ff-only 2>/dev/null && \
-                print_ok "Repository up to date" || \
+            if git -C "$source_dir" pull --ff-only 2>/dev/null 9>&-; then
+                print_ok "Repository up to date"
+            else
                 print_warn "Could not pull latest. Using existing files."
+            fi
             # Warn-only: chain configs are plain files in the superproject, so a
             # submodule failure must not block them; it only matters for builds.
             tn_sync_submodules "$source_dir" || \
                 print_warn "submodule sync reported an issue -- chain configs are unaffected"
-        fi
-    elif [[ -z "${TN_GENESIS_DIR:-}" ]]; then
-        echo ""
-        print_info "The chain-config YAML files (genesis.yaml, committee.yaml, parameters.yaml)"
-        print_info "are required to run a node. They live in the Telcoin Network GitHub repo."
-        print_info "Repository: ${TN_REPO}"
-        print_info "Clone destination: ${source_dir}"
-        echo ""
-
-        if confirm "Clone the repository now to get the chain-config files?"; then
-            print_step "Cloning repository..."
-            if git clone --recurse-submodules "$TN_REPO" "$source_dir"; then
-                print_ok "Repository cloned to: ${source_dir}"
-            else
-                print_error "Clone failed. Check your internet connection."
-                print_info "Manual clone: git clone ${TN_REPO} ${source_dir}"
-                exit 1
-            fi
         else
-            print_warn "Skipped. You will need to provide chain-config files manually in the next step."
-            return 0
+            _tn_chain_configs_clone_target "$source_dir" "$fn" || return 1
+            _tn_chain_configs_consent "$source_dir" || return 0
+            _tn_chain_configs_clone "$source_dir" "" "$fn" || return 2
         fi
+    else
+        dir="${source_dir}/chain-configs/${net}"
+        [[ ! -e "${source_dir}/.git" ]] || \
+            print_info "Repository present; ${net} chain configs are used as published (no pull)."
     fi
 
-    dir="${TN_GENESIS_DIR:-${source_dir}/chain-configs/${net}}"
-    if ! tn_chain_configs_check "$dir" "$net"; then
+    tn_chain_configs_check "$dir" "$net" "$fn" || rc=$?
+    if [[ $rc -ne 0 ]]; then
         print_error "The chain configs in ${dir} do not match the ${net} pins (see above); nothing was copied."
         return 1
     fi
@@ -7139,17 +7267,23 @@ tn_host_baseline_status() {
 }
 
 # Chain-config pins: the sha256 of genesis.yaml, committee.yaml and
-# parameters.yaml each network runs. Testnet: chain-configs/testnet in the
-# telcoin-network repository at TESTNET_CHAIN_CONFIGS_TAG (the release
+# parameters.yaml each network runs, and the telcoin-network tag they are read
+# from (<NET>_CHAIN_CONFIGS_TAG). tn_chain_configs_from_tag reads the three
+# files at that tag into <config dir>/chain-configs/<network>; a branch is
+# never read, because the default branch moves on and its files stop matching
+# the pins. Testnet: chain-configs/testnet in the telcoin-network repository at
+# TESTNET_CHAIN_CONFIGS_TAG (the release
 # network-gated: testnet release history of the chain configs; no endpoint
 # DEFAULT_DOCKER_IMAGE runs; the three files are the same since v0.15.0-adiri).
-# Mainnet: empty until the genesis ceremony publishes the files and a signed
-# script release carries their hashes; while any of the three is empty, a
-# mainnet install or refresh refuses (tn_chain_configs_check). Devnet has none.
+# Mainnet: the tag and the hashes are empty until the genesis ceremony
+# publishes the files and a signed script release carries both; while the tag
+# is empty nothing is fetched, and while any hash is empty a mainnet install or
+# refresh refuses (tn_chain_configs_check). Devnet has neither.
 readonly TESTNET_CHAIN_CONFIGS_TAG="v0.16.0-adiri"  # network-gated: testnet constant: the tag of the testnet chain-config pins
 readonly TESTNET_GENESIS_SHA256="670c94e3816686bd4da5aedbfa994d4f362452eaf2552b2757f05226608188c2"
 readonly TESTNET_COMMITTEE_SHA256="009b6d7b568f7d04734b657080d55621eed70f68ecefe1284dd8cdd0f42f15ce"
 readonly TESTNET_PARAMETERS_SHA256="7c6a44712faef1dc47dbc5b4f21f62d1eeabf1f0d54d2cb600ad6c65d4eda091"
+readonly MAINNET_CHAIN_CONFIGS_TAG=""
 readonly MAINNET_GENESIS_SHA256=""
 readonly MAINNET_COMMITTEE_SHA256=""
 readonly MAINNET_PARAMETERS_SHA256=""
@@ -7169,15 +7303,22 @@ tn_chain_config_pin() {
     return 0
 }
 
-# tn_chain_configs_check DIR NETWORK [progress-fn] -- compare DIR/genesis.yaml,
-# committee.yaml and parameters.yaml with NETWORK's pins, before anything copies
-# them. Each must be a regular file (not a symlink) with the pinned sha256; a
-# mismatch names the expected and the actual value. devnet has no pins (a
+# tn_chain_configs_check DIR NETWORK [progress-fn] [NAME-PREFIX [NAME-SUFFIX]]
+# -- compare DIR/genesis.yaml, committee.yaml and parameters.yaml with
+# NETWORK's pins, before anything copies them. Each must be a regular file (not
+# a symlink) with the pinned sha256; a mismatch names the expected and the
+# actual value. The messages name each file DIR/<file>, or
+# NAME-PREFIX<file>NAME-SUFFIX when NAME-PREFIX is given (DIR a staging
+# directory that is gone when the operator reads them). devnet has no pins (a
 # warning, rc 0). rc 0 all three match, 1 refused: a mismatch, a missing file,
 # mainnet pins not published yet, or a network other than testnet, mainnet and
 # devnet.
 tn_chain_configs_check() {
-    local dir="${1:-}" net="${2:-}" fn="${3:-}" f want got bad=0
+    local dir="${1:-}" net="${2:-}" fn="${3:-}" pre="${1:-}/" suf="" name f want got bad=0
+    if [[ $# -ge 4 ]]; then
+        pre="$4"
+        suf="${5:-}"
+    fi
     case "$net" in
         testnet|mainnet) ;;
         devnet)
@@ -7195,19 +7336,314 @@ tn_chain_configs_check() {
             _tn_guard_say warn "${net} has no pinned sha256 for ${f} yet (it ships with the genesis ceremony); unpinned chain configs are not used." "$fn"
             return 1
         fi
+        name="${pre}${f}${suf}"
         if [[ -L "${dir}/${f}" || ! -f "${dir}/${f}" ]]; then
-            _tn_guard_say warn "${dir}/${f} is missing or not a regular file." "$fn"
+            _tn_guard_say warn "${name} is missing or not a regular file." "$fn"
             bad=1
             continue
         fi
         got="$(sha256sum < "${dir}/${f}" 2>/dev/null)" || got=""
         got="${got%% *}"
         if [[ "$got" != "$want" ]]; then
-            _tn_guard_say warn "${dir}/${f}: sha256 ${got:-unreadable}, expected ${want} (${net})." "$fn"
+            _tn_guard_say warn "${name}: sha256 ${got:-unreadable}, expected ${want} (${net})." "$fn"
             bad=1
         fi
     done
     return "$bad"
+}
+
+# tn_chain_configs_tag NETWORK -- print the telcoin-network tag NETWORK's
+# chain-config pins come from: TESTNET_CHAIN_CONFIGS_TAG on testnet,
+# MAINNET_CHAIN_CONFIGS_TAG on mainnet (empty until the genesis ceremony).
+# Prints nothing for an empty tag, devnet or any other network. rc 0.
+tn_chain_configs_tag() {
+    local tag=""
+    case "${1:-}" in
+        testnet) tag="$TESTNET_CHAIN_CONFIGS_TAG" ;;
+        mainnet) tag="$MAINNET_CHAIN_CONFIGS_TAG" ;;
+    esac
+    [[ -z "$tag" ]] || printf '%s\n' "$tag"
+    return 0
+}
+
+# tn_chain_configs_dir NETWORK -- print the root-owned directory that holds
+# NETWORK's pinned chain configs once tn_chain_configs_from_tag has installed
+# them: <config dir>/chain-configs/NETWORK (CONFIG_DIR, default
+# DEFAULT_CONFIG_DIR, under TN_ROOT_PREFIX). rc 0.
+tn_chain_configs_dir() {
+    printf '%s\n' "${TN_ROOT_PREFIX:-}${CONFIG_DIR:-$DEFAULT_CONFIG_DIR}/chain-configs/${1:-}"
+    return 0
+}
+
+# tn_chain_configs_from_tag DIR NETWORK [progress-fn] -- put NETWORK's three
+# chain configs, as they are at NETWORK's pinned tag (tn_chain_configs_tag),
+# into tn_chain_configs_dir NETWORK. DIR is a telcoin-network checkout (a git
+# worktree counts: its .git is a file) owned by the account running this (root
+# on a host), not a symlink. The destination is checked first
+# (_tn_chain_configs_dest_ok): a symlink there is refused, an entry that no
+# install could replace fails, before anything is fetched or written. When the
+# destination already passes tn_chain_configs_check, no git runs and DIR need
+# not exist; if its owner or modes are not the ones the install sets
+# (_tn_chain_configs_in_place: made by hand, or under a restrictive umask), the
+# files there are staged, checked and installed again. Otherwise the tag is
+# fetched from origin into refs/tn-remote-tags/TAG, as tn_source_checkout_tag
+# fetches it, and the files are read from there; when the fetch fails, from
+# that ref of an earlier fetch, else from the checkout's own refs/tags/TAG (a
+# warning names git's reason). A ref lookup that git cannot answer (it cannot
+# read the repository: another account's .git, a broken gitfile) refuses. A
+# local refs/tags/TAG is never moved. Every git command runs through
+# _tn_chain_configs_git. The three files go to a private staging directory
+# (_tn_chain_configs_stage, removed on every path) and are checked against the
+# pins before anything is installed: the two directories root:root 0755
+# (_tn_root_layout_dir), each file root 0644 (tn_write_root_file), then the
+# destination is checked again. HEAD, the index, the working tree and the
+# submodules of DIR are never touched (no checkout, pull, reset or submodule
+# command). Messages go through _tn_guard_say. rc 0 the pinned files are in
+# place; 1 refused: NETWORK has no tag, the destination or its parent is a
+# symlink or not a directory, DIR is a symlink, owned by another account or
+# not readable by git, or the files do not match the pins (the destination is
+# untouched); 2 failed: an entry in the destination is in the way, DIR is not a
+# git checkout, the tag is neither on origin nor in the checkout, a file is
+# missing at the tag or cannot be read (a partial clone's blob is not fetched
+# for it), or the install failed.
+tn_chain_configs_from_tag() {
+    local dir="${1:-}" net="${2:-}" fn="${3:-}" tag dest ref="" stage f rc=0 out="" why="" grc fetched=0
+    while [[ "$dir" == */ && "$dir" != / ]]; do dir="${dir%/}"; done
+    tag="$(tn_chain_configs_tag "$net")"
+    if [[ -z "$tag" ]]; then
+        _tn_guard_say warn "${net} has no pinned chain-config tag; nothing was read." "$fn"
+        return 1
+    fi
+    dest="$(tn_chain_configs_dir "$net")"
+    _tn_chain_configs_dest_ok "$dest" "$fn" || return $?
+    if tn_chain_configs_check "$dest" "$net" 2>/dev/null; then
+        _tn_guard_say log "The pinned ${net} chain configs are already in ${dest}." "$fn"
+        _tn_chain_configs_in_place "$dest" && return 0
+        # The right files with another owner or mode: they are installed again
+        # from where they are (ref stays empty), with no git and no network.
+    else
+        if [[ ! -e "${dir}/.git" ]]; then
+            _tn_guard_say warn "${dir} is not a git checkout; the ${net} chain configs at ${tag} cannot be read from it." "$fn"
+            return 2
+        fi
+        if [[ -L "$dir" || "$(stat -c '%u' -- "$dir" 2>/dev/null)" != "$(id -u)" ]]; then
+            _tn_guard_say warn "${dir} must be a directory owned by $(id -un) (not a symlink); nothing was fetched." "$fn"
+            return 1
+        fi
+        _tn_guard_say step "Fetching ${tag} from origin for the chain configs..." "$fn"
+        out="$(_tn_chain_configs_git "$dir" fetch --quiet --no-tags origin \
+            "+refs/tags/${tag}:refs/tn-remote-tags/${tag}" 2>&1 >/dev/null)" && fetched=1
+        if [[ $fetched -eq 1 ]] \
+            && _tn_chain_configs_git "$dir" rev-parse -q --verify "refs/tn-remote-tags/${tag}^{commit}" >/dev/null 2>&1; then
+            ref="refs/tn-remote-tags/${tag}"
+        else
+            why="$(_tn_chain_configs_why "$out")"
+            for f in "refs/tn-remote-tags/${tag}" "refs/tags/${tag}"; do
+                grc=0
+                out="$(_tn_chain_configs_git "$dir" rev-parse -q --verify "${f}^{commit}" 2>&1 >/dev/null)" || grc=$?
+                if [[ $grc -eq 0 ]]; then
+                    ref="$f"
+                    break
+                fi
+                # rc 1 is "no such ref"; anything else means git could not read
+                # the repository at all.
+                if [[ $grc -ne 1 ]]; then
+                    out="$(_tn_chain_configs_why "$out")"
+                    _tn_guard_say warn "Git cannot read the repository in ${dir} (${out:-git exited ${grc}}); nothing was installed." "$fn"
+                    return 1
+                fi
+            done
+            if [[ -z "$ref" ]]; then
+                _tn_guard_say warn "Could not fetch tag ${tag} from origin${why:+ (${why})}, and the checkout does not have it." "$fn"
+                return 2
+            fi
+            _tn_guard_say warn "Could not fetch ${tag} from origin${why:+ (${why})}; reading the ${net} chain configs from the local copy of ${tag}." "$fn"
+        fi
+    fi
+    if ! stage="$(_tn_chain_configs_stage)"; then
+        _tn_guard_say warn "Could not make a staging directory for the ${net} chain configs." "$fn"
+        return 2
+    fi
+    for f in genesis.yaml committee.yaml parameters.yaml; do
+        if [[ -n "$ref" ]]; then
+            if ! out="$(_tn_chain_configs_git "$dir" cat-file blob "${ref}:chain-configs/${net}/${f}" 2>&1 > "${stage}/${f}")"; then
+                # A path the tag's tree lists but git cannot read (a partial
+                # clone's missing blob: no lazy fetch here) is not "missing".
+                if [[ -n "$(_tn_chain_configs_git "$dir" ls-tree --name-only "$ref" -- "chain-configs/${net}/${f}" 2>/dev/null)" ]]; then
+                    why="$(_tn_chain_configs_why "$out")"
+                    _tn_guard_say warn "Could not read chain-configs/${net}/${f} at ${tag}${why:+ (${why})}; nothing was installed." "$fn"
+                else
+                    _tn_guard_say warn "${tag} has no chain-configs/${net}/${f}." "$fn"
+                fi
+                rc=2
+                break
+            fi
+        elif ! cat -- "${dest}/${f}" > "${stage}/${f}" 2>/dev/null; then
+            _tn_guard_say warn "Could not read ${dest}/${f}." "$fn"
+            rc=2
+            break
+        fi
+    done
+    if [[ $rc -eq 0 && -n "$ref" ]]; then
+        if ! tn_chain_configs_check "$stage" "$net" "$fn" "chain-configs/${net}/" " at ${tag}"; then
+            _tn_guard_say warn "The ${net} chain configs at ${tag} do not match the pins; nothing was installed." "$fn"
+            rc=1
+        elif ! _tn_chain_configs_install "$stage" "$dest" "$net" "$fn"; then
+            _tn_guard_say warn "Could not install the ${net} chain configs from ${tag} into ${dest} (see above)." "$fn"
+            rc=2
+        else
+            _tn_guard_say log "Installed the ${net} chain configs from ${tag} into ${dest}." "$fn"
+        fi
+    elif [[ $rc -eq 0 ]]; then
+        if ! tn_chain_configs_check "$stage" "$net" "$fn" "${dest}/"; then
+            _tn_guard_say warn "The ${net} chain configs in ${dest} changed while they were read; nothing was installed." "$fn"
+            rc=1
+        elif ! _tn_chain_configs_install "$stage" "$dest" "$net" "$fn"; then
+            _tn_guard_say warn "Could not reinstall the ${net} chain configs in ${dest} root-owned, directories 0755 and files 0644 (see above)." "$fn"
+            rc=2
+        else
+            _tn_guard_say log "Reinstalled the ${net} chain configs in ${dest} root-owned, directories 0755 and files 0644: their owner or modes were not the ones the install sets." "$fn"
+        fi
+    fi
+    rm -rf -- "$stage" 2>/dev/null || true
+    return "$rc"
+}
+
+# _tn_chain_configs_install STAGE DEST NETWORK [progress-fn] -- install the
+# three chain configs in STAGE (already checked against NETWORK's pins) as
+# DEST/<file>, root 0644 through tn_write_root_file fed from the staged file;
+# DEST and its parent are made root:root 0755 first. DEST is checked against
+# the pins again afterwards. rc 0, non-zero when a directory, a write or that
+# check failed (a write that failed leaves its file as it was).
+_tn_chain_configs_install() {
+    local stage="${1:-}" dest="${2:-}" net="${3:-}" fn="${4:-}" f
+    _tn_root_layout_dir "${dest%/*}" root 0755 || return 1
+    _tn_root_layout_dir "$dest" root 0755 || return 1
+    for f in genesis.yaml committee.yaml parameters.yaml; do
+        tn_write_root_file "${dest}/${f}" 0644 < "${stage}/${f}" || return 1
+    done
+    tn_chain_configs_check "$dest" "$net" "$fn"
+}
+
+# _tn_chain_configs_dest_ok DEST [progress-fn] -- rc 0 when the chain configs
+# can be installed as DEST/<file>: DEST and its parent are real directories or
+# absent, and each of genesis.yaml, committee.yaml and parameters.yaml is a
+# regular file or absent. Checked before anything is fetched or written, so a
+# refusal leaves DEST as it was. rc 1: DEST or its parent is a symlink or not a
+# directory (nothing is installed or read through it); rc 2: one of the three
+# names is a symlink, a directory or another entry no install can replace. The
+# warning names the entry and asks for it to be removed.
+_tn_chain_configs_dest_ok() {
+    local dest="${1:-}" fn="${2:-}" p f
+    for p in "${dest%/*}" "$dest"; do
+        if [[ -L "$p" ]] || { [[ -e "$p" ]] && [[ ! -d "$p" ]]; }; then
+            _tn_guard_say warn "${p} must be a directory, not a symlink or a file; nothing was installed. Remove it and run again." "$fn"
+            return 1
+        fi
+    done
+    for f in genesis.yaml committee.yaml parameters.yaml; do
+        p="${dest}/${f}"
+        if [[ -L "$p" ]] || { [[ -e "$p" ]] && [[ ! -f "$p" ]]; }; then
+            _tn_guard_say warn "${p} is a symlink or not a regular file; nothing was installed. Remove it and run again." "$fn"
+            return 2
+        fi
+    done
+    return 0
+}
+
+# _tn_chain_configs_in_place DEST -- rc 0 when DEST looks the way
+# _tn_chain_configs_install leaves it: DEST and its parent real directories with
+# mode 0755, the three files regular with mode 0644, all owned by the account
+# running this (root on a host; a fixture's own account elsewhere). The
+# contents are tn_chain_configs_check's job. Reads only.
+_tn_chain_configs_in_place() {
+    local dest="${1:-}" me p f st
+    me="$(id -u)"
+    for p in "${dest%/*}" "$dest"; do
+        [[ -d "$p" && ! -L "$p" ]] || return 1
+        st="$(stat -c '%u %a' -- "$p" 2>/dev/null)" || return 1
+        [[ "$st" == "${me} 755" ]] || return 1
+    done
+    for f in genesis.yaml committee.yaml parameters.yaml; do
+        p="${dest}/${f}"
+        [[ -f "$p" && ! -L "$p" ]] || return 1
+        st="$(stat -c '%u %a' -- "$p" 2>/dev/null)" || return 1
+        [[ "$st" == "${me} 644" ]] || return 1
+    done
+    return 0
+}
+
+# _tn_chain_configs_stage -- make a private staging directory for the chain
+# configs and print its path. It goes under the release staging directory
+# (tn_staging_dir) as tag.<pid>.XXXXXX, so tn_staging_sweep removes it when the
+# run ends (the EXIT traps) or, after a kill, on the next run ("stale"); where
+# that directory cannot be used (not root, or it fails its checks), and under
+# TN_ROOT_PREFIX without TN_RELEASE_STAGING_DIR (nothing is made outside the
+# prefix), mktemp -d. rc 1 when neither works.
+_tn_chain_configs_stage() {
+    local parent d=""
+    if [[ -z "${TN_ROOT_PREFIX:-}" || -n "${TN_RELEASE_STAGING_DIR:-}" ]] \
+        && parent="$(tn_staging_dir 2>/dev/null)"; then
+        d="$(mktemp -d "${parent}/tag.$$.XXXXXX" 2>/dev/null)" || d=""
+    fi
+    if [[ -z "$d" ]]; then
+        d="$(mktemp -d 2>/dev/null)" || d=""
+    fi
+    [[ -n "$d" && -d "$d" && ! -L "$d" ]] || return 1
+    printf '%s\n' "$d"
+}
+
+# _tn_chain_configs_git DIR ARGS... -- git ARGS for the chain-config helpers,
+# as git -C DIR when DIR is not empty: over https only (GIT_ALLOW_PROTOCOL),
+# with fd 9 (the update lock a caller holds) closed, and without the caller's
+# GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, GIT_COMMON_DIR and the other
+# variables that locate a repository, so DIR is the repository git reads;
+# GIT_CEILING_DIRECTORIES keeps git from taking a repository above DIR. Every
+# command but fetch and clone also gets GIT_NO_LAZY_FETCH=1, so a partial clone
+# cannot fetch a missing object behind the helper's back. The rc is git's.
+_tn_chain_configs_git() {
+    local dir="${1:-}"
+    shift
+    (
+        unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
+            GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_PREFIX GIT_CEILING_DIRECTORIES \
+            GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_NO_LAZY_FETCH
+        GIT_ALLOW_PROTOCOL=https
+        export GIT_ALLOW_PROTOCOL
+        case "${1:-}" in
+            fetch|clone) ;;
+            *)
+                GIT_NO_LAZY_FETCH=1
+                export GIT_NO_LAZY_FETCH
+                ;;
+        esac
+        if [[ -z "$dir" ]]; then
+            exec git "$@" 9>&-
+        fi
+        GIT_CEILING_DIRECTORIES="${dir%/*}"
+        [[ -n "$GIT_CEILING_DIRECTORIES" ]] || GIT_CEILING_DIRECTORIES=/
+        export GIT_CEILING_DIRECTORIES
+        exec git -C "$dir" "$@" 9>&-
+    )
+}
+
+# _tn_chain_configs_why TEXT -- git's reason in TEXT (what git printed on
+# stderr): its first "fatal: " or "error: " line, else its last non-empty line;
+# control characters are dropped and it is cut at 200 characters. Prints
+# nothing for a TEXT without a non-empty line.
+_tn_chain_configs_why() {
+    local line first="" last=""
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line//[[:cntrl:]]/}"
+        line="${line#"${line%%[![:space:]]*}"}"
+        [[ -n "$line" ]] || continue
+        case "$line" in
+            "fatal: "*|"error: "*) [[ -n "$first" ]] || first="$line" ;;
+        esac
+        last="$line"
+    done <<< "${1:-}"
+    [[ -n "$first" ]] || first="$last"
+    printf '%s' "${first:0:200}"
 }
 
 print_summary() {

@@ -530,7 +530,7 @@ else
 fi
 sed -i.bak 's/^NETWORK=.*/NETWORK=mainnet/' "$META"
 alerts_write_env 060 0240 900 >/dev/null 2>&1
-check "env: mainnet chain id; leading zeros read as decimal" "487 240 60" \
+check "env: mainnet chain id; leading zeros read as decimal" "731 240 60" \
     "$(_alerts_env_value ALERTS_CHAIN_ID) $(_alerts_env_value ALERTS_STALL_AFTER) $(_alerts_env_value ALERTS_INTERVAL)"
 sed -i.bak 's/^NETWORK=.*/NETWORK=devnet/' "$META"
 alerts_write_env 60 180 900 >/dev/null 2>&1

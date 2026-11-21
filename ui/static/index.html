@@ -3585,7 +3585,9 @@ async function stepPreflight(body){
   body.innerHTML = `<h3>Step 1 · Preflight Checks</h3><div id="pfList"><div class="muted">Running checks…</div></div>
     <div class="wiz-nav"><button class="btn btn-out" id="pfRerun">↻ Re-run Checks</button><button class="btn btn-green" id="pfNext" disabled>Continue →</button></div>`;
   $('#pfRerun').addEventListener('click', ()=>stepPreflight(body));
-  const d = await api('/api/setup/preflight');
+  // The hardware tiers follow the wizard's network (testnet until step 2 picks
+  // another; going back to this step fetches again).
+  const d = await api('/api/setup/preflight?network='+encodeURIComponent(setupNetwork()));
   state.preflight = d;
   const hard = [
     ['systemd', d.systemd?.ok, `systemd ${d.systemd?.version??'?'} (need ≥ ${d.systemd?.required??247})`, true],
@@ -3614,6 +3616,13 @@ async function stepPreflight(body){
   if(!hardOk) toast('Some hard requirements failed — resolve them before continuing','error');
 }
 
+// CPU and disk sizes as the documentation writes them. hwCores: physical cores
+// with the vCPU count beside them (a vCPU is one hardware thread, two per core):
+// "4 cores (8 vCPU)". hwDiskLabel: whole thousands of GB read as TB ("2 TB"),
+// anything else stays in GB ("350 GB"), like the shell's _tn_hw_disk_label.
+function hwCores(n){ return n==null ? '? cores' : `${n} cores (${2*n} vCPU)`; }
+function hwDiskLabel(gb){ return gb==null ? '? GB' : (gb>=1000 && gb%1000===0) ? `${gb/1000} TB` : `${gb} GB`; }
+
 // Advisory hardware tiers (d.hardware.tiers from /api/setup/preflight) as soft
 // preflight rows: [name, ok, desc, hardReq]. A tier with ok:false and no gaps had
 // a value the server could not read (e.g. RAM off Linux).
@@ -3625,27 +3634,42 @@ function hwTierRows(hw){
       : gaps.length ? 'below minimum — '+gaps.join(', ')
       : 'could not be measured';
     return ['hardware', !!t.ok,
-      `${t.label}: ${verdict} (${t.min_cpu} cores / ${t.min_ram_gb} GB RAM / ${t.min_disk_gb} GB disk)`, false];
+      `${t.label}: ${verdict} (${hwCores(t.min_cpu)} / ${t.min_ram_gb ?? '?'} GB RAM / ${hwDiskLabel(t.min_disk_gb)} disk)`, false];
   });
 }
 
-// Info line under the hardware rows: what was detected + the recommended spec to
-// validate (d.hardware.validator_recommended). '' when the server sent neither.
+// Info line under the hardware rows: what was detected, the tier set compared
+// with (hw.network), the recommended spec to validate (validator_recommended,
+// with ECC RAM when its ecc is true) and the single-core advice. '' when the
+// server sent none of the first three. An older server sends no network and no
+// ecc: those parts are left out.
 // UI 1.9.0 servers add cpu_physical and cpu_threads (in hardware, or at the top
 // level of the preflight reply: pf); the CPU then reads "8 cores (16 threads)".
+// hw.cpu_kind 'logical' means only logical CPUs could be counted: the CPU then
+// reads "8 logical CPUs", with the shell's note on what the tiers compared.
+// Absent, null or 'physical': the cores wording above.
 function hwInfoRow(hw, pf){
   if(!hw) return '';
-  const gb = kb => kb==null ? '?' : String(Math.round(kb/1048576));
+  const gb = kb => kb==null ? '?' : String(Math.round(kb/1048576));   // RAM: binary GiB
+  // Disk in decimal GB, as disks are sold and as the tiers and the shell's
+  // check_hardware count it: 360000000 kB reads 369 GB.
+  const diskGb = kb => kb==null ? '?' : String(Math.round(kb*1024/1e9));
   const pick = k => hw[k]!=null ? hw[k] : ((pf && pf[k]!=null) ? pf[k] : null);
   const phys = pick('cpu_physical'), threads = pick('cpu_threads');
-  const cpu = phys!=null ? `${phys} cores${threads!=null ? ` (${threads} threads)` : ''}` : `${hw.cpu??'?'} cores`;
+  const logical = hw.cpu_kind === 'logical', nLogical = hw.cpu ?? phys;
+  const cpu = logical ? `${nLogical ?? '?'} logical CPU${Number(nLogical)===1 ? '' : 's'}`
+    : phys!=null ? `${phys} cores${threads!=null ? ` (${threads} threads)` : ''}` : `${hw.cpu??'?'} cores`;
   const parts = [];
-  if(hw.cpu!=null || phys!=null || hw.ram_kb!=null || hw.disk?.total_kb!=null)
-    parts.push(`Detected ${cpu} / ${gb(hw.ram_kb)} GB RAM / ${gb(hw.disk?.total_kb)} GB disk`
+  if(hw.cpu!=null || phys!=null || hw.ram_kb!=null || hw.disk?.total_kb!=null){
+    parts.push(`Detected ${cpu} / ${gb(hw.ram_kb)} GB RAM / ${diskGb(hw.disk?.total_kb)} GB disk`
       + (hw.disk?.path ? ` (${hw.disk.path})` : '') + '.');
+    if(logical) parts.push('Physical cores could not be counted, so the tiers are compared with logical CPUs; with hyperthreading that is up to twice the physical cores.');
+  }
+  if(hw.network) parts.push(`Compared with the ${hw.network} hardware tiers.`);
   const r = hw.validator_recommended;
-  if(r) parts.push(`Recommended to validate: ${r.cpu} cores / ${r.ram_gb} GB RAM / ${r.disk_gb} GB disk.`);
+  if(r) parts.push(`Recommended to validate: ${hwCores(r.cpu)} / ${r.ram_gb ?? '?'} ${r.ecc ? 'GB ECC RAM' : 'GB RAM'} / ${hwDiskLabel(r.disk_gb)} disk.`);
   if(!parts.length) return '';
+  parts.push('Prioritise single-core performance: EVM execution is single-threaded, so a high clock speed matters more than extra cores.');
   return `<div class="check"><div class="ci"><span style="color:var(--text3)">i</span></div><div class="cl"><div class="ct">Hardware</div><div class="cd">${esc(parts.join(' '))}</div></div></div>`;
 }
 

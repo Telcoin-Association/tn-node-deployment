@@ -8,6 +8,11 @@ up while it is False) and the page its SETUP_MAINNET_ENABLED (the wizard's
 mainnet card). The release that flips the library line flips both; these tests
 fail when one of them is left behind.
 
+The chain ids are twins too: `readonly {TESTNET,MAINNET,DEVNET}_CHAIN_ID="<id>"` in
+lib/common.sh and the keys of NETWORKS in ui/server.py name the same chains.
+TN_UI_TEST_LIB_COMMON points that check at another copy of lib/common.sh (a
+check of the test itself); without it the repository's file is read.
+
 No network, no sudo. Python 3.10 or later with Flask (ui/requirements.txt):
 
     python3 -m unittest discover -s ui -p 'test_*.py'
@@ -115,6 +120,47 @@ class MainnetFlagTieTest(unittest.TestCase):
             with self.subTest(text=text):
                 with self.assertRaises(ValueError):
                     library_flag(text)
+
+
+CHAIN_LIB = os.environ.get("TN_UI_TEST_LIB_COMMON") or LIB_COMMON
+CHAIN_TIE = ("the *_CHAIN_ID constants in lib/common.sh and the keys of NETWORKS in "
+             "ui/server.py must change together")
+
+
+def library_chain_ids(text):
+    """[(slug, chain id)] for testnet, mainnet and devnet from the one
+    `readonly <NET>_CHAIN_ID="<digits>"` line each of a lib/common.sh text.
+    ValueError when a line is missing, doubled or not a decimal number."""
+    out = []
+    for slug in ("devnet", "mainnet", "testnet"):
+        found = re.findall(r'^readonly %s_CHAIN_ID="([0-9]+)"$' % slug.upper(), text, re.M)
+        if len(found) != 1:
+            raise ValueError('lib/common.sh needs exactly one \'readonly %s_CHAIN_ID="<digits>"\' '
+                             "line, found %d" % (slug.upper(), len(found)))
+        out.append((slug, int(found[0])))
+    return out
+
+
+def server_chain_ids():
+    """[(slug, chain id)] of NETWORKS in ui/server.py, sorted by slug."""
+    return sorted((m["slug"], cid) for cid, m in server.NETWORKS.items())
+
+
+class ChainIdTieTest(unittest.TestCase):
+
+    def test_the_server_keys_the_library_chain_ids(self):
+        self.assertEqual(server_chain_ids(), library_chain_ids(read(CHAIN_LIB)), CHAIN_TIE)
+
+    def test_the_library_lines_are_read_and_an_odd_one_is_an_error(self):
+        good = ('readonly TESTNET_CHAIN_ID="2017"\nreadonly MAINNET_CHAIN_ID="731"\n'
+                'readonly DEVNET_CHAIN_ID="32285"\n')
+        self.assertEqual(library_chain_ids(good),
+                         [("devnet", 32285), ("mainnet", 731), ("testnet", 2017)])
+        for text in (good.replace('"731"', '"0x2db"'), good.replace('"731"', "731"),
+                     good.replace("readonly MAINNET", "MAINNET"), good + good):
+            with self.subTest(text=text):
+                with self.assertRaises(ValueError):
+                    library_chain_ids(text)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,65 @@
+# V-HW-UI fake hosts, one per line, tab-separated: id cpu mem disk dir note
+#   cpu:  lscpu:C:T:S  lscpu answers, S sockets x C cores x T threads (core ids restart per socket)
+#         cpuinfo:C:T:S  no lscpu; an x86 /proc/cpuinfo with physical id / core id
+#         sysctl:N  no lscpu, ARM cpuinfo (no ids); sysctl -n hw.physicalcpu answers N
+#         nproc:N   only the logical count is known (nproc N)
+#         raw:NAME  lscpu prints the hand-written fixture NAME (see h1_shell.sh)
+#         none      nothing answers (getconf too)
+#   mem:  MemTotal in kB, or none (unreadable), zero, nomemtotal, junk
+#   disk: df -Pk total in kB, or none (df / statvfs fail), zero
+#   dir:  exists or missing (the data dir does not exist yet)
+tnval	lscpu:4:2:1	16365288	360000000	exists	testnet validators: c3-highcpu-8, 16 GB, 350 GiB pd-ssd as df shows it
+tnval-raw	lscpu:4:2:1	16365288	367001600	exists	same host, disk exactly 350 GiB
+big	lscpu:32:2:1	134217728	7812500000	exists	passes everything
+c1	lscpu:1:2:1	134217728	7812500000	exists	1 core
+c2	lscpu:2:2:1	134217728	7812500000	exists	2 cores
+c3	lscpu:3:2:1	134217728	7812500000	exists	3 cores
+c4	lscpu:4:2:1	134217728	7812500000	exists	4 cores
+c7	lscpu:7:2:1	134217728	7812500000	exists	7 cores
+c8	lscpu:8:2:1	134217728	7812500000	exists	8 cores
+c15	lscpu:15:2:1	134217728	7812500000	exists	15 cores
+c16	lscpu:16:2:1	134217728	7812500000	exists	16 cores
+c16-2s	lscpu:8:2:2	134217728	7812500000	exists	2 sockets x 8 cores, core ids repeat per socket
+r8	lscpu:32:2:1	7969177	7812500000	exists	RAM at the 8 GB floor
+r8m1	lscpu:32:2:1	7969176	7812500000	exists	RAM one kB under the 8 GB floor
+r16	lscpu:32:2:1	15938355	7812500000	exists	RAM at the 16 GB floor
+r16m1	lscpu:32:2:1	15938354	7812500000	exists	RAM one kB under the 16 GB floor
+r32	lscpu:32:2:1	31876710	7812500000	exists	RAM at the 32 GB floor
+r32m1	lscpu:32:2:1	31876709	7812500000	exists	RAM one kB under the 32 GB floor
+r64	lscpu:32:2:1	63753420	7812500000	exists	RAM at the 64 GB (recommended) floor
+r64m1	lscpu:32:2:1	63753419	7812500000	exists	RAM one kB under 64 GB
+d350	lscpu:32:2:1	134217728	324707031	exists	disk at the 350 GB floor
+d350m1	lscpu:32:2:1	134217728	324707030	exists	disk one kB under the 350 GB floor
+d500	lscpu:32:2:1	134217728	463867187	exists	disk at 500 GB (recommended) floor
+d500m1	lscpu:32:2:1	134217728	463867186	exists	disk one kB under 500 GB
+d2000	lscpu:32:2:1	134217728	1855468750	exists	disk at the 2 TB floor
+d2000m1	lscpu:32:2:1	134217728	1855468749	exists	disk one kB under the 2 TB floor
+d4000	lscpu:32:2:1	134217728	3710937500	exists	disk at 4 TB (recommended) floor
+d4000m1	lscpu:32:2:1	134217728	3710937499	exists	disk one kB under 4 TB
+cpuinfo4	cpuinfo:4:2:1	134217728	7812500000	exists	no lscpu; x86 cpuinfo 4 cores / 8 threads
+cpuinfo16	cpuinfo:8:2:2	134217728	7812500000	exists	no lscpu; x86 cpuinfo 2 sockets x 8 cores
+sysctl3	sysctl:3	134217728	7812500000	exists	macOS-style sysctl 3
+sysctl8	sysctl:8	134217728	7812500000	exists	macOS-style sysctl 8
+log3	nproc:3	134217728	7812500000	exists	only logical CPUs known: 3
+log4	nproc:4	134217728	7812500000	exists	only logical CPUs known: 4
+log8	nproc:8	134217728	7812500000	exists	only logical CPUs known: 8 (a 4-core box with HT)
+log16	nproc:16	134217728	7812500000	exists	only logical CPUs known: 16
+rawsock	raw:emptysock	134217728	7812500000	exists	lscpu with empty socket ids (2 cores)
+rawcore	raw:nocore	134217728	7812500000	exists	lscpu with lines lacking a core id (2 cores)
+cpunone	none	134217728	7812500000	exists	CPU count unknown
+memnone	lscpu:32:2:1	none	7812500000	exists	RAM unreadable
+memzero	lscpu:32:2:1	zero	7812500000	exists	MemTotal: 0 kB
+memnokey	lscpu:32:2:1	nomemtotal	7812500000	exists	meminfo without MemTotal
+memjunk	lscpu:32:2:1	junk	7812500000	exists	MemTotal: abc kB
+disknone	lscpu:32:2:1	134217728	none	exists	disk cannot be statted
+diskzero	lscpu:32:2:1	134217728	zero	exists	filesystem total 0 kB
+dirmissing	lscpu:4:2:1	16365288	360000000	missing	data dir does not exist yet
+allnone	none	none	none	exists	nothing measurable
+mixed	lscpu:2:2:1	15938354	324707030	exists	2 cores, RAM and disk under the 16 GB / 350 GB floors
+partial	none	7969176	7812500000	exists	CPU unknown, RAM under 8 GB
+hugecpu	sysctl:99999999999999999999	134217728	7812500000	exists	sysctl beyond int64
+hugecpu63	sysctl:9223372036854775807	134217728	7812500000	exists	sysctl at int64 max
+hugemem	lscpu:32:2:1	99999999999999999999	7812500000	exists	MemTotal beyond int64
+hugemem63	lscpu:32:2:1	9223372036854775807	7812500000	exists	MemTotal at int64 max
+hugedisk	lscpu:32:2:1	134217728	99999999999999999999	exists	disk beyond int64
+hugedisk53	lscpu:32:2:1	134217728	9007199254740992	exists	disk 2^53 kB

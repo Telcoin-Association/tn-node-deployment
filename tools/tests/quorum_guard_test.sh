@@ -84,8 +84,8 @@ curl() {
         tn_getCurrentEpochInfo) [[ "$COMMITTEE_UP" == 1 ]] || return 7; a="$(committee_json)" ;;
         tn_latestConsensusHeader) a="$(header_json)" ;;
         eth_chainId)
-            if [[ "$url" == "$LOCAL" ]]; then a='{"jsonrpc":"2.0","id":1,"result":"0x1e7"}'
-            else a="{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x$(printf '%x' "${PUB_CHAIN:-487}")\"}"; fi ;;
+            if [[ "$url" == "$LOCAL" ]]; then a='{"jsonrpc":"2.0","id":1,"result":"0x2db"}'
+            else a="{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x$(printf '%x' "${PUB_CHAIN:-731}")\"}"; fi ;;
         *) return 7 ;;
     esac
     printf '%s\n200' "$a"
@@ -136,9 +136,13 @@ LOCAL_UP=0 COMMITTEE_UP=0 STAKED=2 guard "mainnet, no committee, stake unknown: 
 # The public RPC is trusted only when it answers with the network's chain id.
 PUB_CHAIN=2017 LOCAL_UP=0 PUBLIC_UP=1 LIVE=9 guard "mainnet, local down, public RPC on chain 2017: not counted (rc 2)" 2
 check_has "the refusal says the public RPC serves another chain" "yes" \
-    "$(printf '%s' "$MSG" | grep -q 'does not answer with chain 487' && echo yes)"
+    "$(printf '%s' "$MSG" | grep -q 'does not answer with chain 731' && echo yes)"
 PUB_CHAIN=2017 LOCAL_UP=0 COMMITTEE_UP=0 STAKED=1 guard "mainnet, public RPC on chain 2017: its stake answer is not used (rc 2)" 2
-PUB_CHAIN=487 LOCAL_UP=0 PUBLIC_UP=1 LIVE=9 guard "mainnet, local down, public RPC on chain 487: counted" 0
+PUB_CHAIN=731 LOCAL_UP=0 PUBLIC_UP=1 LIVE=9 guard "mainnet, local down, public RPC on chain 731: counted" 0
+# 487 was the mainnet id before #1716; upstream devnet genesis files use it now.
+PUB_CHAIN=487 LOCAL_UP=0 PUBLIC_UP=1 LIVE=9 guard "mainnet, local down, public RPC on chain 487 (the old id): not counted (rc 2)" 2
+check_has "the old id: the refusal names chain 731" "yes" \
+    "$(printf '%s' "$MSG" | grep -q 'does not answer with chain 731' && echo yes)"
 # A node whose mode cannot be read may still be voting: it is counted as voting,
 # so stopping it adds one, unless tn_info on the node itself proves it authored
 # nothing in the counted commit. With the local RPC down, tn_info fails too.

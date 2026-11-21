@@ -156,7 +156,7 @@ die() {
     exit 1
 }
 
-readonly SCRIPT_VERSION="2.2.0"
+readonly SCRIPT_VERSION="2.2.1"
 # basic_auth (the dashboard block) and heredocs (the RPC block page) need Caddy 2.8.0.
 readonly CADDY_MIN_VERSION="2.8.0"
 # Timestamped Caddyfile backups kept by caddy_prune_backups.
@@ -2474,19 +2474,31 @@ caddy_read_password_stdin() {
 
 # caddy_mainnet_gate -- refuse (die) the dashboard and public RPC on a mainnet node
 # that is a staked validator, or whose stake status cannot be read: Caddy is not for
-# mainnet validators. NETWORK comes from .node-meta (else the genesis chain id); the
-# stake from node_is_staked_validator for VALIDATOR_ADDRESS, asked of the local node
-# first, then of the network's public RPC when the local answer is unreadable. Runs
-# once per run; testnet and devnet pass. A network that cannot be told (no NETWORK
-# and no readable genesis chain id) is refused like an unreadable stake.
+# mainnet validators. NETWORK comes from .node-meta (else tn_detect_network, from the
+# genesis chain id); the stake from node_is_staked_validator for VALIDATOR_ADDRESS,
+# asked of the local node first, then of the network's public RPC when the local
+# answer is unreadable and that RPC answers eth_chainId with MAINNET_CHAIN_ID (before
+# a launch it may serve another network, whose registry would call the address not
+# staked). Runs once per run; testnet and devnet pass. A network that cannot be told
+# is refused like an unreadable stake, with tn_detect_network's reason: the NETWORK
+# value, or the genesis chain id it read (or that none was readable) and the two ids
+# it knows.
 caddy_mainnet_gate() {
-    local net addr rc
+    local net addr rc why hint=""
     [[ "$CADDY_GATE_DONE" == "true" ]] && return 0
     net="$(addon_meta_get NETWORK "")" || die "NETWORK is set more than once in .node-meta; fix the file before enabling external access. Nothing was changed."
     if [[ -z "$net" ]]; then
         net="$(tn_detect_network 2>/dev/null)" || net=""
     fi
-    [[ -n "$net" ]] || die "The network of this node cannot be told (no NETWORK in .node-meta and no readable genesis chain id), so this run cannot confirm it is not a staked mainnet validator. Caddy (dashboard and public RPC) is not offered on mainnet validators. Nothing was changed."
+    if [[ -z "$net" ]]; then
+        # Asked again for its reason only; it reads files, nothing else.
+        why="$(tn_detect_network 2>&1 >/dev/null)" || true
+        case "$why" in
+            *"tn_detect_network: "*) why="${why##*tn_detect_network: }" ;;
+            *) why="no NETWORK in .node-meta and no readable genesis chain id" ;;
+        esac
+        die "The network of this node cannot be told (${why}), so this run cannot confirm it is not a staked mainnet validator. Caddy (dashboard and public RPC) is not offered on mainnet validators. Nothing was changed."
+    fi
     if [[ "$net" != "mainnet" ]]; then
         CADDY_GATE_DONE=true
         return 0
@@ -2496,13 +2508,17 @@ caddy_mainnet_gate() {
     rc=0
     node_is_staked_validator "$addr" || rc=$?
     if [[ "$rc" -eq 2 ]]; then
-        rc=0
-        node_is_staked_validator "$addr" "$MAINNET_RPC_URL" || rc=$?
+        if _tn_rpc_chain_is "$MAINNET_RPC_URL" "$MAINNET_CHAIN_ID"; then
+            rc=0
+            node_is_staked_validator "$addr" "$MAINNET_RPC_URL" || rc=$?
+        else
+            hint="; ${MAINNET_RPC_URL} does not answer with chain ${MAINNET_CHAIN_ID}, so the stake was not read there"
+        fi
     fi
     case "$rc" in
         1) CADDY_GATE_DONE=true; return 0 ;;
         0) die "This mainnet node (${addr}) is a staked validator. Caddy (dashboard and public RPC) is not offered on mainnet validators: serve the dashboard over the SSH tunnel, and public RPC from a separate RPC node. Nothing was changed." ;;
-        *) die "Could not read the stake status of ${addr} from the local node or ${MAINNET_RPC_URL}. Caddy is not offered on mainnet validators, so this run stops until the status can be read. Nothing was changed." ;;
+        *) die "Could not read the stake status of ${addr} from the local node or ${MAINNET_RPC_URL}${hint}. Caddy is not offered on mainnet validators, so this run stops until the status can be read. Nothing was changed." ;;
     esac
 }
 
@@ -3875,7 +3891,7 @@ caddy_require_lib() {
     for fn in tn_write_root_file tn_backup_file tn_restore_backup tn_as_service_user \
               addon_meta_get addon_meta_write_begin tn_acquire_update_lock _tn_strip_gw \
               tn_committee_down_guard tn_wait_restart_window tn_local_rpc_url \
-              tn_gateway_installed; do
+              tn_gateway_installed _tn_rpc_chain_is; do
         declare -F "$fn" >/dev/null 2>&1 || missing="${missing:+${missing}, }${fn}"
     done
     # The tn-gateway fence lines.

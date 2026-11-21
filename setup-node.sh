@@ -208,7 +208,8 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
         tn_docker_release_tag_for tn_release_stage tn_source_build tn_install_logrotate \
         tn_os_floor_check tn_docker_network_ok tn_release_tag_grammar tn_mainnet_enabled \
         tn_docker_pull_repo_ok tn_docker_pull_repos_for tn_docker_image_network_ok \
-        tn_network_config_render tn_node_supports_admission >/dev/null; then
+        tn_network_config_render tn_node_supports_admission \
+        tn_chain_configs_tag tn_chain_configs_dir tn_chain_configs_from_tag >/dev/null; then
     _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this setup-node.sh: run update-scripts.sh and try again."
     case " $* " in
         *" --json "*) printf '{"event":"error","msg":"%s"}\n{"event":"done","ok":false,"msg":"%s"}\n' "$_tn_old" "$_tn_old" ;;
@@ -218,7 +219,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
 fi
 unset _tn_old
 
-readonly SCRIPT_VERSION="2.1.1"
+readonly SCRIPT_VERSION="2.1.4"
 readonly SERVICE_NAME="telcoin"
 # The node's role is decided on-chain from committee membership, and the dashboard's
 # validator view follows the on-chain stake status (ConsensusRegistry getValidator).
@@ -416,16 +417,6 @@ step_preflight() {
     fi
     mkdir -p "$DATA_DIR" 2>/dev/null || true
 
-    check_hardware "node" "$DATA_DIR"
-    # --json: put the hardware result in the setup log too. Below-minimum hardware is not
-    # an error (check_hardware warns and setup goes on), so the gaps go out as a `log`
-    # line starting WARNING:, which the Node Manager UI styles as a warning.
-    if json_mode; then
-        json_event log "hardware: ${TN_HW_SUMMARY:-unknown}"
-        if [[ -n "${TN_HW_GAPS:-}" ]]; then
-            json_event log "WARNING: hardware below the minimum for: ${TN_HW_GAPS} (setup continues)"
-        fi
-    fi
     # Core node ports + the ports the optional features use (Caddy dashboard 80/443,
     # WireGuard VPN 51820, health monitor 43174) so conflicts surface up front.
     check_ports \
@@ -452,8 +443,20 @@ step_preflight() {
     echo ""
     print_step "Selecting network..."
     json_mode || select_network
-    # After the network is chosen: check_internet probes that network's own RPC.
+    # After the network is chosen: check_internet probes that network's own RPC, and
+    # check_hardware compares the host with that network's tiers.
     check_internet
+
+    check_hardware "node" "$DATA_DIR" "$NETWORK"
+    # --json: put the hardware result in the setup log too. Below-minimum hardware is not
+    # an error (check_hardware warns and setup goes on), so the gaps go out as a `log`
+    # line starting WARNING:, which the Node Manager UI styles as a warning.
+    if json_mode; then
+        json_event log "hardware: ${TN_HW_SUMMARY:-unknown}"
+        if [[ -n "${TN_HW_GAPS:-}" ]]; then
+            json_event log "WARNING: hardware below the minimum for: ${TN_HW_GAPS} (setup continues)"
+        fi
+    fi
 
     # The systemd floor: 247 everywhere (LoadCredential=), 255 on mainnet
     # (TN_MAINNET_MIN_SYSTEMD: the encrypted credential; Ubuntu 24.04 or later). Below 250
@@ -2138,7 +2141,19 @@ step_create_infrastructure() {
     # Node flags: asked of the release now, before any key exists, and recorded for a
     # --json finalize.
     prepare_node_extra_flags
-    ensure_chain_configs_available "$NETWORK" || setup_fail "The ${NETWORK} chain configs are not the pinned ones (see above); nothing was copied."
+    # A network with a pinned chain-config tag gets the three files at that tag in
+    # tn_chain_configs_dir, read without moving any checkout; step_write_config copies
+    # them from there. rc 1: refused (not the pinned files, no pins, or a checkout that
+    # cannot be used); rc 2: the clone, the fetch or the install failed. The helper's
+    # warning names the cause (a --json log event before this error), so the rc-1 line
+    # stays true for every refusal.
+    local cc_rc=0
+    ensure_chain_configs_available "$NETWORK" setup_progress || cc_rc=$?
+    case "$cc_rc" in
+        0) ;;
+        1) setup_fail "The ${NETWORK} chain configs were refused (see above); nothing was copied." ;;
+        *) setup_fail "Could not get the ${NETWORK} chain configs (see above)." ;;
+    esac
     print_ok "Infrastructure ready"
 }
 
@@ -2346,16 +2361,32 @@ step_write_config() {
         *) setup_fail "no chain-configs for network ${NETWORK}" ;;
     esac
 
-    # TN_GENESIS_DIR (optional) points DIRECTLY at the dir holding genesis.yaml/
-    # committee.yaml/parameters.yaml and is checked FIRST. Never the working
-    # directory: only these absolute places.
-    local search_paths=(
+    # Only these absolute places, first match wins, never the working directory:
+    # TN_GENESIS_DIR (--genesis-dir: the dir holding genesis.yaml, committee.yaml and
+    # parameters.yaml); then, on a network with a pinned chain-config tag,
+    # tn_chain_configs_dir, where ensure_chain_configs_available put the files at that
+    # tag, ahead of any checkout (whose default branch can carry files that no longer
+    # match the pins); then the telcoin-network checkout and CONFIG_DIR/chain-configs.
+    local tag pinned_dir=""
+    tag="$(tn_chain_configs_tag "$NETWORK")"
+    [[ -z "$tag" ]] || pinned_dir="$(tn_chain_configs_dir "$NETWORK")"
+    local candidates=(
         ${TN_GENESIS_DIR:+"$TN_GENESIS_DIR"}
+        ${pinned_dir:+"$pinned_dir"}
         "${TN_SOURCE_DIR}/chain-configs/${chain_subdir}"
         "/opt/telcoin-source/chain-configs/${chain_subdir}"
         "${CONFIG_DIR}/chain-configs/${chain_subdir}"
     )
-    local search_path found="" try
+    # Each directory once, in that order: on a host the pinned directory is
+    # CONFIG_DIR/chain-configs/<net> and TN_SOURCE_DIR is /opt/telcoin-source. A later
+    # copy of a directory can never be the first match, so dropping it changes nothing.
+    local search_paths=() search_path seen found="" try
+    for search_path in "${candidates[@]}"; do
+        for seen in ${search_paths[@]+"${search_paths[@]}"}; do
+            [[ "$seen" != "$search_path" ]] || continue 2
+        done
+        search_paths+=("$search_path")
+    done
     for try in 1 2; do
         for search_path in "${search_paths[@]}"; do
             if [[ -f "${search_path}/genesis.yaml" ]] && \
@@ -2367,9 +2398,10 @@ step_write_config() {
         done
         [[ "$try" == 1 ]] || break
         print_warn "Chain config files not found automatically."
-        print_info "Copy genesis.yaml, committee.yaml and parameters.yaml from"
-        print_info "  https://github.com/Telcoin-Association/telcoin-network/tree/main/chain-configs/${chain_subdir}/"
-        print_info "into ${CONFIG_DIR}/chain-configs/${chain_subdir}/ (or pass --genesis-dir)."
+        print_info "genesis.yaml, committee.yaml and parameters.yaml are in chain-configs/${chain_subdir}/ at ${tag:-main}:"
+        print_info "  https://github.com/Telcoin-Association/telcoin-network/tree/${tag:-main}/chain-configs/${chain_subdir}/"
+        print_info "Copy the three raw files, readable by ${SERVICE_USER}, into ${CONFIG_DIR}/chain-configs/${chain_subdir}/,"
+        print_info "or run setup again with --genesis-dir <dir>, any directory that holds them."
         echo ""
         if json_mode; then
             setup_fail "Chain config files missing and cannot prompt in non-interactive mode."
@@ -3275,9 +3307,11 @@ JSON_NETWORK_INPUT="testnet"
 JSON_DONE_EMITTED=false
 JSON_LAST_ERROR=""   # the last error event's message; json_on_exit reuses it for done
 SETUP_SIGNAL=""      # TERM, INT or HUP when a signal ended the run (json_on_exit names it)
-# Optional override: dir holding genesis.yaml/committee.yaml/parameters.yaml,
-# checked first by step_write_config. Preserve any env value; default empty so
-# `set -u` never trips and the ${TN_GENESIS_DIR:+...} expansion is a no-op.
+# Optional override (--genesis-dir): dir holding genesis.yaml/committee.yaml/
+# parameters.yaml. ensure_chain_configs_available uses it as given (checked against
+# the pins, with no git and no prompt), and step_write_config searches it first.
+# Preserve any env value; default empty so `set -u` never trips and the
+# ${TN_GENESIS_DIR:+...} expansion is a no-op.
 TN_GENESIS_DIR="${TN_GENESIS_DIR:-}"
 
 json_mode() { [[ "$JSON_MODE" == "true" ]]; }

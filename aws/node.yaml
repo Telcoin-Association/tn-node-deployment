@@ -48,9 +48,12 @@ Parameters:
       - PublicRPC
       - Validator
     Description: >-
-      FullNode (c7i.2xlarge), PublicRPC (c7i.4xlarge, also opens TCP 80 and 443 for Caddy) or
-      Validator (c7i.8xlarge). Validating also needs the Telcoin Association's approval and an
-      on-chain stake; the host is the same.
+      Each preset follows the recommended testnet figures for cores and RAM.
+      FullNode: c7i.2xlarge, 4 cores (8 vCPU), 16 GiB.
+      PublicRPC: c7i.4xlarge, 8 cores (16 vCPU), 32 GiB; also opens TCP 80 and 443 for Caddy.
+      Validator: c7i.2xlarge, 4 cores (8 vCPU), 16 GiB, the same size as FullNode.
+      Validating also needs the Telcoin Association's approval and an on-chain stake; the host is
+      the same.
   InstanceType:
     Type: String
     Default: ''
@@ -63,13 +66,18 @@ Parameters:
     Description: Leave empty for the preset's type, or name another x86_64 type.
   DataVolumeSize:
     Type: Number
-    Default: 2000
+    Default: 500
     AllowedValues:
+      - 350
+      - 500
       - 2000
       - 4000
     Description: >-
-      Size of the encrypted gp3 data volume in GiB: 2000 (2 TB, the minimum for every role) or
-      4000 (4 TB, recommended). It runs at 10000 IOPS and 300 MB/s.
+      Size of the encrypted gp3 data volume in GiB: 500 (recommended) or 350 (the minimum) for a
+      testnet node. 2000 and 4000 remain for stacks launched with them; a volume can grow but not
+      shrink. It is provisioned at 15000 IOPS and 300 MiB/s. A c7i.2xlarge (the FullNode and
+      Validator presets) sustains 12000 IOPS to EBS and 15000 in bursts; a c7i.4xlarge (PublicRPC)
+      sustains the full 15000.
   AutoUpdate:
     Type: String
     Default: Enabled
@@ -96,7 +104,7 @@ Mappings:
     PublicRPC:
       InstanceType: c7i.4xlarge
     Validator:
-      InstanceType: c7i.8xlarge
+      InstanceType: c7i.2xlarge
 
 Conditions:
   IsPublicRPC: !Equals [!Ref Preset, PublicRPC]
@@ -279,7 +287,11 @@ Resources:
       AvailabilityZone: !GetAtt PublicSubnet.AvailabilityZone
       Size: !Ref DataVolumeSize
       VolumeType: gp3
-      Iops: 10000
+      # 15000 IOPS, the testnet storage minimum, and 300 MiB/s on every allowed size: gp3 needs at
+      # least 30 GiB for 15000 IOPS (500 IOPS per GiB) and 1200 IOPS for 300 MiB/s (0.25 MiB/s
+      # per IOPS). A c7i.2xlarge sustains 12000 IOPS to EBS; above that it bursts, for 30 minutes
+      # at least once every 24 hours, up to the volume's 15000.
+      Iops: 15000
       Throughput: 300
       Encrypted: true
       Tags:

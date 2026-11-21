@@ -11,16 +11,16 @@
 
 | Role | Minimum | Recommended |
 |---|---|---|
-| Observer, follower | 2 cores, 8 GB RAM | 4 cores, 16 GB RAM |
-| Observer, public RPC | 4 cores, 16 GB RAM | 8 cores, 32 GB RAM |
-| Validator | 8 cores, 32 GB ECC RAM | 16 cores, 64 GB ECC RAM |
-| Storage, every role | 2 TB TLC NVMe (10,000 write IOPS, 300 MB/s) | 4 TB |
+| Observer, follower | 2 cores (4 vCPU), 8 GB RAM | 4 cores (8 vCPU), 16 GB RAM |
+| Observer, public RPC | 4 cores (8 vCPU), 16 GB RAM | 8 cores (16 vCPU), 32 GB RAM |
+| Validator | 8 cores (16 vCPU), 32 GB ECC RAM | 16 cores (32 vCPU), 64 GB ECC RAM |
+| Storage, validator | 2 TB TLC NVMe (20,000 write IOPS, 300 MB/s) | 4 TB |
+| Storage, observer | 2 TB TLC NVMe (10,000 write IOPS, 300 MB/s) | 4 TB |
 | Validator bandwidth | 200 Mbps symmetric | 1 Gbps |
 
-- CPU counts are physical cores; cloud vCPUs are usually hyperthreads, so an 8 vCPU instance has about 4.
+- Prioritise single-core performance: EVM execution is single-threaded, so a high clock speed matters more than extra cores.
 - A validator also needs a p95 round-trip time well below 1 second to a quorum of the committee.
-- Avoid QLC drives: they wear out under continuous chain writes.
-- Every node: swap off, time sync on, data directory on ext4 or xfs; the scripts check none of these.
+- Every node: swap off, time sync on, ext4 or xfs; none checked.
 
 > [!IMPORTANT]
 > Email devs@telcoin.org with your planned hardware before you buy anything for a validator.
@@ -33,7 +33,7 @@
 
 | | |
 |---|---|
-| Chain ID | 487 (`0x1e7`) |
+| Chain ID | 731 (`0x2db`) |
 | Public RPC | `https://rpc.telcoin.network` is planned and set at launch; today it serves the testnet |
 | Explorer | Not launched yet |
 | Epochs | Six hours |

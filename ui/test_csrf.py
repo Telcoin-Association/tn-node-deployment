@@ -431,10 +431,23 @@ class SetupRefusalTest(ServerTestCase):
 
 class MainnetAndImagesTest(ServerTestCase):
 
-    def test_chain_487(self):
-        self.assertEqual(server.resolve_network(487), ("mainnet", "Telcoin Mainnet", True))
-        self.assertEqual(server.NETWORK_PUBLIC_RPC[487], [], "set at launch, no invented URL")
+    def test_chain_731(self):
+        self.assertEqual(server.resolve_network(731), ("mainnet", "Telcoin Mainnet", True))
+        self.assertEqual(server.NETWORK_PUBLIC_RPC[731], [], "set at launch, no invented URL")
         self.assertIn("mainnet", server.KNOWN_SLUGS)
+        self.assertEqual([cid for cid, m in server.NETWORKS.items() if m["slug"] == "mainnet"],
+                         [731], "one chain id is mainnet")
+
+    def test_chain_487_is_no_longer_mainnet(self):
+        # Mainnet's id until telcoin-network #1716; upstream devnet genesis files
+        # use it now. The UI does not list it, so it is an unknown chain id.
+        self.assertNotIn(487, server.NETWORKS)
+        self.assertNotIn(487, server.NETWORK_PUBLIC_RPC)
+        self.assertEqual(server.resolve_network(487), ("", "", False))
+        # Like any unknown id it falls back to the NETWORK .node-meta records.
+        self.patch(server, "read_meta", lambda t=None: {"NETWORK": "devnet"})
+        self.assertEqual(server.resolve_network(487, "observer"),
+                         ("devnet", "Adiri Devnet", True))
 
     def no_registry(self):
         """Fail the test on any direct HTTP request: the image comes from the

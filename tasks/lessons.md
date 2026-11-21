@@ -721,3 +721,114 @@ The first draft of the PR-1 body said the four PDFs rebuild unchanged "with and 
 `pdftotext`" at each commit. That had been run on the previous tip, not on the one-line
 amendment after it. The sentence was cut back to what the final tip was checked for. After an
 amend, reread each claim in the body against the list of commands run since.
+
+## Requirements round (2026-11-21): seams, unverified instructions, and who may be named
+
+### Two fix agents on a caller and its callee need a seam pass
+
+**Symptom:** one fix agent changed what the library accepts (a git worktree counts as a
+checkout; "in place" means root-owned 0755 and 0644) while another, in parallel from the same
+base, wrote menu 13's own pre-checks against the old rules. Each was green alone and with its
+verifier. The whole-diff review found three defects at that seam: a clone offered into a
+directory that cannot take one, a skipped host-baseline refresh, an error message chosen by the
+wrong test.
+
+**Rule:** when a fix round changes a library predicate, every caller that re-derives that
+predicate is in the same package, or the caller is changed to call the library's predicate
+instead of its own copy. The orchestrator lists such callers before the round (`grep` for the
+tests the library function makes: `-d .git`, a content check, a mode check) and the whole-diff
+review stays after the fix round, never before it.
+
+### An instruction for the documentation wave is a fact and needs a source
+
+**Symptom:** the shared spec told the doc writers that one `followup.md` sentence "is about
+devnet and stays 487" and kept an upstream environment variable's name. Neither had been
+checked. A verifier reading upstream found the variable renamed, the pull request merged and
+the devnet on another chain id.
+
+**Rule:** the verified-facts table covers what the documents will say, not only what the code
+does. A sentence the spec tells a writer to keep is checked like one it tells them to write.
+The verifier of a change produces the worklist for the documents (file, line, current text,
+new text); the orchestrator's own list is a starting point.
+
+### Give the invariant, not the mechanics
+
+**Symptom:** the README writer was told to stack each pass's changelog entries above the
+previous pass's. That would have put one script's versions in the order 2.2.4, 2.2.3, 2.2.5,
+2.2.2. The writer asked before doing it.
+
+**Rule:** state the property that must hold ("newest first, each script's versions
+descending, existing lines untouched, each pass only adds lines") and let the writer place the
+lines. A brief that prescribes mechanics is wrong whenever the orchestrator has not worked the
+example through.
+
+### A ranked list of cuts carries its reasons per page
+
+**Symptom:** the one-pagers' cut list began with "drop the QLC bullet (the storage rows say
+TLC)". On the testnet page the minimum storage cell says SSD, so the reason did not hold
+there, and the first cut would have removed the only place that page warns about QLC drives.
+
+**Rule:** a cut list for several documents says, per cut, for which document its reason
+holds. When a cut's reason fails on a page, look for a fold (the advice moved into another
+bullet) before a drop, and test each candidate with the build's own page bound.
+
+### A verifier's report that it may not write is saved from its transcript
+
+Seven verifiers had the Write of their report file refused and returned the text in the
+hand-back. Retyping a 200 to 400 line report is slow and error-prone. A short script that
+walks the agent's output file for the string containing the report's first heading, and
+writes it from that heading on, saved each one unchanged in a few seconds. Check the first
+and last line it wrote.
+
+### Names of other repositories do not belong in public records
+
+**Symptom:** a verifier was asked to list, for the maintainer, where sibling repositories on
+the host still stated the old value. Its report and checkpoint, and one line of the shared
+spec, named a private repository and its files. A doc writer noticed that no tracked file
+names that repository and left the item out of `followup.md`.
+
+**Rule:** a brief that sends an agent into other repositories says that the result goes in
+the hand-back only, never in a file under `tasks/`. Before the records commit,
+`grep -rn` the files to be added for directory names under the maintainer's home that no
+tracked file already names, and remove what turns up.
+
+### Measure which tool causes a difference before naming it
+
+**Symptom:** the plan said the committed PDFs "came from pandoc 3.14" while the container
+has 3.8.3, and two writers reported the line-break differences against the committed guide as
+the older pandoc's doing. Built in the same container with the official pandoc 3.14 binary,
+the PDFs came out byte for byte the same as with 3.8.3, and the differences stayed. An image
+on Ubuntu 26.04 with the same pandoc and WeasyPrint versions rebuilt main's PDFs byte for
+byte: what differed was Pango and HarfBuzz under WeasyPrint. The Debian 12 container's older
+text stack broke five guide lines early, one of them inside an `ssh -o` option.
+
+**Rule:** a difference is attributed to a tool only after the build was repeated with that
+one tool changed. An image that differs in exactly one thing (`FROM <image>` plus
+`COPY --from=<official image> <binary>`, or the same versions on another base) costs minutes
+and turns a guess in a commit message into a statement. And the first step of any rebuild of
+a committed artifact is to rebuild the unchanged sources and compare bytes: if they differ,
+find the environment that reproduces them before building the new version.
+
+### Budgets, once more
+
+Implementers and verifiers of one file with its fixtures ran 130k to 250k tokens; verifiers
+with a real-git harness or a parity table ran 265k to 345k; the library fix agent 373k. Fresh
+agents for each fix round, briefed with the verifier's report and nothing else, worked every
+time. A mid-round addition from the user (the mainnet chain id) fitted without disturbing the
+other packages because ownership was by file range and each topic had its own commits.
+
+### An assertion on another tool's wording fails on the runner's version of that tool
+
+**Symptom:** every local environment was green (git 2.53 on the host and in `ubuntu:26.04`,
+git 2.49 under bash 3.2), and both CI fixture jobs failed on one check that compared the
+library's warning with git's sentence for an unreadable repository. The runners' git words
+that sentence differently. The check was a yes/no `check`, so the first CI log showed only
+"no"; it took a second push, with the check changed to print what it got, to see the text.
+The lesson of 2026-11-03 ("a yes/no `check` hides it") was in this file and not in the briefs.
+
+**Rule:** a test asserts on what the code under test contributes (that git's `fatal:` line is
+carried, where it sits in the message), never on the exact sentence another tool prints. Any
+check of text that comes from git, docker, systemd, curl or the kernel prints the actual text
+when it fails. Both rules go into every brief that asks for a real-tool fixture, with the
+earlier lesson quoted, and the orchestrator greps new fixtures for literal tool messages
+before the first push: `grep -n "fatal: \|error: " tools/tests/<new>_test.sh`.

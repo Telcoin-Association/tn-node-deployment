@@ -138,6 +138,14 @@ rm -f "$NWMETA"
 NODE_NETWORK="" NETWORK_RPC="" QUERY_NETWORK=true LOCAL_CHAIN_ID="0x$(printf '%x' "$MAINNET_CHAIN_ID")"
 resolve_network
 check "no .node-meta, a mainnet chain id: the mainnet RPC" "$MAINNET_RPC_URL" "$NETWORK_RPC"
+# The mainnet chain id is 731; 487, the old one, is a devnet genesis id upstream now.
+check "chain_network: 731 is mainnet, 487 is no Telcoin network" "mainnet|" "$(chain_network 731)|$(chain_network 487)"
+NODE_NETWORK="" NETWORK_SRC="" NETWORK_RPC="" QUERY_NETWORK=true LOCAL_CHAIN_ID="0x2db"
+resolve_network
+check "no .node-meta, local chain 0x2db: mainnet from the local chain id" "mainnet|the local chain id" "${NODE_NETWORK}|${NETWORK_SRC}"
+NODE_NETWORK="" NETWORK_SRC="" NETWORK_RPC="" QUERY_NETWORK=true LOCAL_CHAIN_ID="0x1e7"
+resolve_network
+check "no .node-meta, local chain 0x1e7 (487): network unknown, not queried" "|false" "${NODE_NETWORK}|${QUERY_NETWORK}"
 # The report prints the header line and the section 3 skip from these variables.
 check "the report header prints NETWORK_RPC_LABEL" 1 "$(grep -c 'print_info "Network RPC:  ${NETWORK_RPC_LABEL}"' "$CN")"
 check "the section 3 skip prints NETWORK_SKIP_WHY" 1 "$(grep -c 'print_info "Network query skipped (${NETWORK_SKIP_WHY})"' "$CN")"

@@ -398,10 +398,23 @@ class NetworkStakeTest(ChainTestCase):
 
     def test_mainnet_hostname_serving_testnet_is_not_a_mainnet_answer(self):
         # rpc.telcoin.network answers eth_chainId 0x7e1 until mainnet launches.
-        self.patch(server, "NETWORK_PUBLIC_RPC", {487: ["https://rpc.telcoin.network"]})
+        self.patch(server, "NETWORK_PUBLIC_RPC", {731: ["https://rpc.telcoin.network"]})
         self.network(ok(record(3)), chain="0x7e1", url="https://rpc.telcoin.network")
-        self.assertIsNone(server.network_stake_status(ADDR, 487))
+        self.assertIsNone(server.network_stake_status(ADDR, 731))
         self.assertEqual(self.chain.methods(), ["eth_chainId"])
+
+    def test_a_mainnet_answer_needs_chain_731(self):
+        # An endpoint is trusted for mainnet only when its eth_chainId is 731
+        # (0x2db). 0x1e7 is 487: mainnet's id until telcoin-network #1716, a
+        # devnet genesis id since.
+        old, new = "https://chain-487.invalid", "https://chain-731.invalid"
+        self.patch(server, "NETWORK_PUBLIC_RPC", {731: [old, new]})
+        self.network(ok(record(3)), chain="0x1e7", url=old)
+        self.network(ok(record(1)), chain="0x2db", url=new)
+        self.assertEqual(server.network_stake_status(ADDR, 731)["status"], 1)
+        self.assertEqual(self.chain.methods(old), ["eth_chainId"])
+        self.assertEqual(self.chain.methods(new), ["eth_chainId", "eth_call"])
+        self.assertTrue([m for m in self.logs if "serves chain 487, not 731" in m])
 
     def test_at_most_two_endpoints(self):
         self.assertIsNone(server.network_stake_status(ADDR, 32285))
@@ -428,7 +441,7 @@ class NetworkStakeTest(ChainTestCase):
 
     def test_nothing_to_ask(self):
         self.assertIsNone(server.network_stake_status(ADDR, None))
-        self.assertIsNone(server.network_stake_status(ADDR, 487))      # no endpoint listed
+        self.assertIsNone(server.network_stake_status(ADDR, 731))      # no endpoint listed
         self.assertIsNone(server.network_stake_status("0x123", 2017))  # not an address
         self.assertEqual(self.chain.calls, [])
 

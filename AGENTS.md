@@ -78,7 +78,8 @@ setup-node `--json` run, and a Node Manager UI setup on mainnet (the helper asks
 before anything on the host changes. `ui/server.py` `TN_MAINNET_ENABLED` and
 `ui/static/index.html` `const SETUP_MAINNET_ENABLED` mirror it, and `ui/test_mainnet_flag.py`
 fails unless the three agree. The launch release flips all three in one change, together with
-the mainnet chain-config pins (`tn_chain_config_pin`) and `MIN_SOURCE_VERSION_MAINNET`.
+the mainnet chain-config tag and pins (`MAINNET_CHAIN_CONFIGS_TAG`, `tn_chain_config_pin`) and
+`MIN_SOURCE_VERSION_MAINNET`.
 
 Each network has its own image package, and the channel follows the release tag: mainnet
 `ghcr.io/telcoin-association/tn-mainnet` (`TN_MAINNET_IMAGE_REPO`, tags `vX.Y.Z`), testnet
@@ -114,6 +115,29 @@ pairs a new digest with the old release. The UI's `DOCKER_REPO` and the library'
 (`tn_ref_min_check`, `MIN_SOURCE_VERSION_<NETWORK>`) applies to setup-node, to every update-node
 prepare path and to edit-config's Docker image change; new code that picks a node release
 calls it too.
+
+## Chain configs
+
+Setup and edit-config's menu 13 read `genesis.yaml`, `committee.yaml` and `parameters.yaml` from
+the telcoin-network tag the script release pins (`TESTNET_CHAIN_CONFIGS_TAG`), never from a
+branch: the default branch moves on, and its files stop matching the pins (on 2026-11-14 its
+testnet `committee.yaml` did, and fresh testnet installs failed at keygen).
+`tn_chain_configs_from_tag` fetches the tag into `refs/tn-remote-tags/<tag>` of the checkout in
+`/opt/telcoin-source`, reads the three files there, checks them against the pins and installs them
+root-owned in `/etc/telcoin/chain-configs/<network>/` (`tn_chain_configs_dir`); setup's
+`step_write_config` and menu 13 copy them from there. It never moves the checkout (no checkout,
+pull, reset or submodule command), so a source install's build tree stays where it is. Do not add
+a pull to the testnet or mainnet path; devnet, which has no pins, still pulls.
+
+- `TESTNET_CHAIN_CONFIGS_TAG`, the three `TESTNET_*_SHA256` pins and the files in
+  `tools/tests/genesis.d/testnet/` move together, in one change.
+- Mainnet has neither a tag nor pins until the genesis ceremony, so a mainnet install stops at the
+  chain-config check and menu 13 refuses mainnet before any prompt (see "The mainnet switch").
+- Menu 13 asks the library's own checks and clone (`_tn_chain_configs_dest_ok`,
+  `_tn_chain_configs_clone_target`, `_tn_chain_configs_clone`) in the order
+  `ensure_chain_configs_available` runs them, so setup and the menu refuse the same cases.
+- setup-node and edit-config list the chain-config helpers they call in their `tn_require_fns`
+  checks.
 
 ## Ownership: root owns the install
 
@@ -549,6 +573,10 @@ from a Session Manager shell, so the BLS passphrase never enters AWS. Rules:
   check reports `storage_migration` true, on any node: that update waits for the apply document
   too, because `update-node.sh` asks for no snapshot in `--json` mode. It never runs
   `ui/install-ui.sh --update` or `setup-alerts.sh --refresh`.
+- The presets follow the recommended column of the testnet hardware table (`HW_TESTNET_*`) for
+  cores and RAM, and `DataVolumeSize` its disk sizes. The `Preset` and `DataVolumeSize`
+  descriptions, which the console shows, state the instance types and what each sustains to EBS:
+  change them with the figures.
 - No snapshots or backup plan for the data volume: a snapshot is a copy of the node keys. The
   volume keeps `DeletionPolicy: Retain` and `UpdateReplacePolicy: Retain`, and the user data
   formats it only when it carries no signature.
@@ -699,6 +727,16 @@ backgrounds) and `covers/`. Record the provenance of every vendored file in
   the PDF text and is optional. The `tn-pdf-tools` container is a locally built Debian 12
   image with pandoc 3.8.3 and WeasyPrint 70.0; no Dockerfile for it is committed. The script
   checks for pandoc 3.8+ and WeasyPrint 61+.
+- What moves a PDF's bytes is the text stack under WeasyPrint, not pandoc. On Ubuntu 26.04
+  (Pango 1.57.0, HarfBuzz 12.3.2) with pandoc 3.14 and WeasyPrint 70.0, the sources of guide
+  1.12 and one-pagers 1.2 build to the committed PDFs byte for byte, and guide 1.13 and
+  one-pagers 1.3 were built there: `ubuntu:26.04` with `python3-venv`, `poppler-utils`,
+  `libpango-1.0-0`, `libpangoft2-1.0-0`, `libharfbuzz0b` and `libharfbuzz-subset0` from apt,
+  `weasyprint==70.0` from pip in a venv, and the static `pandoc` binary of the
+  `pandoc/minimal:3.14` image. The Debian 12 container (Pango 1.50.12, HarfBuzz 6.0.0) lays
+  the same text out with some lines broken earlier, with pandoc 3.8.3 and with 3.14 alike, so
+  do not commit a PDF built there. A build that only differs by toolchain is kept out by the
+  script ("no source changed since"); `--force` replaces the committed PDF.
 - Nothing under `docs/partner/` or `tools/` is updater-tracked or carries a `.sha256`
   sidecar.
 
@@ -1195,7 +1233,12 @@ line.
 - `tools/tests/genesis.d/testnet/` holds `genesis.yaml`, `committee.yaml` and
   `parameters.yaml` from telcoin-network at the pinned tag (`TESTNET_CHAIN_CONFIGS_TAG`),
   unchanged. `genesis_hash_test.sh` checks them against the `TESTNET_*_SHA256` pins in
-  `lib/common.sh`; refresh the files and the pins together.
+  `lib/common.sh`; refresh the files, the pins and the tag together.
+  `chain_configs_tag_test.sh` drives `tn_chain_configs_from_tag` and
+  `ensure_chain_configs_available` with real git against a local bare origin whose tag holds
+  these files while its `main` carries another `committee.yaml`, the shape of the 2026-11-14
+  break; its git cases need git, so they skip in the `bash:3.2` image.
+  `chain_configs_refresh_test.sh` covers edit-config's menu 13 (`refresh_chain_configs`).
 - `tools/tests/perl-interp.d/` holds the perl lint's fixtures, and `tools/tests/signing.sh`
   the OpenPGP release-signing helpers of `updater_manifest_test.sh`, `install_test.sh`,
   `release_scripts_test.sh`, `cut_release_test.sh`, `p2p_allow_install_test.sh` and `gateway_pin_test.sh`: `newkey NAME [EXPIRY|--expired|--revoked]`,
@@ -1220,6 +1263,11 @@ line.
   The key does not expire; the cases on its real signature skip without a working real `gpg` (`REAL_GPG`), and every other case re-signs copies of the files with `signing.sh` keys and runs in all three environments.
   Every file is as the dry run wrote it, and all of them are refreshed together from a new dry run (`gateway-pin.d/README`).
 - The node admission settings have `network_config_test.sh` (the renderer), `setup_node_admission_test.sh` and `edit_config_admission_test.sh`.
+- The hardware check has `hardware_check_test.sh`: the output for the testnet validators' machine
+  on both networks, the 350 GB boundary, the logical-CPU fallback and the order of the calls in
+  `step_preflight`. The UI's twin is `hardware_profile` in `ui/server.py`, and
+  `ui/test_hw_mirror.py` compares its `HW_TIERS` and `HW_VALIDATOR_RECOMMENDED` with the
+  `HW_TESTNET_*` and `HW_MAINNET_*` constants of `lib/common.sh`, so the two change together.
 
 Nothing under `tools/tests/` is updater-tracked or carries a sidecar. The UI's own tests live
 in `ui/tests/` (`helper_test.sh`, `open_ui_test.sh`, `install_ui_test.sh`) and `ui/test_*.py`.
