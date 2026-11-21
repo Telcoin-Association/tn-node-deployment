@@ -119,10 +119,10 @@ The hardware preflight in `setup-node.sh` prints one line per role and only warn
 
 | Network | Operating system | systemd floor |
 |---|---|---|
-| Mainnet | Ubuntu 24.04 LTS | 255. Setup stops below it: a mainnet node keeps the BLS passphrase only as an encrypted systemd credential |
+| Mainnet | Ubuntu 26.04 LTS (recommended) or 24.04 LTS | 255. Setup stops below it: a mainnet node keeps the BLS passphrase only as an encrypted systemd credential |
 | Testnet | Ubuntu 22.04 LTS or later, Debian 12 or later, RHEL 9 and compatible distributions | 247. Below 250 (Ubuntu 22.04 ships 249) setup warns and keeps the passphrase in a root-only file instead of an encrypted credential |
 
-`setup-node.sh` checks the systemd version, not the distribution name, and stops below the floor for the network it installs, so RHEL 8 (systemd 239) is not supported. Setup installs Docker itself on Ubuntu and Debian only; elsewhere install Docker Engine first. macOS is not supported for running a node. See [Passphrase delivery](#passphrase-delivery) for what the floor buys.
+Ubuntu 26.04 LTS is the recommended OS on every network; Ubuntu 24.04 LTS stays supported. `setup-node.sh` checks the systemd version, not the distribution name, and stops below the floor for the network it installs, so RHEL 8 (systemd 239) is not supported. Setup installs Docker itself on Ubuntu and Debian only; elsewhere install Docker Engine first. macOS is not supported for running a node. See [Passphrase delivery](#passphrase-delivery) for what the floor buys.
 
 ### Software
 The scripts will install or check for everything needed. You do not need to install anything manually beforehand.

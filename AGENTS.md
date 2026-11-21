@@ -1159,13 +1159,14 @@ non-blocking (`continue-on-error`, `|| true`): `ci_pins_test.sh` rejects both.
 
 `tools/tests/*_test.sh` are fixture tests for the scripts and the library. They build fake
 installs under a private temp dir (`TN_ROOT_PREFIX` points the path probes at it) and stub
-system tools on `PATH`; none of them needs a node. Run them in all three environments before
+system tools on `PATH`; none of them needs a node. Run them in all four environments before
 you hand back a change:
 
 ```
 bash tools/tests/run.sh                                                  # bash 5
 docker run --rm -v "$PWD:/w" -w /w bash:3.2 bash tools/tests/run.sh      # bash 3.2, busybox
 docker run --rm -v "$PWD:/w" -w /w ubuntu:24.04 bash tools/tests/run.sh  # root, GNU tools
+docker run --rm -v "$PWD:/w" -w /w ubuntu:26.04 bash tools/tests/run.sh  # root, the recommended OS
 ```
 
 `run.sh` runs each file as its own process under the bash that runs it; name files to run only

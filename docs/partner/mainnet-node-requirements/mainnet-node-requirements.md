@@ -40,7 +40,7 @@
 
 ## Operating system and host
 
-- Ubuntu 24.04 LTS only (systemd 255 or newer).
+- Ubuntu 26.04 LTS (recommended) or 24.04 LTS (systemd 255 or newer).
 - Release tarballs are x86_64 Linux; on another architecture, build from source or use Docker. macOS is not supported.
 - A BLS passphrase of at least 16 bytes, and a TPM 2.0 or vTPM unless you pass `--allow-no-tpm`.
 - Logs go to the systemd journal by default.
@@ -58,7 +58,7 @@
 
 Open the UDP ports on every node, in every layer that filters traffic (`ufw`, cloud firewall, NAT).
 Open `443` and `80` only for public RPC or the dashboard.
-Mainnet keeps RPC on `127.0.0.1`; the firewall asks for SSH sources.
+The firewall asks for SSH sources.
 
 <div class="col-break"></div>
 

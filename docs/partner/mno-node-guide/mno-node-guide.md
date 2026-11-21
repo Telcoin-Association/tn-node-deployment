@@ -135,14 +135,14 @@ It does not check for ECC memory or NVMe.
 
 ### Operating system
 
-Use Ubuntu 24.04 LTS.
-A mainnet node installs only on systemd 255 or newer, which means Ubuntu 24.04.
+Use Ubuntu 26.04 LTS (recommended) or 24.04 LTS.
+A mainnet node installs only on systemd 255 or newer, which means Ubuntu 24.04 or later.
 On testnet, systemd 250 or newer is enough to keep the BLS passphrase encrypted on disk (see [How setup stores the passphrase](#how-setup-stores-the-passphrase)).
 `setup-node.sh` reads the systemd version during preflight, once you have picked the network:
 
 | systemd | For example | What setup does |
 |---|---|---|
-| 255 or newer | Ubuntu 24.04 | Installs on every network. |
+| 255 or newer | Ubuntu 26.04, Ubuntu 24.04 | Installs on every network. |
 | 250 to 254 | Debian 12 | Installs on testnet, with the passphrase as an encrypted credential. Refused on mainnet. |
 | 247 to 249 | Ubuntu 22.04 | Installs on testnet with a warning: the passphrase stays in a root-only file, `/etc/telcoin/bls-passphrase`. Refused on mainnet. |
 | Older than 247 | | Refused on every network. |
@@ -1793,8 +1793,8 @@ The tables below group the common symptoms by area.
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | Preflight prints `[WARN] <role>: below minimum` | The server is under that role's minimum. | A warning only. The check counts physical cores, so a cloud instance with hyperthreads has half as many as its vCPUs. |
-| `systemd <N> is too old: the node needs 247 or later ...`, or `systemd <N> is below the mainnet floor (255, Ubuntu 24.04) ...` | The OS is older than the network needs (see [Operating system](#operating-system)). | Move to Ubuntu 24.04. |
-| `systemd <N> cannot encrypt credentials (needs 250, Ubuntu 24.04) ...` | A testnet server below systemd 250. A warning: the passphrase stays in a root-only file. Encryption needs systemd 250 or newer; Ubuntu 24.04 ships 255. | Upgrade to systemd 250 or newer, such as Ubuntu 24.04, then encrypt the passphrase with `sudo bash ~/telcoin-node-scripts/edit-config.sh --migrate-credential`. |
+| `systemd <N> is too old: the node needs 247 or later ...`, or `systemd <N> is below the mainnet floor (255, Ubuntu 24.04 or later; ...) ...` | The OS is older than the network needs (see [Operating system](#operating-system)). | Move to Ubuntu 26.04. |
+| `systemd <N> cannot encrypt credentials (needs 250, Ubuntu 24.04) ...` | A testnet server below systemd 250. A warning: the passphrase stays in a root-only file. Encryption needs systemd 250 or newer; Ubuntu 24.04 ships 255. | Upgrade to systemd 250 or newer, such as Ubuntu 26.04, then encrypt the passphrase with `sudo bash ~/telcoin-node-scripts/edit-config.sh --migrate-credential`. |
 | `No usable TPM2 on this host: on mainnet pass --allow-no-tpm ...` | A mainnet server with no TPM the credential can use. | Give the server a TPM or vTPM, or accept the host key alone with `--allow-no-tpm` (see [How setup stores the passphrase](#how-setup-stores-the-passphrase)). |
 | `<tag> is not a testnet release tag ...` | A branch, a commit, `latest` or a mistyped tag. | Give a release tag such as `v0.16.0-adiri`. |
 | `No release signing key in <dir> (*.asc) ...`, or `Release <tag> did not verify (see above); nothing was installed.` | The scripts carry no key for the release (one added or renewed after your scripts release), or the release's `SHA256SUMS` signature or a hash did not check out. | Run `update-scripts.sh` for the current keys and try again. If it still fails, email devs@telcoin.org with the output and do not install that release. |
