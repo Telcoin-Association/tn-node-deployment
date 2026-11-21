@@ -769,12 +769,13 @@ dest_clear
 ft "$T/broken" testnet pf
 check "a .git git cannot read: refused (rc 1), nothing installed" "1 no" \
     "$FT_RC $([[ -e "$D/genesis.yaml" ]] && echo yes || echo no)"
-# Git words this differently from version to version ("not a git repository: <path>",
-# "not a git repository (or any of the parent directories): .git"), so the check is
-# that git's own fatal line is carried, and a failure prints the line that came.
+# Git words this differently from version to version ("fatal: not a git repository:
+# <gitdir>", "fatal: gitfile does not point to a valid repository: <dir>/.git"), so the
+# check is that git's own fatal line is carried (without it the library says "git
+# exited <n>"), and a failure prints the line that came.
 GW="$(grep -F "warn|Git cannot read the repository in ${T}/broken (" <<< "$PFL" || true)"
 case "$GW" in
-    *"(fatal: not a git repository"*"); nothing was installed.") GWR=yes ;;
+    *"${T}/broken (fatal: "*"); nothing was installed.") GWR=yes ;;
     *) GWR="no: ${GW:-no such warning}" ;;
 esac
 check "a .git git cannot read: git's reason" yes "$GWR"
