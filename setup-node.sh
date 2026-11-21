@@ -219,7 +219,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
 fi
 unset _tn_old
 
-readonly SCRIPT_VERSION="2.1.2"
+readonly SCRIPT_VERSION="2.1.3"
 readonly SERVICE_NAME="telcoin"
 # The node's role is decided on-chain from committee membership, and the dashboard's
 # validator view follows the on-chain stake status (ConsensusRegistry getValidator).
@@ -417,16 +417,6 @@ step_preflight() {
     fi
     mkdir -p "$DATA_DIR" 2>/dev/null || true
 
-    check_hardware "node" "$DATA_DIR"
-    # --json: put the hardware result in the setup log too. Below-minimum hardware is not
-    # an error (check_hardware warns and setup goes on), so the gaps go out as a `log`
-    # line starting WARNING:, which the Node Manager UI styles as a warning.
-    if json_mode; then
-        json_event log "hardware: ${TN_HW_SUMMARY:-unknown}"
-        if [[ -n "${TN_HW_GAPS:-}" ]]; then
-            json_event log "WARNING: hardware below the minimum for: ${TN_HW_GAPS} (setup continues)"
-        fi
-    fi
     # Core node ports + the ports the optional features use (Caddy dashboard 80/443,
     # WireGuard VPN 51820, health monitor 43174) so conflicts surface up front.
     check_ports \
@@ -453,8 +443,20 @@ step_preflight() {
     echo ""
     print_step "Selecting network..."
     json_mode || select_network
-    # After the network is chosen: check_internet probes that network's own RPC.
+    # After the network is chosen: check_internet probes that network's own RPC, and
+    # check_hardware compares the host with that network's tiers.
     check_internet
+
+    check_hardware "node" "$DATA_DIR" "$NETWORK"
+    # --json: put the hardware result in the setup log too. Below-minimum hardware is not
+    # an error (check_hardware warns and setup goes on), so the gaps go out as a `log`
+    # line starting WARNING:, which the Node Manager UI styles as a warning.
+    if json_mode; then
+        json_event log "hardware: ${TN_HW_SUMMARY:-unknown}"
+        if [[ -n "${TN_HW_GAPS:-}" ]]; then
+            json_event log "WARNING: hardware below the minimum for: ${TN_HW_GAPS} (setup continues)"
+        fi
+    fi
 
     # The systemd floor: 247 everywhere (LoadCredential=), 255 on mainnet
     # (TN_MAINNET_MIN_SYSTEMD: the encrypted credential; Ubuntu 24.04 or later). Below 250

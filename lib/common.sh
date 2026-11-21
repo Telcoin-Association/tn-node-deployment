@@ -77,17 +77,29 @@ readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 # network-gated: the comment names the testnet fleet; 9101 is the default on every network
 readonly DEFAULT_METRICS_PORT="9101"   # node loopback Prometheus endpoint (matches the adiri fleet)
-readonly COMMON_VERSION="2.2.2"
+readonly COMMON_VERSION="2.2.3"
 
 # The operator runbook, for any message that should point operators at it.
 readonly TN_OPERATOR_GUIDE_URL="https://github.com/Telcoin-Association/tn-node-deployment/blob/main/OPERATOR.md"
 
-# Per-role hardware tiers (telcoin-network docs/src/getting-started/hardware-requirements.md,
-# physical cores; cloud vCPUs are usually hyperthreads, so 8 vCPU ~ 4 physical cores).
-readonly HW_NODE_MIN_CPU=2;  readonly HW_NODE_MIN_RAM_GB=8;  readonly HW_NODE_MIN_DISK_GB=2000   # observer (follower)
-readonly HW_RPC_MIN_CPU=4;   readonly HW_RPC_MIN_RAM_GB=16; readonly HW_RPC_MIN_DISK_GB=2000    # observer serving public RPC
-readonly HW_VAL_MIN_CPU=8;   readonly HW_VAL_MIN_RAM_GB=32; readonly HW_VAL_MIN_DISK_GB=2000    # validator minimum (ECC, NVMe)
-readonly HW_VAL_REC_CPU=16;  readonly HW_VAL_REC_RAM_GB=64; readonly HW_VAL_REC_DISK_GB=4000    # validator recommended
+# Per-role hardware tiers, one set per network; check_hardware picks the set (devnet uses
+# the testnet one). CPU is physical cores: a cloud vCPU is usually one hyperthread, so
+# 8 vCPU is about 4 cores. Disk is decimal GB, as disks are sold.
+#   testnet: the deployed testnet validators, Google Cloud c3-highcpu-8 machines
+#            (4 cores (8 vCPU), 16 GB) with a 350 GB pd-ssd each.
+#   mainnet: the hardware requirements page of the telcoin-network documentation
+#            (docs/src/getting-started/hardware-requirements.md), plus Telcoin's published
+#            benchmarks (benchmark.telcoin.network) for the validator storage.
+# ui/server.py mirrors these in HW_TIERS and HW_VALIDATOR_RECOMMENDED; keep one
+# `readonly NAME=value` per statement, which is how the UI's mirror test reads them.
+readonly HW_TESTNET_NODE_MIN_CPU=2;  readonly HW_TESTNET_NODE_MIN_RAM_GB=8;  readonly HW_TESTNET_NODE_MIN_DISK_GB=350   # observer (follower)
+readonly HW_TESTNET_RPC_MIN_CPU=4;   readonly HW_TESTNET_RPC_MIN_RAM_GB=16;  readonly HW_TESTNET_RPC_MIN_DISK_GB=350   # observer serving public RPC
+readonly HW_TESTNET_VAL_MIN_CPU=3;   readonly HW_TESTNET_VAL_MIN_RAM_GB=16;  readonly HW_TESTNET_VAL_MIN_DISK_GB=350   # validator minimum
+readonly HW_TESTNET_VAL_REC_CPU=4;   readonly HW_TESTNET_VAL_REC_RAM_GB=16;  readonly HW_TESTNET_VAL_REC_DISK_GB=500   # validator recommended (NVMe)
+readonly HW_MAINNET_NODE_MIN_CPU=2;  readonly HW_MAINNET_NODE_MIN_RAM_GB=8;  readonly HW_MAINNET_NODE_MIN_DISK_GB=2000  # observer (follower)
+readonly HW_MAINNET_RPC_MIN_CPU=4;   readonly HW_MAINNET_RPC_MIN_RAM_GB=16;  readonly HW_MAINNET_RPC_MIN_DISK_GB=2000  # observer serving public RPC
+readonly HW_MAINNET_VAL_MIN_CPU=8;   readonly HW_MAINNET_VAL_MIN_RAM_GB=32;  readonly HW_MAINNET_VAL_MIN_DISK_GB=2000  # validator minimum (ECC, NVMe)
+readonly HW_MAINNET_VAL_REC_CPU=16;  readonly HW_MAINNET_VAL_REC_RAM_GB=64;  readonly HW_MAINNET_VAL_REC_DISK_GB=4000  # validator recommended (ECC, NVMe)
 
 # Set by check_hardware for callers that embed them in JSON log lines (plain ASCII).
 TN_HW_SUMMARY=""
@@ -2199,6 +2211,13 @@ _tn_hw_disk_label() {
     fi
 }
 
+# _tn_hw_cores_label <n> — "<n> cores (<2n> vCPU)", e.g. "3 cores (6 vCPU)": a tier's
+# physical cores with the cloud vCPU count (two hyperthreads per core) that matches.
+_tn_hw_cores_label() {
+    local n="${1:-0}"
+    printf '%s cores (%s vCPU)' "$n" "$(( n * 2 ))"
+}
+
 # tn_physical_cores — print "<n> physical" with the number of physical CPU cores,
 # or "<n> logical" when only the logical CPU count (every hyperthread counted) can
 # be read. Sources, first answer wins:
@@ -2279,20 +2298,21 @@ _tn_hw_cpu_text() {
 # _tn_hw_role <label> <min_cpu> <min_ram_gb> <min_disk_gb> <cpu> <ram_kb> <disk_kb>
 # [cpu_kind] — print one line for a role tier. Empty cpu/ram_kb/disk_kb mean "could
 # not measure" and never count as a shortfall. cpu_kind (physical or logical, from
-# tn_physical_cores) only words the count. rc 1 when a measured value is below the
-# tier, else 0. RAM and disk get 5 % slack: a "16 GB" box reports ~15.6 GiB and a
-# formatted "2 TB" disk a little under 2000 GB.
+# tn_physical_cores) only words the count. The tier's CPU is written as
+# _tn_hw_cores_label words it ("3 cores (6 vCPU)"). rc 1 when a measured value is
+# below the tier, else 0. RAM and disk get 5 % slack: a "16 GB" box reports ~15.6 GiB
+# and a formatted "2 TB" disk a little under 2000 GB.
 _tn_hw_role() {
     local label="$1" min_cpu="$2" min_ram="$3" min_disk="$4" cpu="$5" ram_kb="$6" disk_kb="$7"
     local cpu_kind="${8:-logical}" spec need have unknown
-    spec="${min_cpu} cores / ${min_ram} GB / $(_tn_hw_disk_label "$min_disk")"
+    spec="$(_tn_hw_cores_label "$min_cpu") / ${min_ram} GB / $(_tn_hw_disk_label "$min_disk")"
     need=""
     have=""
     unknown=""
     if [[ -z "$cpu" ]]; then
         unknown="CPU"
     elif [[ "$cpu" -lt "$min_cpu" ]]; then
-        need="${min_cpu} cores"
+        need="$(_tn_hw_cores_label "$min_cpu")"
         have="$(_tn_hw_cpu_text "$cpu" "$cpu_kind")"
     fi
     if [[ -z "$ram_kb" ]]; then
@@ -2322,13 +2342,16 @@ _tn_hw_role() {
     return 0
 }
 
-# check_hardware [legacy_arg] [data_dir] — informational hardware report against the
-# per-role tiers above. It never blocks setup and ALWAYS returns 0: every node is
+# check_hardware [unused] [data_dir] [network] — informational hardware report against
+# the per-role tiers above. It never blocks setup and ALWAYS returns 0: every node is
 # provisioned validator-capable, but the role is decided on-chain each epoch and a
 # node below the validator tier still runs fine as a follower. $1 (the old
 # node_type) is accepted for call-site compatibility and ignored. data_dir (default
 # /) picks the filesystem to measure; it may not exist yet (created later in
-# setup), so the nearest existing parent is used.
+# setup), so the nearest existing parent is used. network picks the tier set:
+# testnet and devnet compare with the HW_TESTNET_* tiers; mainnet, an empty value
+# or anything else with the HW_MAINNET_* tiers, so a caller that passes only two
+# arguments keeps the mainnet verdicts. A line before the role lines names the set.
 #   * CPU: tn_physical_cores. The tiers are physical cores; when only the logical
 #     count can be read (every hyperthread counted, so up to twice the cores), the
 #     tiers are compared with that and the report says so.
@@ -2340,12 +2363,37 @@ _tn_hw_role() {
 # Sets TN_HW_SUMMARY (the "Detected" text) and TN_HW_GAPS (comma-separated roles
 # below minimum, from node, rpc, validator; empty when all pass), both plain ASCII.
 check_hardware() {
-    local data_dir="${2:-/}"
+    local data_dir="${2:-/}" network="${3:-}"
     local meminfo cpu cpu_kind cores ram_kb ram_gb check_path df_line disk_kb disk_avail_kb disk_pct
     local mount_point disk_gb disk_free_gb cpu_txt ram_txt disk_txt gaps
+    local tier_net tier_why rec_ecc rec_unchecked
+    local -a tier_node tier_rpc tier_val tier_rec
     TN_HW_SUMMARY=""
     TN_HW_GAPS=""
     print_step "Checking hardware..."
+
+    # The tier set: each array is (cpu, ram_gb, disk_gb).
+    case "$network" in
+        testnet) tier_net="testnet"; tier_why="" ;;
+        devnet)  tier_net="testnet"; tier_why=" (devnet uses them)" ;;
+        mainnet) tier_net="mainnet"; tier_why="" ;;
+        *)       tier_net="mainnet"; tier_why=" (no network given)" ;;
+    esac
+    if [[ "$tier_net" == "testnet" ]]; then
+        tier_node=("$HW_TESTNET_NODE_MIN_CPU" "$HW_TESTNET_NODE_MIN_RAM_GB" "$HW_TESTNET_NODE_MIN_DISK_GB")
+        tier_rpc=("$HW_TESTNET_RPC_MIN_CPU" "$HW_TESTNET_RPC_MIN_RAM_GB" "$HW_TESTNET_RPC_MIN_DISK_GB")
+        tier_val=("$HW_TESTNET_VAL_MIN_CPU" "$HW_TESTNET_VAL_MIN_RAM_GB" "$HW_TESTNET_VAL_MIN_DISK_GB")
+        tier_rec=("$HW_TESTNET_VAL_REC_CPU" "$HW_TESTNET_VAL_REC_RAM_GB" "$HW_TESTNET_VAL_REC_DISK_GB")
+        rec_ecc=""
+        rec_unchecked="NVMe is"
+    else
+        tier_node=("$HW_MAINNET_NODE_MIN_CPU" "$HW_MAINNET_NODE_MIN_RAM_GB" "$HW_MAINNET_NODE_MIN_DISK_GB")
+        tier_rpc=("$HW_MAINNET_RPC_MIN_CPU" "$HW_MAINNET_RPC_MIN_RAM_GB" "$HW_MAINNET_RPC_MIN_DISK_GB")
+        tier_val=("$HW_MAINNET_VAL_MIN_CPU" "$HW_MAINNET_VAL_MIN_RAM_GB" "$HW_MAINNET_VAL_MIN_DISK_GB")
+        tier_rec=("$HW_MAINNET_VAL_REC_CPU" "$HW_MAINNET_VAL_REC_RAM_GB" "$HW_MAINNET_VAL_REC_DISK_GB")
+        rec_ecc=" ECC"
+        rec_unchecked="ECC and NVMe are"
+    fi
 
     cpu=""
     cpu_kind=""
@@ -2423,25 +2471,24 @@ check_hardware() {
     if [[ "$cpu_kind" == "logical" ]]; then
         print_info "Physical cores could not be counted, so the tiers below are compared with logical CPUs; with hyperthreading that is up to twice the physical cores."
     fi
+    print_info "Comparing with the ${tier_net} hardware tiers${tier_why}."
     if [[ -n "$disk_pct" ]] && [[ "$disk_pct" -ge 90 ]]; then
         print_warn "Disk ${mount_point} is ${disk_pct}% used (${disk_free_gb:-?} GB free)."
     fi
 
     gaps=""
-    if ! _tn_hw_role "Full node (follower)" "$HW_NODE_MIN_CPU" "$HW_NODE_MIN_RAM_GB" "$HW_NODE_MIN_DISK_GB" \
-        "$cpu" "$ram_kb" "$disk_kb" "$cpu_kind"; then
+    if ! _tn_hw_role "Full node (follower)" "${tier_node[@]}" "$cpu" "$ram_kb" "$disk_kb" "$cpu_kind"; then
         gaps="node"
     fi
-    if ! _tn_hw_role "Public RPC node" "$HW_RPC_MIN_CPU" "$HW_RPC_MIN_RAM_GB" "$HW_RPC_MIN_DISK_GB" \
-        "$cpu" "$ram_kb" "$disk_kb" "$cpu_kind"; then
+    if ! _tn_hw_role "Public RPC node" "${tier_rpc[@]}" "$cpu" "$ram_kb" "$disk_kb" "$cpu_kind"; then
         gaps="${gaps:+${gaps},}rpc"
     fi
-    if ! _tn_hw_role "Validator (minimum)" "$HW_VAL_MIN_CPU" "$HW_VAL_MIN_RAM_GB" "$HW_VAL_MIN_DISK_GB" \
-        "$cpu" "$ram_kb" "$disk_kb" "$cpu_kind"; then
+    if ! _tn_hw_role "Validator (minimum)" "${tier_val[@]}" "$cpu" "$ram_kb" "$disk_kb" "$cpu_kind"; then
         gaps="${gaps:+${gaps},}validator"
     fi
     TN_HW_GAPS="$gaps"
-    print_info "Validator (recommended): ${HW_VAL_REC_CPU} cores / ${HW_VAL_REC_RAM_GB} GB ECC / $(_tn_hw_disk_label "$HW_VAL_REC_DISK_GB") NVMe — ECC and NVMe are not checked here."
+    print_info "Validator (recommended): $(_tn_hw_cores_label "${tier_rec[0]}") / ${tier_rec[1]} GB${rec_ecc} / $(_tn_hw_disk_label "${tier_rec[2]}") NVMe — ${rec_unchecked} not checked here."
+    print_info "Prioritise single-core performance: EVM execution is single-threaded, so a high clock speed matters more than extra cores."
     print_info "Hardware checks never block setup; the node role is decided on-chain each epoch."
     return 0
 }
