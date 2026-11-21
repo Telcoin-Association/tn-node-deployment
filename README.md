@@ -264,6 +264,16 @@ Each script walks through numbered steps:
 - With `--bootstrap-peers`, `--enable-state-export` or `--state-export-keep`, asks the release whether it has each flag and stops, before any key is made, when it does not. A bootstrap peers map is checked with the release's own parser and installed as `/etc/telcoin/bootstrap-peers.yaml` (see [Bootstrap peers](#bootstrap-peers))
 - With `--admission`, checks that the release is `MIN_ADMISSION_VERSION` (0.17.0) or later and stops when it is older.
   A `--trusted-nodes` map is installed as `/etc/telcoin/trusted-nodes.yaml` (see [Node admission settings](#node-admission-settings))
+- Gets the chain configs from the tag this script release pins (testnet: `v0.16.0-adiri`), never from the default branch.
+  It fetches that tag from origin into the `/opt/telcoin-source` checkout, reads `genesis.yaml`, `committee.yaml` and `parameters.yaml` at the tag, checks them against the pins and installs them root-owned in `/etc/telcoin/chain-configs/<network>/` (directories 0755, files 0644).
+  It never pulls or checks out an existing checkout: the checkout's branch, working tree and submodules stay as they are, and no git runs when `/etc/telcoin/chain-configs/<network>/` already holds the pinned files.
+  When the fetch fails, it reads the checkout's own copy of the tag: `Could not fetch v0.16.0-adiri from origin (<git's reason>); reading the testnet chain configs from the local copy of v0.16.0-adiri.`
+- A Docker, signed-release or existing-binary install may have no checkout. Then, unless `/etc/telcoin/chain-configs/<network>/` already holds the pinned files, setup asks to clone the repository at the tag into `/opt/telcoin-source` (`Clone the repository now to get the chain-config files?`).
+  A path there that is not a checkout is refused before the question (`/opt/telcoin-source exists but is not a git checkout; move it aside first.`).
+  A refusal stops setup with `The testnet chain configs were refused (see above); nothing was copied.`, and a failed clone, fetch or install with `Could not get the testnet chain configs (see above).`
+  `--genesis-dir <dir>` replaces all of this: the files in that directory are checked against the pins, with no git and no prompt.
+  Mainnet has no tag or pins yet, so a mainnet install stops here until a script release publishes them.
+  Devnet has neither: it still pulls or clones the checkout's default branch and uses its files unchecked
 
 **Step 5: Key Generation**
 - Asks for your Ethereum address and P2P multiaddrs
@@ -274,7 +284,7 @@ Each script walks through numbered steps:
 - Stores the passphrase as the encrypted credential `/etc/telcoin/bls-passphrase.cred` (root, mode 0600); on a testnet host below systemd 250, in the root-only file `/etc/telcoin/bls-passphrase` (mode 0600) instead
 
 **Step 6: Configuration**
-- Copies the official chain-config files (genesis.yaml, committee.yaml, parameters.yaml) after checking each against the SHA-256 this script release pins for the network (testnet: `chain-configs/testnet` at `v0.16.0-adiri`). A mismatch stops setup. Mainnet has no pins yet, so a mainnet install stops here until a script release publishes them
+- Copies the official chain-config files (genesis.yaml, committee.yaml, parameters.yaml) after checking each against the SHA-256 this script release pins for the network (testnet: `chain-configs/testnet` at `v0.16.0-adiri`). It takes the first directory that holds all three: `--genesis-dir`, then on testnet `/etc/telcoin/chain-configs/testnet/` (step 4 put them there), then the checkout's `chain-configs/<network>/` and `/etc/telcoin/chain-configs/<network>/`. A mismatch stops setup. When none holds them (for example, you declined the clone), setup links the files at the tag (`https://github.com/Telcoin-Association/telcoin-network/tree/v0.16.0-adiri/chain-configs/testnet/`), asks you to copy the three raw files into `/etc/telcoin/chain-configs/<network>/` or to run setup again with `--genesis-dir <dir>`, and waits; a `--json` run stops
 
 **Step 7/8: Systemd Service**
 - Writes the start script `/usr/local/libexec/telcoin/tn-start` (Docker installs: `tn-start-docker`), root-owned, mode 0755. It holds no secret: it reads the listener addresses from `/etc/telcoin/node.env` and hands the node the passphrase on its standard input (`--bls-passphrase-source stdin`) from the credential systemd provides
@@ -319,6 +329,7 @@ table below and reports any path that differs.
 | `/etc/telcoin/bls-passphrase` | root | 0600 | The passphrase in plain text, only on a testnet host below systemd 250 |
 | `/etc/telcoin/bootstrap-peers.yaml` | root | 0644 | The bootstrap peers map, only with `--bootstrap-peers` |
 | `/etc/telcoin/trusted-nodes.yaml` | root | 0644 | The trusted nodes map, only with `--trusted-nodes` or `edit-config.sh --set trusted_nodes=` (see [Node admission settings](#node-admission-settings)) |
+| `/etc/telcoin/chain-configs/<network>/` | root | 0755 | `genesis.yaml`, `committee.yaml` and `parameters.yaml` (0644) as they are at the tag this script release pins for the network (testnet `v0.16.0-adiri`). Setup and `edit-config.sh` menu 13 copy them into the data directory from here. Only on a network with a pinned tag, so testnet today |
 | `/etc/telcoin/.pending-update` | root | 0600 | An update prepared by `update-node.sh` and not yet applied |
 | `/etc/telcoin/build-info` | root | 0644 | The release tag and commit of a source build |
 | `/etc/telcoin/alerts/` | root | 0755 | Private alerts configuration, only with private alerts on |
@@ -335,7 +346,7 @@ table below and reports any path that differs.
 | `/var/lib/private/telcoin-heartbeat/` | the heartbeat's dynamic user (on disk `nobody` (65534) with systemd 257 or later) | 0700 | The private alerts runner's `state` file, written only by the runner |
 | `/var/lib/telcoin-p2p-allow/` | root | 0700 | The allowlist's state: `config` (written by `firewall-setup.sh`), `floor`, `current.nft`, `state.json`, `status` and `lock` (written by the tool, each 0600), only while committee mode is on |
 | `/run/telcoin/update.lock` | root | 0600 (directory 0755) | The update lock |
-| `/opt/telcoin-source/` | root | | The telcoin-network checkout, at a release tag (source builds) |
+| `/opt/telcoin-source/` | root | | The telcoin-network checkout: at a release tag on a source build; on other installs, a clone you let setup or menu 13 make (at the pinned chain-config tag; on devnet, the default branch). The scripts fetch the pinned tag into it and read the chain configs from there without moving it |
 | `/var/lib/tn-build/` | tn-build | 0700 | The build account's home: its Rust toolchain, cargo cache and build output (source builds) |
 
 The private alerts state directory is the one path the scripts set up that belongs to neither
@@ -1142,7 +1153,7 @@ sudo bash ~/telcoin-node-scripts/edit-config.sh --json --set metrics=off
 | 10 | Private forward targets (private networks only) |
 | 11 | Admission mode (open, grace or closed; see [Node admission settings](#node-admission-settings)) |
 | 12 | Trusted nodes (the hubs a closed node admits), or none |
-| 13 | Refresh chain configs (pull the latest genesis, committee and parameters). It replaces `parameters.yaml`, so set item 10 again afterwards |
+| 13 | Refresh chain configs (the genesis, committee and parameters this script release pins; on devnet, the latest). It replaces `parameters.yaml`, so set item 10 again afterwards |
 | 14 | Restart node |
 | 15 | Exit |
 
@@ -1177,7 +1188,15 @@ How an edit runs:
 - An edit is written before that wait, so a run stopped before its restart (Ctrl-C, SIGTERM, SIGHUP, or the Node Manager UI page closing) puts every file it changed back and exits 130, 143 or 129: "Stopped by SIGTERM before the restart, so the edit was rolled back". Once the restart has been issued, the edit stays. Refresh chain configs is the exception: a run stopped during its wait keeps the new chain files for the next restart.
 - On a host with the host baseline (see [Host baseline](#host-baseline-auditd-and-aide)), the AIDE baseline is made again after a `--set` restart came back healthy, after a menu edit's restart came back active, after menu item 14 (Restart node) came back active (which folds in an edit saved with "restart later"), and after `--migrate-credential`, `--reseal` or a menu 5 passphrase action that went through. A failure there is a warning.
 - A launch file with more than one node command carrying `--http` is refused rather than half edited. Remove or comment out the extra command and try again.
-- Refresh chain configs reads `NETWORK` from `.node-meta` and refuses unless the node's genesis and the new one declare the same chain ID. It copies the network's `genesis.yaml`, `committee.yaml` and `parameters.yaml` over the node's, which drops an `allow_private_forward_targets` value, so set that again afterwards. On a source build checked out at a release tag, the usual testnet install, `git pull` fails: refresh prints git's error and "git pull failed in <dir>. Chain configs unchanged."
+- Refresh chain configs reads `NETWORK` from `.node-meta` and refuses unless the node's genesis and the new one declare the same chain ID. It copies the network's `genesis.yaml`, `committee.yaml` and `parameters.yaml` over the node's, which drops an `allow_private_forward_targets` value, so set that again afterwards.
+- On testnet it installs the files at the tag this script release pins (`v0.16.0-adiri`) into `/etc/telcoin/chain-configs/testnet/`, as setup does, and copies them from there.
+  It never pulls or checks out `/opt/telcoin-source`; a git worktree there counts as a checkout.
+  When the node's data dir already holds the pinned files, it asks nothing, takes no lock and restarts nothing: `Nothing to refresh: the node's data dir already holds the testnet chain configs this script release pins (v0.16.0-adiri), so <service> was not restarted.`, followed by a pointer to `14) Restart node` for a node whose restart was put off.
+  With no checkout and no pinned files in `/etc/telcoin/chain-configs/testnet/`, it runs setup's two checks for a path in the way, then offers the clone setup makes: `Clone the repository at v0.16.0-adiri into /opt/telcoin-source now?`.
+  Declined or failed, it prints the manual `sudo git clone --branch v0.16.0-adiri ...` line and the three raw-file URLs at the tag; it never tells you to run setup again.
+  The update lock is free at every "Press Enter", and on a host with the [host baseline](#host-baseline-auditd-and-aide) the AIDE baseline is made again whenever the refresh wrote files under `/etc/telcoin/chain-configs/`.
+- On mainnet it stops before any prompt: `This script release pins no mainnet chain configs yet, so there is nothing to install. Chain configs unchanged.`
+  On devnet it still pulls the checkout's default branch; a failed pull prints git's error and `git pull failed in <dir>. Chain configs unchanged.`
 - edit-config needs the `lib/common.sh` shipped with it; with an older library it stops and says to run `update-scripts.sh`.
 
 ### Bootstrap peers
@@ -1440,7 +1459,7 @@ A network's newest release, where a script picks one (setup's Docker default, a 
 
 On testnet only, a Docker install or update given a release tag falls back to the digest the registry serves for that tag (`ghcr.io/telcoin-association/tn-testnet`, then the legacy repository), with a warning, when no key file is installed or the release publishes no signed files; a release that fails a check is never replaced by the registry's answer. The newest-image fallback for a testnet without a release on GitHub is in [Docker Install Notes](#docker-install-notes).
 
-A source build verifies the git tag itself: the tag's signature is checked against the same `lib/release-keys` (a bad signature refuses everywhere, one that cannot be checked refuses on mainnet and warns on testnet), the tag must match the one on origin, and the chain configs in the checkout must match the pins.
+A source build verifies the git tag itself: the tag's signature is checked against the same `lib/release-keys` (a bad signature refuses everywhere, one that cannot be checked refuses on mainnet and warns on testnet), the tag must match the one on origin, and the chain configs, read from the tag this script release pins (testnet `v0.16.0-adiri`) rather than from the tag being built, must match the pins.
 
 Release tarballs are built for x86_64 only. On aarch64 a release install stops with "Release TAG has no aarch64-unknown-linux-gnu tarball"; use a source or Docker install there. To check a release by hand, in an empty directory:
 
@@ -1810,10 +1829,10 @@ These mainnet values are still open in this script release, and mainnet installs
 
 | Still open | Effect today |
 |---|---|
-| The mainnet `genesis.yaml`, `committee.yaml` and `parameters.yaml` hashes | Mainnet chain configs cannot be checked and no mainnet release can be verified, so a mainnet install (any method) is refused: a Docker install or image change before anything on the host changes, the other methods before the chain configs are copied |
+| The mainnet `genesis.yaml`, `committee.yaml` and `parameters.yaml` hashes, and the tag they are read from | Mainnet chain configs cannot be checked and no mainnet release can be verified, so a mainnet install (any method) is refused: a Docker install or image change before anything on the host changes, the other methods before the chain configs are copied |
 | The mainnet public RPC set | Fixed at launch. Interactive setup does not offer mainnet yet |
 
-The testnet values are pinned: chain configs from `chain-configs/testnet` at `v0.16.0-adiri`. The image packages are set, one per network, where the release pipeline publishes: testnet `ghcr.io/telcoin-association/tn-testnet`, mainnet `ghcr.io/telcoin-association/tn-mainnet`; testnet also takes the legacy `us-docker.pkg.dev/telcoin-network/tn-public/adiri` (see [Docker Install Notes](#docker-install-notes)). Devnet pulls images by digest only, from the legacy repository or `ghcr.io/telcoin-association/tn-dev` (`TN_DEVNET_IMAGE_REPOS`); its tags end in `-devnet` and have no signed release.
+The testnet values are pinned: chain configs from `chain-configs/testnet` at `v0.16.0-adiri`, read from that tag and never from the default branch. The image packages are set, one per network, where the release pipeline publishes: testnet `ghcr.io/telcoin-association/tn-testnet`, mainnet `ghcr.io/telcoin-association/tn-mainnet`; testnet also takes the legacy `us-docker.pkg.dev/telcoin-network/tn-public/adiri` (see [Docker Install Notes](#docker-install-notes)). Devnet pulls images by digest only, from the legacy repository or `ghcr.io/telcoin-association/tn-dev` (`TN_DEVNET_IMAGE_REPOS`); its tags end in `-devnet` and have no signed release.
 
 ### RPC queries
 
@@ -1895,6 +1914,7 @@ Interactive setup prompts for everything. The public RPC flags (`--rpc-domain` t
 | `--binary-path <path>` | Absolute path to the node binary of an `existing` install, of letters, digits and `. _ / -`; with `--json` it implies `--install-method existing`. Without it, setup searches `PATH`, `/usr/local/bin`, `/opt` and `/home`, and a `--json` run stops when nothing is found |
 | `--address <0x...>` | Execution address that stakes and receives rewards: `0x` and 40 hex digits. Required for a `--json` keygen |
 | `--data-dir <path>` | Data directory (default `/var/lib/telcoin`): an absolute path of letters, digits and `. _ / -`, with no `..`. A directory under `/home` is refused |
+| `--genesis-dir <dir>` | A directory that holds `genesis.yaml`, `committee.yaml` and `parameters.yaml`. Setup copies the chain configs from it after checking them against the network's pins (devnet has none), with no git and no clone prompt. Setup's own hint names it when it cannot find the files |
 | `--service-user <name>`, `--service-group <name>` | The account the node runs as (default `telcoin`). An existing account is accepted only with a `nologin` or `false` shell and no admin group; the UID is not forced |
 | `--passphrase-stdin` | Read the BLS key passphrase from standard input: one line, read once, without echo, a trailing CR dropped. Giving `TN_BLS_PASSPHRASE` as well is an error. See [Passphrase delivery](#passphrase-delivery) |
 | `--passphrase-method credential\|stdin` | Force how the passphrase is kept (default: `credential` wherever `systemd-creds` works). Mainnet takes `credential` only; `tpm` is no longer offered |
@@ -2046,6 +2066,50 @@ prints the exact fix command.
 > **Versioning note (from v1.1.48 onwards):** each script bumps `SCRIPT_VERSION`
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
+
+### edit-config v2.2.2 — menu 13 offers the clone and frees the lock before its prompts
+With no repository checkout and no pinned files, menu 13 runs setup's checks for a path in the way, then offers to clone the repository at the pinned tag into `/opt/telcoin-source`, the clone setup makes.
+Declined or failed, it prints a manual `sudo git clone --branch <tag> ...` line and the three raw-file URLs; it no longer tells you to re-run `setup-node.sh`.
+After `Nothing to refresh: ...` a line points to `14) Restart node`, and a network this release pins nothing for (mainnet today) is refused before any prompt: `This script release pins no mainnet chain configs yet, so there is nothing to install. Chain configs unchanged.`
+The update lock is free at every "Press Enter", a git worktree checkout is read, and the AIDE baseline is made again whenever the refresh wrote under `/etc/telcoin/chain-configs/`, a reinstall that only corrects owner or modes included.
+Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+
+### lib/common.sh v2.2.5 — chain-config helpers after verification
+A failed fetch gives git's own reason, `Could not fetch <tag> from origin (<git's reason>); reading the <network> chain configs from the local copy of <tag>.`, in place of the blanket "Could not reach origin", and a repository git cannot read is refused with git's reason.
+"Already in place" means what the install makes: root-owned directories 0755 holding regular files 0644.
+The right files with another owner or mode are reinstalled from where they are, with no git (`Reinstalled the <network> chain configs in <dir> root-owned, directories 0755 and files 0644: ...`).
+A symlinked destination, a stray entry under one of the three names and a source path that is not a checkout (`... exists but is not a git checkout; move it aside first.`) are refused before anything is fetched or written; a git worktree checkout is read.
+A failed clone's reason and the manual clone line reach a `--json` run, a pin mismatch names the file at the tag, and the helpers' git commands run over https only, without the update lock's descriptor or a stray `GIT_DIR`.
+Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+
+### setup-node v2.1.4 — "were refused", each directory once, a manual hint that names the tag
+A refused chain-config step reads `The <network> chain configs were refused (see above); nothing was copied.` instead of "not the pinned ones", which was wrong for a refused checkout.
+When the files cannot be found, the error lists each directory once, and the hint says where the files are at the tag and names `--genesis-dir <dir>`.
+Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+
+### update-node v2.1.2 — comment only: no git pull runs there
+A comment no longer lists a `git pull`, which update-node never runs.
+Nothing changes for the operator.
+Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+
+### edit-config v2.2.1 — menu 13 installs the pinned chain configs instead of pulling
+Menu 13 ran `git pull` in the telcoin-network checkout and copied the default branch's files: on testnet the pull moved a source install's build tree, and the copy was then refused because those files no longer match the pins.
+On testnet it now installs the files at the pinned tag into `/etc/telcoin/chain-configs/testnet/`, as setup does, and copies them from there, with no pull and no submodule command; the host baseline is made again when it installed files.
+When the node's data dir already holds the pinned files it prints "Nothing to refresh" and returns without a prompt, the lock or a restart.
+The menu label reads `(pinned genesis/committee/parameters)`.
+Mainnet keeps its refusal; devnet still pulls.
+
+### lib/common.sh v2.2.2 — chain configs from the pinned tag, not from main
+Fresh testnet Docker and signed-release installs failed at keygen: setup cloned or pulled the telcoin-network default branch, whose testnet `committee.yaml` has not matched the pin since 2026-11-14.
+The library now reads `genesis.yaml`, `committee.yaml` and `parameters.yaml` at the tag this release pins (`v0.16.0-adiri`), checks them and installs them root-owned in `/etc/telcoin/chain-configs/testnet/`.
+The checkout's HEAD, index, working tree and submodules are never touched, and nothing runs when the files are already there.
+With no checkout it clones at the tag, without submodules, after the same consent prompt; a failed clone returns an error instead of exiting.
+With origin unreachable a local copy of the tag is read, and a checkout that is a symlink or another account's is refused.
+`--genesis-dir` is used as given, devnet still pulls, and mainnet has no tag yet and runs no git.
+
+### setup-node v2.1.2 — reads the pinned chain-config directory
+On testnet, setup looks for the chain configs in `/etc/telcoin/chain-configs/testnet/` right after `--genesis-dir`, ahead of any checkout.
+Its not-found hint links the files at the pinned tag instead of `main`, and a failed clone or fetch reads `Could not get the <network> chain configs (see above).`, apart from a pin mismatch.
 
 ### lib/common.sh v2.2.1 — Ubuntu 26.04 recommended
 Ubuntu 26.04 LTS is the recommended OS; 24.04 stays supported. The systemd floor messages

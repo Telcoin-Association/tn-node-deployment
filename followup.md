@@ -111,10 +111,11 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   `existing_update_refusal`, check-node's `--observer` warning, install-caddy's domain prompts and
   same-domain messages, and the page's `DEFAULT_RPC_HOST` placeholder. Closes when they use a
   neutral example host (`node1.example.com`) and per-network tag examples, and the markers go.
-- `MAINNET_GENESIS_SHA256`, `MAINNET_COMMITTEE_SHA256` and `MAINNET_PARAMETERS_SHA256` in
-  `lib/common.sh` are empty, so every mainnet install stops at the chain-config check and a
-  mainnet release refuses its chain-config lines in `SHA256SUMS`. Closes after the genesis
-  ceremony, when the final files are published (U-13) and the three hashes are set.
+- `MAINNET_CHAIN_CONFIGS_TAG`, `MAINNET_GENESIS_SHA256`, `MAINNET_COMMITTEE_SHA256` and
+  `MAINNET_PARAMETERS_SHA256` in `lib/common.sh` are empty, so every mainnet install stops at the
+  chain-config check, edit-config's menu 13 refuses mainnet, and a mainnet release refuses its
+  chain-config lines in `SHA256SUMS`. Closes after the genesis ceremony, when the final files are
+  published (U-13) and the tag and the three hashes are set.
 - The public RPC for chain 487 is not settled. The UI's `NETWORK_PUBLIC_RPC` has an empty list for
   487, so its comparison cards show "-", while `MAINNET_RPC_URL` in `lib/common.sh` is
   `https://rpc.telcoin.network`, which check-node and the restart-window epoch reads use and which
@@ -489,16 +490,36 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   script could stop expanding the peers map onto the command line, which would also drop the
   character limit on a custom config directory. (guide-1.5)
   Why: both flags exist on main only; nothing the scripts write changes until a tag carries them.
+- setup-node 2.1.1 with the new library, on a host whose checkout sits on a diverged default
+  branch, searches the checkout first and refuses at finalize, after keygen: the keys,
+  `node-info.yaml`, `.node-meta`, the service account and the directories exist, and there is no
+  unit (V-FIX-S-06). edit-config 2.2.0 with the new library still pulls in menu 13, which moves
+  the checkout to `main` and force-updates its submodules, then refuses on the pins (V-FIX-E-9).
+  Both fail safe, and only a partial update reaches them: `update-scripts.sh` installs the set
+  together, and the new scripts refuse an older library. Closes if
+  `ensure_chain_configs_available` also warns when the checkout's `chain-configs/<network>` does
+  not match the pins.
+- `setup-node.sh` still defines `run_streamed`, which nothing calls, and its comment still names
+  the git clone (V-FIX-S-12). Closes when it is removed.
 
 ### edit-config
 
 - edit-config's `bootstrap_peers` and `state_export` edits change the launch line but leave
   `BOOTSTRAP_PEERS_FILE` and `STATE_EXPORT` in `.node-meta` as setup-node wrote them.
 - "Refresh chain configs" (`refresh_chain_configs`) still runs `git pull` in `/opt/telcoin-source`
-  on testnet and devnet, which fails on the detached checkout of a release tag, and refuses when
-  `.node-meta` has no `NETWORK` although the genesis chain id would tell it. Mainnet never pulls.
-  Closes when it checks out only the chain-config path at the pinned tag and takes the network
-  from the genesis.
+  on devnet, which fails on the detached checkout of a release tag, and refuses when
+  `.node-meta` has no `NETWORK` although the genesis chain id would tell it. Testnet reads the
+  pinned tag since edit-config 2.2.1, and mainnet never pulls. Closes when it takes the network
+  from the genesis and the devnet pull works on a detached checkout.
+- Menu 13 on a first install that ends in a successful restart makes the host baseline twice:
+  once after the pinned files are installed and again in `apply_changes` (V-FIX-E-3). With
+  `HOST_BASELINE=true` each runs `aide --update` over the whole AIDE tree. Closes when
+  `apply_changes` can skip its refresh, or the menu refreshes only on the paths that return
+  without that restart.
+- Menu 13's chain-id guard reads the node's `genesis/genesis.yaml` with `tn_genesis_chain_id` as
+  root, although the file sits in the data dir the service user owns; the "Nothing to refresh"
+  test reads through the service user. Older than this round (V-FIX-E-8). Closes when the guard
+  reads it as the service user too.
 - "Refresh chain configs" copies the new genesis, committee and parameters files without backups,
   so a run stopped during its epoch wait keeps them for the next restart. By design: they are the
   files the network restart needs.
@@ -585,6 +606,11 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   migrate-node-naming 2.0.0 removes it when it migrates a legacy node and setup-node when it runs
   again, but nothing removes it from a host 1.2.0 already migrated. Only the deprecated
   `tn_resolve_node_type` stub in `lib/fallback.sh` reads it.
+- On a host with the older `/etc/telcoin/<role>` config layout, removing the node removes only
+  that directory and leaves `/etc/telcoin/chain-configs/<network>/`, which `rmdir /etc/telcoin`
+  cannot remove; the next remove-node run offers it as a leftover and removes it (V-FIX-S-13).
+  The files are public. Closes if remove-node also removes `/etc/telcoin/chain-configs` when the
+  config dir is a role directory.
 
 ### check-node
 
@@ -667,6 +693,10 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
 - `lib/common.sh` and `ui/server.py` decode `getValidator` words 5 and 6 as `stakeVersion` and
   `region` (tn-contracts 10cc12b7). Live testnet replies have zero in both, so the deployed layout is
   unconfirmed until a validator with a non-zero value is checked.
+- When the second of the three writes of a chain-config install fails,
+  `/etc/telcoin/chain-configs/<network>/` holds one new file beside the other two as they were
+  (rc 2, no rollback). The next run installs all three, and the pre-check refuses an entry in the
+  way before anything is written (FIX-T F2). Accepted.
 
 ## Tooling and docs
 

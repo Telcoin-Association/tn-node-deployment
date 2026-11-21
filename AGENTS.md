@@ -78,7 +78,8 @@ setup-node `--json` run, and a Node Manager UI setup on mainnet (the helper asks
 before anything on the host changes. `ui/server.py` `TN_MAINNET_ENABLED` and
 `ui/static/index.html` `const SETUP_MAINNET_ENABLED` mirror it, and `ui/test_mainnet_flag.py`
 fails unless the three agree. The launch release flips all three in one change, together with
-the mainnet chain-config pins (`tn_chain_config_pin`) and `MIN_SOURCE_VERSION_MAINNET`.
+the mainnet chain-config tag and pins (`MAINNET_CHAIN_CONFIGS_TAG`, `tn_chain_config_pin`) and
+`MIN_SOURCE_VERSION_MAINNET`.
 
 Each network has its own image package, and the channel follows the release tag: mainnet
 `ghcr.io/telcoin-association/tn-mainnet` (`TN_MAINNET_IMAGE_REPO`, tags `vX.Y.Z`), testnet
@@ -114,6 +115,29 @@ pairs a new digest with the old release. The UI's `DOCKER_REPO` and the library'
 (`tn_ref_min_check`, `MIN_SOURCE_VERSION_<NETWORK>`) applies to setup-node, to every update-node
 prepare path and to edit-config's Docker image change; new code that picks a node release
 calls it too.
+
+## Chain configs
+
+Setup and edit-config's menu 13 read `genesis.yaml`, `committee.yaml` and `parameters.yaml` from
+the telcoin-network tag the script release pins (`TESTNET_CHAIN_CONFIGS_TAG`), never from a
+branch: the default branch moves on, and its files stop matching the pins (on 2026-11-14 its
+testnet `committee.yaml` did, and fresh testnet installs failed at keygen).
+`tn_chain_configs_from_tag` fetches the tag into `refs/tn-remote-tags/<tag>` of the checkout in
+`/opt/telcoin-source`, reads the three files there, checks them against the pins and installs them
+root-owned in `/etc/telcoin/chain-configs/<network>/` (`tn_chain_configs_dir`); setup's
+`step_write_config` and menu 13 copy them from there. It never moves the checkout (no checkout,
+pull, reset or submodule command), so a source install's build tree stays where it is. Do not add
+a pull to the testnet or mainnet path; devnet, which has no pins, still pulls.
+
+- `TESTNET_CHAIN_CONFIGS_TAG`, the three `TESTNET_*_SHA256` pins and the files in
+  `tools/tests/genesis.d/testnet/` move together, in one change.
+- Mainnet has neither a tag nor pins until the genesis ceremony, so a mainnet install stops at the
+  chain-config check and menu 13 refuses mainnet before any prompt (see "The mainnet switch").
+- Menu 13 asks the library's own checks and clone (`_tn_chain_configs_dest_ok`,
+  `_tn_chain_configs_clone_target`, `_tn_chain_configs_clone`) in the order
+  `ensure_chain_configs_available` runs them, so setup and the menu refuse the same cases.
+- setup-node and edit-config list the chain-config helpers they call in their `tn_require_fns`
+  checks.
 
 ## Ownership: root owns the install
 
@@ -1195,7 +1219,12 @@ line.
 - `tools/tests/genesis.d/testnet/` holds `genesis.yaml`, `committee.yaml` and
   `parameters.yaml` from telcoin-network at the pinned tag (`TESTNET_CHAIN_CONFIGS_TAG`),
   unchanged. `genesis_hash_test.sh` checks them against the `TESTNET_*_SHA256` pins in
-  `lib/common.sh`; refresh the files and the pins together.
+  `lib/common.sh`; refresh the files, the pins and the tag together.
+  `chain_configs_tag_test.sh` drives `tn_chain_configs_from_tag` and
+  `ensure_chain_configs_available` with real git against a local bare origin whose tag holds
+  these files while its `main` carries another `committee.yaml`, the shape of the 2026-11-14
+  break; its git cases need git, so they skip in the `bash:3.2` image.
+  `chain_configs_refresh_test.sh` covers edit-config's menu 13 (`refresh_chain_configs`).
 - `tools/tests/perl-interp.d/` holds the perl lint's fixtures, and `tools/tests/signing.sh`
   the OpenPGP release-signing helpers of `updater_manifest_test.sh`, `install_test.sh`,
   `release_scripts_test.sh`, `cut_release_test.sh`, `p2p_allow_install_test.sh` and `gateway_pin_test.sh`: `newkey NAME [EXPIRY|--expired|--revoked]`,

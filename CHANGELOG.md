@@ -7,6 +7,20 @@ For recent entries (v1.1.40 onwards), see the Changelog section of README.md.
 
 ## Unreleased
 
+### Chain configs from the pinned tag, November 2026 -- lib/common 2.2.5, setup-node 2.1.4, edit-config 2.2.2
+Part of `scripts-v2.2.0`; see [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+Fresh testnet Docker and signed-release installs have failed at keygen since 2026-11-14. Setup
+took `genesis.yaml`, `committee.yaml` and `parameters.yaml` from the default branch of the
+telcoin-network repository, whose testnet `committee.yaml` then stopped matching the pinned
+sha256. Setup now reads the three files from the tag the script release pins
+(`TESTNET_CHAIN_CONFIGS_TAG`, `v0.16.0-adiri`), checks them against the pins, installs them
+root-owned in `/etc/telcoin/chain-configs/<network>/` and copies them from there. No checkout is
+pulled or moved; with no checkout, setup asks and then clones at the tag. edit-config's menu 13
+installs the pinned files the same way instead of pulling, and leaves a node that already has
+them alone. Devnet still pulls, and mainnet has no tag yet. Before a host takes this release, a
+testnet install on `scripts-v2.1.0` works with `--genesis-dir <dir>`, where `<dir>` holds the
+three files of `chain-configs/testnet` at `v0.16.0-adiri`.
+
 ### Partner documents at run.telcoin.network, November 2026 -- the four PDFs and their short links, and one-pagers 1.1 that link the guide there
 A new repo, `Telcoin-Association/tn-partner-site`, publishes the four partner PDFs at
 `https://run.telcoin.network`: `/testnet-node-requirements.pdf`,
