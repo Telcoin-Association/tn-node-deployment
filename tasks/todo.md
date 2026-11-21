@@ -1007,3 +1007,76 @@ environment to `main`; merge PR-1; after the site code is pushed and the first d
 on the github.io URL, set the custom domain and the `run` CNAME, wait for the certificate,
 enforce HTTPS, run the branch-deploy test; then merge PR-2 and publish once more. The live-site
 check (VD) follows those steps.
+
+## Requirements round (2026-11-21): review
+
+Branch `requirements-from-benchmarks` off `origin/main` at `01664cc`. Plan: `tasks/plan.md`.
+Shared spec: `tasks/spec-req-shared.md` (section 8 maps the commit ids the records cite to the
+final ones). Checkpoints: `tasks/ckpt-req-*.md`. Verifier reports and harnesses:
+`tasks/verify-req/<ID>/`.
+
+What landed:
+
+- Chain configs at the pinned tag. Setup and edit-config's menu 13 read `genesis.yaml`,
+  `committee.yaml` and `parameters.yaml` from `TESTNET_CHAIN_CONFIGS_TAG` into
+  `/etc/telcoin/chain-configs/<network>/` and never pull or check out a checkout. Fresh testnet
+  Docker, signed-release and existing-binary installs had failed at step 4 of setup since
+  2026-11-14.
+- Hardware requirements per network in the shell check, the Node Manager preflight, the AWS
+  template and every document: testnet tiers from the deployed validators, the mainnet
+  validator storage figure from the benchmark runs, CPU as cores with vCPU.
+- Mainnet chain id 731 in the library, the UI and every current statement in the documents
+  (added by the user during wave 0).
+- Guide 1.13 and both one-pagers 1.3, rebuilt on Ubuntu 26.04 with pandoc 3.14 and WeasyPrint
+  70.0.
+
+How it was checked:
+
+- Eleven implementers in two waves, two of them writing a test from the spec before reading
+  the code under test (the real-git chain-config test, the hardware-check fixture); neither
+  found a mismatch with the spec.
+- Five verifiers on the integrated code, each with its own harness. V-FIX-S ran the live
+  proof in `ubuntu:26.04` against the real node repository: at `01664cc` the clone lands on
+  `main` and `committee.yaml` fails its pin; with the fix the clone sits detached at
+  `v0.16.0-adiri` and the pinned files are installed root-owned, HEAD and `git status`
+  unchanged when the checkout is moved by hand, no git at all when the directory is in place,
+  the local copy of the tag when origin cannot be reached. V-HW-UI compared shell and server
+  over 330 rows (55 hosts, two networks, three roles); 12 differed, all on a measured zero,
+  older than this round and fixed in the fix round. V-CHAIN showed that setting the constant
+  back to 487 fails exactly the nine changed fixtures and the UI tie test. No High finding;
+  the Mediums were the menu's "re-run setup" hint, the AWS note that only a YAML comment
+  carried, and one wrong instruction in the shared spec for the documentation wave.
+- A fix round by fresh agents (library, setup-node, menu 13, UI server and page, AWS, Caddy
+  gate), then one whole-diff review at `high`. It found three Low defects, all where menu 13's
+  own pre-checks had drifted from the library the fix round changed; a seventh fix agent made
+  the menu call the library's checks.
+- Five writers with one owner per file, then two verifiers of the documents. V-DOC-REF found
+  one Medium (a claim about what the old menu 13's pull did to a source install, wrong in two
+  documents and in two of the orchestrator's commit messages) and seven Low; all corrected.
+  V-DOC-PDF found five lines broken early in the guide by the Debian 12 container's text
+  stack; the PDFs were rebuilt on Ubuntu 26.04, which reproduces main's PDFs byte for byte.
+- Gates on the frozen code tip: the fixture suite on the host, as root in `ubuntu:26.04` with
+  git and in `bash:3.2` (84 files, 0 failed, each); the UI suite in `python:3.10-slim` (319
+  passed); shellcheck 0 errors and 305 warnings over 214 scripts (main: 307 over 211);
+  `check-bash32`, `check-network-hits` (153 annotated hits, as on main) and
+  `check-perl-interp` clean; `cfn-lint` and both `cfn-guard` commands at the versions CI pins;
+  `check-release-keys` in a clone with the signing submodule. The gates on the final tip are
+  in the pull request's body.
+
+Known limits, accepted:
+
+- No full `setup-node.sh` run with apt, Docker and keytool: the steps were driven the way the
+  fixtures drive them, and the live proof drove the library against the real repository.
+- The AWS stack-update behaviour is from AWS's documentation, with the update order and the
+  instance stop inferred; no stack was launched.
+- The hardware parity hosts are fixtures; the page code ran in node against a stub DOM.
+- Menu 13 refreshes the host baseline twice on a first install that ends in a successful
+  restart; six guide headings sit alone on a page, as in 1.12. Both are in `followup.md`.
+- Changelog entries of released versions that name 487 are history and were left
+  (`README.md` below `## Changelog`, `CHANGELOG.md`).
+
+Left to the maintainer: merge the pull request; run the partner site's Publish workflow, after
+which `source_tree` in `https://run.telcoin.network/source.txt` must equal
+`git rev-parse origin/main:docs/partner`; cut and sign the scripts release that carries the
+fix (until then hosts on `scripts-v2.1.0` need `--genesis-dir`); the hardware page in the
+telcoin-network documentation still has the single table.

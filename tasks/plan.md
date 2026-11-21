@@ -1,172 +1,175 @@
-# Plan: host the partner PDFs at run.telcoin.network (2026-11-20)
+# Plan: node requirements from the benchmarks, chain configs at the pinned tag, mainnet chain id 731 (2026-11-21)
 
-Operators and MNO partners get browser links to the four partner PDFs. A new public repo
-`Telcoin-Association/tn-partner-site` (GitHub Pages, Actions source, custom domain
-`run.telcoin.network`) reads the committed PDFs from this repo's `main` at build time and serves
-them with a landing page. Two PRs here: the specification at 1.3 without the confidentiality
-footer (PR-1), then the links to the hosted copies (PR-2, stacked, merged once `/guide` is live).
+Three changes on one branch, `requirements-from-benchmarks`, as separate commits, ending in one
+pull request.
 
-`origin/main` at 2d1bdc7. Worktree `~/coding/telcoin/tnd-spec-13` holds both branches in turn.
-Site working copy `~/coding/telcoin/tn-partner-site`. Shared site contract:
-`tasks/spec-run-site.md`. Checkpoints `tasks/ckpt-run-<unit>.md`.
+1. **Bug fix.** Fresh testnet Docker and signed-release installs fail at keygen:
+   `ensure_chain_configs_available` clones the node repository's default branch, and since
+   2026-11-14 `main`'s testnet `committee.yaml` no longer matches the pinned hash. The scripts
+   take the chain configs at the pinned tag instead.
+2. **Hardware requirements per network.** Testnet figures follow the five Adiri validators;
+   the mainnet validator storage figure follows the latest benchmark runs. Docs, three operator
+   PDFs, the hardware check in the scripts and the UI, and the AWS template say the same thing.
+3. **Mainnet chain id 731** (added by the user during wave 0, 2026-11-21: "also ensure mainnet
+   chain id is listed as 731 everywhere using more subagents"). Upstream moved it from 487 to
+   731 in telcoin-network #1716 (`90ed40b39`, 2026-11-12); this repository still says 487.
 
-## Decisions (user, 2026-11-20)
+Base: `origin/main` at `01664cc` (fetched 2026-11-21), which contains #74 (Ubuntu 26.04
+recommended), #73, #72, #71 (AWS stack), #70, #69 and #68. No open pull requests.
+`scripts-v2.2.0` is not tagged. Integration branch: the main checkout. Agent worktrees:
+`~/coding/telcoin/tnd-req-<id>`. Shared spec: `tasks/spec-req-shared.md`. Checkpoints:
+`tasks/ckpt-req-<id>.md` in each agent's worktree.
 
-- Hosting: a new small public repo with GitHub Pages, the same mechanism as
-  `install.telcoin.network` and `docs.telcoin.network`. Nothing is duplicated or moved.
-- Domain: `run.telcoin.network`.
-- All four PDFs are served. The specification's footer line "Telcoin Association Confidential
-  and Proprietary Information" is dropped in a new revision.
-- Defaults: repo name `tn-partner-site`; publishing is a manual "Run workflow" after a docs
-  merge (the workflow also accepts `repository_dispatch`); `robots.txt` allows indexing; the
-  landing page takes Geist and the Telcoin Network logo from `docs/partner/assets` at build time.
+## Decisions (user, 2026-11-21)
 
-## URIs
+- CPU is written as physical cores with vCPU in parentheses.
+- Testnet storage is one row for every role: 350 GB minimum, 500 GB TLC NVMe recommended.
+- Testnet minimum storage mirrors the deployed disks: 15,000 IOPS, 240 MB/s.
+- Mainnet: 20,000 IOPS for validators only; observers stay at 10,000.
+- AWS Validator preset `c7i.2xlarge`, with a note that this size sustains 12,000 IOPS and bursts.
+- The round ends with the branch pushed and one PR opened.
+- No Claude attribution on any commit or on the PR.
+- Mainnet chain id is 731 everywhere.
 
-| URI | Serves |
-|---|---|
-| `https://run.telcoin.network/` | landing page |
-| `https://run.telcoin.network/mno-node-guide.pdf` | MNO node guide |
-| `https://run.telcoin.network/testnet-node-requirements.pdf` | testnet one-pager |
-| `https://run.telcoin.network/mainnet-node-requirements.pdf` | mainnet one-pager |
-| `https://run.telcoin.network/technical-specification.pdf` | technical specification |
-| `/guide`, `/testnet`, `/mainnet`, `/spec` | short aliases that redirect to the PDFs |
+Defaults chosen by the orchestrator: testnet validator rows drop "ECC"; observer rows get the
+vCPU parentheses too; AWS data volume default 500 GiB, allowed 350/500/2000/4000, 15,000 IOPS,
+300 MB/s; the hardware check uses testnet tiers on devnet and mainnet tiers with no network;
+the fix's docs are a separate commit; released changelog entries that record 487 as what an
+older release shipped are history and stay (they are listed in the final report).
 
-## P0 Setup (orchestrator)
+## Baseline on `main` (01664cc), 2026-11-21
 
-- [x] `git fetch`; worktree `tnd-spec-13` on `docs/spec-1.3-public` off `origin/main` (2d1bdc7)
-- [x] `git init -b main` in `~/coding/telcoin/tn-partner-site`, `tasks/` excluded
-- [x] scratch clone of `origin/main` (`src-main`) as the read source
-- [x] the plan's line references re-checked against `origin/main`
-- [x] baseline: page 1 of each PDF prints `Version <v> · <date>`; the specification's text has
-      the marking 36 times, the other three none; pages 1, 1, 77, 37
-- [x] shared site contract `tasks/spec-run-site.md`
+- `bash tools/tests/run.sh`: 81 files, 0 failed on the host (bash 5.3.9) and as root in
+  `ubuntu:26.04`.
+- `shellcheck -x` 0.11.0 over 211 tracked `*.sh`: 0 errors, 307 warnings.
+- `bash tools/check-network-hits.sh`: clean, 153 annotated hits in 29 files.
+- Lines naming 26.04: `README.md` 9, `OPERATOR.md` 8, guide 5, each one-pager 1,
+  `aws/node.yaml` 4, `lib/common.sh` 4, `setup-node.sh` 1.
+- Images present: `tn-pdf-tools`, `python:3.10-slim`, `bash:3.2`, `ubuntu:26.04`.
+- `gh auth status`: scopes `read:org`, `repo`; git over SSH.
 
-## P1 (parallel, opus)
+## Wave 0 (orchestrator)
 
-- [x] A1: `build-site.sh`, `site/index.html`, `site/style.css`, `site/404.html`, `site/robots.txt`
-      (its harness 115/115; the contract's `@@` check narrowed to text files, since the PDFs
-      and fonts hold those bytes by chance; first local site commit 0ee1951)
-- [x] A2: `.github/workflows/publish.yml`, `README.md`, `LICENSE-APACHE`, `LICENSE-MIT`
-      (actionlint clean, pins identical to the installer workflow; the orchestrator added a
-      `.gitignore` for `/src/` and `/_site/`)
-- [x] B: PR-1 on `docs/spec-1.3-public` (93412a4, def6961): metadata 1.3 without `confidentiality`, template and
-      theme `.run-meta`, build script without `NEED_CONFIDENTIALITY`/`CONFIDENTIALITY` and with
-      the marking in `FORBIDDEN`, AGENTS.md, CHANGELOG, the rebuilt specification PDF;
-      `--all` reports the other three unchanged
+- [x] `git fetch`; branch `requirements-from-benchmarks` off `origin/main` (01664cc)
+- [x] project-context refreshed (`.claude/project-context.md`)
+- [x] Google Cloud and AWS figures rechecked on the live pages
+- [x] `scripts-v2.2.0` still untagged; no open PRs
+- [x] Baseline gates on `main`
+- [x] Mainnet chain id: upstream checked (731 on `main` since #1716; 487 at the pinned tags)
+- [x] `tasks/plan.md`, `tasks/spec-req-shared.md`
 
-## P2
+## Wave 1 (seven implementers in parallel, disjoint files or ranges)
 
-- [x] VB: PASS WITH NOTES from a fresh clone at a different path. Scope 7 files; both commits
-      rebuild to four "PDF unchanged"; 37 pages; no marking in any form; word sequences equal on
-      37 of 37 pages; pixels differ only at the cover's version line and the footer band.
-      Findings: (1) the marking passes through `metadata.yaml` into the PDF's document
-      properties; (2) without `pdftotext` every non-Markdown route passes; (3) the CHANGELOG
-      sentence overstates; (4) the pixel band in the first commit message was 0.5 mm off
-- [x] orchestrator: first commit message reworded with VB's band (tips now 35214c4, ecf035f;
-      trees identical to 93412a4, def6961); first local site commit 0ee1951
-- [x] B2 (fresh writer): the lint checks each document's sources (Markdown, metadata,
-      template, stylesheet) for the marking in any case, without `pdftotext`; CHANGELOG and
-      AGENTS.md say what is checked where; folded into the tip commit (9da2a07, +19 -5 in the
-      script, no PDF changed)
-- [x] VB2 (fresh verifier): PASS WITH NOTES. Findings 1 and 2 closed on every named route,
-      with and without `pdftotext`; prose and commit-message claims re-run and true. New:
-      a no-break space between the words in `metadata.yaml` passes every check (`tr` is
-      bytewise). By design and left: other wordings; markup-split phrases without `pdftotext`
-- [x] B3: U+00A0 folded in the lint loop (the verifier's validated line), header comment;
-      tip 2e6ce45, script only (+6 -3)
-- [x] orchestrator: checked from a fresh clone at another path: four "PDF unchanged"; the
-      no-break-space case exits 1 at the lint; shellcheck and `bash -n` clean; no trailers
-- [x] orchestrator: `docs/spec-1.3-public` pushed (35214c4, 2e6ce45); PR-2 rebased onto it
-      (797dcb5, e957fd9; `docs/partner` tree still a6d248b; four "PDF unchanged")
+- [x] FIX-A1: chain-config helpers in `lib/common.sh`; `genesis_hash_test.sh` ensure cases
+- [x] HW-SH: per-network tiers and `check_hardware` in `lib/common.sh`; `step_preflight` order
+- [x] HW-UI-SRV: `ui/server.py` hardware profile per network; contract and mirror tests
+- [x] HW-UI-PAGE: `ui/static/index.html` preflight sends the network; wording; wiring test
+- [x] AWS: `aws/node.yaml` presets, volume size and IOPS; guard rules and their tests
+- [x] CHAIN-SH: `MAINNET_CHAIN_ID` 731 in the library, script comments, shell fixtures
+- [x] CHAIN-UI: chain 731 in `ui/server.py` network tables and the UI tests
 
-## P3 (parallel, opus)
+## Wave 1b (four agents, each after its prerequisite is integrated)
 
-- [x] VA-S: FAIL on `build-site.sh` at 0ee1951, everything else in the contract passing
-      (red/green, 48 output checks, every gate, usage and safety, `<src>` only read, sparse
-      emulation, determinism). Findings: (1) committed symlinks are followed out of `<src>`
-      and published; (2) edits hidden by index flags are served; (3) a clean filter in
-      `<src>/.git/config` runs under `git status`; (4) a failing `git status` exits 128
-      without an `error:` line; (5) a relative `<src>` shaped like `v=1` confuses awk
-- [x] orchestrator: decisions written into the contract ("Amended after verification"):
-      gate 0 compares each file the build reads with its blob in `HEAD` (no `git status`),
-      gate 1 pins the logo's SHA-256, the concurrency group is per ref, README setup section
-- [x] A3 (fresh writer): the site fix round. `committed()` replaces `tracked()` (regular
-      file, in `HEAD`, `hash-object --no-filters` equals `rev-parse HEAD:<path>`); `LOGO_SHA256`;
-      absolute `<src>`; `error:` lines for git failures; modes normalised; group
-      `pages-${{ github.ref }}`; README. The earlier harness reruns green with twelve
-      expectations changed for the new gate 0, 54 new cases pass. One SIGINT hang in several
-      hundred runs, not reproduced. 281k tokens: over budget, see lessons
-- [x] orchestrator: two README wording notes from VC (publish rule, the short link without
-      its slash), one comment; site commit a3c70b8; the fixed build passes on Ubuntu 24.04
-      against PR-2 (18 files, 1.1/1.1/1.9/1.3, hashes verify)
-- [x] VA2-S (fresh verifier): PASS WITH NOTES at a3c70b8. Nine reported cases closed (the
-      old script passes all nine); twenty-odd ways around gate 0 refused or serving exactly
-      HEAD's bytes; logo pin; modes; exit codes 0, 1, 2 only; the earlier harness 385 passed,
-      0 failed; sparse emulation fetches nothing; 300 signalled runs, no hang, one leftover
-      temp directory. Left: (1) a race between the check and the copy needs a writer in
-      `<src>` during the build; (2) `git replace`; (3) a remote command via lazy fetch; (4) a
-      SIGTERM to bash alone can leave a temp directory
-- [x] A5: `--no-replace-objects` and `GIT_ALLOW_PROTOCOL=none` in `git_src` (the verifier's
-      tested line) for (2) and (3); (1) documented in the README; (4) left. Both repros
-      closed, the harness again 385 passed, 0 failed; the orchestrator's run on Ubuntu 24.04:
-      green exit 0, the marked specification gate 5, a symlinked licence gate 0. Site commit
-      ad25b0b
-- [x] VA2-W (fresh verifier): PASS WITH NOTES at a3c70b8 and PR-2 0e21144. The group change
-      is right for every pair of triggers; six violations of the constraints PR-2 names each
-      refuse the build; served-output regression 49 and 113 checks, 0 fail. Notes: the
-      first deploy needs PR-1 merged (today's `main` fails gate 5); the branch-deploy test in
-      setup did not test the environment's branch rule (two runs needed); the workflow header
-      still said "a partner PDF change"; "Add or rename" missed two places; gate 0 missing
-      from "fixed where"; the retirement sentence incomplete
-- [x] A4: those README and comment fixes (prose only); site commit 4918da6
-- [x] C: PR-2 on `docs/run-telcoin-network-links` (0e7053b, 93f3969): both one-pagers end
-      Contact with "The full operator guide is at run.telcoin.network/guide." at 1.1, one page
-      each; README note and maintainer paragraph; two AGENTS.md bullets (publishing; the two
-      constraints the site's build puts on the documents); CHANGELOG entry
+- [x] FIX-A2 (after FIX-A1): `setup-node.sh` search order, hint, progress fn, require list
+- [x] FIX-T (after FIX-A1): `tools/tests/chain_configs_tag_test.sh`, written from the spec
+- [x] FIX-B (after FIX-A1): `edit-config.sh` menu 13; `chain_configs_refresh_test.sh`
+- [x] HW-T (after HW-SH): `tools/tests/hardware_check_test.sh`, written from the spec
 
-## P4
+## Integration 1 (orchestrator; version constants and sidecars are mine)
 
-- [x] VC: PASS WITH NOTES from a fresh clone. Scope 9 files; both commits rebuild to four
-      "PDF unchanged"; each one-pager is one page at 1.1 with one link annotation to
-      `https://run.telcoin.network/guide`; text and pixels differ only in the version line
-      and the Contact sentence; the site build (0ee1951) accepts the branch (1.1/1.1/1.9/1.3,
-      `source_tree` a6d248b). Notes: AGENTS.md omits two of the site's constraints (gate 3
-      shapes, the five shared assets); "a change to a partner PDF" should be "a change under
-      `docs/partner`"; the currency check needs `git fetch origin`; "never renamed or removed"
-- [x] C2: the wording fixes and the files-and-logo bullet, folded into PR-2's tip (bb4f8a5,
-      three prose files, `docs/partner` tree still a6d248b); the orchestrator pointed one
-      sentence at the site README's "Add or rename a document" (tip 0e21144)
-- [x] orchestrator: records committed, `docs/run-telcoin-network-links` pushed; PR titles and
-      bodies in `tasks/pr-body-run-1-spec.md` and `tasks/pr-body-run-2-links.md`
+- [x] `fix(setup): take the chain configs from the pinned tag, not from main`
+- [x] `fix(edit-config): refresh installs the pinned chain configs instead of pulling`
+- [x] `feat(setup): check the hardware against the chosen network's tiers`
+- [x] `feat(ui): the setup preflight judges the hardware tiers of the wizard's network`
+- [x] `feat(aws): Validator preset c7i.2xlarge, a 500 GiB data volume at 15,000 IOPS`
+- [x] `fix(network): the mainnet chain id is 731`
+- [x] All gates on the tip
 
-## P5 (after the user's steps)
+## Wave 2 (five independent verifiers, then the range review)
 
-- [ ] VD: verdict on the live site (after steps 6-9, again after step 10)
+- [x] V-FIX-S: setup end to end, skew, `remove-node`, the live proof in `ubuntu:26.04`
+- [x] V-FIX-E: menu 13
+- [x] V-HW-UI: shell and server parity, parameter validation, page wording
+- [x] V-AWS: lint and guard, EBS limits, update behaviour, presets against the hardware check
+- [x] V-CHAIN: no surviving 487 as the mainnet id; behaviour on 731 and on 487; sibling repos
+      (read-only report)
+- [x] Findings fixed (implementer if under budget, else a fresh agent)
+- [x] V-RANGE: one whole-diff review of the code range, then its fixes
+- [x] Code freeze
 
-## User-only steps
+## Wave 3 (docs, five writers in parallel, one owner per file)
 
-0. Org Settings, Pages, Verified domains: `telcoin.network` is verified.
-1. Create `Telcoin-Association/tn-partner-site`, public and empty.
-2. Settings, Pages, Source: GitHub Actions.
-3. Settings, Environments, `github-pages`: deployment branches `main` only.
-4. Recommended: a ruleset on `main` requiring a pull request.
-5. Merge PR-1. The site code is then pushed over SSH; the first run deploys to
-   `https://telcoin-association.github.io/tn-partner-site/`.
-6. Settings, Pages, Custom domain `run.telcoin.network`, Save.
-7. Vercel DNS: `run` CNAME `telcoin-association.github.io`.
-8. Wait for "DNS check successful" and the certificate.
-9. Tick "Enforce HTTPS".
-10. Merge PR-2, then run the publish workflow once more.
+- [x] DOC-O: `OPERATOR.md` (three passes: fix, hardware, chain id)
+- [x] DOC-R: `README.md` (three passes; changelog entries, nothing older edited)
+- [x] DOC-M: `CHANGELOG/scripts-v2.2.0.md`, `CHANGELOG.md`, `AGENTS.md`, `followup.md`
+- [x] GUIDE: `mno-node-guide.md` 1.13, all topics in one pass, PDF
+- [x] ONEPAGERS: both one-pagers 1.3, PDFs, the list of cuts used
 
-## House rules
+## Wave 4 (verification, read-only)
 
-- Agents on opus, each with an explicit read list and a checkpoint rewritten after every section.
-- No Claude trailer or footer; commit messages go through a file.
-- Nothing is pushed to `main`; branches only. `install.telcoin.network` and its workflow are
-  not touched.
+- [x] V-DOC-REF: quoted messages, changelog headings, 26.04 counts, surviving old figures
+- [x] V-DOC-PDF: `pdftotext` assertions, page counts, guide cells equal one-pager cells
+- [x] V-SITE (orchestrator): the partner site's build gates against the committed tip
 
-## Review
+## Final (orchestrator)
 
-In `tasks/todo.md`, "Review: partner documents at run.telcoin.network (2026-11-20)".
-Lessons in `tasks/lessons.md`, "Partner documents site round (2026-11-20)".
+- [x] Doc fixes
+- [x] `git fetch` (`main` did not move); every gate again on the final tip
+- [x] `bash tools/gen-checksums.sh`; `git status --porcelain` empty
+- [x] `tasks/` records: this plan ticked, review in `todo.md`, lessons, harnesses linted
+- [x] No Claude attribution in `main..tip`; subjects checked
+- [ ] Push over SSH; one PR; CI watched (24.04, 26.04 VM assertions, macOS)
+
+## Commits (as they landed, no attribution)
+
+1. `fix(setup): take the chain configs from the pinned tag, not from main`
+2. `fix(edit-config): refresh installs the pinned chain configs instead of pulling`
+3. `feat(setup): check the hardware against the chosen network's tiers`
+4. `feat(ui): the setup preflight judges the hardware tiers of the wizard's network`
+5. `feat(aws): Validator preset c7i.2xlarge, a 500 GiB data volume at 15,000 IOPS`
+6. `fix(network): the mainnet chain id is 731`
+7. Fix commits from the verifiers' findings and the whole-diff review:
+   `fix(setup): chain-config helpers after verification`,
+   `fix(edit-config): menu 13 offers the clone and frees the lock before its prompts`,
+   `fix(ui): the preflight treats a measured zero as unmeasured and words logical CPUs as such`,
+   `fix(aws): say in the console what a c7i.2xlarge sustains to EBS`,
+   `fix(caddy): the mainnet gate names the chain it found and checks the public RPC's chain`,
+   `fix(edit-config): menu 13 uses the library's pre-checks`
+8. `docs: chain configs come from the pinned tag`
+9. `docs: hardware requirements per network`
+10. `docs: the mainnet chain id is 731`
+11. `docs(partner): guide 1.13, hardware per network, chain configs at the pinned tag, chain id 731`
+12. `docs(partner): node requirements one-pagers 1.3`
+13. `docs: corrections after verification`
+14. `chore(release): refresh the checksums`
+15. `tasks: plan, checkpoints and review of the requirements round`
+
+## What changed against the plan
+
+- The user added the mainnet chain id (731) during wave 0: two more implementers, a verifier,
+  its own code commit and docs commit.
+- The fix round bumped the touched scripts once more (lib/common 2.2.5, setup-node 2.1.4,
+  edit-config 2.2.2, telcoin-ui 2.1.3, update-node 2.1.2, install-caddy 2.2.1), so the README
+  changelog has one entry per bump.
+- Two more verifier-driven packages than planned: the Caddy mainnet gate (V-CHAIN) and the seam
+  between menu 13 and the library (the whole-diff review).
+- The PDFs were built on Ubuntu 26.04 with pandoc 3.14 and WeasyPrint 70.0, not in the Debian 12
+  `tn-pdf-tools` container: the user asked for pandoc 3.14 in a container, and the Ubuntu 26.04
+  image turned out to rebuild main's PDFs byte for byte, while the Debian container breaks some
+  lines earlier whatever the pandoc version.
+- Two commit messages were corrected after the documents' verifier showed a claim in them was
+  wrong (what the old menu 13's pull did on a source install), so the branch was rebuilt with
+  the same trees; `tasks/spec-req-shared.md` section 8 maps the earlier commit ids, which the
+  verifier reports and checkpoints cite, to the final ones.
+- The testnet one-pager keeps the QLC advice inside its "Every node" bullet; the mainnet one
+  needed cuts 1 and 3 of the ranked list, not 2.
+- Not applied, recorded in `followup.md`: menu 13's second host-baseline refresh on a first
+  install, and the guide headings that sit alone on a page.
+
+## What stays with the user
+
+- Merge the PR.
+- Run the partner site's Publish workflow; then the orchestrator verifies run.telcoin.network.
+- Cut and sign the scripts release that carries the fix; until then `scripts-v2.1.0` users need
+  `--genesis-dir`.
+- The upstream hardware page in `telcoin-network` still shows the old single table.
