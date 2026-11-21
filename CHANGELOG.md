@@ -28,7 +28,7 @@ on, ext4 or xfs; none checked." No type size, margin or column width changed. Th
 specification is unchanged at 1.3. After the change merges, run the Publish workflow of
 tn-partner-site and check `source.txt`, as the run.telcoin.network entry below says.
 
-### Mainnet chain id 731, November 2026 -- lib/common 2.2.4, check-node 2.2.1, update-node 2.1.1, telcoin-ui 2.1.2, install-caddy 2.2.1
+### Mainnet chain id 731, November 2026 -- lib/common 2.2.5, check-node 2.2.1, update-node 2.1.2, Node Manager UI 2.1.3, install-caddy 2.2.1
 Part of `scripts-v2.2.0`; see [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
 telcoin-network moved the mainnet chain id from 487 to 731 (`0x2db`) in #1716 on 2026-11-12, and
 upstream devnet genesis files use 487 now. `MAINNET_CHAIN_ID` in `lib/common.sh` is 731
@@ -57,7 +57,8 @@ Existing stacks need no change; do not update them to the new template (OPERATOR
 
 ### Chain configs from the pinned tag, November 2026 -- lib/common 2.2.5, setup-node 2.1.4, edit-config 2.2.2
 Part of `scripts-v2.2.0`; see [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
-Fresh testnet Docker and signed-release installs have failed at keygen since 2026-11-14. Setup
+Fresh testnet Docker, signed-release and existing-binary installs have failed since 2026-11-14,
+at step 4 of 8, before any key is made. Setup
 took `genesis.yaml`, `committee.yaml` and `parameters.yaml` from the default branch of the
 telcoin-network repository, whose testnet `committee.yaml` then stopped matching the pinned
 sha256. Setup now reads the three files from the tag the script release pins

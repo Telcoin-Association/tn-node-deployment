@@ -727,6 +727,16 @@ backgrounds) and `covers/`. Record the provenance of every vendored file in
   the PDF text and is optional. The `tn-pdf-tools` container is a locally built Debian 12
   image with pandoc 3.8.3 and WeasyPrint 70.0; no Dockerfile for it is committed. The script
   checks for pandoc 3.8+ and WeasyPrint 61+.
+- What moves a PDF's bytes is the text stack under WeasyPrint, not pandoc. On Ubuntu 26.04
+  (Pango 1.57.0, HarfBuzz 12.3.2) with pandoc 3.14 and WeasyPrint 70.0, the sources of guide
+  1.12 and one-pagers 1.2 build to the committed PDFs byte for byte, and guide 1.13 and
+  one-pagers 1.3 were built there: `ubuntu:26.04` with `python3-venv`, `poppler-utils`,
+  `libpango-1.0-0`, `libpangoft2-1.0-0`, `libharfbuzz0b` and `libharfbuzz-subset0` from apt,
+  `weasyprint==70.0` from pip in a venv, and the static `pandoc` binary of the
+  `pandoc/minimal:3.14` image. The Debian 12 container (Pango 1.50.12, HarfBuzz 6.0.0) lays
+  the same text out with some lines broken earlier, with pandoc 3.8.3 and with 3.14 alike, so
+  do not commit a PDF built there. A build that only differs by toolchain is kept out by the
+  script ("no source changed since"); `--force` replaces the committed PDF.
 - Nothing under `docs/partner/` or `tools/` is updater-tracked or carries a `.sha256`
   sidecar.
 

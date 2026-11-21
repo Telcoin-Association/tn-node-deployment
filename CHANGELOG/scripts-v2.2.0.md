@@ -16,7 +16,8 @@ used to delete its rule (see [firewall-setup 2.2.0](#firewall-setup-220)).
 A second fix reaches every new testnet node. Setup took the chain configs (`genesis.yaml`,
 `committee.yaml` and `parameters.yaml`) from the default branch of the telcoin-network repository,
 whose testnet `committee.yaml` stopped matching the pinned sha256 on 2026-11-14, so fresh testnet
-Docker and signed-release installs have failed at keygen since then. Setup and edit-config's menu 13
+Docker, signed-release and existing-binary installs have failed since then, at step 4 of 8, before
+any key is made. Setup and edit-config's menu 13
 now read the three files from the tag this release pins, `v0.16.0-adiri`, and never from a branch
 (see [lib/common 2.2.5](#libcommon-225)). Before a host takes this release, a testnet install on
 `scripts-v2.1.0` works with `--genesis-dir <dir>`, where `<dir>` holds the three files of
@@ -214,8 +215,10 @@ Every other script, library and UI file keeps its version. The runbook for the g
 ### edit-config 2.2.2
 
 - Menu 13, "Refresh chain configs", ran `git pull` in the repository checkout and copied
-  `chain-configs/<network>` from its default branch. On testnet the pull moved a source install's
-  build tree, and the copy was then refused because the default branch no longer matches the pins.
+  `chain-configs/<network>` from it. On a source install, whose checkout is detached at a release
+  tag, the pull failed and the menu stopped. On the default-branch clone setup makes for other
+  installs, the pull moved the checkout to the branch's tip, and the copy was then refused because
+  that branch no longer matches the pins.
   On a network with a pinned tag the menu now installs the pinned files through
   `tn_chain_configs_from_tag` (see [lib/common 2.2.5](#libcommon-225)) and copies them from
   `/etc/telcoin/chain-configs/<network>/`; it runs no pull and no submodule command. The menu

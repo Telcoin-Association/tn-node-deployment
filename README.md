@@ -1626,7 +1626,7 @@ The Network tab links the network's status page only where one exists: testnet l
 
 The firewall card lists node ports beyond its three toggles, read-only. CPU counts are physical cores, shown as "8 (16 threads)".
 
-The setup wizard's preflight judges the hardware tiers of the wizard's network, the tables in [Hardware](#hardware): the mainnet tiers once mainnet is picked, the testnet tiers otherwise, and going back to the preflight step after picking a network fetches them again.
+The setup wizard's preflight judges the hardware tiers of the wizard's network, the tables in [Hardware](#hardware). It comes before the Network step, so it shows the testnet tiers until you pick another network and go back to it, which fetches that network's tiers.
 It judges cores exactly and RAM and disk with the shell's 5 % slack, and a RAM or disk size read as zero counts as not measured, as in the shell.
 Each tier reads like the tables, cores with vCPU (`3 cores (6 vCPU)`) and disks as `350 GB` or `2 TB`, followed by the detected host (its disk in decimal GB), the tier set it compared with and the single-core note.
 When the server could count only logical CPUs, the detected line reads `Detected 8 logical CPUs / ...`, followed by `Physical cores could not be counted, so the tiers are compared with logical CPUs; with hyperthreading that is up to twice the physical cores.`
@@ -2194,14 +2194,14 @@ The network is a new third argument; a caller that passes two arguments gets the
 Setup checks the hardware once the network is picked, after the internet check, and passes the network to `check_hardware`, so a testnet host is judged against the testnet table.
 
 ### edit-config v2.2.1 — menu 13 installs the pinned chain configs instead of pulling
-Menu 13 ran `git pull` in the telcoin-network checkout and copied the default branch's files: on testnet the pull moved a source install's build tree, and the copy was then refused because those files no longer match the pins.
+Menu 13 ran `git pull` in the telcoin-network checkout and copied its files. On a source install, whose checkout is detached at a release tag, the pull failed (`git pull failed in /opt/telcoin-source. Chain configs unchanged.`); on the default-branch clone setup made for other installs, it moved the checkout to the branch's tip, and the copy was then refused because those files no longer match the pins.
 On testnet it now installs the files at the pinned tag into `/etc/telcoin/chain-configs/testnet/`, as setup does, and copies them from there, with no pull and no submodule command; the host baseline is made again when it installed files.
 When the node's data dir already holds the pinned files it prints "Nothing to refresh" and returns without a prompt, the lock or a restart.
 The menu label reads `(pinned genesis/committee/parameters)`.
 Mainnet keeps its refusal; devnet still pulls.
 
 ### lib/common.sh v2.2.2 — chain configs from the pinned tag, not from main
-Fresh testnet Docker and signed-release installs failed at keygen: setup cloned or pulled the telcoin-network default branch, whose testnet `committee.yaml` has not matched the pin since 2026-11-14.
+Fresh testnet Docker, signed-release and existing-binary installs failed at step 4 of 8, before any key is made: setup cloned the telcoin-network default branch, whose testnet `committee.yaml` has not matched the pin since 2026-11-14.
 The library now reads `genesis.yaml`, `committee.yaml` and `parameters.yaml` at the tag this release pins (`v0.16.0-adiri`), checks them and installs them root-owned in `/etc/telcoin/chain-configs/testnet/`.
 The checkout's HEAD, index, working tree and submodules are never touched, and nothing runs when the files are already there.
 With no checkout it clones at the tag, without submodules, after the same consent prompt; a failed clone returns an error instead of exiting.

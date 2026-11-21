@@ -759,6 +759,25 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   missing. Install poppler on the build machine or make the skip loud.
 - In `docs/partner/mno-node-guide/theme.css`, `td code { overflow-wrap: break-word }` lets inline
   code in a table break after a leading `--`. Cosmetic.
+- In the partner guide, six section headings sit alone on an otherwise empty page, with the
+  section's table on the next page (3.6, 8.3, 9.1, 9.2, 9.3 and 9.5; in 1.12 and in 1.13). The
+  cause is `table { break-inside: avoid }` in the guide's `theme.css` together with the rules that
+  keep a heading with what follows. A trial with `break-inside: auto` gave 69 pages and no such
+  heading, at the cost of short tables splitting. Closes when long tables may split and short ones
+  may not; rebuild with `--all` and look at the specification too, which shares the rules.
+- The Debian 12 `tn-pdf-tools` container (Pango 1.50.12, HarfBuzz 6.0.0) breaks some lines of the
+  guide earlier than the published PDFs do, with pandoc 3.8.3 and with 3.14 alike; one break split
+  an `ssh -o` option after its hyphen. The 1.13 and 1.3 PDFs were therefore built on Ubuntu 26.04
+  (`AGENTS.md`, "Partner documents"). Closes when a Dockerfile for that toolchain is committed, or
+  the Debian container is retired.
+- The mainnet node requirements one-pager 1.3 has no spare line: the gap above its footer is about
+  2.5 mm. Any added line needs another cut; the next ones are the firewall sentence with the
+  `2) Mainnet` sentence, then the callout. Its "Every node" bullet was shortened to fit and no
+  longer names the data directory.
+- `README.md`, "Node releases", still describes the release key that script releases ship as
+  `grantkee.asc` with the earlier RSA key's fingerprint and expiry, while the update-scripts 2.2.0
+  changelog entry names the ed25519 key and adds `MavenRain.asc`. Closes when that sentence names
+  the keys `lib/release-keys/` holds.
 - `--help` gaps. `setup-node.sh --help` omits `--network`, `--binary-path`, `--docker-image`,
   `--address`, the `--external-*` and `--listener-*` flags, `--data-dir`, `--advertised-name`,
   `--service-user`, `--service-group`, `--genesis-dir` and `--enable-healthcheck-monitor`;
