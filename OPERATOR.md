@@ -203,7 +203,7 @@ Open them in every layer that filters traffic: `ufw` on the host (section 2.6), 
 | Network | Chain ID | Public RPC | Explorer |
 |---|---|---|---|
 | Adiri testnet | 2017 (`0x7e1`) | `https://rpc.adiri.tel` | `https://telscan.io` or `https://www.telscan.xyz` |
-| Mainnet | 487 (`0x1e7`) | `https://rpc.telcoin.network` is reserved; the endpoint is confirmed at launch | Not launched yet |
+| Mainnet | 731 (`0x2db`) | `https://rpc.telcoin.network` is reserved; the endpoint is confirmed at launch | Not launched yet |
 | Devnet | 32285 (`0x7e1d`) | `https://rpc.devnet.telcoin.network` | None |
 
 The public RPCs sit behind a load balancer and answer JSON-RPC over HTTPS only; a WebSocket upgrade gets HTTP 405.
@@ -226,7 +226,7 @@ curl -s -X POST -H 'content-type: application/json' \
   --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' https://rpc.telcoin.network
 ```
 
-`"result":"0x7e1"` is the testnet, `0x1e7` mainnet and `0x7e1d` devnet.
+`"result":"0x7e1"` is the testnet, `0x2db` mainnet and `0x7e1d` devnet.
 The scripts run this check themselves: when an RPC serves another chain than the node's, `check-node.sh` warns and skips its network comparison, and `prepare-stake.sh` stops.
 
 Setup records the node's network in `/etc/telcoin/.node-meta` as `NETWORK=testnet`, `mainnet` or `devnet`.
@@ -265,7 +265,7 @@ Directories must be absolute paths of letters, digits and `. _ / -`, without `..
 
 1. Welcome. Answer `y` to `Ready to begin node setup?`.
 2. Preflight ("Step 1 of 8"). Setup checks that it runs as root, takes the update lock (`/run/telcoin/update.lock`), detects the distribution, tells needrestart not to restart the node and unattended upgrades not to reboot the host, and runs the CVE-2026-31431 gate. It lists your mounted filesystems and physical disks, then asks `Data directory [/var/lib/telcoin]`. Enter a path on your data drive if you have one. It then runs a port check (in-use ports only warn) and installs `curl` and `git` if missing.
-3. Network. Choose `1) Adiri Testnet (Chain ID: 2017)`. `2) Mainnet (Chain ID: 487)` is marked coming soon and returns you to the menu. Devnet is not offered interactively. Setup then checks the internet connection, runs the hardware check against that network's table (section 1.1), and checks the systemd floor for the network (section 1.2).
+3. Network. Choose `1) Adiri Testnet (Chain ID: 2017)`. `2) Mainnet (Chain ID: 731)` is marked coming soon and returns you to the menu. Devnet is not offered interactively. Setup then checks the internet connection, runs the hardware check against that network's table (section 1.1), and checks the systemd floor for the network (section 1.2).
 4. Testnet add-ons (testnet only). Each is off by default: the health-monitor endpoint on TCP 43174, log shipping, metrics shipping, a region label if you turned either shipping option on, and VPN admin SSH. The region label keeps only letters, digits, `_` and `-`, up to 32 characters; setup warns when it shortens one. See [docs/testnet-addons.md](docs/testnet-addons.md) before you opt in. Then, on every network, setup asks `Set up private alerts once the node is running?` (section 4.14): a yes only marks them pending, and the monitor URLs are asked for at step 13.
 5. Install method. See section 2.3. Source builds first ask `Install missing packages now?` if build dependencies are missing (answer y; No exits), then show a picker of the network's release tags (`vX.Y.Z-adiri` on testnet); a branch or a commit id is refused. The build runs as the `tn-build` account, so stay attached to the session for the 20 to 40 minutes it takes. `2) Signed release` asks for the release tag and downloads and checks it (section 2.3). Docker installs ask for the image: a release tag, the image by digest, or Enter for the newest release (section 2.3); setup resolves a tag to its digest and runs the image by digest only. A testnet release candidate (`vX.Y.Z-adiri-rcN`) is installed only when you type or pass its tag; no default offers one. "I already have it" first offers a binary it finds (`Use this binary?`) and asks `Full path to telcoin binary:` only if it finds none or you decline.
 6. Passphrase storage. There is no menu. At the end of preflight setup picks how the node will keep the BLS passphrase: as an encrypted systemd credential, `/etc/telcoin/bls-passphrase.cred`, wherever systemd-creds works (systemd 250 or later), sealed with the TPM2 as well when the host has a usable one; otherwise, on testnet and devnet only, in the root-only file `/etc/telcoin/bls-passphrase`. A mainnet host with no usable TPM2 stops unless you pass `--allow-no-tpm`. Section 2.8 covers the flags.
@@ -842,7 +842,7 @@ The regular run checks more of the hardening on an installed node: the root-owne
 Its last block, `Checking the script release...`, reads the installed release record of the scripts (`~/telcoin-node-scripts/MANIFEST`): the tag, serial and release date, and the expiry date (section 4.1). An expired release, or no record at all, is a warning with the command to run; it never counts as an issue, and the block makes no network call.
 It also runs on macOS, where it skips the memory check with a note.
 
-If the comparison RPC serves another chain than the node's, the report says so and skips the comparison instead of blaming the node, for example `https://rpc.telcoin.network serves chain 2017 (testnet), not chain 487 (mainnet) -- skipping the network comparison`.
+If the comparison RPC serves another chain than the node's, the report says so and skips the comparison instead of blaming the node, for example `https://rpc.telcoin.network serves chain 2017 (testnet), not chain 731 (mainnet) -- skipping the network comparison`.
 That is what a mainnet node would see today with the default RPC, because mainnet has not launched and its hostname still serves the testnet (section 1.5).
 It does not count as an issue; `--network-rpc <URL>` with an RPC for the node's chain brings the comparison back.
 
@@ -2179,7 +2179,7 @@ sudo bash ~/telcoin-node-scripts/install-caddy.sh --phase=rpc-enable --rpc-domai
 
 `rpc-check-dns` changes nothing and exits 0 only when the name reaches this server.
 `rpc-enable` first shows what the endpoint exposes and asks you to agree; from a script, pass `--yes` (without a terminal and without `--yes` it stops: `public RPC needs your consent to the exposure above: run again with --yes (or from a terminal). Nothing was changed.`).
-On mainnet, Caddy is not offered to validators: the dashboard and public RPC are refused on a staked validator, on a node whose stake status cannot be read, and on a node with no `VALIDATOR_ADDRESS` in `.node-meta`. Serve public RPC from a separate RPC node and the dashboard over the SSH tunnel.
+On mainnet, Caddy is not offered to validators: the dashboard and public RPC are refused on a staked validator, on a node whose stake status cannot be read, and on a node with no `VALIDATOR_ADDRESS` in `.node-meta`. The stake is read from the local node, and from `https://rpc.telcoin.network` only when that endpoint answers with chain 731. A node whose network cannot be told (no `NETWORK` in `.node-meta`, and a genesis that cannot be read or is on neither 731 nor 2017, such as a chain-487 genesis) is refused too, with what was found: `The network of this node cannot be told (no NETWORK in .node-meta, and the chain id of /var/lib/telcoin/genesis/genesis.yaml (487) is neither 731 nor 2017), so this run cannot confirm it is not a staked mainnet validator. ...`. Serve public RPC from a separate RPC node and the dashboard over the SSH tunnel.
 `rpc-enable` writes the Caddy site and reloads Caddy, adds `ufw` rules for 80 and 443 (also while `ufw` is off, so they are in place when you turn it on), makes sure reth serves WebSocket, and sets the advertised URLs in `node-info.yaml` (the first worker's entry) with the node's own `keytool set-rpc`.
 It restarts the node once, and only if `node-info.yaml` or the launch command changed; it first runs the committee quorum check (section 4.11; `TN_ALLOW_QUORUM_RISK=1` overrides a refusal), and on a committee node it waits for the epoch boundary (section 4.2), which `TN_SKIP_EPOCH_WAIT=1` skips.
 If the check refuses, or the run is stopped before the restart, `node-info.yaml` and the launch command are put back.
@@ -2299,7 +2299,7 @@ The run ends with one line and an exit code:
 | 4 | `... node-info.yaml is back as it was (from <backup>).` | A rotation failed and was undone (6.6). |
 | 130, 143, 129 | `Interrupted by SIG<X> ...` after Ctrl-C (SIGINT), SIGTERM or SIGHUP | Outside a rotation nothing changed; run it again. For a rotation, see 6.6. |
 
-A mainnet node that uses the default RPC stops with exit 2 today: `https://rpc.telcoin.network serves chain 2017 (testnet), not chain 487 (mainnet)`, because mainnet has not launched and its hostname still serves the testnet (section 1.5).
+A mainnet node that uses the default RPC stops with exit 2 today: `https://rpc.telcoin.network serves chain 2017 (testnet), not chain 731 (mainnet)`, because mainnet has not launched and its hostname still serves the testnet (section 1.5).
 
 ### 6.3 Send the stake
 

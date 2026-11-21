@@ -116,10 +116,10 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   chain-config check, edit-config's menu 13 refuses mainnet, and a mainnet release refuses its
   chain-config lines in `SHA256SUMS`. Closes after the genesis ceremony, when the final files are
   published (U-13) and the tag and the three hashes are set.
-- The public RPC for chain 487 is not settled. The UI's `NETWORK_PUBLIC_RPC` has an empty list for
-  487, so its comparison cards show "-", while `MAINNET_RPC_URL` in `lib/common.sh` is
+- The public RPC for chain 731 (`0x2db`) is not settled. The UI's `NETWORK_PUBLIC_RPC` has an empty
+  list for 731, so its comparison cards show "-", while `MAINNET_RPC_URL` in `lib/common.sh` is
   `https://rpc.telcoin.network`, which check-node and the restart-window epoch reads use and which
-  answers for chain 2017 until launch. Closes at launch: confirm the endpoint answers chain 487 and
+  answers for chain 2017 until launch. Closes at launch: confirm the endpoint answers `0x2db` and
   fill the UI list.
 - Once mainnet is enabled, the setup wizard shows the mainnet hardware tiers at step 1 only when
   the operator goes back to it after picking mainnet at step 2; going forward, the verdict shows
@@ -134,14 +134,18 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   `/etc/telcoin/bootstrap-peers.yaml` onto the command line. Closes when it ships in a release and
   the start script switches to `--bls-passphrase-source credential` (gated on `--version`) and
   `--bootstrap-peers-file`.
-- U-3 and U-5, the chain 487 guard (faucet opt-in, build features in `--version` and the startup
-  line, cleartext BLS key refused on 487): issues #1725 and #1727, branch `mainnet-chain-guard`,
-  telcoin-network PR #1716 (open). The devnet deployment runs a faucet image on a chain-487 genesis and
-  must set `TN_ALLOW_FAUCET_ON_CHAIN_487=true` before it takes a release with the guard. Closes
-  when it merges and the devnet deployment is updated.
+- U-3 and U-5, the mainnet chain guard: merged on telcoin-network main as PR #1716 (2026-11-12),
+  issues #1725 and #1727; no release carries it yet. It moved mainnet to chain id 731 (`0x2db`);
+  487, the old id, is what upstream devnet genesis files use. On chain 731 the node refuses a
+  cleartext BLS key and a faucet build, and no flag lifts either; it logs
+  `node build: faucet=<bool> adiri=<bool> chain_id=<n> genesis_hash=<0x..>` at startup and lists
+  `faucet` in `--version`. A faucet build starts on a chain other than adiri only with
+  `--allow-faucet-on-chain` (env `TN_ALLOW_FAUCET_ON_CHAIN=true`), so the devnet's faucet image
+  (chain 32285) must set `TN_ALLOW_FAUCET_ON_CHAIN=true` before it takes a release with #1716.
+  Closes when a node release carries #1716 and the devnet image sets it.
 - U-4, part of U-6 and the release side of U-12, the release pipeline: telcoin-network PR #694
   merged on 2026-10-28, and U-4 (#1726) is closed. Still open: the node refusing fork-epoch
-  overrides on chains 487 and 2017, and the release check that depends on it (U-12, #1734). When
+  overrides on mainnet (731) and testnet (2017), and the release check that depends on it (U-12, #1734). When
   last checked (the scripts-v2.0.0 round), the telcoin-network README, SECURITY,
   validator-operations and maintainers pages described a release as the tarball and
   `IMAGE_DIGEST`, without the chain-config lines. Closes when #1734 lands and those pages name the
@@ -168,7 +172,8 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   dumps. Open.
 - U-11 (#1733): a remote signer with an equivocation guard. Needs a design proposal first.
 - U-13 (#1735): the final mainnet genesis embedded as `MAINNET_GENESIS`, with its hash logged at INFO
-  (the chain 487 guard branch adds the startup line). Waits for the genesis ceremony.
+  (#1716 added the startup line with the genesis hash; no release carries it yet). Waits for the
+  genesis ceremony.
 - The operator docs backlog merged upstream as telcoin-network #1573, but README and OPERATOR.md
   still warn that the upstream stake and unstake signatures are out of date. Closes when
   docs.telcoin.network is redeployed from it and the warnings are dropped.
@@ -340,6 +345,11 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   maintenance marker under `/run/telcoin` (bounded in size and age, root 0644) that those scripts
   write before their own stop and remove after it, which the runner reports as
   `up maintenance: ...` while the marker is fresh (from #60).
+- A rehearsal host whose `alerts.env` was written with `NETWORK=mainnet` before this release keeps
+  `ALERTS_CHAIN_ID=487`; once that node answers `0x2db`, the heartbeat reports
+  `wrong chain: rpc reports 731, expected 487` (V-CHAIN VC-7). Setup refuses mainnet, so only a
+  hand-made rehearsal host has such a file. Closes when `setup-alerts.sh` rewrites it there
+  (`--refresh`, or an enable).
 
 ## UI
 
@@ -455,6 +465,11 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   below `/var/lib/telcoin` the preflight can read `below minimum` for the disk while the setup log
   reads a pass (V-HW-UI F10, older than this round). Closes when the preflight measures the data
   dir the wizard will use.
+- For a node on a chain the UI does not list (487, for example), the page shows the network that
+  `.node-meta` names, with `· chain id 487` in the tooltip and no mismatch note, while the shell
+  reports a chain mismatch for the same node (V-CHAIN VC-6). Nothing is asked of the wrong
+  network: stake reads and the compare cards key on the chain id. Closes if the page notes a
+  chain id that does not fit the recorded network.
 
 ## Scripts
 
@@ -702,6 +717,11 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
 - `print_validator_onchain_status` tells an address with no record to call `stake()` by hand instead
   of naming `prepare-stake.sh`.
 - `tn_sync_submodules` hands the update-lock descriptor to `git submodule`; add `9>&-`.
+- Devnet means "exactly 32285" in check-node, update-node (`verify_consensus_participation`) and
+  the heartbeat (`alerts_write_env`), and "any other chain id" in the gateway (`_gw_chain_fits`)
+  and `OPERATOR.md`. A `NETWORK=devnet` node on upstream's chain-487 devnet genesis is a chain
+  mismatch for the first three and fits the gateway (V-CHAIN VC-5, older than this round).
+  Closes when one rule is picked and documented, if devnets on upstream's genesis matter.
 - `lib/common.sh` and `ui/server.py` decode `getValidator` words 5 and 6 as `stakeVersion` and
   `region` (tn-contracts 10cc12b7). Live testnet replies have zero in both, so the deployed layout is
   unconfirmed until a validator with a non-zero value is checked.

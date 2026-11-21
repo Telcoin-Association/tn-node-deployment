@@ -28,6 +28,17 @@ on, ext4 or xfs; none checked." No type size, margin or column width changed. Th
 specification is unchanged at 1.3. After the change merges, run the Publish workflow of
 tn-partner-site and check `source.txt`, as the run.telcoin.network entry below says.
 
+### Mainnet chain id 731, November 2026 -- lib/common 2.2.4, check-node 2.2.1, update-node 2.1.1, telcoin-ui 2.1.2, install-caddy 2.2.1
+Part of `scripts-v2.2.0`; see [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+telcoin-network moved the mainnet chain id from 487 to 731 (`0x2db`) in #1716 on 2026-11-12, and
+upstream devnet genesis files use 487 now. `MAINNET_CHAIN_ID` in `lib/common.sh` is 731
+(lib/common 2.2.4) and the UI's network tables key mainnet by 731 (telcoin-ui 2.1.2); check-node
+2.2.1 and update-node 2.1.1 change comments only. A genesis on chain 487 with no `NETWORK` in
+`.node-meta` is no longer detected as mainnet. install-caddy 2.2.1's mainnet gate names the chain
+it found when it cannot tell the network, and reads a stake from the mainnet public RPC only when
+that endpoint answers with chain 731. Mainnet has not launched and stays switched off, so no
+running node changes.
+
 ### Hardware requirements per network, November 2026 -- lib/common 2.2.5, setup-node 2.1.4, Node Manager UI 2.1.3, the AWS one-click stack
 Part of `scripts-v2.2.0`; see [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
 The hardware check compared every host with the mainnet figures, so it warned "below minimum" on

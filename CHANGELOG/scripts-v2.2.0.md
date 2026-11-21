@@ -29,6 +29,10 @@ network chosen, and the testnet tiers follow those validators (see
 wizard's network. The check still only warns. The AWS one-click stack's `Validator` preset moves
 to `c7i.2xlarge`, and its data volume defaults to 500 GiB at 15,000 IOPS.
 
+The mainnet chain id is 731 (`0x2db`), as on telcoin-network main since #1716; it was 487, which
+upstream devnet genesis files use now (see [lib/common 2.2.5](#libcommon-225)). Mainnet has not
+launched and stays switched off, so no running node changes.
+
 The release keys change, for every operator. grantkee's RSA key, the only key of
 `scripts-v2.1.0`, is replaced by grantkee's new ed25519 key, and MavenRain's key is added. The keys now come
 from the maintainers' key allowlist, the tn-release-signing repository, and `tn-p2p-allow-sync`
@@ -43,7 +47,8 @@ systemd 255).
 |---|---|
 | setup-gateway | 2.2.0 (new) |
 | lib/gateway (`GATEWAY_VERSION`) | 2.2.0 (new) |
-| install-caddy, firewall-setup, check-node, remove-node | 2.2.0 |
+| firewall-setup, remove-node | 2.2.0 |
+| install-caddy, check-node | 2.2.1 |
 | edit-config | 2.2.2 |
 | update-scripts | 2.2.0 |
 | update-node | 2.1.2 |
@@ -150,8 +155,17 @@ Every other script, library and UI file keeps its version. The runbook for the g
   `--status` counts an image the release does not allow.
 - `--remove` leaves a file it did not write in place and names it.
 
-### install-caddy 2.2.0
+### install-caddy 2.2.1
 
+- The mainnet gate refuses a node whose network cannot be told with `tn_detect_network`'s reason.
+  For a host with no `NETWORK` in `.node-meta` and a genesis on chain 487 it reads `no NETWORK in
+  .node-meta, and the chain id of <datadir>/genesis/genesis.yaml (487) is neither 731 nor 2017`;
+  it said "no readable genesis chain id" although the id was read.
+- When the local node cannot say whether the address is staked, the gate reads the stake from the
+  mainnet public RPC only when that endpoint answers with chain 731; otherwise it refuses and says
+  so. Until launch `https://rpc.telcoin.network` answers for testnet, where a mainnet address
+  reads as not staked.
+- `_tn_rpc_chain_is` joins the library functions it requires.
 - A third managed site, `tn-gateway`, serves the gateway's public hostname in front of its
   loopback listener: `POST` is proxied, the probe paths go to the probe listener, and a WebSocket
   upgrade or any other non-`POST` request gets 405.
@@ -230,8 +244,11 @@ Every other script, library and UI file keeps its version. The runbook for the g
   restart is rolled back.
 - Other keys behave as before.
 
-### check-node 2.2.0
+### check-node 2.2.1
 
+- A comment only: the chain ids it accepts name 731 for mainnet. Its messages take the id from
+  the library, so they now say 731, for example `https://rpc.telcoin.network serves chain 2017
+  (testnet), not chain 731 (mainnet) -- skipping the network comparison`.
 - On a host with a gateway: the unit, the image, the three listeners, `/health`, the Caddy site,
   and in same-host mode the node's health listener. `/ready` is reported and is not an issue
   while the node is down. `[::]:port` counts as a wildcard listener. On a host with a gateway and
@@ -265,8 +282,8 @@ Every other script, library and UI file keeps its version. The runbook for the g
 
 ### update-node 2.1.2
 
-- Comments only, no change in behaviour: the comment on the update lock no longer names a
-  `git pull`, since none runs in update-node.
+- Comments only, no change in behaviour: the chain-id comments name 731 for mainnet, and the
+  comment on the update lock no longer names a `git pull`, since none runs in update-node.
 
 ### setup-node 2.1.4
 
@@ -331,6 +348,10 @@ Every other script, library and UI file keeps its version. The runbook for the g
   is single-threaded, so a high clock speed matters more than extra cores.` When physical cores
   cannot be counted it compares logical CPUs and says so. ECC, NVMe, IOPS and throughput are not
   checked.
+- `MAINNET_CHAIN_ID` is 731 (`0x2db`), as on telcoin-network main since #1716 (2026-11-12); it
+  was 487, which upstream devnet genesis files use now. Every use of the constant is an equality
+  test or message text. A genesis on chain 487 with no `NETWORK` in `.node-meta` is no longer
+  detected as mainnet (`tn_detect_network`).
 - The systemd floor messages recommend Ubuntu 26.04 and say "Ubuntu 24.04 or later" for
   mainnet. The floors themselves are unchanged.
 - Pins `tn-p2p-allow-sync` v0.1.2 (`TN_P2P_ALLOW_VERSION`, `TN_P2P_ALLOW_TARBALL_SHA256`
@@ -364,6 +385,8 @@ Every other script, library and UI file keeps its version. The runbook for the g
   "2 TB" disk labels, the detected disk in decimal GB, the tiers compared and the single-core
   note. When only logical CPUs could be counted, the detected line reads `Detected 8 logical CPUs
   / ...` and the shell's sentence about the comparison follows. A missing RAM figure shows `?`.
+- The network tables (`NETWORKS`, `NETWORK_PUBLIC_RPC`) key mainnet by 731. Chain 487 is not
+  listed, so a node on it is named through `.node-meta`, like a node on any unknown chain.
 
 ### AWS one-click stack
 

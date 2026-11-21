@@ -50,8 +50,9 @@ clean up after themselves:
   instead.
 - `install-caddy.sh` refuses the dashboard and public RPC on a mainnet node that is a
   staked validator, whose stake cannot be read (from the local node, then from the
-  network's public RPC), that has no `VALIDATOR_ADDRESS` in `.node-meta`, or whose
-  network cannot be told (no `NETWORK` and no readable genesis). Serve the dashboard
+  mainnet public RPC when it answers with chain 731), that has no `VALIDATOR_ADDRESS` in
+  `.node-meta`, or whose network cannot be told (no `NETWORK`, and a genesis chain id
+  that is unreadable or neither 731 nor 2017, which the refusal names). Serve the dashboard
   over the SSH tunnel and public RPC from a separate RPC node.
 - `setup-node.sh` shows the add-on prompts on testnet only, and refuses a mainnet
   install while any add-on is still on the host: the VPN (`/etc/wireguard/wg0.conf`,

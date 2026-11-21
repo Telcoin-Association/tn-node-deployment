@@ -801,7 +801,7 @@ sudo bash ~/telcoin-node-scripts/check-node.sh --audit
 Run it with `sudo`. `/etc/telcoin/.node-meta` is root-only (mode 600), and without root the script can't read the recorded network, execution address, data directory, RPC port or public RPC domain. There is no `--validator` or `--observer` switch any more: the script still accepts both, prints a note and ignores them. A value flag given without its value (`--rpc` as the last argument, say) prints a usage error.
 
 The health check verifies:
-- **Network** — a `Network:` header line names the network from `.node-meta` (testnet, devnet or mainnet), its chain ID and where that came from. The local chain ID must match that network's; with no network recorded, any Telcoin chain ID (2017, 487, 32285) passes with a note. When the network RPC itself serves another chain (today `https://rpc.telcoin.network` answers for testnet, 2017), the report warns that the RPC serves chain X and skips the comparison instead of blaming the node.
+- **Network** — a `Network:` header line names the network from `.node-meta` (testnet, devnet or mainnet), its chain ID and where that came from. The local chain ID must match that network's; with no network recorded, any Telcoin chain ID (2017, 731, 32285) passes with a note. When the network RPC itself serves another chain (today `https://rpc.telcoin.network` answers for testnet, 2017), the report warns that the RPC serves chain X and skips the comparison instead of blaming the node.
 - **Execution address** — compares `VALIDATOR_ADDRESS` in `.node-meta` with the address the node runs with (its `tn_info` answer, else `node-info.yaml` on disk) and warns near the top of the report when they differ, also with `--no-network` or the local RPC down. The warning says what to do: restart the node when `node-info.yaml` already holds the `.node-meta` address (as after `prepare-stake.sh --rotate-address --no-restart`); otherwise restart it if you rotated with `--no-restart`, or set `VALIDATOR_ADDRESS` in `.node-meta` to the node's address.
 - **Systemd service status** — running, with restart-loop detection (warns if the unit has restarted more than 5 times). The section also lists what the node runs (Docker image or binary), its bootstrap peers and state export when set, its P2P ports and the RPC URLs it advertises.
 - **Local RPC mode** — classified as `HEALTHY`, `SLOW` (responding but >6s), `DISABLED` (HTTP 200 but `-32601 method not found`), or `DOWN` (connection refused). Previously all four looked the same.
@@ -1212,7 +1212,7 @@ Items 8 to 10 came with edit-config 1.3.0, and items 11 and 12 with edit-config 
 | `docker_image` | A release tag of the node's network (such as `vX.Y.Z-adiri`, or on testnet a release candidate `vX.Y.Z-adiri-rcN`), resolved to the release's image digest, or the network's image by digest (`<repository>@sha256:<digest>`; see [Docker Install Notes](#docker-install-notes) for the repositories). `latest` and other tags are refused. Docker installs only; the image is pulled first and must be held under that digest, and the start script is rewritten with the digest. A release older than the network's oldest supported one is refused (`<ref> is older than v<floor>, the oldest <network> release these scripts support (...). Pick v<floor> or a newer release. The image is not changed.`); a digest alone is checked by the release `.node-meta` records for it. On mainnet a change is refused until a mainnet release can be verified, and after that a digest alone is taken only for a mainnet release this node has installed |
 | `bootstrap_peers` | An absolute path to a peers map, or `none` to remove the flag and the installed file. See [Bootstrap peers](#bootstrap-peers) |
 | `state_export` | `off`; `unlimited` (`--enable-state-export`, every export kept, `v0.13.0-adiri` or later); or `N` from 1 to 999999 (`--state-export-keep N` as well, only the newest N kept, `v0.15.0-adiri` or later) |
-| `allow_private_forward_targets` | `true` or `false`: the `parameters.yaml` key that lets the node forward transactions to committee RPC endpoints on private addresses. `true` is refused on testnet (2017) and mainnet (487), and when the genesis chain ID cannot be read |
+| `allow_private_forward_targets` | `true` or `false`: the `parameters.yaml` key that lets the node forward transactions to committee RPC endpoints on private addresses. `true` is refused on testnet (2017) and mainnet (731), and when the genesis chain ID cannot be read |
 | `admission` | `open`, `grace` or `closed` (the node's `Open`, `Grace` and `Closed` are taken too): the node's connection admission mode, written into `<data dir>/network-config` with the recorded trusted nodes map and, as `committee_peers`, the installed bootstrap peers map when the node command loads one. Needs node release 0.17.0 or later. See [Node admission settings](#node-admission-settings) |
 | `trusted_nodes` | An absolute path to a trusted nodes map, checked and installed as `/etc/telcoin/trusted-nodes.yaml`, or `none` to remove the map and its `trusted_nodes` entry. A map needs an admission mode set first. See [Node admission settings](#node-admission-settings) |
 
@@ -1585,7 +1585,7 @@ Enable it from the UI under **Settings → External Dashboard Access**, or on th
 sudo bash ~/telcoin-node-scripts/install-caddy.sh
 ```
 
-Choose **Dashboard** from the menu, then pick the domain, a login username (not forced to `admin`), and a password of at least 16 characters (the menu offers to generate one). A script passes the password on standard input with `--password-stdin`, never on the command line. The dashboard and public RPC are refused on a staked mainnet validator, and on a mainnet node whose stake cannot be read.
+Choose **Dashboard** from the menu, then pick the domain, a login username (not forced to `admin`), and a password of at least 16 characters (the menu offers to generate one). A script passes the password on standard input with `--password-stdin`, never on the command line. The dashboard and public RPC are refused on a staked mainnet validator, and on a mainnet node whose stake cannot be read. When the local node cannot give the stake, it is read from `https://rpc.telcoin.network` only if that endpoint answers with chain 731; until launch it answers for testnet, so the refusal says the stake was not read there. A node with no `NETWORK` in `.node-meta` and a genesis on neither 731 nor 2017 is refused too, and the message names the chain id it found.
 
 - **Set the DNS A record first.** Point your domain at the server's public IP (the router's public IP if it's behind NAT) **before** enabling — Caddy requests the certificate on first start, so the record must already resolve or issuance fails and Let's Encrypt rate-limits retries. The wizard checks propagation before continuing.
 - **Give it its own hostname.** The dashboard can't share a name with the [public RPC endpoint](#public-rpc-endpoint-https--wss). If your node has a public name like `node7.adiri.telcoin.network`, keep that for RPC and put the dashboard on `dashboard.node7.adiri.telcoin.network`.
@@ -1870,10 +1870,10 @@ sudo bash ~/telcoin-node-scripts/edit-config.sh
 | Network | Chain ID | Public RPC | Explorer | Release tags |
 |---|---|---|---|---|
 | Adiri testnet | 2017 (`0x7e1`) | `https://rpc.adiri.tel` | `https://telscan.io` or `https://www.telscan.xyz` | `vX.Y.Z-adiri`; `vX.Y.Z-adiri-rcN` when named |
-| Mainnet | 487 (`0x1e7`) | `https://rpc.telcoin.network`, not launched yet | Not launched yet | `vX.Y.Z` |
+| Mainnet | 731 (`0x2db`) | `https://rpc.telcoin.network`, not launched yet | Not launched yet | `vX.Y.Z` |
 | Devnet | 32285 (`0x7e1d`) | `https://rpc.devnet.telcoin.network` | None | none |
 
-Mainnet has not launched. Until it does, `https://rpc.telcoin.network` answers for testnet (chain 2017), so check `eth_chainId` before you trust an answer from it. The scripts use the testnet RPC for testnet nodes, and `check-node.sh` warns and skips its chain comparison when the network RPC serves a different chain. The public RPCs answer JSON-RPC over HTTPS only; for `wss://`, use a node that serves [public RPC](#public-rpc-endpoint-https--wss).
+Mainnet has not launched. Until it does, `https://rpc.telcoin.network` answers for testnet (chain 2017), so check `eth_chainId` before you trust an answer from it: mainnet will answer `0x2db` (731). The scripts use the testnet RPC for testnet nodes, and `check-node.sh` warns and skips its chain comparison when the network RPC serves a different chain. The public RPCs answer JSON-RPC over HTTPS only; for `wss://`, use a node that serves [public RPC](#public-rpc-endpoint-https--wss).
 
 These mainnet values are still open in this script release, and mainnet installs are refused until a script release sets them:
 
@@ -2117,6 +2117,12 @@ prints the exact fix command.
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
 
+### install-caddy v2.2.1 — the mainnet gate names the chain it found and checks the public RPC's chain
+With no `NETWORK` in `.node-meta` and a genesis on neither mainnet nor testnet, such as a devnet genesis on chain 487 now that the mainnet id is 731, the gate refused with "no readable genesis chain id" although it had read the id.
+The refusal stays, with the reason `tn_detect_network` gives: `The network of this node cannot be told (no NETWORK in .node-meta, and the chain id of <datadir>/genesis/genesis.yaml (487) is neither 731 nor 2017), so this run cannot confirm it is not a staked mainnet validator. ...`
+When the local node cannot give the stake, it is read from `https://rpc.telcoin.network` only if that endpoint answers with chain 731; until launch it answers for testnet, so the refusal adds `; https://rpc.telcoin.network does not answer with chain 731, so the stake was not read there`.
+Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+
 ### telcoin-ui v2.1.3 — a measured zero is unmeasured, logical CPUs worded as such
 The setup preflight treats a MemTotal of 0 and a filesystem of 0 kB as "could not measure", as the shell does, not as "below minimum".
 Cores are compared exactly; RAM and disk keep the 5 % slack.
@@ -2148,6 +2154,22 @@ Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
 A comment no longer lists a `git pull`, which update-node never runs.
 Nothing changes for the operator.
 Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+
+### lib/common.sh v2.2.4 — the mainnet chain id is 731
+The mainnet chain id is 731 (`0x2db`), as on telcoin-network main since #1716; it was 487, which upstream devnet genesis files use now.
+`MAINNET_CHAIN_ID` is 731, so a genesis on chain 487 with no `NETWORK` recorded in `.node-meta` is no longer detected as mainnet.
+Mainnet has not launched and stays switched off, so no running node changes.
+
+### check-node v2.2.1 — comments only: the mainnet chain id is 731
+Comments only: they name the mainnet chain id as 731 (it was 487); check-node reads the id from `lib/common.sh`.
+Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+
+### update-node v2.1.1 — comments only: the mainnet chain id is 731
+Comments only: they name the mainnet chain id as 731 (it was 487); update-node reads the id from `lib/common.sh`.
+
+### telcoin-ui v2.1.2 — mainnet keyed by chain id 731
+The network tables key mainnet by 731 (`0x2db`) instead of 487, which upstream devnet genesis files use now (telcoin-network #1716).
+A node on chain 487 is no longer named mainnet: the UI has no name for 487 and names such a node by the `NETWORK` in its `.node-meta`.
 
 ### aws/node.yaml — the Validator preset is c7i.2xlarge, a 500 GiB data volume at 15,000 IOPS
 The presets follow the recommended column of the testnet table for cores and RAM: `Validator` moves from c7i.8xlarge to `c7i.2xlarge, 4 cores (8 vCPU), 16 GiB`, the size of `FullNode`.
