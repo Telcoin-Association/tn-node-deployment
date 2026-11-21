@@ -163,7 +163,8 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
         tn_restore_backup tn_migrate_credential _tn_cred_switch _tn_multiaddr_udp_port \
         tn_launch_runner tn_keytool_has tn_keytool _tn_cred_plain_ok _tn_passfile_trim_safe \
         tn_docker_resolve_ref tn_docker_network_ok _tn_guard_network tn_docker_image_network_ok \
-        tn_network_config_render tn_node_supports_admission tn_gateway_from_rules_ok >/dev/null; then
+        tn_network_config_render tn_node_supports_admission tn_gateway_from_rules_ok \
+        tn_chain_configs_tag tn_chain_configs_dir tn_chain_configs_from_tag >/dev/null; then
     _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this edit-config.sh: run update-scripts.sh and try again."
     case " $* " in
         *" --json "*) printf '{"event":"error","msg":"%s"}\n{"event":"done","ok":false,"msg":"%s"}\n' "$_tn_old" "$_tn_old" ;;
@@ -173,7 +174,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
 fi
 unset _tn_old
 
-readonly SCRIPT_VERSION="2.2.0"
+readonly SCRIPT_VERSION="2.2.1"
 
 # The largest bootstrap peers file accepted. A map of a few dozen peers is a
 # few KiB, and the whole map travels as one command-line argument.
@@ -3714,11 +3715,24 @@ refresh_copy_configs() {
     return 0
 }
 
+# refresh_chain_configs -- menu 13: put this network's chain configs into the
+# node's data dir and restart the node. A network with a pinned tag
+# (tn_chain_configs_tag: testnet) gets the three files of that tag, the ones
+# this script release pins: tn_chain_configs_from_tag reads them into the
+# root-owned pinned directory (tn_chain_configs_dir) without pulling or moving
+# the checkout, and they are copied from there. A node whose data dir already
+# holds the pinned files is told so and left alone: no prompt, no lock, no
+# restart. Mainnet has no tag until the genesis ceremony: nothing is fetched
+# or pulled, and its pins, still empty, refuse the checkout's files. devnet
+# pulls the checkout and copies its files. Before anything is copied: the three
+# files present, the pins (tn_chain_configs_check), the same chain id as the
+# node's genesis.
 refresh_chain_configs() {
     print_header "Refresh Chain Configs"
 
-    local source_dir="$TN_SOURCE_DIR"
+    local source_dir="${TN_ROOT_PREFIX:-}${TN_SOURCE_DIR}"
     local node_data_dir network subdir chain_config_src node_genesis node_id src_id rc
+    local tag had_pinned current f want got
     if ! node_data_dir="$(detect_data_dir)"; then
         print_error "Cannot tell the node's data dir: DATA_DIR is set more than once in .node-meta. Chain configs unchanged."
         echo ""
@@ -3745,9 +3759,40 @@ refresh_chain_configs() {
         return 0
     fi
 
-    print_info "This pulls the latest ${network} chain configs from the repository and"
-    print_info "copies them to your node data directory."
-    print_info "Use this when the network restarts with new genesis/committee/parameters."
+    # A network with a pinned tag: first, is there anything to do? The node
+    # already has the pinned files when the three in its data dir (where
+    # refresh_copy_configs puts them) have the pinned sha256.
+    tag="$(tn_chain_configs_tag "$network")"
+    if [[ -n "$tag" ]]; then
+        current=true
+        for f in genesis/genesis.yaml genesis/committee.yaml parameters.yaml; do
+            want="$(tn_chain_config_pin "$network" "${f##*/}")"
+            got=""
+            if [[ -f "${node_data_dir}/${f}" && ! -L "${node_data_dir}/${f}" ]]; then
+                got="$(sha256sum < "${node_data_dir}/${f}" 2>/dev/null)" || got=""
+                got="${got%% *}"
+            fi
+            [[ -n "$want" && "$got" == "$want" ]] || current=false
+        done
+        if [[ "$current" == "true" ]]; then
+            print_ok "Nothing to refresh: the node's data dir already holds the ${network} chain configs this script release pins (${tag}), so ${TARGET_SERVICE} was not restarted."
+            print_info "New pins come with a signed scripts release (update-scripts.sh); run this again after one."
+            echo ""
+            read -r -p "  Press Enter to return to menu..." || true
+            return 0
+        fi
+        print_info "This installs the ${network} chain configs this script release pins (genesis,"
+        print_info "committee and parameters at ${tag}) in your node data directory. They are"
+        print_info "read from that tag; the repository checkout is not pulled or moved."
+        print_info "New pins come with a signed scripts release (update-scripts.sh)."
+    elif [[ "$network" == "devnet" ]]; then
+        print_info "This pulls the latest ${network} chain configs from the repository and"
+        print_info "copies them to your node data directory."
+        print_info "Use this when the network restarts with new genesis/committee/parameters."
+    else
+        print_info "This copies the ${network} chain configs from the repository checkout, as"
+        print_info "published (no pull), to your node data directory, once this script release pins them."
+    fi
     echo ""
     print_warn "The node will be restarted to apply the new configs."
     echo ""
@@ -3759,14 +3804,49 @@ refresh_chain_configs() {
         return
     fi
 
-    # update-node.sh builds from the same checkout, so the pull waits for it too.
+    # update-node.sh fetches and builds in the same checkout, so this waits for
+    # it too.
     menu_lock || return 0
 
-    # Pull latest from repo (never on mainnet: its files come only as published,
-    # and the pins below decide).
-    if [[ -d "${source_dir}/.git" && "$network" == "mainnet" ]]; then
+    chain_config_src="${source_dir}/chain-configs/${subdir}"
+    if [[ -n "$tag" ]]; then
+        # The files at the pinned tag, into the pinned directory: no pull and no
+        # submodule command, so the checkout (a source install's build tree)
+        # stays where it is.
+        chain_config_src="$(tn_chain_configs_dir "$network")"
+        had_pinned=false
+        if tn_chain_configs_check "$chain_config_src" "$network" >/dev/null 2>&1; then
+            had_pinned=true
+        fi
+        rc=0
+        tn_chain_configs_from_tag "$source_dir" "$network" edit_wait_say || rc=$?
+        if [[ "$rc" -ne 0 ]]; then
+            if [[ "$rc" -eq 1 ]]; then
+                print_error "The pinned ${network} chain configs (${tag}) were not installed (see above). Chain configs unchanged."
+            elif [[ ! -d "${source_dir}/.git" ]]; then
+                print_error "There is no repository checkout at ${source_dir} to read the pinned ${network} chain configs (${tag}) from, and ${chain_config_src} does not hold them. Chain configs unchanged."
+                print_info "Re-run sudo ./setup-node.sh, which offers to clone the repository and reads them, or put"
+                print_info "genesis.yaml, committee.yaml and parameters.yaml from"
+                print_info "  https://github.com/Telcoin-Association/telcoin-network/tree/${tag}/chain-configs/${network}/"
+                print_info "into ${chain_config_src} (owned by root) and run this again."
+            else
+                print_error "Could not read the pinned ${network} chain configs (${tag}) from ${source_dir} (see above). Chain configs unchanged."
+            fi
+            edit_unlock
+            echo ""
+            read -r -p "  Press Enter to return to menu..." || true
+            return 0
+        fi
+        # The pinned directory lies in the config dir, which the host baseline
+        # covers: files just installed there are taken into it now, whatever
+        # the rest of the refresh does.
+        [[ "$had_pinned" == "true" ]] || edit_baseline_refresh
+    elif [[ -d "${source_dir}/.git" && "$network" == "mainnet" ]]; then
+        # No tag yet: nothing is fetched or pulled; the files as published
+        # meet the pins below, which refuse them while they are empty.
         print_info "Mainnet chain configs are used as published (no pull)."
     elif [[ -d "${source_dir}/.git" ]]; then
+        # devnet has no pins: the checkout's default branch, pulled.
         print_step "Pulling latest chain configs..."
         if ! git -C "$source_dir" pull; then
             print_error "git pull failed in ${source_dir}. Chain configs unchanged."
@@ -3788,7 +3868,6 @@ refresh_chain_configs() {
     fi
 
     # Copy updated configs
-    chain_config_src="${source_dir}/chain-configs/${subdir}"
     if [[ ! -d "$chain_config_src" ]]; then
         print_warn "Chain config directory not found at ${chain_config_src}"
         echo ""
@@ -3921,7 +4000,7 @@ main_menu() {
         echo " 10) Private forward targets (private networks only)"
         echo " 11) Admission mode          (open / grace / closed)"
         echo " 12) Trusted nodes           (the hubs a closed node admits)"
-        echo " 13) Refresh chain configs   (pull latest genesis/committee/parameters)"
+        echo " 13) Refresh chain configs   (pinned genesis/committee/parameters)"
         echo " 14) Restart node"
         echo " 15) Exit"
         echo ""
