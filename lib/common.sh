@@ -6449,7 +6449,7 @@ tn_migrate_credential() {
     local fn="${1:-}" v svc conf unit plain method net key rc=0 cr=$'\r'
     if ! tn_creds_supported; then
         v="$(tn_systemd_version 2>/dev/null)" || v="unknown"
-        _tn_guard_say warn "systemd ${v} cannot encrypt credentials (systemd ${TN_CRED_MIN_SYSTEMD} with systemd-creds, Ubuntu 24.04, is needed); nothing changed." "$fn"
+        _tn_guard_say warn "systemd ${v} cannot encrypt credentials (systemd ${TN_CRED_MIN_SYSTEMD} with systemd-creds, Ubuntu 24.04 or later, is needed); nothing changed." "$fn"
         return 1
     fi
     svc="$(tn_resolve_service 2>/dev/null)" || { _tn_guard_say warn "No node service found." "$fn"; return 1; }

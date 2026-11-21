@@ -213,7 +213,7 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   binary command and an embedded passphrase into the current unit and start script. It is
   fixture-tested only; run it once on a real legacy Docker node.
 - Before any mainnet host: a testnet rehearsal of the migration path on an existing host, and a
-  fresh install on Ubuntu 24.04 from a verified `scripts-v*` tag and a verified node release.
+  fresh install on Ubuntu 26.04 from a verified `scripts-v*` tag and a verified node release.
 
 ## Add-ons
 
