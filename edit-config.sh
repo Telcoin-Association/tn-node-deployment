@@ -165,7 +165,8 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
         tn_docker_resolve_ref tn_docker_network_ok _tn_guard_network tn_docker_image_network_ok \
         tn_network_config_render tn_node_supports_admission tn_gateway_from_rules_ok \
         tn_chain_configs_tag tn_chain_configs_dir tn_chain_configs_from_tag \
-        _tn_chain_configs_clone >/dev/null; then
+        _tn_chain_configs_clone tn_chain_config_pin _tn_chain_configs_dest_ok \
+        _tn_chain_configs_clone_target _tn_chain_configs_in_place >/dev/null; then
     _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this edit-config.sh: run update-scripts.sh and try again."
     case " $* " in
         *" --json "*) printf '{"event":"error","msg":"%s"}\n{"event":"done","ok":false,"msg":"%s"}\n' "$_tn_old" "$_tn_old" ;;
@@ -3721,13 +3722,22 @@ refresh_copy_configs() {
 # (tn_chain_configs_tag: testnet) gets the three files of that tag, the ones
 # this script release pins: tn_chain_configs_from_tag reads them into the
 # root-owned pinned directory (tn_chain_configs_dir) without pulling or moving
-# the checkout, and they are copied from there. With no checkout and the pinned
-# files not in place, the menu offers to clone the repository at the tag first
+# the checkout, and they are copied from there. A git worktree counts as a
+# checkout (its .git is a file), as it does for the library. With no checkout
+# and the pinned files not in place, the menu decides as
+# ensure_chain_configs_available does, with the same library helpers in the
+# same order: a pinned directory no install could use
+# (_tn_chain_configs_dest_ok) or a source path that is in the way
+# (_tn_chain_configs_clone_target) is refused with the library's reason;
+# otherwise it offers to clone the repository at the tag first
 # (_tn_chain_configs_clone, the clone setup makes), or says how to get the
-# files by hand. A node whose data dir already holds the pinned files (hashed
-# by the service user, whose data dir it is) is told so and left alone: no
-# prompt, no lock, no restart. A network with neither a tag nor pins (mainnet
-# until the genesis ceremony) is refused up front: no prompt, no lock, no git.
+# files by hand. The host baseline is made again whenever the helper wrote
+# under the config dir, that is unless the pinned files were in place before
+# it ran (their contents, owner and modes). A node whose data dir already
+# holds the pinned files (hashed by the service user, whose data dir it is) is
+# told so and left alone: no prompt, no lock, no restart. A network with
+# neither a tag nor pins (mainnet until the genesis ceremony) is refused up
+# front: no prompt, no lock, no git.
 # One with pins but no tag copies the checkout's files as published (no pull).
 # devnet pulls the checkout and copies its files. Before anything is copied:
 # the three files present, the pins (tn_chain_configs_check), the same chain id
@@ -3738,7 +3748,7 @@ refresh_chain_configs() {
 
     local source_dir="${TN_ROOT_PREFIX:-}${TN_SOURCE_DIR}"
     local node_data_dir network subdir chain_config_src node_genesis node_id src_id rc
-    local tag had_pinned current f want got pin_dir clone
+    local tag was_in_place current f want got pin_dir clone
     if ! node_data_dir="$(detect_data_dir)"; then
         print_error "Cannot tell the node's data dir: DATA_DIR is set more than once in .node-meta. Chain configs unchanged."
         echo ""
@@ -3823,14 +3833,32 @@ refresh_chain_configs() {
         return
     fi
 
-    # Nothing to read the pinned files from (no checkout) and the pinned
-    # directory does not hold them: offer the clone setup makes, at the tag,
-    # over https, without submodules. The question waits with the update lock
-    # free; the lock is taken for the clone, since update-node.sh fetches in the
-    # same checkout, and kept for the rest of the refresh.
-    if [[ -n "$tag" && ! -d "${source_dir}/.git" ]] \
+    # Nothing to read the pinned files from (no checkout; a git worktree, its
+    # .git a file, is one) and the pinned directory does not hold them: offer
+    # the clone setup makes, at the tag, over https, without submodules. First
+    # the library's own checks, in the order ensure_chain_configs_available
+    # runs them: a pinned directory no install could use and a source path
+    # that is in the way are refused, with the library's reason, before the
+    # question, so no clone is offered or made for nothing. The question waits
+    # with the update lock free; the lock is taken for the clone, since
+    # update-node.sh fetches in the same checkout, and kept for the rest of the
+    # refresh.
+    if [[ -n "$tag" && ! -e "${source_dir}/.git" ]] \
         && ! tn_chain_configs_check "$(tn_chain_configs_dir "$network")" "$network" >/dev/null 2>&1; then
         pin_dir="$(tn_chain_configs_dir "$network")"
+        rc=0
+        _tn_chain_configs_dest_ok "$pin_dir" edit_wait_say || rc=$?
+        [[ "$rc" -ne 0 ]] || _tn_chain_configs_clone_target "$source_dir" edit_wait_say || rc=1
+        if [[ "$rc" -ne 0 ]]; then
+            if [[ "$rc" -eq 1 ]]; then
+                print_error "The pinned ${network} chain configs (${tag}) were not installed (see above). Chain configs unchanged."
+            else
+                print_error "The pinned ${network} chain configs (${tag}) could not be installed (see above). Chain configs unchanged."
+            fi
+            echo ""
+            read -r -p "  Press Enter to return to menu..." || true
+            return 0
+        fi
         print_warn "There is no repository checkout at ${source_dir} to read the pinned ${network} chain configs (${tag}) from, and ${pin_dir} does not hold them."
         print_info "They can be read from a clone of the repository at that tag, the one setup makes:"
         print_info "Tag: ${tag}"
@@ -3840,7 +3868,7 @@ refresh_chain_configs() {
         if confirm "Clone the repository at ${tag} into ${source_dir} now?"; then
             menu_lock || return 0
             clone=failed
-            if [[ -d "${source_dir}/.git" ]] || _tn_chain_configs_clone "$source_dir" "$tag"; then
+            if [[ -e "${source_dir}/.git" ]] || _tn_chain_configs_clone "$source_dir" "$tag"; then
                 clone=cloned
             fi
         fi
@@ -3873,22 +3901,30 @@ refresh_chain_configs() {
         # submodule command, so the checkout (a source install's build tree)
         # stays where it is.
         chain_config_src="$(tn_chain_configs_dir "$network")"
-        had_pinned=false
-        if tn_chain_configs_check "$chain_config_src" "$network" >/dev/null 2>&1; then
-            had_pinned=true
+        # The helper writes nothing only when the pinned files are already in
+        # place: the pinned contents and the owner and modes its install sets,
+        # the test it makes itself. Anything else (an install, or a reinstall
+        # of the right files with the wrong owner or modes) rewrites files
+        # under the config dir.
+        was_in_place=false
+        if tn_chain_configs_check "$chain_config_src" "$network" >/dev/null 2>&1 \
+            && _tn_chain_configs_in_place "$chain_config_src"; then
+            was_in_place=true
         fi
         rc=0
         tn_chain_configs_from_tag "$source_dir" "$network" edit_wait_say || rc=$?
         if [[ "$rc" -ne 0 ]]; then
             if [[ "$rc" -eq 1 ]]; then
                 print_error "The pinned ${network} chain configs (${tag}) were not installed (see above). Chain configs unchanged."
-            elif [[ ! -d "${source_dir}/.git" ]]; then
-                # Only when the checkout or the pinned files went away since
-                # the test before the lock.
-                print_error "There is no repository checkout at ${source_dir} to read the pinned ${network} chain configs (${tag}) from, and ${chain_config_src} does not hold them. Chain configs unchanged."
-                print_info "Run this again to be offered a clone of the repository at ${tag}."
             else
-                print_error "Could not read the pinned ${network} chain configs (${tag}) from ${source_dir} (see above). Chain configs unchanged."
+                # The helper's warning above names the cause. A clone is
+                # offered on the next run only while there is no checkout and
+                # the pinned directory does not hold the files.
+                print_error "The pinned ${network} chain configs (${tag}) could not be installed (see above). Chain configs unchanged."
+                if [[ ! -e "${source_dir}/.git" ]] \
+                    && ! tn_chain_configs_check "$chain_config_src" "$network" >/dev/null 2>&1; then
+                    print_info "Run this again to be offered a clone of the repository at ${tag}."
+                fi
             fi
             edit_unlock
             echo ""
@@ -3896,14 +3932,14 @@ refresh_chain_configs() {
             return 0
         fi
         # The pinned directory lies in the config dir, which the host baseline
-        # covers: files just installed there are taken into it now, whatever
-        # the rest of the refresh does.
-        [[ "$had_pinned" == "true" ]] || edit_baseline_refresh
-    elif [[ -d "${source_dir}/.git" && "$network" == "mainnet" ]]; then
+        # covers: files the helper just wrote there are taken into it now,
+        # whatever the rest of the refresh does.
+        [[ "$was_in_place" == "true" ]] || edit_baseline_refresh
+    elif [[ -e "${source_dir}/.git" && "$network" == "mainnet" ]]; then
         # Pins but no tag: nothing is fetched or pulled; the files as
         # published meet the pins below.
         print_info "Mainnet chain configs are used as published (no pull)."
-    elif [[ -d "${source_dir}/.git" ]]; then
+    elif [[ -e "${source_dir}/.git" ]]; then
         # devnet has no pins: the checkout's default branch, pulled.
         print_step "Pulling latest chain configs..."
         if ! git -C "$source_dir" pull; then

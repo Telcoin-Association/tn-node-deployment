@@ -511,7 +511,11 @@ G -C "$S5D" update-ref "refs/tn-remote-tags/${TAG}" "$C_MAIN"
 G clone -q "$O" "$S6D" 2>/dev/null                       # neither
 G -C "$S6D" tag -d "$TAG" >/dev/null 2>&1
 mv "$O" "$O.away"
-OFFLINE="warn|Could not fetch ${TAG} from origin (fatal: '${O}' does not appear to be a git repository); reading the testnet chain configs from the local copy of ${TAG}."
+# git's reason names the origin's path, so the library's cut at 200 characters
+# applies to it under a long TMPDIR: the expected texts cut it the same way.
+OFFWHY="fatal: '${O}' does not appear to be a git repository"
+OFFWHY="${OFFWHY:0:200}"
+OFFLINE="warn|Could not fetch ${TAG} from origin (${OFFWHY}); reading the testnet chain configs from the local copy of ${TAG}."
 dest_clear
 ft "$SRC" testnet pf
 check "offline, an earlier fetch: rc 0, the pinned files" "0 yes" "$FT_RC $(installed)"
@@ -530,7 +534,7 @@ dest_clear
 ft "$S6D" testnet pf
 check "offline, no copy of the tag: rc 2" 2 "$FT_RC"
 check "offline, no copy: the message" yes \
-    "$(has "$PFL" "warn|Could not fetch tag ${TAG} from origin (fatal: '${O}' does not appear to be a git repository), and the checkout does not have it.")"
+    "$(has "$PFL" "warn|Could not fetch tag ${TAG} from origin (${OFFWHY}), and the checkout does not have it.")"
 check "offline, no copy: nothing installed" "no" "$([[ -e "$D/genesis.yaml" ]] && echo yes || echo no)"
 mv "$O.away" "$O"
 check "offline cases: staging removed" yes "$(stg_empty)"

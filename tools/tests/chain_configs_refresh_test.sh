@@ -8,13 +8,22 @@
 # submodule command runs; a data dir that already holds the pinned files
 # (hashed by the service user) is left alone (no prompt, no lock, no restart,
 # no git) with a pointer to 14) Restart node. A refusal or failure of the
-# helper changes nothing. With no checkout and no pinned files the menu offers
-# the clone at the tag (_tn_chain_configs_clone), asked with the lock free,
-# or prints how to get the files by hand. The host baseline is made again when
-# pinned files were installed. Every way back to the menu after the lock
-# releases it before the "Press Enter" prompt. Mainnet (neither a tag nor
-# pins) is refused before any prompt, lock or git; devnet still pulls. The
-# chain-id guard and a cancelled prompt still stop the refresh. The menu label.
+# helper changes nothing; a failure (rc 2) is one neutral line, with the hint
+# that a re-run offers a clone only when one would. A git worktree (its .git a
+# file) is a checkout and is read, on devnet pulled. With no checkout and no
+# pinned files the menu first runs the library's own checks, as
+# ensure_chain_configs_available does: a pinned directory with an entry in the
+# way or a symlink, and a source path that is not a checkout, are refused with
+# the library's wording before any clone question; otherwise it offers the
+# clone at the tag (_tn_chain_configs_clone), asked with the lock free, or
+# prints how to get the files by hand. The host baseline is made again
+# whenever the helper wrote under the config dir: pinned files installed, or
+# the right ones reinstalled because their modes were not the install's (on
+# every way the refresh ends), and not when they were in place. Every way back
+# to the menu after the lock releases it before the "Press Enter" prompt.
+# Mainnet (neither a tag nor pins) is refused before any prompt, lock or git;
+# devnet still pulls. The chain-id guard and a cancelled prompt still stop the
+# refresh. The menu label.
 #
 #   bash tools/tests/chain_configs_refresh_test.sh
 #   docker run --rm -v "$PWD:/w" -w /w bash:3.2 bash tools/tests/chain_configs_refresh_test.sh
@@ -28,8 +37,9 @@
 # event file, and so is every "Press Enter" prompt (a read wrapper), so the
 # order of unlock and prompt is read from that log. The service-user runner
 # records its calls; it and the install into the pinned directory run as the
-# account running the test. The cases that stand in for
-# tn_chain_configs_from_tag itself come last.
+# account running the test, and the root writers set the modes they are given,
+# as the real ones do, so the results are the same under any umask. The cases
+# that stand in for tn_chain_configs_from_tag itself come last.
 #
 # Maintainer tooling (not updater-tracked, no sidecar). bash 3.2 safe.
 # =============================================================================
@@ -142,8 +152,12 @@ tn_as_service_user() {
     esac
     "$@"
 }
-_tn_root_layout_dir() { mkdir -p -- "$1"; }
-tn_write_root_file() { cat > "$1"; }
+# The root writers set the modes they are given (as the real ones do), so a
+# pinned directory they made is in place under any umask. LAYOUT_FAIL=1 makes
+# the directory writer refuse, as the real one does when the config dir fails
+# tn_root_dir_ok.
+_tn_root_layout_dir() { [[ -z "${LAYOUT_FAIL:-}" ]] || return 1; mkdir -p -- "$1" && chmod "$3" "$1"; }
+tn_write_root_file() { cat > "$1" && chmod "$2" "$1"; }
 # shellcheck disable=SC2034  # read by edit-config.sh
 TARGET_SERVICE=telcoin
 SERVICE_USER=telcoin
@@ -257,6 +271,36 @@ checkout() {
     origin
 }
 nopin() { rm -rf "${PIN%/*}"; }
+# worktree -- the same checkout as a git worktree: its .git is a file that
+# names the gitdir of the primary checkout.
+worktree() {
+    checkout
+    rm -rf "$SRC/.git"
+    printf 'gitdir: %s/primary/.git/worktrees/telcoin-source\n' "$T" > "$SRC/.git"
+}
+# loose_pin -- the pinned files with the pinned contents, made by hand under a
+# restrictive umask: the directory 0700, the files 0600 (its parent 0755).
+loose_pin() {
+    nopin
+    mkdir -p "$PIN"
+    cp "$FX"/*.yaml "$PIN/"
+    chmod 0600 "$PIN"/*.yaml
+    chmod 0700 "$PIN"
+    chmod 0755 "${PIN%/*}"
+}
+# exact_pin -- the pinned files as the install leaves them: 0755 directories,
+# 0644 files.
+exact_pin() {
+    loose_pin
+    chmod 0644 "$PIN"/*.yaml
+    chmod 0755 "$PIN"
+}
+# pmodes -- the modes of the pinned directory's parent, the directory and its
+# three files, on one line.
+pmodes() {
+    stat -c '%a' -- "${PIN%/*}" "$PIN" "$PIN/genesis.yaml" "$PIN/committee.yaml" "$PIN/parameters.yaml" \
+        | tr '\n' ' '
+}
 # refresh -- menu 13 as main_menu runs it (the lock of an earlier edit released
 # first), stdin from /dev/null; OUT and RC, the events in EV, git's argv, the
 # service-user calls. Counts the prompts reached with the lock held.
@@ -373,6 +417,44 @@ check "pinned dir in place: the data dir gets the pinned files" "$PINNED" "$(dsu
 check "pinned dir in place: no baseline before the restart, one after it" "${ASK}
 lock
 ${RESTART}" "$(ev)"
+# The same, the restart put off: nothing was written under the config dir, so
+# no baseline at all.
+node testnet
+checkout
+exact_pin
+ANSWERS="0 1"
+refresh
+check "pinned dir in place with the install's modes, restart later: copied, no git, no baseline" \
+    "${PINNED}||0|755 755 644 644 644 " "$(dsums)|$(argv)|$(bcount)|$(pmodes)"
+
+# --- a git worktree as the checkout (its .git a file): read, no clone offered -------------
+node testnet
+worktree
+nopin
+refresh
+check_rc "worktree: rc 0" 0 "$RC"
+check "worktree: no clone question, no clone; the helper reads the tag from it" \
+    "no|fetch rev-parse cat-file cat-file cat-file" "$(has "$(ev)" "asked: Clone")|$(verbs)"
+check "worktree: the pinned files installed and copied, the baseline, the restart path" "${PINNED}|${PINNED}|${ASK}
+lock
+baseline
+${RESTART}" "$(psums)|$(dsums)|$(ev)"
+check "worktree: still a worktree, its tree untouched" "yes|$(cat "$T/diverged/committee.yaml")" \
+    "$([[ -f "$SRC/.git" ]] && echo yes || echo no)|$(cat "$SRC/chain-configs/testnet/committee.yaml")"
+# The read fails (the tag neither on origin nor in it): the neutral line and no
+# promise of a clone, since there is a checkout.
+node testnet
+worktree
+nopin
+GIT_FETCH_RC=1
+GIT_REFS=""
+refresh
+check "worktree, the read fails: the neutral error, no clone question or hint" \
+    "The pinned testnet chain configs (${TAG}) could not be installed (see above). Chain configs unchanged.|no|no" \
+    "$(errors)|$(has "$(ev)" "asked: Clone")|$(has "$OUT" "offered a clone")"
+check "worktree, the read fails: the helper's reason, unlocked before the prompt" "yes|${ASK}
+lock
+${BACK}" "$(has "$OUT" "Could not fetch tag ${TAG} from origin, and the checkout does not have it.")|$(ev)"
 
 # --- the restart put off, refused or failed: the baseline once, for the installed files ----
 node testnet
@@ -412,6 +494,45 @@ systemctl show -p NRestarts --value telcoin
 systemctl is-active --quiet telcoin
 ${BACK}" "$(ev)"
 check "restart failed: says so" yes "$(has "$OUT" "Node failed to restart. Check logs:")"
+
+# --- the pinned files right, their modes not the install's: reinstalled, the baseline once --
+# The helper rewrites them under the config dir (0755 and 0644) with no git, so
+# the baseline is made again on every way the refresh ends, not only after a
+# successful restart.
+REINSTALLED="Reinstalled the testnet chain configs in ${PIN} root-owned, directories 0755 and files 0644: their owner or modes were not the ones the install sets."
+node testnet
+checkout
+loose_pin
+ANSWERS="0 1"
+refresh
+check "0600 pinned files, restart later: reinstalled with no git, the install's modes" \
+    "yes||755 755 644 644 644 " "$(has "$OUT" "$REINSTALLED")|$(argv)|$(pmodes)"
+check "0600 pinned files, restart later: copied, the baseline once, no restart" "${PINNED}|${ASK}
+lock
+baseline
+${APPLY}
+${BACK}|1" "$(dsums)|$(ev)|$(bcount)"
+node testnet
+checkout
+loose_pin
+EPOCH_RC=1
+refresh
+EPOCH_RC=0
+check "0600 pinned files, restart refused by the committee check: reinstalled, the baseline once" "yes|${ASK}
+lock
+baseline
+${APPLY}
+${BACK}|1" "$(has "$OUT" "$REINSTALLED")|$(ev)|$(bcount)"
+node testnet 999
+checkout
+loose_pin
+before="$(dsums)"
+refresh
+check "0600 pinned files, the chain-id guard refuses: reinstalled, the baseline once, nothing copied" \
+    "yes|${before}|${ASK}
+lock
+baseline
+${BACK}|1" "$(has "$OUT" "$REINSTALLED")|$(dsums)|$(ev)|$(bcount)"
 
 # --- the copy into the data dir fails after the install -------------------------------------
 node testnet
@@ -456,8 +577,8 @@ GIT_FETCH_RC=1
 GIT_REFS=""
 refresh
 check_rc "failed: back to the menu, rc 0" 0 "$RC"
-check "failed: the error, ending Chain configs unchanged." \
-    "Could not read the pinned testnet chain configs (${TAG}) from ${SRC} (see above). Chain configs unchanged." "$(errors)"
+check "failed: the neutral error, ending Chain configs unchanged." \
+    "The pinned testnet chain configs (${TAG}) could not be installed (see above). Chain configs unchanged." "$(errors)"
 check "failed: the helper's reason is shown" yes \
     "$(has "$OUT" "Could not fetch tag ${TAG} from origin, and the checkout does not have it.")"
 check "failed: nothing copied" "$before" "$(dsums)"
@@ -465,7 +586,8 @@ check "failed: asked, locked, unlocked before the prompt; no baseline, no restar
 lock
 ${BACK}" "$(ev)"
 check "failed: the lock is released" "false" "$EDIT_LOCK_HELD"
-check "failed: no clone offered while there is a checkout" no "$(has "$OUT" "Clone the repository")"
+check "failed: no clone offered or promised while there is a checkout" "no no" \
+    "$(has "$OUT" "Clone the repository") $(has "$OUT" "offered a clone")"
 
 # --- no checkout and no pinned files (a Docker install that never cloned) ------------------
 # Declined: what is missing, the clone named, then how to get the files by hand.
@@ -547,8 +669,9 @@ GIT_FETCH_RC=1
 GIT_REFS=""
 ANSWERS="0 0"
 refresh
-check "cloned, the read fails: the error, ending Chain configs unchanged." \
-    "Could not read the pinned testnet chain configs (${TAG}) from ${SRC} (see above). Chain configs unchanged." "$(errors)"
+check "cloned, the read fails: the neutral error, no promise of another clone" \
+    "The pinned testnet chain configs (${TAG}) could not be installed (see above). Chain configs unchanged.|no" \
+    "$(errors)|$(has "$OUT" "offered a clone")"
 check "cloned, the read fails: unlocked before the prompt" "${ASK}
 ${ASK_CLONE}
 lock
@@ -564,6 +687,81 @@ refresh
 check "no checkout, files put in by hand: refreshed with no git, no clone question" "yes no " \
     "$(has "$(ev)" "systemctl restart telcoin") $(has "$(ev)" "asked: Clone") $(argv)"
 check "no checkout, files put in by hand: the data dir holds the pinned files" "$PINNED" "$(dsums)"
+
+# --- no checkout: the library's checks run before the clone question -------------------------
+# A source path that exists and is not a checkout: the library's refusal
+# (_tn_chain_configs_clone_target), no clone offered, nothing locked or run.
+node testnet
+rm -rf "$SRC"
+mkdir -p "$SRC/chain-configs/testnet"
+cp "$T/diverged"/*.yaml "$SRC/chain-configs/testnet/"
+nopin
+origin
+before="$(dsums)"
+ANSWERS="0 0"
+refresh
+check_rc "a source path that is not a checkout: back to the menu, rc 0" 0 "$RC"
+check "a source path that is not a checkout: the library's wording, then the refusal" \
+    "yes|The pinned testnet chain configs (${TAG}) were not installed (see above). Chain configs unchanged." \
+    "$(has "$OUT" "[WARN] ${SRC} exists but is not a git checkout; move it aside first.")|$(errors)"
+check "a source path that is not a checkout: no clone offered, no lock, no git" "no|${ASK}
+enter|" "$(has "$OUT" "There is no repository checkout")|$(ev)|$(argv)"
+check "a source path that is not a checkout: nothing copied or installed, the path as it was" \
+    "${before}|no|no|$(cat "$T/diverged/committee.yaml")" \
+    "$(dsums)|$(exists "$PIN")|$(exists "$SRC/.git")|$(cat "$SRC/chain-configs/testnet/committee.yaml")"
+# An entry in the way in the pinned directory (_tn_chain_configs_dest_ok, rc
+# 2): refused before the clone question, so no clone is made for nothing.
+node testnet
+rm -rf "$SRC"
+nopin
+mkdir -p "$PIN/committee.yaml"
+origin
+before="$(dsums)"
+ANSWERS="0 0"
+refresh
+check "an entry in the way: the library's wording, then the neutral error" \
+    "yes|The pinned testnet chain configs (${TAG}) could not be installed (see above). Chain configs unchanged." \
+    "$(has "$OUT" "[WARN] ${PIN}/committee.yaml is a symlink or not a regular file; nothing was installed. Remove it and run again.")|$(errors)"
+check "an entry in the way: refused before any clone question; no lock, no git, no clone made" "${ASK}
+enter||no" "$(ev)|$(argv)|$(exists "$SRC")"
+check "an entry in the way: no clone promised, nothing copied" "no|${before}" \
+    "$(has "$OUT" "offered a clone")|$(dsums)"
+# The pinned directory a symlink (rc 1): the same, worded as a refusal.
+node testnet
+rm -rf "$SRC"
+nopin
+mkdir -p "${PIN%/*}" "$T/elsewhere"
+ln -s "$T/elsewhere" "$PIN"
+ANSWERS="0 0"
+refresh
+check "a symlinked pinned directory: the library's wording, the refusal, before any clone question" \
+    "yes|The pinned testnet chain configs (${TAG}) were not installed (see above). Chain configs unchanged.|${ASK}
+enter||no" \
+    "$(has "$OUT" "[WARN] ${PIN} must be a directory, not a symlink or a file; nothing was installed. Remove it and run again.")|$(errors)|$(ev)|$(argv)|$(exists "$SRC")"
+rm -f "$PIN"
+
+# --- no checkout, the right files 0600 and their reinstall fails: no clone promised -------
+# Run twice: the second run asks no clone question either (the files are
+# there), so neither may promise one.
+for run in 1 2; do
+    node testnet
+    rm -rf "$SRC"
+    loose_pin
+    before="$(dsums)"
+    LAYOUT_FAIL=1
+    ANSWERS="0 0"
+    refresh
+    LAYOUT_FAIL=""
+    check "reinstall fails, run ${run}: the library's reason, then the neutral error" \
+        "yes|The pinned testnet chain configs (${TAG}) could not be installed (see above). Chain configs unchanged." \
+        "$(has "$OUT" "[WARN] Could not reinstall the testnet chain configs in ${PIN} root-owned, directories 0755 and files 0644 (see above).")|$(errors)"
+    check "reinstall fails, run ${run}: no clone question, none promised; nothing copied; unlocked before the prompt" \
+        "no|no|${before}|${ASK}
+lock
+${BACK}" "$(has "$(ev)" "asked: Clone")|$(has "$OUT" "offered a clone")|$(dsums)|$(ev)"
+    check "reinstall fails, run ${run}: no claim that the pinned directory lacks the files" no \
+        "$(has "$OUT" "does not hold them")"
+done
 
 # --- the chain-id guard still refuses a genesis of another chain ---------------------------
 node testnet 999
@@ -672,6 +870,17 @@ refresh
 check "devnet, no checkout: says so, no clone offered; unlocked before the prompt" "yes|no|${ASK}
 lock
 ${BACK}" "$(has "$OUT" "Source directory not found at ${SRC}")|$(has "$OUT" "asked: Clone")|$(ev)"
+# A git worktree is a checkout on devnet too: pulled, its files copied.
+node devnet 32285
+worktree
+mkdir -p "$SRC/chain-configs/devnet"
+printf 'genesis:\n  chainId: 32285\n# devnet\n' > "$SRC/chain-configs/devnet/genesis.yaml"
+printf 'committee: devnet\n' > "$SRC/chain-configs/devnet/committee.yaml"
+printf 'parameters: devnet\n' > "$SRC/chain-configs/devnet/parameters.yaml"
+refresh
+check "devnet, a worktree: pulled, its files copied, restarted" \
+    "-C $SRC pull|committee: devnet|yes|no" \
+    "$(sed -n 1p "$REC/git.argv")|$(cat "$DD/genesis/committee.yaml")|$(has "$(ev)" "systemctl restart telcoin")|$(has "$OUT" "Source directory not found")"
 
 # --- the menu label ------------------------------------------------------------------------
 MENU="$(grep -E '^        echo " 1[0-4]\) ' "$TN_TEST_REPO/edit-config.sh")"
@@ -693,6 +902,9 @@ tn_chain_configs_from_tag() {
     if [[ "$HRC" -eq 0 ]]; then
         mkdir -p "$PIN"
         cp "$FX"/*.yaml "$PIN/"
+    elif [[ -n "${HGONE:-}" ]]; then
+        # The pinned files went away while it ran.
+        rm -rf "$PIN"
     fi
     return "$HRC"
 }
@@ -716,22 +928,41 @@ for HRC in 1 2 3; do
 lock
 helper $SRC testnet edit_wait_say
 ${BACK}|false" "$(dsums)|$(ev)|${EDIT_LOCK_HELD}"
+    want="The pinned testnet chain configs (${TAG}) could not be installed (see above). Chain configs unchanged."
+    [[ "$HRC" -ne 1 ]] || want="The pinned testnet chain configs (${TAG}) were not installed (see above). Chain configs unchanged."
+    check "stub rc ${HRC}, a checkout: the line for that rc, no clone promised" "${want}|no" \
+        "$(errors)|$(has "$OUT" "offered a clone")"
 done
-# No checkout, and the pinned files gone between the menu's test and the
-# helper (here: the helper fails while they are in place): run it again.
+# No checkout, the pinned files in place before and after the helper failed:
+# a re-run asks no clone question, so none is promised.
 node testnet
 rm -rf "$SRC"
-nopin
-mkdir -p "$PIN"
-cp "$FX"/*.yaml "$PIN/"
+exact_pin
 HRC=2
 refresh
-check "stub rc 2 with no checkout: the error, run this again for the clone; unlocked before the prompt" \
-    "yes|no|${ASK}
+check "stub rc 2, no checkout, the pinned files still there: the neutral error, no clone promised; unlocked before the prompt" \
+    "The pinned testnet chain configs (${TAG}) could not be installed (see above). Chain configs unchanged.|no|no|${ASK}
 lock
 helper $SRC testnet edit_wait_say
 ${BACK}" \
-    "$(has "$OUT" "->  Run this again to be offered a clone of the repository at ${TAG}.")|$(has "$OUT" "setup-node")|$(ev)"
+    "$(errors)|$(has "$OUT" "offered a clone")|$(has "$OUT" "setup-node")|$(ev)"
+# No checkout, and the pinned files gone while the helper ran: the neutral
+# error, then the hint, which the next run bears out.
+node testnet
+rm -rf "$SRC"
+exact_pin
+HGONE=1
+refresh
+HGONE=""
+check "stub rc 2, no checkout, the pinned files gone: the neutral error, run this again for the clone; unlocked before the prompt" \
+    "The pinned testnet chain configs (${TAG}) could not be installed (see above). Chain configs unchanged.|yes|no|${ASK}
+lock
+helper $SRC testnet edit_wait_say
+${BACK}" \
+    "$(errors)|$(has "$OUT" "->  Run this again to be offered a clone of the repository at ${TAG}.")|$(has "$OUT" "setup-node")|$(ev)"
+ANSWERS="0 1"
+refresh
+check "stub rc 2, the pinned files gone: the next run offers the clone" yes "$(has "$(ev)" "$ASK_CLONE")"
 # The pins refuse the copy source after the helper (a check that fails): an
 # error, the baseline for the installed files, unlocked before the prompt.
 node testnet

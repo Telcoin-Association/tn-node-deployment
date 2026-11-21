@@ -3891,7 +3891,7 @@ caddy_require_lib() {
     for fn in tn_write_root_file tn_backup_file tn_restore_backup tn_as_service_user \
               addon_meta_get addon_meta_write_begin tn_acquire_update_lock _tn_strip_gw \
               tn_committee_down_guard tn_wait_restart_window tn_local_rpc_url \
-              tn_gateway_installed; do
+              tn_gateway_installed _tn_rpc_chain_is; do
         declare -F "$fn" >/dev/null 2>&1 || missing="${missing:+${missing}, }${fn}"
     done
     # The tn-gateway fence lines.

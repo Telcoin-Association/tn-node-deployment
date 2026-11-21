@@ -3,7 +3,9 @@
 # tools/tests/genesis_hash_test.sh -- chain configs pinned to a hash and read
 # from a pinned tag: tn_chain_configs_check, tn_chain_configs_tag,
 # tn_chain_configs_dir, tn_chain_configs_from_tag,
-# ensure_chain_configs_available and setup-node.sh's step_write_config. The
+# ensure_chain_configs_available, setup-node.sh's step_write_config, and how
+# setup-node.sh's step_create_infrastructure words and ends a --json run on
+# each return code of the chain-config helper (refused, failed). The
 # testnet fixture files (genesis.d/testnet) are the repository's
 # chain-configs/testnet at the pinned tag and must match the TESTNET_*_SHA256
 # constants; a changed, missing or symlinked file is refused before anything
@@ -308,8 +310,10 @@ To add an exception for this directory, call:
 
     git config --global --add safe.directory ${SRC}"
 check_rc "git cannot read the checkout: refused (rc 1)" 1 "$(ft "$SRC" testnet pf)"
+# git's reason is that fatal line (GIT_FETCH_ERR holds just it), cut at 200
+# characters as the library cuts it: it names SRC, so a long TMPDIR reaches the cut.
 check "git cannot read the checkout: git's reason" \
-    "warn|Git cannot read the repository in ${SRC} (fatal: detected dubious ownership in repository at '${SRC}'); nothing was installed." \
+    "warn|Git cannot read the repository in ${SRC} (${GIT_FETCH_ERR:0:200}); nothing was installed." \
     "$(grep '^warn|' "$REC/pf")"
 check "git cannot read the checkout: no blob read, nothing written" "fetch rev-parse||" \
     "$(verbs)|$(cat "$REC/layout")|$(cat "$REC/rootw")"
