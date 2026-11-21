@@ -121,6 +121,10 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   `https://rpc.telcoin.network`, which check-node and the restart-window epoch reads use and which
   answers for chain 2017 until launch. Closes at launch: confirm the endpoint answers chain 487 and
   fill the UI list.
+- Once mainnet is enabled, the setup wizard shows the mainnet hardware tiers at step 1 only when
+  the operator goes back to it after picking mainnet at step 2; going forward, the verdict shows
+  only in the setup log (V-HW-UI F9). Closes when the page fetches the preflight again when the
+  network changes (`setSetupNetwork`), or the Review step shows the hardware verdict.
 
 ## Upstream and maintainer repos
 
@@ -187,6 +191,9 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   merged 2026-11-04). The other consumers of that file upstream (`docker-compose.yml` and the
   start-script heredocs) still pass the token in the environment, so a compose self-host on the
   new config fails every push. Closes when those consumers move to the token file upstream.
+- telcoin-network's hardware requirements page
+  (`docs/src/getting-started/hardware-requirements.md`) still shows one table for every network,
+  while these scripts, the UI and the partner documents now have one per network. Closes when the page carries the testnet and mainnet tables.
 
 ## Host soak
 
@@ -443,6 +450,11 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   as down in the dashboard, without the panic reason from the journal or the `start-limit-hit`
   state from systemd. (guide-1.4)
   Why: the operator sees a dead node and has to find the cause in the journal by hand.
+- The wizard's preflight measures the disk of the default data dir (`/var/lib/telcoin`), while
+  setup's hardware check measures the data dir chosen later in the wizard, so with a drive mounted
+  below `/var/lib/telcoin` the preflight can read `below minimum` for the disk while the setup log
+  reads a pass (V-HW-UI F10, older than this round). Closes when the preflight measures the data
+  dir the wizard will use.
 
 ## Scripts
 
@@ -811,7 +823,17 @@ are pulled through the customer's own State Manager association. The account sid
   parameter again on every update, so once a newer image exists an update replaces the instance,
   which fails on the network interface it holds and rolls back (reasoned from the docs, not
   tested). The docs tell operators to change the instance type in EC2 instead. A fix is an
-  optional `ImageId` parameter that pins the current image.
+  optional `ImageId` parameter that pins the current image. With the 15,000 IOPS volume of
+  `scripts-v2.2.0` the IOPS change of an older stack lands before that failure, so the rollback
+  waits, possibly for hours, until the volume modification completes (V-AWS-3).
+- **CI does not check the volume's figures or the preset types.** cfn-lint passes a gp3 `Iops`
+  above 80,000, a `Throughput` above 2,000, IOPS-to-size and throughput-to-IOPS ratios beyond
+  gp3's limits, and a typo in a preset's instance type (V-AWS-7). A guard rule is the wrong place for
+  these; a plain `tools/tests` case that reads the template could assert them.
+- **Nothing grows the filesystem after the volume grows.** The user data formats the whole device
+  with no partition table, so after a volume is grown in the console the operator runs
+  `sudo resize2fs "$(findmnt -no SOURCE /var/lib/telcoin)"`, which OPERATOR.md section 2.11
+  gives, without a snapshot first (V-AWS-4). Closes if a stack document or a script grows it.
 - **The subnet takes the region's first availability zone**, which may not offer c7i. An
   `AvailabilityZone` parameter fixes it if a launch hits that.
 - **Not checked without AWS:** the root device name `/dev/sda1` on Canonical's images, the Session

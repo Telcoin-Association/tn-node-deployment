@@ -100,18 +100,47 @@ node on the box, the binary is launched with no node-instance flag and serves RP
 
 ### Hardware
 
-Size the machine for the role you plan to run. The figures come from the telcoin-network hardware requirements and count physical cores: cloud vCPUs are usually hyperthreads, so an 8 vCPU instance has about 4 physical cores. The validator row only matters if you intend to stake and validate.
+Size the machine for the role you plan to run and the network it joins.
+The figures count physical cores, written `N cores (2N vCPU)`: cloud vCPUs are usually hyperthreads, two per core, so an 8 vCPU instance has about 4 physical cores.
+The validator rows only matter if you intend to stake and validate.
+
+Testnet (Adiri):
 
 | Role | Minimum | Recommended |
 |---|---|---|
-| Observer, follower (RPC on localhost) | 2 cores, 8 GB RAM | 4 cores, 16 GB RAM |
-| Observer, public RPC | 4 cores, 16 GB RAM | 8 cores, 32 GB RAM |
-| Validator | 8 cores, 32 GB ECC RAM | 16 cores, 64 GB ECC RAM |
-| Storage, every role | 2 TB TLC NVMe SSD | 4 TB TLC NVMe SSD |
+| Observer, follower | 2 cores (4 vCPU), 8 GB RAM | 4 cores (8 vCPU), 16 GB RAM |
+| Observer, public RPC | 4 cores (8 vCPU), 16 GB RAM | 8 cores (16 vCPU), 32 GB RAM |
+| Validator | 3 cores (6 vCPU), 16 GB RAM | 4 cores (8 vCPU), 16 GB RAM |
+| Storage, every role | 350 GB SSD (15,000 IOPS, 240 MB/s) | 500 GB TLC NVMe |
+| Validator bandwidth | 200 Mbps symmetric | 1 Gbps |
 
-Validators also need 200 Mbps symmetric bandwidth at minimum, 1 Gbps recommended.
+Mainnet:
 
-The hardware preflight in `setup-node.sh` prints one line per role and only warns; it never blocks setup. It compares the tiers with physical cores, counted from `lscpu`, `/proc/cpuinfo` or `sysctl hw.physicalcpu`, and the report says what it measured ("4 physical cores"). When only the logical count can be read it says so ("8 logical CPUs"); halve a cloud instance's vCPU count yourself in that case. It does not check for ECC memory or NVMe.
+| Role | Minimum | Recommended |
+|---|---|---|
+| Observer, follower | 2 cores (4 vCPU), 8 GB RAM | 4 cores (8 vCPU), 16 GB RAM |
+| Observer, public RPC | 4 cores (8 vCPU), 16 GB RAM | 8 cores (16 vCPU), 32 GB RAM |
+| Validator | 8 cores (16 vCPU), 32 GB ECC RAM | 16 cores (32 vCPU), 64 GB ECC RAM |
+| Storage, validator | 2 TB TLC NVMe (20,000 write IOPS, 300 MB/s) | 4 TB |
+| Storage, observer | 2 TB TLC NVMe (10,000 write IOPS, 300 MB/s) | 4 TB |
+| Validator bandwidth | 200 Mbps symmetric | 1 Gbps |
+
+Prioritise single-core performance: EVM execution is single-threaded, so a high clock speed matters more than extra cores.
+
+The testnet figures follow the five Adiri validators: Google Cloud c3-highcpu-8 machines (4 cores (8 vCPU), 16 GB, Intel Sapphire Rapids), each with a 350 GB pd-ssd disk, which Google caps at 15,000 IOPS and 240 MiB/s on that machine size.
+
+The mainnet validator storage figure comes from Telcoin's published benchmarks at [benchmark.telcoin.network](https://benchmark.telcoin.network).
+In the [latest run](https://benchmark.telcoin.network/runs/r20261115-1653/), 10 validators on 8 vCPU and 16 GB with a 20,000 IOPS, 800 MiB/s volume averaged about 9,300 transactions a second, with write IOPS at about 20,000 at the 95th percentile and about 286 MiB/s written.
+Execution ran strictly in sequence: the engine was busy about 978 ms of every second while the machine used about 56 % of its 8 vCPUs.
+The other mainnet figures come from the hardware requirements page in the telcoin-network documentation.
+
+The hardware check in `setup-node.sh` runs during preflight, once the network is picked, and prints one line per role against that network's table, such as `Validator (minimum): meets minimum (3 cores (6 vCPU) / 16 GB / 350 GB)` on testnet.
+It only warns; it never blocks setup.
+It counts physical cores, from `lscpu`, `/proc/cpuinfo` or `sysctl hw.physicalcpu`, so an 8 vCPU instance with 4 cores meets the testnet validator minimum, 3 cores (6 vCPU), but not the mainnet one, 8 cores (16 vCPU).
+When only the logical count can be read it says so ("8 logical CPUs") and compares that count with the tiers; halve a cloud instance's vCPU count yourself in that case.
+It does not check ECC, NVMe, IOPS or throughput, and devnet uses the testnet table.
+
+A `[WARN] <role>: below minimum — needs ≥ ... (have ...)` line means the host is under that role's minimum for the chosen network, and names only the values that fall short, such as `needs ≥ 2 TB disk (have 350 GB disk)`; setup goes on.
 
 > Storage note: TLC NVMe drives are specifically required over QLC. TLC supports 1,000-3,000 P/E cycles vs 100-1,000 for QLC, making TLC significantly more durable for continuous blockchain write operations.
 
@@ -201,9 +230,13 @@ sudo bash ~/telcoin-node-scripts/remove-node.sh
 | `aws/requirements-ci.txt` | cfn-lint for CI, every file pinned by hash. |
 | `.github/workflows/publish-aws-templates.yml` | Uploads the template of each `scripts-v*` tag for the launch link. |
 
-Parameters: `Preset` (`FullNode` c7i.2xlarge, `PublicRPC` c7i.4xlarge with TCP 80 and 443 open, `Validator` c7i.8xlarge), `InstanceType` (empty for the preset's type, or another x86_64 type), `DataVolumeSize` (2000 or 4000 GiB), `AutoUpdate` (`Enabled` or `Disabled`) and `ImageId` (Canonical's public SSM parameter `/aws/service/canonical/ubuntu/server/26.04/stable/current/amd64/hvm/ebs-gp3/ami-id`).
+Parameters: `Preset` (`FullNode`, the default, `c7i.2xlarge, 4 cores (8 vCPU), 16 GiB`; `PublicRPC` `c7i.4xlarge, 8 cores (16 vCPU), 32 GiB` with TCP 80 and 443 open; `Validator` `c7i.2xlarge, 4 cores (8 vCPU), 16 GiB`, the same size as `FullNode`), `InstanceType` (empty for the preset's type, or another x86_64 type), `DataVolumeSize` (`500` GiB, the default, or `350`; `2000` and `4000` stay allowed for stacks launched with them), `AutoUpdate` (`Enabled` or `Disabled`) and `ImageId` (Canonical's public SSM parameter `/aws/service/canonical/ubuntu/server/26.04/stable/current/amd64/hvm/ebs-gp3/ami-id`).
 
-The stack creates a VPC with one public subnet, an internet gateway and route, an Elastic IP on the instance's network interface, and a security group with UDP 49590 and 49594 in from everywhere (plus TCP 80 and 443 on `PublicRPC`), no SSH and everything out. The instance runs Ubuntu 26.04 with IMDSv2 required, an encrypted gp3 root volume and an instance role that trusts `ec2.amazonaws.com` only and carries only `AmazonSSMManagedInstanceCore`. The data volume is encrypted gp3 (10,000 IOPS, 300 MB/s) with `DeletionPolicy: Retain` and `UpdateReplacePolicy: Retain`, and no snapshots. The user data writes `install algif_aead /bin/false` to `/etc/modprobe.d/telcoin-algif-aead.conf` first (and unloads the module if it is loaded), turns swap off, formats the data volume ext4 only when it carries no filesystem, mounts it at `/var/lib/telcoin` by UUID with `nofail` (found under `/dev/disk/by-id/` by its volume ID), installs the scripts as `ubuntu` with `install.sh --yes`, and signals a `WaitCondition` with `curl`, `SUCCESS` or `FAILURE` and the reason.
+The stack creates a VPC with one public subnet, an internet gateway and route, an Elastic IP on the instance's network interface, and a security group with UDP 49590 and 49594 in from everywhere (plus TCP 80 and 443 on `PublicRPC`), no SSH and everything out. The instance runs Ubuntu 26.04 with IMDSv2 required, an encrypted gp3 root volume and an instance role that trusts `ec2.amazonaws.com` only and carries only `AmazonSSMManagedInstanceCore`. The data volume is encrypted gp3, provisioned at 15,000 IOPS and 300 MiB/s, with `DeletionPolicy: Retain` and `UpdateReplacePolicy: Retain`, and no snapshots. The user data writes `install algif_aead /bin/false` to `/etc/modprobe.d/telcoin-algif-aead.conf` first (and unloads the module if it is loaded), turns swap off, formats the data volume ext4 only when it carries no filesystem, mounts it at `/var/lib/telcoin` by UUID with `nofail` (found under `/dev/disk/by-id/` by its volume ID), installs the scripts as `ubuntu` with `install.sh --yes`, and signals a `WaitCondition` with `curl`, `SUCCESS` or `FAILURE` and the reason.
+
+Cores, RAM and disk size follow the recommended column of the testnet table in [Hardware](#hardware); the disk is an EBS network volume, not a local NVMe drive.
+A `c7i.2xlarge` sustains 12,000 IOPS and 312.5 MB/s to EBS and bursts above that for 30 minutes at least once every 24 hours, so on `FullNode` and `Validator` the volume gives 12,000 IOPS sustained and 15,000 in bursts.
+A `c7i.4xlarge` sustains the full 15,000.
 
 | Output | Value |
 |---|---|
@@ -215,6 +248,18 @@ The stack creates a VPC with one public subnet, an internet gateway and route, a
 | `DataVolumeId` | The data volume, which deleting the stack keeps. |
 
 With `AutoUpdate` enabled, a State Manager association runs a Command document daily (03:00 UTC, then a random wait of up to an hour): nothing before setup has written `/etc/telcoin/.node-meta`; then `printf 'y\n' | sudo -u ubuntu -H bash update-scripts.sh`, `update-node.sh --json --check`, and when `update_available` is true (read with `python3`) `--json --prepare --ref <latest_ref>` and `--json --apply` without `--yes`. A prepared update that is already pending is applied, not prepared again. On a staked validator, or one whose stake cannot be read, the apply refuses without `--yes` and the prepared update waits for the apply document. When the check reports `storage_migration` true (a one-way update), the association prepares the update and never applies it, on any node; it waits for the apply document too. The association never runs `ui/install-ui.sh --update` or `setup-alerts.sh --refresh`.
+
+A stack launched from an earlier template keeps running as it is; nothing in this release needs a change on it.
+Do not update a stack to this template.
+Every stack update reads Canonical's image parameter again.
+Once a newer image is out, the update tries to replace the instance, fails because the old instance holds the network interface, and rolls back.
+The volume's IOPS change is made before that failure, so the rollback waits until the volume modification completes, which can take hours, and the stack shows `UPDATE_ROLLBACK_IN_PROGRESS` meanwhile.
+If the image has not changed, a `Validator` stack's update stops and starts the instance to change its type, outside the epoch-boundary wait of `update-node.sh`.
+Make changes on the resources instead:
+
+- To raise the data volume to 15,000 IOPS, use the EC2 console (`Volumes`, `Modify volume`). The node keeps running, and the volume takes no other modification until this one shows `completed` (at most four modifications in 24 hours).
+- To move a `Validator` to `c7i.2xlarge`, change the instance type in the EC2 console at a time when the node may restart.
+- A volume can grow but not shrink, and a stack update that picks a smaller `DataVolumeSize` fails. After you grow a volume, grow its filesystem on the host: `sudo resize2fs "$(findmnt -no SOURCE /var/lib/telcoin)"` (the volume has no partition table, and ext4 grows while mounted). Do not snapshot the volume first: a snapshot is a copy of the node keys.
 
 Telcoin gets no access to the account or the node: no cross-account role, no Systems Manager hybrid activation, no Telcoin principal. The guard rules check that the only IAM principal is `ec2.amazonaws.com`, that the role carries `AmazonSSMManagedInstanceCore` and nothing else (no inline policy), that every resource type is on an allowed list of types that take no resource policy, that no ingress rule covers TCP 22 (no all-protocol ingress either), that the instance requires IMDSv2, that every EBS volume is encrypted and that the data volume is retained.
 
@@ -240,12 +285,12 @@ Each script walks through numbered steps:
 **Step 1: Pre-flight Checks, Network and Install Method**
 - Checks you are running as root
 - Detects your Linux distribution and package manager
-- Reports the hardware against each role's minimum (warns only, never blocks)
 - Checks the required ports
+- Installs any missing tools (curl, git)
 - Asks which network to connect to (Adiri testnet; mainnet is offered once it launches), then offers the testnet add-ons and, on every network, [private alerts](#private-alerts-every-network), which it sets up once the node runs. The network is chosen here, so the script's own step headers go from Step 1 to Step 3. While this script release keeps mainnet off (`TN_MAINNET_ENABLED=0` in `lib/common.sh`), option 2 answers `Mainnet has not launched yet.` and asks again, and `--json --network mainnet` stops with `Mainnet is not enabled in this script release (lib/common.sh TN_MAINNET_ENABLED); nothing on this host was changed.`
 - Checks internet connectivity against the chosen network's public RPC (testnet `https://rpc.adiri.tel`, mainnet `https://rpc.telcoin.network`, devnet `https://rpc.devnet.telcoin.network`), then `https://1.1.1.1`
+- Reports the hardware against each role's minimum in the chosen network's table (see [Hardware](#hardware); warns only, never blocks)
 - Checks the systemd version against the network's floor (see [Supported Operating Systems](#supported-operating-systems))
-- Installs any missing tools (curl, git)
 - Asks how to obtain the binary: build from source, a signed release binary, Docker, or a binary already on the machine (see [Binary Installation Options](#binary-installation-options))
 - Takes release tags only: `vX.Y.Z-adiri` on testnet (or a release candidate, `vX.Y.Z-adiri-rcN`, that you name), `vX.Y.Z` on mainnet. A branch, a commit id or `latest` is refused. On testnet a release older than `v0.13.0-adiri`, the first release that has all three of `keytool set-rpc`, proof-of-possession signing and state export, is refused too
 - Installs all dependencies upfront before configuration begins (build tools and the build account's Rust toolchain, the verified release, or the Docker engine and image)
@@ -1579,7 +1624,12 @@ The card cannot turn the allowlist on or off; see [P2P committee allowlist](#p2p
 
 The Network tab links the network's status page only where one exists: testnet links `https://status.adiri.telcoin.network/`, and mainnet, devnet and an unknown network show no link (`STATUS_PAGE_LINKS` in `ui/server.py`; the page renders only an https link).
 
-The firewall card lists node ports beyond its three toggles, read-only. CPU counts are physical cores, shown as "8 (16 threads)", and the setup preflight judges the hardware tiers on physical cores too.
+The firewall card lists node ports beyond its three toggles, read-only. CPU counts are physical cores, shown as "8 (16 threads)".
+
+The setup wizard's preflight judges the hardware tiers of the wizard's network, the tables in [Hardware](#hardware): the mainnet tiers once mainnet is picked, the testnet tiers otherwise, and going back to the preflight step after picking a network fetches them again.
+It judges cores exactly and RAM and disk with the shell's 5 % slack, and a RAM or disk size read as zero counts as not measured, as in the shell.
+Each tier reads like the tables, cores with vCPU (`3 cores (6 vCPU)`) and disks as `350 GB` or `2 TB`, followed by the detected host (its disk in decimal GB), the tier set it compared with and the single-core note.
+When the server could count only logical CPUs, the detected line reads `Detected 8 logical CPUs / ...`, followed by `Physical cores could not be counted, so the tiers are compared with logical CPUs; with hyperthreading that is up to twice the physical cores.`
 
 ### Validator view
 
@@ -2067,6 +2117,13 @@ prints the exact fix command.
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
 
+### telcoin-ui v2.1.3 — a measured zero is unmeasured, logical CPUs worded as such
+The setup preflight treats a MemTotal of 0 and a filesystem of 0 kB as "could not measure", as the shell does, not as "below minimum".
+Cores are compared exactly; RAM and disk keep the 5 % slack.
+The hardware object gains `cpu_kind` (`physical` or `logical`): with `logical` the page reads `Detected 8 logical CPUs / ...` and adds the shell's sentence about what the tiers were compared with.
+A missing RAM figure shows `?`.
+Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+
 ### edit-config v2.2.2 — menu 13 offers the clone and frees the lock before its prompts
 With no repository checkout and no pinned files, menu 13 runs setup's checks for a path in the way, then offers to clone the repository at the pinned tag into `/opt/telcoin-source`, the clone setup makes.
 Declined or failed, it prints a manual `sudo git clone --branch <tag> ...` line and the three raw-file URLs; it no longer tells you to re-run `setup-node.sh`.
@@ -2091,6 +2148,28 @@ Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
 A comment no longer lists a `git pull`, which update-node never runs.
 Nothing changes for the operator.
 Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+
+### aws/node.yaml — the Validator preset is c7i.2xlarge, a 500 GiB data volume at 15,000 IOPS
+The presets follow the recommended column of the testnet table for cores and RAM: `Validator` moves from c7i.8xlarge to `c7i.2xlarge, 4 cores (8 vCPU), 16 GiB`, the size of `FullNode`.
+`DataVolumeSize` defaults to 500 GiB (was 2000) and allows 350, 500, 2000 and 4000; the two old sizes stay because a volume cannot shrink and stacks were launched with them.
+The volume is provisioned at 15,000 IOPS (was 10,000) and 300 MiB/s, and the console's `DataVolumeSize` description says that a c7i.2xlarge (`FullNode`, `Validator`) sustains 12,000 IOPS to EBS and 15,000 in bursts, and a c7i.4xlarge (`PublicRPC`) the full 15,000.
+The template has no version.
+Existing stacks need no change, and should not be updated to this template: see [AWS one-click](#aws-one-click-cloudformation).
+
+### telcoin-ui v2.1.1 — the setup preflight judges the tiers of the wizard's network
+The wizard's preflight compared every host with the mainnet tiers.
+The page now sends the wizard's network, and the server answers with that network's tiers, which mirror `lib/common.sh`; a missing or unknown network reads as testnet.
+The disk floor is decimal GB with the shell's 5 % slack, so a 350 GB disk gets the same verdict as in setup.
+The rows read like the documentation (`3 cores (6 vCPU)`, `350 GB`, `2 TB`) and name the tier set, followed by the single-core note; the reply's `hardware` object gains `network`, and `validator_recommended` gains `ecc`.
+
+### lib/common.sh v2.2.3 — hardware tiers per network
+`check_hardware` compared every host with the mainnet tiers, so it warned "below minimum" on the machines the testnet validators run on.
+The tiers are now per network, as in [Hardware](#hardware): testnet and devnet use the testnet table, mainnet the mainnet one.
+CPU is printed as `N cores (2N vCPU)`, the report names the tier set (`Comparing with the testnet hardware tiers.`) and adds the single-core note.
+The network is a new third argument; a caller that passes two arguments gets the mainnet tiers, as before, and the check still only warns.
+
+### setup-node v2.1.3 — the hardware check runs after the network is chosen
+Setup checks the hardware once the network is picked, after the internet check, and passes the network to `check_hardware`, so a testnet host is judged against the testnet table.
 
 ### edit-config v2.2.1 — menu 13 installs the pinned chain configs instead of pulling
 Menu 13 ran `git pull` in the telcoin-network checkout and copied the default branch's files: on testnet the pull moved a source install's build tree, and the copy was then refused because those files no longer match the pins.

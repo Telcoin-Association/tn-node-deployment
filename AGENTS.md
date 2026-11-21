@@ -573,6 +573,10 @@ from a Session Manager shell, so the BLS passphrase never enters AWS. Rules:
   check reports `storage_migration` true, on any node: that update waits for the apply document
   too, because `update-node.sh` asks for no snapshot in `--json` mode. It never runs
   `ui/install-ui.sh --update` or `setup-alerts.sh --refresh`.
+- The presets follow the recommended column of the testnet hardware table (`HW_TESTNET_*`) for
+  cores and RAM, and `DataVolumeSize` its disk sizes. The `Preset` and `DataVolumeSize`
+  descriptions, which the console shows, state the instance types and what each sustains to EBS:
+  change them with the figures.
 - No snapshots or backup plan for the data volume: a snapshot is a copy of the node keys. The
   volume keeps `DeletionPolicy: Retain` and `UpdateReplacePolicy: Retain`, and the user data
   formats it only when it carries no signature.
@@ -1249,6 +1253,11 @@ line.
   The key does not expire; the cases on its real signature skip without a working real `gpg` (`REAL_GPG`), and every other case re-signs copies of the files with `signing.sh` keys and runs in all three environments.
   Every file is as the dry run wrote it, and all of them are refreshed together from a new dry run (`gateway-pin.d/README`).
 - The node admission settings have `network_config_test.sh` (the renderer), `setup_node_admission_test.sh` and `edit_config_admission_test.sh`.
+- The hardware check has `hardware_check_test.sh`: the output for the testnet validators' machine
+  on both networks, the 350 GB boundary, the logical-CPU fallback and the order of the calls in
+  `step_preflight`. The UI's twin is `hardware_profile` in `ui/server.py`, and
+  `ui/test_hw_mirror.py` compares its `HW_TIERS` and `HW_VALIDATOR_RECOMMENDED` with the
+  `HW_TESTNET_*` and `HW_MAINNET_*` constants of `lib/common.sh`, so the two change together.
 
 Nothing under `tools/tests/` is updater-tracked or carries a sidecar. The UI's own tests live
 in `ui/tests/` (`helper_test.sh`, `open_ui_test.sh`, `install_ui_test.sh`) and `ui/test_*.py`.

@@ -7,6 +7,43 @@ For recent entries (v1.1.40 onwards), see the Changelog section of README.md.
 
 ## Unreleased
 
+### Partner guide 1.13 and node requirements one-pagers 1.3, November 2026 -- hardware requirements per network, chain configs at the pinned tag, mainnet chain id 731
+The partner guide (`docs/partner/mno-node-guide/`, version 1.13) and the testnet and mainnet node
+requirements one-pagers (version 1.3, November 2026) carry the hardware requirements per network.
+The testnet figures follow the five Adiri validators, Google Cloud `c3-highcpu-8` machines with a
+350 GB `pd-ssd` disk: a validator needs at least 3 cores (6 vCPU), 16 GB RAM and a 350 GB SSD
+(15,000 IOPS, 240 MB/s). On mainnet a validator needs at least 8 cores (16 vCPU), 32 GB ECC RAM
+and a 2 TB TLC NVMe drive (20,000 write IOPS, 300 MB/s), the storage figure from Telcoin's
+published benchmarks. CPU is written as cores with the vCPU count. The documents say that setup
+reads the chain configs from the telcoin-network tag the script release pins, and give the
+mainnet chain id as 731 (`0x2db`) instead of 487. To stay on one page, both one-pagers replace
+the hyperthread bullet with the single-core sentence ("Prioritise single-core performance: EVM
+execution is single-threaded, so a high clock speed matters more than extra cores."). The testnet
+page drops its QLC bullet and keeps that advice in the "Every node" bullet, which now reads
+"Every node: swap off, time sync on, data directory on ext4 or xfs, no QLC drives; the scripts
+check none of these." The mainnet page drops its QLC bullet (both its storage rows say TLC NVMe),
+splits the storage row into validator (20,000 write IOPS) and observer (10,000 write IOPS), shows
+chain ID 731 (`0x2db`), and shortens the "Every node" bullet to "Every node: swap off, time sync
+on, ext4 or xfs; none checked." No type size, margin or column width changed. The technical
+specification is unchanged at 1.3. After the change merges, run the Publish workflow of
+tn-partner-site and check `source.txt`, as the run.telcoin.network entry below says.
+
+### Hardware requirements per network, November 2026 -- lib/common 2.2.5, setup-node 2.1.4, Node Manager UI 2.1.3, the AWS one-click stack
+Part of `scripts-v2.2.0`; see [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+The hardware check compared every host with the mainnet figures, so it warned "below minimum" on
+the machines the testnet validators run on. It now runs once the network is chosen, compares the
+host with that network's tiers, and still only warns. Testnet follows the five Adiri validators:
+2 cores (4 vCPU) and 8 GB RAM for a follower, 4 cores (8 vCPU) and 16 GB for public RPC, and
+3 cores (6 vCPU) and 16 GB for a validator (4 cores (8 vCPU) recommended), each with a 350 GB SSD
+(15,000 IOPS, 240 MB/s). Mainnet keeps the follower and public RPC figures, asks 8 cores
+(16 vCPU) and 32 GB ECC RAM of a validator, and 2 TB TLC NVMe of every role (20,000 write IOPS
+for a validator, 10,000 for an observer, 300 MB/s). CPU is written as cores with the vCPU count.
+The Node Manager UI's setup preflight judges the wizard's network with the same figures. The AWS
+one-click stack's `Validator` preset moves from `c7i.8xlarge` to `c7i.2xlarge`, the size of
+`FullNode`, and its data volume defaults to 500 GiB (350 allowed) at 15,000 IOPS and 300 MiB/s.
+Existing stacks need no change; do not update them to the new template (OPERATOR.md section
+2.11).
+
 ### Chain configs from the pinned tag, November 2026 -- lib/common 2.2.5, setup-node 2.1.4, edit-config 2.2.2
 Part of `scripts-v2.2.0`; see [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
 Fresh testnet Docker and signed-release installs have failed at keygen since 2026-11-14. Setup

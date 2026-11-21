@@ -22,6 +22,13 @@ now read the three files from the tag this release pins, `v0.16.0-adiri`, and ne
 `scripts-v2.1.0` works with `--genesis-dir <dir>`, where `<dir>` holds the three files of
 `chain-configs/testnet` at `v0.16.0-adiri`.
 
+The hardware check compared every host with the mainnet figures, so it warned "below minimum" on
+the machines the testnet validators run on. It now compares the host with the tiers of the
+network chosen, and the testnet tiers follow those validators (see
+[lib/common 2.2.5](#libcommon-225)); the Node Manager UI's setup preflight does the same for the
+wizard's network. The check still only warns. The AWS one-click stack's `Validator` preset moves
+to `c7i.2xlarge`, and its data volume defaults to 500 GiB at 15,000 IOPS.
+
 The release keys change, for every operator. grantkee's RSA key, the only key of
 `scripts-v2.1.0`, is replaced by grantkee's new ed25519 key, and MavenRain's key is added. The keys now come
 from the maintainers' key allowlist, the tn-release-signing repository, and `tn-p2p-allow-sync`
@@ -42,11 +49,13 @@ systemd 255).
 | update-node | 2.1.2 |
 | setup-node | 2.1.4 |
 | lib/common (`COMMON_VERSION`) | 2.2.5 |
+| telcoin-ui (`UI_VERSION`) | 2.1.3 |
 | Release keys (`lib/release-keys/*.asc`) | grantkee `95A38484E1CBD31D773F6AF928FD56AD2F9FAE47` (replaces `4E36D35A4AB61B589861D01AC7173F2377CA7573`), MavenRain `32F886ADE9C3A88218E4B67CA0A69159FC76DBFD` (new) |
 | `tn-p2p-allow-sync` (pinned in lib/common) | v0.1.2 (was v0.1.1) |
 
 Every other script, library and UI file keeps its version. The runbook for the gateway is
-[OPERATOR.md section 4.15](../OPERATOR.md#415-worker-gateway).
+[OPERATOR.md section 4.15](../OPERATOR.md#415-worker-gateway). `aws/node.yaml` changed too (see
+[AWS one-click stack](#aws-one-click-stack)); it is not an updater entry.
 
 ## The release keys
 
@@ -270,6 +279,9 @@ Every other script, library and UI file keeps its version. The runbook for the g
   above).`. The library's warning above that line names the cause.
 - When the files are not found, the hint names the tag, where the three files are at that tag,
   the directory to copy them into and `--genesis-dir`.
+- The hardware check runs once the network is chosen, after the internet check, and compares the
+  host with that network's tiers. It ran before the choice, with the mainnet tiers on every
+  network. It still only warns, and a `--json` run logs its result as before.
 - `--help` names Ubuntu 26.04 as the recommended OS for mainnet (systemd 255 or later, so
   Ubuntu 24.04 or later).
 
@@ -300,6 +312,25 @@ Every other script, library and UI file keeps its version. The runbook for the g
 - The chain-config helpers run git over https only, with the update lock's descriptor closed and
   without a caller's `GIT_DIR`, and the read-only commands cannot fetch lazily. Staging uses the
   release staging directory, which the existing sweep cleans.
+- `check_hardware` takes the network as a third argument. Testnet and devnet use the testnet tiers
+  (`HW_TESTNET_*`), which follow the deployed testnet validators. Mainnet, an empty value and an
+  unknown one use the mainnet tiers (`HW_MAINNET_*`, the figures every network used before), so a
+  caller that passes two arguments gets the verdicts it got before. It still only warns and
+  returns 0. The tiers it checks:
+
+  | Role | Testnet (and devnet) | Mainnet |
+  |---|---|---|
+  | Full node (follower) | 2 cores (4 vCPU), 8 GB RAM, 350 GB | 2 cores (4 vCPU), 8 GB RAM, 2 TB |
+  | Public RPC node | 4 cores (8 vCPU), 16 GB RAM, 350 GB | 4 cores (8 vCPU), 16 GB RAM, 2 TB |
+  | Validator (minimum) | 3 cores (6 vCPU), 16 GB RAM, 350 GB | 8 cores (16 vCPU), 32 GB RAM, 2 TB |
+  | Validator (recommended, printed only) | 4 cores (8 vCPU), 16 GB RAM, 500 GB NVMe | 16 cores (32 vCPU), 64 GB ECC RAM, 4 TB NVMe |
+
+- The report writes CPU as physical cores with the vCPU count in parentheses, says which tiers it
+  compares with (`Comparing with the testnet hardware tiers.`), names in a below-minimum line only
+  the dimensions that fall short, and ends with `Prioritise single-core performance: EVM execution
+  is single-threaded, so a high clock speed matters more than extra cores.` When physical cores
+  cannot be counted it compares logical CPUs and says so. ECC, NVMe, IOPS and throughput are not
+  checked.
 - The systemd floor messages recommend Ubuntu 26.04 and say "Ubuntu 24.04 or later" for
   mainnet. The floors themselves are unchanged.
 - Pins `tn-p2p-allow-sync` v0.1.2 (`TN_P2P_ALLOW_VERSION`, `TN_P2P_ALLOW_TARBALL_SHA256`
@@ -317,6 +348,44 @@ Every other script, library and UI file keeps its version. The runbook for the g
   holds both rules for each listed host (`tn_gateway_from_rules_ok`) and whether nobody else
   reaches the two ports (`tn_gateway_ports_private`).
 - Sources `lib/gateway.sh` at its end when the file is present, as it does `lib/alerts.sh`.
+
+### Node Manager UI 2.1.3
+
+- The setup wizard's preflight compared the host with the mainnet tiers on every network. The page
+  now sends the wizard's network, and the server answers with that network's tiers (`HW_TIERS`,
+  which `ui/test_hw_mirror.py` ties to the library's `HW_TESTNET_*` and `HW_MAINNET_*`). Devnet,
+  an unknown and a missing network read as testnet.
+- The disk floor is decimal GB with the shell's 5 % slack, so a 350 GB disk gets the same verdict
+  in the UI as in setup. Cores are compared exactly; RAM keeps its 5 % slack. A measured zero
+  (MemTotal 0, a filesystem of 0 kB) counts as not measured, as in the shell.
+- The reply's `hardware` object gains `network` and `cpu_kind` (`physical` or `logical`, which
+  count `cpu` is), and `validator_recommended` gains `ecc`.
+- The rows read like the documentation: cores with the vCPU count in parentheses, "350 GB" and
+  "2 TB" disk labels, the detected disk in decimal GB, the tiers compared and the single-core
+  note. When only logical CPUs could be counted, the detected line reads `Detected 8 logical CPUs
+  / ...` and the shell's sentence about the comparison follows. A missing RAM figure shows `?`.
+
+### AWS one-click stack
+
+`aws/node.yaml` carries no version.
+
+- The presets follow the recommended column of the testnet table for cores and RAM. `FullNode`
+  (the default) and `Validator` are `c7i.2xlarge`, 4 cores (8 vCPU), 16 GiB; `PublicRPC` is
+  `c7i.4xlarge`, 8 cores (16 vCPU), 32 GiB. `Validator` was `c7i.8xlarge`.
+- `DataVolumeSize` defaults to 500 GiB and allows 350, the testnet minimum; 2000 and 4000 stay
+  allowed for stacks launched with them, since a volume cannot shrink. The default was 2000. The
+  gp3 data volume is provisioned at 15,000 IOPS and 300 MiB/s; it was 10,000 IOPS. It is an EBS
+  network volume, not a local NVMe drive.
+- The `DataVolumeSize` description in the console says what each preset sustains: a `c7i.2xlarge`
+  (`FullNode`, `Validator`) 12,000 IOPS to EBS and 15,000 in bursts, a `c7i.4xlarge`
+  (`PublicRPC`) the full 15,000.
+- Existing stacks keep running as they are, and nothing in this release needs a change on them. Do
+  not update a stack to this template: once Canonical's image has moved, the update fails and its
+  rollback waits, possibly for hours, until the volume's IOPS change completes; if the image has
+  not moved, a `Validator` stack's update stops and starts the instance outside the epoch-boundary
+  wait. Raise the volume's IOPS or change the instance type in the EC2 console instead, as
+  [OPERATOR.md section 2.11](../OPERATOR.md#211-aws-one-click) ("Changing the stack later")
+  describes.
 
 ## New files, units and keys
 

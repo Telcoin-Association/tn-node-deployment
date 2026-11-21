@@ -73,23 +73,39 @@ The node reports what it is doing through the `tn_nodeMode` JSON-RPC method:
 
 ### 1.1 Hardware per role
 
-These figures come from the telcoin-network hardware requirements page.
-CPU counts are physical cores.
+The testnet figures follow the five Adiri validators: Google Cloud c3-highcpu-8 machines (4 cores (8 vCPU), 16 GB, Intel Sapphire Rapids), each with a 350 GB pd-ssd disk, which Google caps at 15,000 IOPS and 240 MiB/s on that machine size.
+The mainnet validator storage figure comes from Telcoin's published benchmarks at [benchmark.telcoin.network](https://benchmark.telcoin.network).
+In the [latest run](https://benchmark.telcoin.network/runs/r20261115-1653/), 10 validators on 8 vCPU and 16 GB with a 20,000 IOPS, 800 MiB/s volume averaged about 9,300 transactions a second, with write IOPS at about 20,000 at the 95th percentile and about 286 MiB/s written.
+Execution ran strictly in sequence: the engine was busy about 978 ms of every second while the machine used about 56 % of its 8 vCPUs.
+The other mainnet figures come from the hardware requirements page in the telcoin-network documentation.
+CPU counts are physical cores, written with the matching cloud vCPU count.
 Cloud vCPUs are usually hyperthreads, so an 8 vCPU instance has about 4 physical cores.
+Prioritise single-core performance: EVM execution is single-threaded, so a high clock speed matters more than extra cores.
+
+Testnet (Adiri):
 
 | Role | Minimum | Recommended |
 |---|---|---|
-| Observer, follower | 2 cores, 8 GB RAM | 4 cores, 16 GB RAM |
-| Observer, public RPC | 4 cores, 16 GB RAM | 8 cores, 32 GB RAM |
-| Validator | 8 cores, 32 GB ECC RAM | 16 cores, 64 GB ECC RAM |
+| Observer, follower | 2 cores (4 vCPU), 8 GB RAM | 4 cores (8 vCPU), 16 GB RAM |
+| Observer, public RPC | 4 cores (8 vCPU), 16 GB RAM | 8 cores (16 vCPU), 32 GB RAM |
+| Validator | 3 cores (6 vCPU), 16 GB RAM | 4 cores (8 vCPU), 16 GB RAM |
+| Storage, every role | 350 GB SSD (15,000 IOPS, 240 MB/s) | 500 GB TLC NVMe |
+| Validator bandwidth | 200 Mbps symmetric | 1 Gbps |
 
-Storage is the same for every role: at least 2 TB of TLC NVMe (10,000 write IOPS, 300 MB/s), 4 TB recommended.
+Mainnet:
+
+| Role | Minimum | Recommended |
+|---|---|---|
+| Observer, follower | 2 cores (4 vCPU), 8 GB RAM | 4 cores (8 vCPU), 16 GB RAM |
+| Observer, public RPC | 4 cores (8 vCPU), 16 GB RAM | 8 cores (16 vCPU), 32 GB RAM |
+| Validator | 8 cores (16 vCPU), 32 GB ECC RAM | 16 cores (32 vCPU), 64 GB ECC RAM |
+| Storage, validator | 2 TB TLC NVMe (20,000 write IOPS, 300 MB/s) | 4 TB |
+| Storage, observer | 2 TB TLC NVMe (10,000 write IOPS, 300 MB/s) | 4 TB |
+| Validator bandwidth | 200 Mbps symmetric | 1 Gbps |
+
 Avoid QLC drives; they wear out under continuous chain writes.
 
-Validators have two network requirements on top of that:
-
-- 200 Mbps symmetric bandwidth at minimum, 1 Gbps recommended.
-- A p95 round-trip time well below 1 second to at least 7 of the 10 committee members.
+Validators also need a p95 round-trip time well below 1 second to at least 7 of the 10 committee members.
 
 Email support@telcoin.org with your planned hardware before you buy anything for a validator.
 
@@ -106,11 +122,14 @@ The page recommends three more settings for every node:
 
 The scripts check neither the filesystem nor the power settings.
 
-`setup-node.sh` runs a hardware check during preflight and prints one line per role, for example `[OK] Full node (follower): meets minimum` or `[WARN] Validator (minimum): below minimum`.
+`setup-node.sh` runs a hardware check during preflight, once you have picked the network, and prints one line per role against that network's table, for example `[OK] Validator (minimum): meets minimum (3 cores (6 vCPU) / 16 GB / 350 GB)` on testnet.
+A role below its minimum gets a warning that lists only what falls short, such as `[WARN] Validator (minimum): below minimum — needs ≥ 8 cores (16 vCPU) (have 4 physical cores)` on mainnet.
 The check only warns; it never blocks setup.
-It counts physical cores where the server reports them, so an 8 vCPU cloud instance with 4 physical cores shows as below the validator minimum.
+It counts physical cores where the server reports them, so an 8 vCPU cloud instance with 4 physical cores meets the testnet validator minimum, 3 cores (6 vCPU), but not the mainnet one, 8 cores (16 vCPU).
 Its `Detected:` line says what it counted: `4 physical cores`, or `8 logical CPUs` plus a note when only the logical count can be read.
-It does not check for ECC memory or NVMe.
+It compares the RAM and the total size of the filesystem that holds the data directory with the table, and prints the recommended validator row without checking it.
+It does not check ECC memory, NVMe, IOPS or throughput.
+Devnet uses the testnet table.
 
 ### 1.2 Operating system
 
@@ -245,8 +264,8 @@ A prompt for a port, a directory, the Docker image, the binary path, the executi
 Directories must be absolute paths of letters, digits and `. _ / -`, without `..`.
 
 1. Welcome. Answer `y` to `Ready to begin node setup?`.
-2. Preflight ("Step 1 of 8"). Setup checks that it runs as root, takes the update lock (`/run/telcoin/update.lock`), detects the distribution, tells needrestart not to restart the node and unattended upgrades not to reboot the host, and runs the CVE-2026-31431 gate. It lists your mounted filesystems and physical disks, then asks `Data directory [/var/lib/telcoin]`. Enter a path on your data drive if you have one. It then runs the hardware check, an internet check, a port check (in-use ports only warn), installs `curl` and `git` if missing, and checks the systemd floor for the network (section 1.2).
-3. Network. Choose `1) Adiri Testnet (Chain ID: 2017)`. `2) Mainnet (Chain ID: 487)` is marked coming soon and returns you to the menu. Devnet is not offered interactively.
+2. Preflight ("Step 1 of 8"). Setup checks that it runs as root, takes the update lock (`/run/telcoin/update.lock`), detects the distribution, tells needrestart not to restart the node and unattended upgrades not to reboot the host, and runs the CVE-2026-31431 gate. It lists your mounted filesystems and physical disks, then asks `Data directory [/var/lib/telcoin]`. Enter a path on your data drive if you have one. It then runs a port check (in-use ports only warn) and installs `curl` and `git` if missing.
+3. Network. Choose `1) Adiri Testnet (Chain ID: 2017)`. `2) Mainnet (Chain ID: 487)` is marked coming soon and returns you to the menu. Devnet is not offered interactively. Setup then checks the internet connection, runs the hardware check against that network's table (section 1.1), and checks the systemd floor for the network (section 1.2).
 4. Testnet add-ons (testnet only). Each is off by default: the health-monitor endpoint on TCP 43174, log shipping, metrics shipping, a region label if you turned either shipping option on, and VPN admin SSH. The region label keeps only letters, digits, `_` and `-`, up to 32 characters; setup warns when it shortens one. See [docs/testnet-addons.md](docs/testnet-addons.md) before you opt in. Then, on every network, setup asks `Set up private alerts once the node is running?` (section 4.14): a yes only marks them pending, and the monitor URLs are asked for at step 13.
 5. Install method. See section 2.3. Source builds first ask `Install missing packages now?` if build dependencies are missing (answer y; No exits), then show a picker of the network's release tags (`vX.Y.Z-adiri` on testnet); a branch or a commit id is refused. The build runs as the `tn-build` account, so stay attached to the session for the 20 to 40 minutes it takes. `2) Signed release` asks for the release tag and downloads and checks it (section 2.3). Docker installs ask for the image: a release tag, the image by digest, or Enter for the newest release (section 2.3); setup resolves a tag to its digest and runs the image by digest only. A testnet release candidate (`vX.Y.Z-adiri-rcN`) is installed only when you type or pass its tag; no default offers one. "I already have it" first offers a binary it finds (`Use this binary?`) and asks `Full path to telcoin binary:` only if it finds none or you decline.
 6. Passphrase storage. There is no menu. At the end of preflight setup picks how the node will keep the BLS passphrase: as an encrypted systemd credential, `/etc/telcoin/bls-passphrase.cred`, wherever systemd-creds works (systemd 250 or later), sealed with the TPM2 as well when the host has a usable one; otherwise, on testnet and devnet only, in the root-only file `/etc/telcoin/bls-passphrase`. A mainnet host with no usable TPM2 stops unless you pass `--allow-no-tpm`. Section 2.8 covers the flags.
@@ -685,13 +704,14 @@ The stack creates one IAM role, the instance's, so tick `I acknowledge that AWS 
 
 | Parameter | Choices |
 |---|---|
-| `Preset` | `FullNode` (default): c7i.2xlarge, 8 vCPU (4 cores), 16 GiB. `PublicRPC`: c7i.4xlarge, 16 vCPU (8 cores), 32 GiB, plus TCP 80 and 443 for Caddy (section 5). `Validator`: c7i.8xlarge, 32 vCPU (16 cores), 64 GiB. |
+| `Preset` | `FullNode` (default): c7i.2xlarge, 4 cores (8 vCPU), 16 GiB. `PublicRPC`: c7i.4xlarge, 8 cores (16 vCPU), 32 GiB, plus TCP 80 and 443 for Caddy (section 5). `Validator`: c7i.2xlarge, 4 cores (8 vCPU), 16 GiB, the same size as `FullNode`. |
 | `InstanceType` | Empty for the preset's type, or another x86_64 type. Graviton (arm64) types are refused: the image is amd64. |
-| `DataVolumeSize` | `2000` (default) or `4000` GiB. |
+| `DataVolumeSize` | `500` (default, the recommended testnet size) or `350` GiB (the testnet minimum). `2000` and `4000` stay allowed for stacks launched with them. |
 | `AutoUpdate` | `Enabled` (default) or `Disabled`: the daily update association below. |
 | `ImageId` | Canonical's public SSM parameter for the current Ubuntu 26.04 amd64 image. Leave it as it is. Ubuntu 24.04 still works: set it to `/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id`. |
 
-The presets follow the recommended column of section 1.1. A validator also needs the Association's approval and a stake (section 6); the host is the same.
+Cores, RAM and disk size follow the recommended column of the testnet table in section 1.1; the disk is an EBS network volume, not a local NVMe drive. A validator also needs the Association's approval and a stake (section 6); the host is the same.
+The gp3 data volume is provisioned at 15,000 IOPS and 300 MiB/s. A `c7i.2xlarge` sustains 12,000 IOPS and 312.5 MB/s to EBS and bursts above that for 30 minutes at least once every 24 hours, so on `FullNode` and `Validator` the volume gives 12,000 IOPS sustained and 15,000 in bursts. A `c7i.4xlarge` (`PublicRPC`) sustains the full 15,000.
 
 **What the stack creates.**
 
@@ -699,7 +719,7 @@ The presets follow the recommended column of section 1.1. A validator also needs
 - An Elastic IP on the instance's network interface, in place before the instance boots, so setup detects it as the public IP and advertises it in the multiaddrs.
 - A security group: UDP 49590 and 49594 in from everywhere, TCP 80 and 443 on `PublicRPC` only, no SSH, everything out. TCP 43174, the testnet health monitor's port (section 4.6), stays closed; add a rule for `104.155.184.201/32` yourself if you turn the health monitor on.
 - An Ubuntu 26.04 instance from Canonical's image, with IMDSv2 required and an encrypted 50 GiB gp3 root volume. Its role trusts `ec2.amazonaws.com` only and carries only `AmazonSSMManagedInstanceCore`, the policy Session Manager and Run Command need.
-- An encrypted gp3 data volume (10,000 IOPS, 300 MB/s), mounted at `/var/lib/telcoin` by UUID with `nofail`, and kept when you delete the stack. The stack takes no snapshots and sets up no backups: a snapshot of this volume is a copy of the node keys (section 4.12).
+- An encrypted gp3 data volume (15,000 IOPS, 300 MiB/s), mounted at `/var/lib/telcoin` by UUID with `nofail`, and kept when you delete the stack. The stack takes no snapshots and sets up no backups: a snapshot of this volume is a copy of the node keys (section 4.12).
 - First-boot preparation, as root: the CVE-2026-31431 mitigation (`/etc/modprobe.d/telcoin-algif-aead.conf`, section 1.2) before anything else, swap off, the data volume formatted ext4 only when it carries no filesystem, and the scripts installed for the `ubuntu` user in `/home/ubuntu/telcoin-node-scripts` by the installer of section 2.1. Time sync stays as Canonical's image sets it up (chrony with the Amazon Time Sync Service).
 - The stack reaches `CREATE_COMPLETE` only once that preparation reported success. On a failure it rolls back, the `HostReady` event gives the reason, and `/var/log/cloud-init-output.log` on the instance has the detail.
 - The daily update association and two Run Command documents (below).
@@ -760,9 +780,19 @@ Updates are pulled: Telcoin publishes signed releases, and the association on yo
 The cfn-guard rules in `aws/rules/` pin this, and CI checks the template against them on every change.
 
 **Changing the stack later.**
+Existing stacks keep running as they are; nothing in this release needs a change on them.
+Do not update a stack to this template.
 Every stack update reads Canonical's image parameter again.
-Once a newer Ubuntu image is out, an update tries to replace the instance, which fails while the old instance holds the network interface, and the stack rolls back unchanged.
-Make later changes on the resources instead: change the instance type in the EC2 console (stop the instance, `Actions`, `Instance settings`, `Change instance type`, start it), and stop the daily updates by deleting the association in State Manager.
+Once a newer Ubuntu image is out, expect an update to try to replace the instance, fail because the old instance holds the network interface, and roll back.
+An update of an older stack to this template also changes the data volume's IOPS. Expect that change to land before the failure, and the rollback to wait until the volume modification completes, which can take hours, with the stack in `UPDATE_ROLLBACK_IN_PROGRESS` meanwhile.
+If the image has not changed, expect a `Validator` stack's update to stop and start the instance to change its type, outside the epoch-boundary wait of `update-node.sh`.
+Make later changes on the resources instead:
+
+- To raise the data volume of an older stack to 15,000 IOPS, use the EC2 console (`Volumes`, `Modify volume`). The node keeps running, and the volume takes no other modification until this one shows `completed` (at most four modifications in 24 hours).
+- To move an older `Validator` stack to `c7i.2xlarge`, or to change any instance type, use the EC2 console (stop the instance, `Actions`, `Instance settings`, `Change instance type`, start it) at a time when the node may restart.
+- A volume can grow but not shrink, and a stack update that picks a smaller `DataVolumeSize` fails. After you grow a volume, grow its filesystem on the host: `sudo resize2fs "$(findmnt -no SOURCE /var/lib/telcoin)"` (the volume has no partition table, and ext4 grows while mounted). Do not snapshot the volume first: a snapshot is a copy of the node keys (section 4.12).
+- To stop the daily updates, delete the association in State Manager.
+
 Stopping the instance stops the node; on a committee node, keep clear of the epoch boundary (section 4.2).
 
 **Deleting the stack.**
@@ -775,7 +805,7 @@ Each stack takes one VPC and one Elastic IP, and an AWS region allows 5 of each 
 Ask for more in Service Quotas before a sixth node in one region.
 
 **Cost.**
-You pay AWS directly, mainly for the instance (by the hour, by type), the data volume (its size, plus the provisioned 10,000 IOPS and 300 MB/s above what gp3 includes, 3,000 IOPS and 125 MB/s), the Elastic IP (public IPv4 addresses are billed by the hour), and data transfer out to the internet: P2P traffic to peers, and on `PublicRPC` the RPC traffic.
+You pay AWS directly, mainly for the instance (by the hour, by type), the data volume (its size, plus the provisioned 15,000 IOPS and 300 MiB/s above what gp3 includes, 3,000 IOPS and 125 MiB/s), the Elastic IP (public IPv4 addresses are billed by the hour), and data transfer out to the internet: P2P traffic to peers, and on `PublicRPC` the RPC traffic.
 The AWS Pricing Calculator gives the figures for your region.
 
 ## 3. Confirm the node is syncing, then synced
@@ -1195,6 +1225,7 @@ What to expect from the UI:
 - The validator view follows the chain. The UI asks the network's public RPC for the node's `getValidator` record, then the synced node, then its last saved answer, so a newly staked validator gets the validator view while it is still syncing. A banner says when the view comes from a cached answer, or when the role is unknown and the view defaults to observer.
 - The UI also shows Docker containers it did not install as externally deployed nodes, with status and logs only: any running container whose image comes from a repository the scripts recognise for testnet, mainnet or devnet, a dev-team container from `ghcr.io/telcoin-association/tn-dev` among them (remove-node's container scan lists the same ones).
 - The wizard installs a signed release, a source build of a release tag, or Docker. The tag field starts at the latest release tag; the Docker field takes a release tag or an image digest and refuses `latest`. The Docker field's default is the image the scripts pick as the newest (section 2.3), never a release candidate; it takes images from both testnet repositories, and a release candidate tag you type on testnet. Testnet defaults to the source build. The Mainnet card stays disabled until the mainnet release.
+- The wizard's preflight step judges the hardware against the table of the wizard's network in section 1.1, as setup's check does, and only warns. It comes before the Network step, so it uses the testnet table until you pick another network and go back to it. When the server cannot count physical cores, it shows `Detected 8 logical CPUs / ...` (for an 8-thread host) and a note on logical CPUs like the one setup prints.
 - The Config tab has no fields for bootstrap peers, state export or private forward targets yet; set those with `edit-config.sh` (section 4.3).
 - The Config tab can move an older install's passphrase to the encrypted credential (`Migrate to an encrypted credential`, the same as `edit-config.sh --migrate-credential`) and re-seal an existing one (`Re-seal the passphrase credential`, `--reseal`). Both run the quorum check and the epoch wait before they restart a running node.
 - The System tab shows the Host Security Audit (`check-node.sh --audit`). When the firewall is off, its card asks for the SSH sources (addresses or CIDRs, /8 or narrower, at most 16) and enables the firewall with them as `--ssh-from`; on mainnet an empty list is refused with `firewall-setup.sh`'s own message. Use `firewall-setup.sh` for `--p2p-from` or `--ssh-anywhere`.
@@ -2225,7 +2256,7 @@ ADDR=0xYOUR_EXECUTION_ADDRESS
 ### 6.1 Prerequisites
 
 - Association approval. Only GSMA-approved mobile network operators can validate; start with support@telcoin.org.
-- Hardware at the validator tier (section 1.1).
+- Hardware at the validator tier of the network's table (section 1.1).
 - The node's P2P ports reachable from the internet (section 1.3).
 - A synced node (section 3).
 - A publicly routable RPC URL advertised in `node-info.yaml` (section 5). Other nodes forward user transactions to the committee's advertised URLs and skip private addresses. Only a private network, such as a devnet, can lift that with `allow_private_forward_targets: true` in `parameters.yaml` (section 4.3); testnet and mainnet refuse `true`.
@@ -2658,7 +2689,7 @@ Start with `sudo bash ~/telcoin-node-scripts/check-node.sh` and `journalctl -u t
 | `eth_sendRawTransaction` (or `eth_sendRawTransactionSync`) returns error `-32603` `validator is inactive; retry another endpoint` (from the next release) | The node is a committee member that is catching up (`tn_nodeMode` reports `CvvInactive`). It refuses new transactions until it votes again, and the health endpoint's `/health/workers` reports it as not accepting them. | Send transactions to another node until `tn_nodeMode` reports `CvvActive`; the node takes them again as soon as it rejoins, without a restart. If it stays `CvvInactive`, see the `CvvInactive` row. |
 | `check-node.sh` warns `<rpc> serves chain <X> (...), not chain <Y> (...) -- skipping the network comparison` | The comparison RPC serves another chain than the node's. Today `https://rpc.telcoin.network` serves the testnet (mainnet has not launched). | Not a node problem. Pass `--network-rpc <URL>` with an RPC for the node's chain (section 1.5). |
 | `check-node.sh` warns `VALIDATOR_ADDRESS in .node-meta (...) is not the node's execution address (...); the on-chain status report is for the .node-meta address` | `.node-meta` and the running node name different addresses: a rotation with `--no-restart` that the node has not picked up yet, or a hand edit. | Follow the line under the warning: if you rotated with `--no-restart` (or `node-info.yaml` already has the `.node-meta` address), restart the node; otherwise set `VALIDATOR_ADDRESS` in `/etc/telcoin/.node-meta` to the address it names. |
-| Preflight prints `[WARN] <role>: below minimum` | The server is under that role's minimum. | A warning only. The check counts physical cores, so a cloud instance with hyperthreads has half as many as its vCPUs. |
+| Preflight prints `[WARN] <role>: below minimum` | The server is under that role's minimum for the network you chose (section 1.1). | A warning only. The check counts physical cores, so a cloud instance with hyperthreads has half as many as its vCPUs: an 8 vCPU instance meets the testnet validator minimum, 3 cores (6 vCPU), but not the mainnet one, 8 cores (16 vCPU). |
 | `systemd <version> is too old: the node needs 247 or later ...`, or `systemd <version> is below the mainnet floor (255, Ubuntu 24.04 or later; ...) ...` | The OS is too old for the network. | Testnet and devnet: move to Ubuntu 22.04+, Debian 12+ or RHEL 9+. Mainnet: install fresh on Ubuntu 26.04 (or 24.04). |
 | `CVE-2026-31431 (Copy Fail) -- setup cannot continue` | The `algif_aead` module is not blocked, or is still loaded. | Apply the mitigation from https://copy.fail, unload the module or reboot, re-run setup. |
 | `Port <port>/<proto> (...) is already in use.` | Another process holds the port. | Find it with `sudo ss -lunp` (UDP) or `sudo ss -ltnp` (TCP); stop it or choose another port. |
