@@ -118,7 +118,8 @@ older release shipped are history and stay (they are listed in the final report)
 - [x] `bash tools/gen-checksums.sh`; `git status --porcelain` empty
 - [x] `tasks/` records: this plan ticked, review in `todo.md`, lessons, harnesses linted
 - [x] No Claude attribution in `main..tip`; subjects checked
-- [ ] Push over SSH; one PR; CI watched (24.04, 26.04 VM assertions, macOS)
+- [x] Push over SSH; one PR (#75); CI watched (24.04, 26.04 VM assertions, macOS): green on the
+      third run, after two test-only commits (below)
 
 ## Commits (as they landed, no attribution)
 
@@ -143,6 +144,9 @@ older release shipped are history and stay (they are listed in the final report)
 13. `docs: corrections after verification`
 14. `chore(release): refresh the checksums`
 15. `tasks: plan, checkpoints and review of the requirements round`
+16. `test: accept git's wording for a repository it cannot read` and
+    `test: git's reason for an unreadable repository is any fatal line` (after the first CI run)
+17. `tasks: the CI fix in the records`
 
 ## What changed against the plan
 

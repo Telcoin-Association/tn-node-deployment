@@ -1080,3 +1080,12 @@ which `source_tree` in `https://run.telcoin.network/source.txt` must equal
 `git rev-parse origin/main:docs/partner`; cut and sign the scripts release that carries the
 fix (until then hosts on `scripts-v2.1.0` need `--genesis-dir`); the hardware page in the
 telcoin-network documentation still has the single table.
+
+After the push (same day): the first CI run on pull request #75 failed in both fixture jobs
+(Linux bash 5, macOS bash 3.2) on one check of `chain_configs_tag_test.sh`. The check expected
+git's wording for a `.git` file that points nowhere, `fatal: not a git repository: <gitdir>`;
+the runners' git says `fatal: gitfile does not point to a valid repository: <dir>/.git`. The
+library carried git's reason correctly both times, and the refusal itself passed. The check now
+requires a `fatal: ` line of git's in the warning, in any wording, and prints the warning it got
+when it fails; with the reason dropped from a scratch copy of the library it fails, as it
+should. The third run is green on all 14 checks.

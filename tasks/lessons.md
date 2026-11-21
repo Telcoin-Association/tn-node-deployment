@@ -816,3 +816,19 @@ with a real-git harness or a parity table ran 265k to 345k; the library fix agen
 agents for each fix round, briefed with the verifier's report and nothing else, worked every
 time. A mid-round addition from the user (the mainnet chain id) fitted without disturbing the
 other packages because ownership was by file range and each topic had its own commits.
+
+### An assertion on another tool's wording fails on the runner's version of that tool
+
+**Symptom:** every local environment was green (git 2.53 on the host and in `ubuntu:26.04`,
+git 2.49 under bash 3.2), and both CI fixture jobs failed on one check that compared the
+library's warning with git's sentence for an unreadable repository. The runners' git words
+that sentence differently. The check was a yes/no `check`, so the first CI log showed only
+"no"; it took a second push, with the check changed to print what it got, to see the text.
+The lesson of 2026-11-03 ("a yes/no `check` hides it") was in this file and not in the briefs.
+
+**Rule:** a test asserts on what the code under test contributes (that git's `fatal:` line is
+carried, where it sits in the message), never on the exact sentence another tool prints. Any
+check of text that comes from git, docker, systemd, curl or the kernel prints the actual text
+when it fails. Both rules go into every brief that asks for a real-tool fixture, with the
+earlier lesson quoted, and the orchestrator greps new fixtures for literal tool messages
+before the first push: `grep -n "fatal: \|error: " tools/tests/<new>_test.sh`.
