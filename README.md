@@ -2047,6 +2047,16 @@ prints the exact fix command.
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
 
+### lib/common.sh v2.2.1 — Ubuntu 26.04 recommended
+Ubuntu 26.04 LTS is the recommended OS; 24.04 stays supported. The systemd floor messages
+recommend 26.04 and say "Ubuntu 24.04 or later" for mainnet; the floors (247, 250, and 255 on
+mainnet) are unchanged. Full release note:
+[CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+
+### setup-node v2.1.1 — Ubuntu 26.04 recommended
+Ubuntu 26.04 LTS is the recommended OS; 24.04 stays supported. `--help` says so for mainnet,
+which still needs systemd 255 or later.
+
 ### setup-gateway v2.2.0 — the worker gateway, a public JSON-RPC front for transaction submissions (new)
 `setup-gateway.sh` 2.2.0, with `lib/gateway.sh` 2.2.0 (`GATEWAY_VERSION`), is new. It runs
 telcoin-network's worker gateway as `telcoin-gateway.service`: a transaction submission goes to

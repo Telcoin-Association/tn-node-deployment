@@ -34,11 +34,16 @@ check_rc "mainnet, systemd 255: ok" 0 "$(floor 255 mainnet)"
 check_rc "mainnet, systemd 254: refused" 1 "$(floor 254 mainnet)"
 check_rc "mainnet, systemd 249: refused" 1 "$(floor 249 mainnet)"
 check_has "mainnet, 249: names the floor" "yes" "$(grep -q 'below the mainnet floor' "$T/err" && echo yes)"
+check_has "mainnet, 249: recommends 26.04" "yes" "$(grep -q 'Ubuntu 26.04 recommended' "$T/err" && echo yes)"
 check_rc "testnet, systemd 249: ok" 0 "$(floor 249 testnet)"
 check_has "testnet, 249: warns" "yes" "$(grep -q 'cannot encrypt credentials' "$T/err" && echo yes)"
 check_rc "testnet, systemd 255: ok" 0 "$(floor 255 testnet)"
 check "testnet, 255: no warning" "" "$(cat "$T/err")"
 check_rc "testnet, systemd 246: refused" 1 "$(floor 246 testnet)"
+check_has "testnet, 246: recommends 26.04" "yes" "$(grep -q 'Ubuntu 26.04 recommended' "$T/err" && echo yes)"
+# A 24.04 host (systemd 255) gets no OS line on mainnet, where the floor is checked.
+floor 255 mainnet > /dev/null
+check_lacks "systemd 255: no OS warning" "Ubuntu" "$(cat "$T/err")"
 check_rc "unknown network, 249: refused like mainnet" 1 "$(floor 249 "")"
 
 # method VERSION TPM NETWORK [VAR=VALUE...] -- run setup_passphrase_method in a
