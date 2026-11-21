@@ -77,7 +77,7 @@ readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 # network-gated: the comment names the testnet fleet; 9101 is the default on every network
 readonly DEFAULT_METRICS_PORT="9101"   # node loopback Prometheus endpoint (matches the adiri fleet)
-readonly COMMON_VERSION="2.2.0"
+readonly COMMON_VERSION="2.2.1"
 
 # The operator runbook, for any message that should point operators at it.
 readonly TN_OPERATOR_GUIDE_URL="https://github.com/Telcoin-Association/tn-node-deployment/blob/main/OPERATOR.md"
@@ -5834,7 +5834,7 @@ display_node_info() {
 
 readonly TN_CRED_NAME="bls-passphrase"
 readonly TN_CRED_MIN_SYSTEMD=250      # systemd-creds, LoadCredentialEncrypted=
-readonly TN_MAINNET_MIN_SYSTEMD=255   # the OS floor for a mainnet node (Ubuntu 24.04)
+readonly TN_MAINNET_MIN_SYSTEMD=255   # the OS floor for a mainnet node (Ubuntu 24.04 or later; Ubuntu 26.04 recommended)
 readonly TN_STDIN_MIN_SYSTEMD=247     # LoadCredential= (the stdin form)
 
 # tn_systemd_version -- the running systemd's major version (systemctl --version).
@@ -5867,11 +5867,11 @@ tn_os_floor_check() {
         return 1
     fi
     if (( v < TN_STDIN_MIN_SYSTEMD )); then
-        _tn_guard_say warn "systemd ${v} is too old: the node needs ${TN_STDIN_MIN_SYSTEMD} or later (Ubuntu 22.04 or later; Ubuntu 24.04 for mainnet)." "$fn"
+        _tn_guard_say warn "systemd ${v} is too old: the node needs ${TN_STDIN_MIN_SYSTEMD} or later (Ubuntu 22.04 or later; Ubuntu 24.04 or later for mainnet; Ubuntu 26.04 recommended)." "$fn"
         return 1
     fi
     if [[ "$net" != "testnet" && "$net" != "devnet" ]] && (( v < TN_MAINNET_MIN_SYSTEMD )); then
-        _tn_guard_say warn "systemd ${v} is below the mainnet floor (${TN_MAINNET_MIN_SYSTEMD}, Ubuntu 24.04): the BLS passphrase must be an encrypted credential there. Upgrade the OS and run setup again." "$fn"
+        _tn_guard_say warn "systemd ${v} is below the mainnet floor (${TN_MAINNET_MIN_SYSTEMD}, Ubuntu 24.04 or later; Ubuntu 26.04 recommended): the BLS passphrase must be an encrypted credential there. Upgrade the OS and run setup again." "$fn"
         return 1
     fi
     if (( v < TN_CRED_MIN_SYSTEMD )); then
@@ -6431,7 +6431,7 @@ _tn_cred_mainnet_floor() {
     [[ "$net" == "testnet" || "$net" == "devnet" ]] && return 0
     v="$(tn_systemd_version 2>/dev/null)" || v=0
     (( v >= TN_MAINNET_MIN_SYSTEMD )) && return 0
-    _tn_guard_say warn "systemd ${v} is below the mainnet floor (${TN_MAINNET_MIN_SYSTEMD}, Ubuntu 24.04); upgrade the OS first. Nothing changed." "$fn"
+    _tn_guard_say warn "systemd ${v} is below the mainnet floor (${TN_MAINNET_MIN_SYSTEMD}, Ubuntu 24.04 or later; Ubuntu 26.04 recommended); upgrade the OS first. Nothing changed." "$fn"
     return 1
 }
 
@@ -6449,7 +6449,7 @@ tn_migrate_credential() {
     local fn="${1:-}" v svc conf unit plain method net key rc=0 cr=$'\r'
     if ! tn_creds_supported; then
         v="$(tn_systemd_version 2>/dev/null)" || v="unknown"
-        _tn_guard_say warn "systemd ${v} cannot encrypt credentials (systemd ${TN_CRED_MIN_SYSTEMD} with systemd-creds, Ubuntu 24.04, is needed); nothing changed." "$fn"
+        _tn_guard_say warn "systemd ${v} cannot encrypt credentials (systemd ${TN_CRED_MIN_SYSTEMD} with systemd-creds, Ubuntu 24.04 or later, is needed); nothing changed." "$fn"
         return 1
     fi
     svc="$(tn_resolve_service 2>/dev/null)" || { _tn_guard_say warn "No node service found." "$fn"; return 1; }
@@ -6565,7 +6565,7 @@ tn_host_audit() {
         if (( v >= TN_CRED_MIN_SYSTEMD )); then
             _tn_audit_say ok "systemd ${v} (encrypted credentials supported)"
         else
-            _tn_audit_say warn "systemd ${v}: below ${TN_CRED_MIN_SYSTEMD}, no encrypted credentials (mainnet needs Ubuntu 24.04)"
+            _tn_audit_say warn "systemd ${v}: below ${TN_CRED_MIN_SYSTEMD}, no encrypted credentials (mainnet needs Ubuntu 24.04 or later)"
         fi
     else
         _tn_audit_say warn "systemd version unknown"

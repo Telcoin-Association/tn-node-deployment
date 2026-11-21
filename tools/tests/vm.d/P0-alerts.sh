@@ -195,8 +195,24 @@ check "enable: the webhook push was accepted" "yes" "$(grep -qE '^push_2=webhook
 check "enable: the listener saw the Kuma GET" "yes" "$(grep -q '^GET /api/push/vmtest1?' "$T/pushes" && echo yes)"
 check "enable: the listener saw the webhook POST" "yes" "$(grep -qx 'POST /hook' "$T/pushes" && echo yes)"
 uid="$(stat -c %u "$STATE" 2>/dev/null)" || uid=""
-check "enable: the state file belongs to the dynamic user" "yes" \
-    "$([[ "$uid" =~ ^[0-9]+$ ]] && (( uid >= 61184 && uid <= 65519 )) && echo yes)"
+sd_ver="$(systemctl --version 2>/dev/null | sed -n '1s/^systemd \([0-9]*\).*/\1/p')"
+# systemd 257 and later, where ID-mapped mounts work, leave a DynamicUser= StateDirectory= owned by
+# nobody (65534) on disk and map it to the dynamic user while the service runs (systemd NEWS, 257).
+# Earlier releases chown it to the dynamic uid (61184-65519). Either way /var/lib/private, root 0700,
+# keeps every other account out.
+# On a failure, name the owner, the modes and the unit's user settings, so a CI log says what changed.
+if [[ "$uid" =~ ^[0-9]+$ ]] && (( uid >= 61184 && uid <= 65519 )); then
+    state_owner="dynamic"
+elif [[ "$uid" == "65534" && "$sd_ver" =~ ^[0-9]+$ ]] && (( sd_ver >= 257 )); then
+    state_owner="dynamic"
+else
+    state_owner="uid=${uid:-none} file=$(stat -c '%u:%g %a' "$STATE" 2>/dev/null)"
+    state_owner+=" dir=$(stat -c '%u:%g %a' "$(dirname "$STATE")" 2>/dev/null)"
+    state_owner+=" unit=$(systemctl show -p DynamicUser -p User -p StateDirectory telcoin-heartbeat.service 2>/dev/null | tr '\n' ' ')"
+    state_owner+=" systemd=${sd_ver:-unknown}"
+fi
+check "enable: the state file belongs to the dynamic user" "dynamic" "$state_owner"
+check "enable: /var/lib/private is root 0700" "0:0 700" "$(stat -c '%u:%g %a' /var/lib/private 2>/dev/null)"
 check "enable: targets root:root 0600" "0:0 600" "$(stat -c '%u:%g %a' /etc/telcoin/alerts/targets 2>/dev/null)"
 check "enable: .node-meta says ENABLE_ALERTS=true" "ENABLE_ALERTS=true" "$(grep '^ENABLE_ALERTS=' /etc/telcoin/.node-meta)"
 SVC_STATE=/run/telcoin/heartbeat-service

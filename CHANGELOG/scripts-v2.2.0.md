@@ -19,13 +19,18 @@ from the maintainers' key allowlist, the tn-release-signing repository, and `tn-
 moves to v0.1.2, the first release signed with the new key. A host on `scripts-v2.1.0` takes this
 release by re-running the installer once (see [The release keys](#the-release-keys)).
 
+Ubuntu 26.04 LTS is the recommended OS; 24.04 stays supported. The systemd messages of
+`setup-node.sh` and `lib/common.sh` say so; what they check is unchanged (mainnet still needs
+systemd 255).
+
 | Component | Version |
 |---|---|
 | setup-gateway | 2.2.0 (new) |
 | lib/gateway (`GATEWAY_VERSION`) | 2.2.0 (new) |
 | install-caddy, firewall-setup, edit-config, check-node, remove-node | 2.2.0 |
 | update-scripts | 2.2.0 |
-| lib/common (`COMMON_VERSION`) | 2.2.0 |
+| setup-node | 2.1.1 |
+| lib/common (`COMMON_VERSION`) | 2.2.1 |
 | Release keys (`lib/release-keys/*.asc`) | grantkee `95A38484E1CBD31D773F6AF928FD56AD2F9FAE47` (replaces `4E36D35A4AB61B589861D01AC7173F2377CA7573`), MavenRain `32F886ADE9C3A88218E4B67CA0A69159FC76DBFD` (new) |
 | `tn-p2p-allow-sync` (pinned in lib/common) | v0.1.2 (was v0.1.1) |
 
@@ -220,8 +225,15 @@ Every other script, library and UI file keeps its version. The runbook for the g
   command. It never runs it: the unit is rendered from `gateway.meta`, and new copies take effect
   only once `--refresh` renders it again.
 
-### lib/common 2.2.0
+### setup-node 2.1.1
 
+- `--help` names Ubuntu 26.04 as the recommended OS for mainnet (systemd 255 or later, so
+  Ubuntu 24.04 or later).
+
+### lib/common 2.2.1
+
+- The systemd floor messages recommend Ubuntu 26.04 and say "Ubuntu 24.04 or later" for
+  mainnet. The floors themselves are unchanged.
 - Pins `tn-p2p-allow-sync` v0.1.2 (`TN_P2P_ALLOW_VERSION`, `TN_P2P_ALLOW_TARBALL_SHA256`
   `1177ee11c48a5ff27a2de78fed8de8168360e4810ed23956cd169aa5cc0765d8`). Its code is v0.1.1's, with
   `config-version 1` and `snapshot-versions 1` as before. v0.1.1 is signed only by the retired

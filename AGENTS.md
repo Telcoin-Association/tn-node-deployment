@@ -125,7 +125,10 @@ the node binary and every directory above it, the log dir (`/var/log/telcoin`,
 root:telcoin-log 0750), `/var/backups/telcoin`, `/var/lib/telcoin-staging`, the P2P committee allowlist's tool `/usr/local/libexec/telcoin/tn-p2p-allow-sync`, state dir `/var/lib/telcoin-p2p-allow` (0700) and units, and the update lock
 under `/run/telcoin`. One more tree is not root's: the state dir of the private alerts runner
 (`/var/lib/private/telcoin-heartbeat`, 0700), which systemd creates for the heartbeat service's
-dynamic user (`DynamicUser=yes`, `StateDirectory=telcoin-heartbeat`). Only the runner writes in
+dynamic user (`DynamicUser=yes`, `StateDirectory=telcoin-heartbeat`). With systemd 257 or later
+(Ubuntu 26.04) and ID-mapped mounts, systemd leaves its files owned by `nobody` (65534) on disk and
+maps them to the dynamic user while the service runs; `/var/lib/private` (root 0700) keeps every
+other account out either way, so do not "fix" that owner. Only the runner writes in
 it; the teardown removes it with `systemctl clean --what=state` (see "Private alerts").
 `.node-meta` records the layout as `OWNERSHIP_LAYOUT=2`, `check-node.sh`
 checks the owners and modes (`check_ownership_layout`), and the README has the full table.
@@ -1118,8 +1121,10 @@ into a pass. The jobs:
   runs `tools/check-release-keys.sh` (the release keys are its `keys/*.asc`), then runs
   `tools/gen-checksums.sh` and fails on a stale, missing or uncommitted sidecar.
 
-`.github/workflows/integration.yml` has one job, `vm-assertions`: on an Ubuntu 24.04 runner
-(a full VM with systemd), it installs logrotate, ufw and openssh-server and runs every
+`.github/workflows/integration.yml` has two jobs with the same steps: `vm-assertions` ("Ubuntu
+24.04 VM assertions") on an Ubuntu 24.04 runner and `vm-assertions-2604` ("Ubuntu 26.04 VM
+assertions", not required) on an Ubuntu 26.04 runner. On the runner (a full VM with systemd),
+each installs logrotate, ufw, openssh-server and nftables and runs every
 `tools/tests/vm.d/P0-*.sh` assertion file as root with `TN_VM_TEST=1`. Only that glob runs: a
 new assertion file needs the `P0-` prefix.
 
@@ -1159,13 +1164,14 @@ non-blocking (`continue-on-error`, `|| true`): `ci_pins_test.sh` rejects both.
 
 `tools/tests/*_test.sh` are fixture tests for the scripts and the library. They build fake
 installs under a private temp dir (`TN_ROOT_PREFIX` points the path probes at it) and stub
-system tools on `PATH`; none of them needs a node. Run them in all three environments before
+system tools on `PATH`; none of them needs a node. Run them in all four environments before
 you hand back a change:
 
 ```
 bash tools/tests/run.sh                                                  # bash 5
 docker run --rm -v "$PWD:/w" -w /w bash:3.2 bash tools/tests/run.sh      # bash 3.2, busybox
 docker run --rm -v "$PWD:/w" -w /w ubuntu:24.04 bash tools/tests/run.sh  # root, GNU tools
+docker run --rm -v "$PWD:/w" -w /w ubuntu:26.04 bash tools/tests/run.sh  # root, the recommended OS
 ```
 
 `run.sh` runs each file as its own process under the bash that runs it; name files to run only

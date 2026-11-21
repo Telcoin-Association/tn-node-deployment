@@ -114,10 +114,11 @@ It does not check for ECC memory or NVMe.
 
 ### 1.2 Operating system
 
-A mainnet node needs Ubuntu 24.04 (systemd 255 or newer), because there the BLS passphrase is kept only as an encrypted systemd credential.
+Ubuntu 26.04 LTS is the recommended OS on every network; Ubuntu 24.04 LTS stays supported.
+A mainnet node needs Ubuntu 24.04 or later (systemd 255 or newer), because there the BLS passphrase is kept only as an encrypted systemd credential.
 Testnet and devnet need systemd 247 or newer: Ubuntu 22.04 or later, Debian 12 or later, or RHEL 9 or later.
 Between 247 and 249, systemd cannot encrypt credentials, so setup warns and keeps the passphrase in the root-only file `/etc/telcoin/bls-passphrase`; once the host runs systemd 250 or later, `sudo bash ~/telcoin-node-scripts/edit-config.sh --migrate-credential` encrypts it (section 4.3).
-Older systems stop with `systemd <version> is too old: the node needs 247 or later (Ubuntu 22.04 or later; Ubuntu 24.04 for mainnet).`
+Older systems stop with `systemd <version> is too old: the node needs 247 or later (Ubuntu 22.04 or later; Ubuntu 24.04 or later for mainnet; Ubuntu 26.04 recommended).`
 
 macOS is not supported by `setup-node.sh`.
 
@@ -687,7 +688,7 @@ The stack creates one IAM role, the instance's, so tick `I acknowledge that AWS 
 | `InstanceType` | Empty for the preset's type, or another x86_64 type. Graviton (arm64) types are refused: the image is amd64. |
 | `DataVolumeSize` | `2000` (default) or `4000` GiB. |
 | `AutoUpdate` | `Enabled` (default) or `Disabled`: the daily update association below. |
-| `ImageId` | Canonical's public SSM parameter for the current Ubuntu 24.04 amd64 image. Leave it as it is. |
+| `ImageId` | Canonical's public SSM parameter for the current Ubuntu 26.04 amd64 image. Leave it as it is. Ubuntu 24.04 still works: set it to `/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id`. |
 
 The presets follow the recommended column of section 1.1. A validator also needs the Association's approval and a stake (section 6); the host is the same.
 
@@ -696,7 +697,7 @@ The presets follow the recommended column of section 1.1. A validator also needs
 - A VPC (`10.0.0.0/16`) with one public subnet in the region's first availability zone, an internet gateway and a default route.
 - An Elastic IP on the instance's network interface, in place before the instance boots, so setup detects it as the public IP and advertises it in the multiaddrs.
 - A security group: UDP 49590 and 49594 in from everywhere, TCP 80 and 443 on `PublicRPC` only, no SSH, everything out. TCP 43174, the testnet health monitor's port (section 4.6), stays closed; add a rule for `104.155.184.201/32` yourself if you turn the health monitor on.
-- An Ubuntu 24.04 instance from Canonical's image, with IMDSv2 required and an encrypted 50 GiB gp3 root volume. Its role trusts `ec2.amazonaws.com` only and carries only `AmazonSSMManagedInstanceCore`, the policy Session Manager and Run Command need.
+- An Ubuntu 26.04 instance from Canonical's image, with IMDSv2 required and an encrypted 50 GiB gp3 root volume. Its role trusts `ec2.amazonaws.com` only and carries only `AmazonSSMManagedInstanceCore`, the policy Session Manager and Run Command need.
 - An encrypted gp3 data volume (10,000 IOPS, 300 MB/s), mounted at `/var/lib/telcoin` by UUID with `nofail`, and kept when you delete the stack. The stack takes no snapshots and sets up no backups: a snapshot of this volume is a copy of the node keys (section 4.12).
 - First-boot preparation, as root: the CVE-2026-31431 mitigation (`/etc/modprobe.d/telcoin-algif-aead.conf`, section 1.2) before anything else, swap off, the data volume formatted ext4 only when it carries no filesystem, and the scripts installed for the `ubuntu` user in `/home/ubuntu/telcoin-node-scripts` by the installer of section 2.1. Time sync stays as Canonical's image sets it up (chrony with the Amazon Time Sync Service).
 - The stack reaches `CREATE_COMPLETE` only once that preparation reported success. On a failure it rolls back, the `HostReady` event gives the reason, and `/var/log/cloud-init-output.log` on the instance has the detail.
@@ -1299,7 +1300,7 @@ Move it in this order:
 
 A mainnet host is never migrated in place.
 On the old layout every one of these scripts refuses it with `... must be installed fresh; it is not migrated in place. Nothing was changed.`
-Install mainnet fresh on Ubuntu 24.04, from a verified `scripts-v*` release (section 2.1) and a verified node release (section 4.10).
+Install mainnet fresh on Ubuntu 26.04 (or 24.04), from a verified `scripts-v*` release (section 2.1) and a verified node release (section 4.10).
 
 ### 4.10 Verifying a release by hand
 
@@ -1693,7 +1694,7 @@ The files:
 | `/etc/telcoin/alerts/` | root 0755 | The two files below. |
 | `/etc/telcoin/alerts/targets` | root 0600 | One `<provider> <url>` per line, at most five. The only secret. |
 | `/etc/telcoin/alerts/alerts.env` | root 0644 | The node's service name and local RPC URL, the network and its chain ID, the label, the health port, the interval and the thresholds. No URL of a monitor. |
-| `/var/lib/private/telcoin-heartbeat/state` | the runner's account, directory 0700 | What the runner remembers between runs: the last status and reason, the consensus header it last saw, and each target's last result. Never a URL. |
+| `/var/lib/private/telcoin-heartbeat/state` | the runner's account (on disk `nobody` (65534) with systemd 257 or later), directory 0700 | What the runner remembers between runs: the last status and reason, the consensus header it last saw, and each target's last result. Never a URL. |
 | `/run/telcoin/heartbeat-service` | root 0644 | The node service's state (`systemctl show` of `telcoin.service`). The service rewrites it as root before each run, and the runner reads it. Gone after a reboot until the next run. |
 | `ENABLE_ALERTS` in `.node-meta` | | `true`, `pending` (asked for during setup, not enabled yet) or `false`. Absent means off. |
 
@@ -2650,7 +2651,7 @@ Start with `sudo bash ~/telcoin-node-scripts/check-node.sh` and `journalctl -u t
 | `check-node.sh` warns `<rpc> serves chain <X> (...), not chain <Y> (...) -- skipping the network comparison` | The comparison RPC serves another chain than the node's. Today `https://rpc.telcoin.network` serves the testnet (mainnet has not launched). | Not a node problem. Pass `--network-rpc <URL>` with an RPC for the node's chain (section 1.5). |
 | `check-node.sh` warns `VALIDATOR_ADDRESS in .node-meta (...) is not the node's execution address (...); the on-chain status report is for the .node-meta address` | `.node-meta` and the running node name different addresses: a rotation with `--no-restart` that the node has not picked up yet, or a hand edit. | Follow the line under the warning: if you rotated with `--no-restart` (or `node-info.yaml` already has the `.node-meta` address), restart the node; otherwise set `VALIDATOR_ADDRESS` in `/etc/telcoin/.node-meta` to the address it names. |
 | Preflight prints `[WARN] <role>: below minimum` | The server is under that role's minimum. | A warning only. The check counts physical cores, so a cloud instance with hyperthreads has half as many as its vCPUs. |
-| `systemd <version> is too old: the node needs 247 or later ...`, or `systemd <version> is below the mainnet floor (255, Ubuntu 24.04) ...` | The OS is too old for the network. | Testnet and devnet: move to Ubuntu 22.04+, Debian 12+ or RHEL 9+. Mainnet: install fresh on Ubuntu 24.04. |
+| `systemd <version> is too old: the node needs 247 or later ...`, or `systemd <version> is below the mainnet floor (255, Ubuntu 24.04 or later; ...) ...` | The OS is too old for the network. | Testnet and devnet: move to Ubuntu 22.04+, Debian 12+ or RHEL 9+. Mainnet: install fresh on Ubuntu 26.04 (or 24.04). |
 | `CVE-2026-31431 (Copy Fail) -- setup cannot continue` | The `algif_aead` module is not blocked, or is still loaded. | Apply the mitigation from https://copy.fail, unload the module or reboot, re-run setup. |
 | `Port <port>/<proto> (...) is already in use.` | Another process holds the port. | Find it with `sudo ss -lunp` (UDP) or `sudo ss -ltnp` (TCP); stop it or choose another port. |
 | `lib/common.sh <version> is older than this <script>: run update-scripts.sh and try again.` | The shared library is older than the script that needs it. | `bash ~/telcoin-node-scripts/update-scripts.sh`, then run the script again. |
@@ -2659,7 +2660,7 @@ Start with `sudo bash ~/telcoin-node-scripts/check-node.sh` and `journalctl -u t
 | `the node rejects <file> as a --bootstrap-peers map (...)` | A key is not a BLS public key, or a value is not the `primary` and `workers` entries of that node's `node-info.yaml`. | Fix the map (section 2.7). |
 | `bootstrap_peers needs a start wrapper: ...`, or `... move it to the current unit and start script first: sudo ./edit-config.sh --migrate-credential (nothing was changed)` | A node that starts straight from its systemd unit, holds the passphrase in the unit, or uses the old TPM method. | `sudo bash ~/telcoin-node-scripts/edit-config.sh --migrate-credential` (section 4.8). |
 | `committee of <n>: <d> member(s) down; stopping this node makes ... Refused: ...`, or `could not count the committee members that are down (...)` | The committee quorum check refused the stop or restart (section 4.11). | Wait until the other members are back. For a restart the fleet coordinator has planned, run again with `--allow-quorum-risk` or `TN_ALLOW_QUORUM_RISK=1`. On mainnet, record `VALIDATOR_ADDRESS` in `.node-meta` so an unstaked node can go ahead when the committee cannot be read. |
-| `... still has the old file ownership layout and must be installed fresh; it is not migrated in place.` | A mainnet host set up by older scripts. | Install it fresh on Ubuntu 24.04 (section 4.9). |
+| `... still has the old file ownership layout and must be installed fresh; it is not migrated in place.` | A mainnet host set up by older scripts. | Install it fresh on Ubuntu 26.04 or 24.04 (section 4.9). |
 | `Refusing <path> ...`, or the layout move stops with a list of paths | A symlink, special file, hard-linked file or unexpected owner in the install, config or log tree. | Fix or remove the listed paths, then run the script again. Nothing beyond the directories themselves was changed. |
 | `Release <tag> did not verify (see above); nothing was installed.`, or `No release signing key in .../lib/release-keys (*.asc)` | The release signature or a hash did not check, or the scripts carry no key for the release (a key added or renewed after this script release, or a lib/release-keys/ emptied by hand). | Run `update-scripts.sh` for the current keys (and `install-ui.sh --update` when you use the Node Manager UI), then try again; check the release by hand (section 4.10). Never install a release that fails. |
 | `<tag> is not a testnet release tag ...`, `image refused: ...`, or `Refusing the image ...` | A branch, commit, `latest` or another repository's image. | Give a release tag (`vX.Y.Z-adiri`, or a release candidate `vX.Y.Z-adiri-rcN`, on testnet) or the network's image by digest. |
@@ -2743,5 +2744,5 @@ The operating systems row is not part of that branch.
 | `node-info.yaml` workers | `p2p_info.workers:`, a list, which `v0.15.0-adiri` and later write; the scripts also read the older single `worker:` map | `p2p_info.worker:`, one map, in the CLI README | Your node's own file. These scripts handle both shapes. |
 | RPC exposure | Any node can serve public RPC through Caddy and advertise it, and the committee's advertised URLs are where other nodes forward transactions. | Keep validator RPC off the public internet; serve the public from observers. | Both hold: a validator must advertise a reachable URL to receive forwarded transactions, so choose deliberately and protect it. Section 5 keeps reth on loopback behind a TLS proxy. |
 | Chain configs | The files in telcoin-network's `chain-configs/testnet/` are the live Adiri genesis, and setup installs them. | The `chain-configs` README calls them placeholders, not the actual network configs. | This repo for testnet. Do not edit those files; the mainnet ones are placeholders until launch. |
-| Operating systems | Mainnet: Ubuntu 24.04 (systemd 255+). Testnet and devnet: systemd 247+, so Ubuntu 22.04+, Debian 12+, RHEL 9+ | Debian 11+, Ubuntu 20.04+, RHEL 8 | This repo for `setup-node.sh`; older systems fail its systemd check. |
+| Operating systems | Ubuntu 26.04 recommended. Mainnet: Ubuntu 24.04 or later (systemd 255+). Testnet and devnet: systemd 247+, so Ubuntu 22.04+, Debian 12+, RHEL 9+ | Debian 11+, Ubuntu 20.04+, RHEL 8 | This repo for `setup-node.sh`; older systems fail its systemd check. |
 | Contact | support@telcoin.org for everything | Two addresses, used for different things on different pages | Section 10. |

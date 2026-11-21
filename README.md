@@ -119,10 +119,10 @@ The hardware preflight in `setup-node.sh` prints one line per role and only warn
 
 | Network | Operating system | systemd floor |
 |---|---|---|
-| Mainnet | Ubuntu 24.04 LTS | 255. Setup stops below it: a mainnet node keeps the BLS passphrase only as an encrypted systemd credential |
+| Mainnet | Ubuntu 26.04 LTS (recommended) or 24.04 LTS | 255. Setup stops below it: a mainnet node keeps the BLS passphrase only as an encrypted systemd credential |
 | Testnet | Ubuntu 22.04 LTS or later, Debian 12 or later, RHEL 9 and compatible distributions | 247. Below 250 (Ubuntu 22.04 ships 249) setup warns and keeps the passphrase in a root-only file instead of an encrypted credential |
 
-`setup-node.sh` checks the systemd version, not the distribution name, and stops below the floor for the network it installs, so RHEL 8 (systemd 239) is not supported. Setup installs Docker itself on Ubuntu and Debian only; elsewhere install Docker Engine first. macOS is not supported for running a node. See [Passphrase delivery](#passphrase-delivery) for what the floor buys.
+Ubuntu 26.04 LTS is the recommended OS on every network; Ubuntu 24.04 LTS stays supported. `setup-node.sh` checks the systemd version, not the distribution name, and stops below the floor for the network it installs, so RHEL 8 (systemd 239) is not supported. Setup installs Docker itself on Ubuntu and Debian only; elsewhere install Docker Engine first. macOS is not supported for running a node. See [Passphrase delivery](#passphrase-delivery) for what the floor buys.
 
 ### Software
 The scripts will install or check for everything needed. You do not need to install anything manually beforehand.
@@ -201,9 +201,9 @@ sudo bash ~/telcoin-node-scripts/remove-node.sh
 | `aws/requirements-ci.txt` | cfn-lint for CI, every file pinned by hash. |
 | `.github/workflows/publish-aws-templates.yml` | Uploads the template of each `scripts-v*` tag for the launch link. |
 
-Parameters: `Preset` (`FullNode` c7i.2xlarge, `PublicRPC` c7i.4xlarge with TCP 80 and 443 open, `Validator` c7i.8xlarge), `InstanceType` (empty for the preset's type, or another x86_64 type), `DataVolumeSize` (2000 or 4000 GiB), `AutoUpdate` (`Enabled` or `Disabled`) and `ImageId` (Canonical's public SSM parameter `/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id`).
+Parameters: `Preset` (`FullNode` c7i.2xlarge, `PublicRPC` c7i.4xlarge with TCP 80 and 443 open, `Validator` c7i.8xlarge), `InstanceType` (empty for the preset's type, or another x86_64 type), `DataVolumeSize` (2000 or 4000 GiB), `AutoUpdate` (`Enabled` or `Disabled`) and `ImageId` (Canonical's public SSM parameter `/aws/service/canonical/ubuntu/server/26.04/stable/current/amd64/hvm/ebs-gp3/ami-id`).
 
-The stack creates a VPC with one public subnet, an internet gateway and route, an Elastic IP on the instance's network interface, and a security group with UDP 49590 and 49594 in from everywhere (plus TCP 80 and 443 on `PublicRPC`), no SSH and everything out. The instance runs Ubuntu 24.04 with IMDSv2 required, an encrypted gp3 root volume and an instance role that trusts `ec2.amazonaws.com` only and carries only `AmazonSSMManagedInstanceCore`. The data volume is encrypted gp3 (10,000 IOPS, 300 MB/s) with `DeletionPolicy: Retain` and `UpdateReplacePolicy: Retain`, and no snapshots. The user data writes `install algif_aead /bin/false` to `/etc/modprobe.d/telcoin-algif-aead.conf` first (and unloads the module if it is loaded), turns swap off, formats the data volume ext4 only when it carries no filesystem, mounts it at `/var/lib/telcoin` by UUID with `nofail` (found under `/dev/disk/by-id/` by its volume ID), installs the scripts as `ubuntu` with `install.sh --yes`, and signals a `WaitCondition` with `curl`, `SUCCESS` or `FAILURE` and the reason.
+The stack creates a VPC with one public subnet, an internet gateway and route, an Elastic IP on the instance's network interface, and a security group with UDP 49590 and 49594 in from everywhere (plus TCP 80 and 443 on `PublicRPC`), no SSH and everything out. The instance runs Ubuntu 26.04 with IMDSv2 required, an encrypted gp3 root volume and an instance role that trusts `ec2.amazonaws.com` only and carries only `AmazonSSMManagedInstanceCore`. The data volume is encrypted gp3 (10,000 IOPS, 300 MB/s) with `DeletionPolicy: Retain` and `UpdateReplacePolicy: Retain`, and no snapshots. The user data writes `install algif_aead /bin/false` to `/etc/modprobe.d/telcoin-algif-aead.conf` first (and unloads the module if it is loaded), turns swap off, formats the data volume ext4 only when it carries no filesystem, mounts it at `/var/lib/telcoin` by UUID with `nofail` (found under `/dev/disk/by-id/` by its volume ID), installs the scripts as `ubuntu` with `install.sh --yes`, and signals a `WaitCondition` with `curl`, `SUCCESS` or `FAILURE` and the reason.
 
 | Output | Value |
 |---|---|
@@ -332,7 +332,7 @@ table below and reports any path that differs.
 | `/var/log/telcoin/node/` | service user:telcoin-log | 2750 (setgid) | Logs the node writes itself, only with observability on (`NODE_LOG_DIR`); new files take group `telcoin-log` |
 | `/var/backups/telcoin/` | root | 0700 | Copies of files the scripts are about to change (see [Backups and the update lock](#backups-and-the-update-lock)) |
 | `/var/lib/telcoin-staging/` | root | 0700 | Release downloads and build logs while they are checked |
-| `/var/lib/private/telcoin-heartbeat/` | the heartbeat's dynamic user | 0700 | The private alerts runner's `state` file, written only by the runner |
+| `/var/lib/private/telcoin-heartbeat/` | the heartbeat's dynamic user (on disk `nobody` (65534) with systemd 257 or later) | 0700 | The private alerts runner's `state` file, written only by the runner |
 | `/var/lib/telcoin-p2p-allow/` | root | 0700 | The allowlist's state: `config` (written by `firewall-setup.sh`), `floor`, `current.nft`, `state.json`, `status` and `lock` (written by the tool, each 0600), only while committee mode is on |
 | `/run/telcoin/update.lock` | root | 0600 (directory 0755) | The update lock |
 | `/opt/telcoin-source/` | root | | The telcoin-network checkout, at a release tag (source builds) |
@@ -547,7 +547,7 @@ An enable (menu item 2, or `--enable`) first checks that the node is installed, 
 | `/etc/systemd/system/telcoin-heartbeat.timer` | root 0644 | `OnBootSec=120`, `OnUnitActiveSec=<interval>`, `AccuracySec=5` |
 | `/etc/telcoin/alerts/targets` | root 0600 | The targets, at most five lines, in `/etc/telcoin/alerts/` (root 0755) |
 | `/etc/telcoin/alerts/alerts.env` | root 0644 | `ALERTS_SERVICE`, `ALERTS_RPC_URL`, `ALERTS_NETWORK`, `ALERTS_CHAIN_ID`, `ALERTS_LABEL`, `ALERTS_HEALTH_PORT`, `ALERTS_INTERVAL`, `ALERTS_STALL_AFTER`, `ALERTS_INACTIVE_AFTER`, `ALERTS_RESTART_GRACE`. No URL |
-| `/var/lib/private/telcoin-heartbeat/state` | the dynamic user, directory 0700 | `key=value` lines the runner keeps between runs (never sourced, never a URL) |
+| `/var/lib/private/telcoin-heartbeat/state` | the dynamic user (on disk `nobody` (65534) with systemd 257 or later), directory 0700 | `key=value` lines the runner keeps between runs (never sourced, never a URL) |
 | `/run/telcoin/heartbeat-service` | root 0644 | The node service's `systemctl show` (`LoadState`, `ActiveState`, `SubState`, `NRestarts` and two timestamps), rewritten by the service as root before each run and read by the runner, because a dynamic user cannot reach the system bus. Never sourced; without it the runner asks `systemctl show` itself |
 | `ENABLE_ALERTS` in `.node-meta` | | `true`, `pending` or `false`; absent means off |
 
@@ -2046,6 +2046,16 @@ prints the exact fix command.
 > **Versioning note (from v1.1.48 onwards):** each script bumps `SCRIPT_VERSION`
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
+
+### lib/common.sh v2.2.1 — Ubuntu 26.04 recommended
+Ubuntu 26.04 LTS is the recommended OS; 24.04 stays supported. The systemd floor messages
+recommend 26.04 and say "Ubuntu 24.04 or later" for mainnet; the floors (247, 250, and 255 on
+mainnet) are unchanged. Full release note:
+[CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+
+### setup-node v2.1.1 — Ubuntu 26.04 recommended
+Ubuntu 26.04 LTS is the recommended OS; 24.04 stays supported. `--help` says so for mainnet,
+which still needs systemd 255 or later.
 
 ### setup-gateway v2.2.0 — the worker gateway, a public JSON-RPC front for transaction submissions (new)
 `setup-gateway.sh` 2.2.0, with `lib/gateway.sh` 2.2.0 (`GATEWAY_VERSION`), is new. It runs

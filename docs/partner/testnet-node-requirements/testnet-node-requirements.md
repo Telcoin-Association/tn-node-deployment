@@ -37,7 +37,7 @@
 
 ## Operating system and host
 
-- Ubuntu 24.04 LTS. macOS is not supported.
+- Ubuntu 26.04 LTS (recommended) or 24.04 LTS. macOS is not supported.
   Debian 12 and Ubuntu 22.04 also install on testnet (systemd 247 or newer); below systemd 250 the BLS passphrase stays in a root-only file.
 - Signed releases ship x86_64 Linux tarballs; otherwise build from source or use Docker.
 - A TPM 2.0 or vTPM is optional on testnet.
