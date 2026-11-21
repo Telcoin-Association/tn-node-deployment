@@ -77,7 +77,7 @@ readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 # network-gated: the comment names the testnet fleet; 9101 is the default on every network
 readonly DEFAULT_METRICS_PORT="9101"   # node loopback Prometheus endpoint (matches the adiri fleet)
-readonly COMMON_VERSION="2.2.1"
+readonly COMMON_VERSION="2.2.2"
 
 # The operator runbook, for any message that should point operators at it.
 readonly TN_OPERATOR_GUIDE_URL="https://github.com/Telcoin-Association/tn-node-deployment/blob/main/OPERATOR.md"
@@ -3253,18 +3253,68 @@ tn_sync_submodules() {
     return 0
 }
 
-# ensure_chain_configs_available [NETWORK] -- make the telcoin-network checkout
-# (TN_SOURCE_DIR) that holds the chain configs available: clone it (with the
-# operator's consent) when it is missing; on testnet and devnet pull it
-# (--ff-only), never on mainnet, whose files come only as published. Then the
-# directory setup will copy from (TN_GENESIS_DIR when set, else the checkout's
-# chain-configs/<network>) is compared with the network's pins
-# (tn_chain_configs_check) before anything is copied. NETWORK defaults to the
-# NETWORK global; TN_ROOT_PREFIX is honoured for the checkout. rc 0 ready (or
-# skipped by the operator: setup asks for the files later), 1 refused: the files
-# do not match their pins or the network has none. Exits 1 when the clone fails.
+# _tn_chain_configs_consent DIR -- say why the chain configs need the
+# telcoin-network repository and ask before cloning it into DIR. rc 0 agreed; 1
+# declined (a warning says the files are asked for later).
+_tn_chain_configs_consent() {
+    echo ""
+    print_info "The chain-config YAML files (genesis.yaml, committee.yaml, parameters.yaml)"
+    print_info "are required to run a node. They live in the Telcoin Network GitHub repo."
+    print_info "Repository: ${TN_REPO}"
+    print_info "Clone destination: ${1:-}"
+    echo ""
+    if confirm "Clone the repository now to get the chain-config files?"; then
+        return 0
+    fi
+    print_warn "Skipped. You will need to provide chain-config files manually in the next step."
+    return 1
+}
+
+# _tn_chain_configs_clone DIR [TAG] -- clone TN_REPO into DIR for the chain
+# configs, after the operator agreed. With TAG: over https only, at TAG, without
+# submodules (the chain configs are plain files of the superproject). Without
+# (devnet): the default branch with its submodules. rc 0 cloned, 2 the clone
+# failed (the message and the command to clone by hand are printed).
+_tn_chain_configs_clone() {
+    local dir="${1:-}" tag="${2:-}" ok=0
+    print_step "Cloning repository..."
+    if [[ -n "$tag" ]]; then
+        GIT_ALLOW_PROTOCOL=https git clone --quiet --branch "$tag" -- "$TN_REPO" "$dir" 9>&- || ok=1
+    else
+        git clone --recurse-submodules -- "$TN_REPO" "$dir" 9>&- || ok=1
+    fi
+    if [[ $ok -eq 0 ]]; then
+        print_ok "Repository cloned to: ${dir}"
+        return 0
+    fi
+    print_error "Clone failed. Check your internet connection."
+    if [[ -n "$tag" ]]; then
+        print_info "Manual clone: git clone --branch ${tag} ${TN_REPO} ${dir}"
+    else
+        print_info "Manual clone: git clone ${TN_REPO} ${dir}"
+    fi
+    return 2
+}
+
+# ensure_chain_configs_available [NETWORK] [progress-fn] -- make the chain
+# configs setup copies available and compare them with the network's pins
+# (tn_chain_configs_check) before anything is copied. TN_GENESIS_DIR, when set,
+# is used as given: no git, no prompt. A network with a pinned tag (testnet;
+# mainnet once it has one) gets the files at that tag into
+# tn_chain_configs_dir NETWORK through tn_chain_configs_from_tag, which never
+# moves the checkout: nothing runs when they are already there; otherwise the
+# telcoin-network checkout (TN_SOURCE_DIR under TN_ROOT_PREFIX) is read, and
+# cloned at the tag first, with the operator's consent, when it is missing.
+# Mainnet without a tag runs no git and checks the checkout's files as
+# published (it refuses while the pins are empty). Devnet pulls the checkout
+# (--ff-only) or clones it, and its files are used unchecked. NETWORK defaults
+# to the NETWORK global; progress-fn receives the messages of the helpers.
+# rc 0 ready (or skipped by the operator: setup asks for the files later); 1
+# refused: an unknown network, files that do not match their pins, a network
+# without pins, a checkout that is a symlink or another account's; 2 failed: the
+# clone, the fetch or the install did not work.
 ensure_chain_configs_available() {
-    local net="${1:-${NETWORK:-}}" source_dir="${TN_ROOT_PREFIX:-}${TN_SOURCE_DIR}" dir
+    local net="${1:-${NETWORK:-}}" fn="${2:-}" source_dir="${TN_ROOT_PREFIX:-}${TN_SOURCE_DIR}" dir tag rc=0
 
     print_step "Ensuring chain-config files are available..."
     case "$net" in
@@ -3275,44 +3325,43 @@ ensure_chain_configs_available() {
             ;;
     esac
 
-    if [[ -d "${source_dir}/.git" ]]; then
-        if [[ "$net" == "mainnet" ]]; then
-            print_info "Repository present; mainnet chain configs are used as published (no pull)."
-        else
+    tag="$(tn_chain_configs_tag "$net")"
+    if [[ -n "${TN_GENESIS_DIR:-}" ]]; then
+        dir="$TN_GENESIS_DIR"
+    elif [[ -n "$tag" ]]; then
+        dir="$(tn_chain_configs_dir "$net")"
+        if [[ ! -d "${source_dir}/.git" ]] && ! tn_chain_configs_check "$dir" "$net" 2>/dev/null; then
+            _tn_chain_configs_consent "$source_dir" || return 0
+            _tn_chain_configs_clone "$source_dir" "$tag" || return 2
+        fi
+        tn_chain_configs_from_tag "$source_dir" "$net" "$fn" || return $?
+        print_ok "Chain configs in ${dir} match the ${net} pins"
+        return 0
+    elif [[ "$net" == "devnet" ]]; then
+        dir="${source_dir}/chain-configs/${net}"
+        if [[ -d "${source_dir}/.git" ]]; then
             print_info "Repository already present -- pulling latest..."
-            git -C "$source_dir" pull --ff-only 2>/dev/null && \
-                print_ok "Repository up to date" || \
+            if git -C "$source_dir" pull --ff-only 2>/dev/null 9>&-; then
+                print_ok "Repository up to date"
+            else
                 print_warn "Could not pull latest. Using existing files."
+            fi
             # Warn-only: chain configs are plain files in the superproject, so a
             # submodule failure must not block them; it only matters for builds.
             tn_sync_submodules "$source_dir" || \
                 print_warn "submodule sync reported an issue -- chain configs are unaffected"
-        fi
-    elif [[ -z "${TN_GENESIS_DIR:-}" ]]; then
-        echo ""
-        print_info "The chain-config YAML files (genesis.yaml, committee.yaml, parameters.yaml)"
-        print_info "are required to run a node. They live in the Telcoin Network GitHub repo."
-        print_info "Repository: ${TN_REPO}"
-        print_info "Clone destination: ${source_dir}"
-        echo ""
-
-        if confirm "Clone the repository now to get the chain-config files?"; then
-            print_step "Cloning repository..."
-            if git clone --recurse-submodules "$TN_REPO" "$source_dir"; then
-                print_ok "Repository cloned to: ${source_dir}"
-            else
-                print_error "Clone failed. Check your internet connection."
-                print_info "Manual clone: git clone ${TN_REPO} ${source_dir}"
-                exit 1
-            fi
         else
-            print_warn "Skipped. You will need to provide chain-config files manually in the next step."
-            return 0
+            _tn_chain_configs_consent "$source_dir" || return 0
+            _tn_chain_configs_clone "$source_dir" || return 2
         fi
+    else
+        dir="${source_dir}/chain-configs/${net}"
+        [[ ! -d "${source_dir}/.git" ]] || \
+            print_info "Repository present; ${net} chain configs are used as published (no pull)."
     fi
 
-    dir="${TN_GENESIS_DIR:-${source_dir}/chain-configs/${net}}"
-    if ! tn_chain_configs_check "$dir" "$net"; then
+    tn_chain_configs_check "$dir" "$net" "$fn" || rc=$?
+    if [[ $rc -ne 0 ]]; then
         print_error "The chain configs in ${dir} do not match the ${net} pins (see above); nothing was copied."
         return 1
     fi
@@ -7139,17 +7188,23 @@ tn_host_baseline_status() {
 }
 
 # Chain-config pins: the sha256 of genesis.yaml, committee.yaml and
-# parameters.yaml each network runs. Testnet: chain-configs/testnet in the
-# telcoin-network repository at TESTNET_CHAIN_CONFIGS_TAG (the release
+# parameters.yaml each network runs, and the telcoin-network tag they are read
+# from (<NET>_CHAIN_CONFIGS_TAG). tn_chain_configs_from_tag reads the three
+# files at that tag into <config dir>/chain-configs/<network>; a branch is
+# never read, because the default branch moves on and its files stop matching
+# the pins. Testnet: chain-configs/testnet in the telcoin-network repository at
+# TESTNET_CHAIN_CONFIGS_TAG (the release
 # network-gated: testnet release history of the chain configs; no endpoint
 # DEFAULT_DOCKER_IMAGE runs; the three files are the same since v0.15.0-adiri).
-# Mainnet: empty until the genesis ceremony publishes the files and a signed
-# script release carries their hashes; while any of the three is empty, a
-# mainnet install or refresh refuses (tn_chain_configs_check). Devnet has none.
+# Mainnet: the tag and the hashes are empty until the genesis ceremony
+# publishes the files and a signed script release carries both; while the tag
+# is empty nothing is fetched, and while any hash is empty a mainnet install or
+# refresh refuses (tn_chain_configs_check). Devnet has neither.
 readonly TESTNET_CHAIN_CONFIGS_TAG="v0.16.0-adiri"  # network-gated: testnet constant: the tag of the testnet chain-config pins
 readonly TESTNET_GENESIS_SHA256="670c94e3816686bd4da5aedbfa994d4f362452eaf2552b2757f05226608188c2"
 readonly TESTNET_COMMITTEE_SHA256="009b6d7b568f7d04734b657080d55621eed70f68ecefe1284dd8cdd0f42f15ce"
 readonly TESTNET_PARAMETERS_SHA256="7c6a44712faef1dc47dbc5b4f21f62d1eeabf1f0d54d2cb600ad6c65d4eda091"
+readonly MAINNET_CHAIN_CONFIGS_TAG=""
 readonly MAINNET_GENESIS_SHA256=""
 readonly MAINNET_COMMITTEE_SHA256=""
 readonly MAINNET_PARAMETERS_SHA256=""
@@ -7208,6 +7263,132 @@ tn_chain_configs_check() {
         fi
     done
     return "$bad"
+}
+
+# tn_chain_configs_tag NETWORK -- print the telcoin-network tag NETWORK's
+# chain-config pins come from: TESTNET_CHAIN_CONFIGS_TAG on testnet,
+# MAINNET_CHAIN_CONFIGS_TAG on mainnet (empty until the genesis ceremony).
+# Prints nothing for an empty tag, devnet or any other network. rc 0.
+tn_chain_configs_tag() {
+    local tag=""
+    case "${1:-}" in
+        testnet) tag="$TESTNET_CHAIN_CONFIGS_TAG" ;;
+        mainnet) tag="$MAINNET_CHAIN_CONFIGS_TAG" ;;
+    esac
+    [[ -z "$tag" ]] || printf '%s\n' "$tag"
+    return 0
+}
+
+# tn_chain_configs_dir NETWORK -- print the root-owned directory that holds
+# NETWORK's pinned chain configs once tn_chain_configs_from_tag has installed
+# them: <config dir>/chain-configs/NETWORK (CONFIG_DIR, default
+# DEFAULT_CONFIG_DIR, under TN_ROOT_PREFIX). rc 0.
+tn_chain_configs_dir() {
+    printf '%s\n' "${TN_ROOT_PREFIX:-}${CONFIG_DIR:-$DEFAULT_CONFIG_DIR}/chain-configs/${1:-}"
+    return 0
+}
+
+# tn_chain_configs_from_tag DIR NETWORK [progress-fn] -- put NETWORK's three
+# chain configs, as they are at NETWORK's pinned tag (tn_chain_configs_tag),
+# into tn_chain_configs_dir NETWORK. DIR is a telcoin-network checkout owned
+# by the account running this (root on a host), not a symlink. When the
+# destination already passes tn_chain_configs_check, nothing else runs (no git,
+# DIR need not exist). Otherwise the tag is fetched from origin into
+# refs/tn-remote-tags/TAG, as tn_source_checkout_tag fetches it, and the files
+# are read from there; when origin cannot be reached, from that ref of an
+# earlier fetch, else from the checkout's own refs/tags/TAG (a warning says
+# so). A local refs/tags/TAG is never moved. The three blobs go to a private
+# staging directory (removed on every path) and are checked against the pins
+# before anything is installed: the two directories root:root 0755
+# (_tn_root_layout_dir), each file root 0644 (tn_write_root_file), then the
+# destination is checked again. HEAD, the index, the working tree and the
+# submodules of DIR are never touched (no checkout, pull, reset or submodule
+# command). Messages go through _tn_guard_say. rc 0 the pinned files are in
+# place; 1 refused: NETWORK has no tag, DIR is a symlink or owned by another
+# account, or the files at the tag do not match the pins (the destination is
+# untouched); 2 failed: DIR is not a git checkout, the tag is neither on
+# origin nor in the checkout, a file is missing at the tag, or the install
+# failed.
+tn_chain_configs_from_tag() {
+    local dir="${1:-}" net="${2:-}" fn="${3:-}" tag dest ref="" stage f rc=0
+    while [[ "$dir" == */ && "$dir" != / ]]; do dir="${dir%/}"; done
+    tag="$(tn_chain_configs_tag "$net")"
+    if [[ -z "$tag" ]]; then
+        _tn_guard_say warn "${net} has no pinned chain-config tag; nothing was read." "$fn"
+        return 1
+    fi
+    dest="$(tn_chain_configs_dir "$net")"
+    if tn_chain_configs_check "$dest" "$net" 2>/dev/null; then
+        _tn_guard_say log "The pinned ${net} chain configs are already in ${dest}." "$fn"
+        return 0
+    fi
+    if [[ ! -d "${dir}/.git" ]]; then
+        _tn_guard_say warn "${dir} is not a git checkout; the ${net} chain configs at ${tag} cannot be read from it." "$fn"
+        return 2
+    fi
+    if [[ -L "$dir" || "$(stat -c '%u' -- "$dir" 2>/dev/null)" != "$(id -u)" ]]; then
+        _tn_guard_say warn "${dir} must be a directory owned by $(id -un) (not a symlink); nothing was fetched." "$fn"
+        return 1
+    fi
+    _tn_guard_say step "Fetching ${tag} from origin for the chain configs..." "$fn"
+    if GIT_ALLOW_PROTOCOL=https git -C "$dir" fetch --quiet --no-tags origin \
+        "+refs/tags/${tag}:refs/tn-remote-tags/${tag}" 9>&- 2>/dev/null \
+        && git -C "$dir" rev-parse -q --verify "refs/tn-remote-tags/${tag}^{commit}" >/dev/null 2>&1; then
+        ref="refs/tn-remote-tags/${tag}"
+    else
+        for f in "refs/tn-remote-tags/${tag}" "refs/tags/${tag}"; do
+            if git -C "$dir" rev-parse -q --verify "${f}^{commit}" >/dev/null 2>&1; then
+                ref="$f"
+                break
+            fi
+        done
+        if [[ -z "$ref" ]]; then
+            _tn_guard_say warn "Could not fetch tag ${tag} from origin, and the checkout does not have it." "$fn"
+            return 2
+        fi
+        _tn_guard_say warn "Could not reach origin; reading the ${net} chain configs from the local copy of ${tag}." "$fn"
+    fi
+    stage="$(mktemp -d 2>/dev/null)" || stage=""
+    if [[ -z "$stage" || ! -d "$stage" ]]; then
+        _tn_guard_say warn "Could not make a staging directory for the ${net} chain configs." "$fn"
+        return 2
+    fi
+    for f in genesis.yaml committee.yaml parameters.yaml; do
+        if ! git -C "$dir" cat-file blob "${ref}:chain-configs/${net}/${f}" > "${stage}/${f}" 2>/dev/null; then
+            _tn_guard_say warn "${tag} has no chain-configs/${net}/${f}." "$fn"
+            rc=2
+            break
+        fi
+    done
+    if [[ $rc -eq 0 ]]; then
+        if ! tn_chain_configs_check "$stage" "$net" "$fn"; then
+            _tn_guard_say warn "The ${net} chain configs at ${tag} do not match the pins; nothing was installed." "$fn"
+            rc=1
+        elif ! _tn_chain_configs_install "$stage" "$dest" "$net" "$fn"; then
+            _tn_guard_say warn "Could not install the ${net} chain configs from ${tag} into ${dest} (see above)." "$fn"
+            rc=2
+        else
+            _tn_guard_say log "Installed the ${net} chain configs from ${tag} into ${dest}." "$fn"
+        fi
+    fi
+    rm -rf -- "$stage" 2>/dev/null || true
+    return "$rc"
+}
+
+# _tn_chain_configs_install STAGE DEST NETWORK [progress-fn] -- install the
+# three chain configs in STAGE (already checked against NETWORK's pins) as
+# DEST/<file>, root 0644 through tn_write_root_file fed from the staged file;
+# DEST and its parent are made root:root 0755 first. DEST is checked against
+# the pins again afterwards. rc 0, non-zero when a directory, a write or that
+# check failed (a write that failed leaves its file as it was).
+_tn_chain_configs_install() {
+    local stage="${1:-}" dest="${2:-}" net="${3:-}" fn="${4:-}" f
+    _tn_root_layout_dir "${dest%/*}" root 0755 || return 1
+    _tn_root_layout_dir "$dest" root 0755 || return 1
+    for f in genesis.yaml committee.yaml parameters.yaml; do
+        tn_write_root_file "${dest}/${f}" 0644 < "${stage}/${f}" || return 1
+    done
+    tn_chain_configs_check "$dest" "$net" "$fn"
 }
 
 print_summary() {

@@ -208,7 +208,8 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
         tn_docker_release_tag_for tn_release_stage tn_source_build tn_install_logrotate \
         tn_os_floor_check tn_docker_network_ok tn_release_tag_grammar tn_mainnet_enabled \
         tn_docker_pull_repo_ok tn_docker_pull_repos_for tn_docker_image_network_ok \
-        tn_network_config_render tn_node_supports_admission >/dev/null; then
+        tn_network_config_render tn_node_supports_admission \
+        tn_chain_configs_tag tn_chain_configs_dir tn_chain_configs_from_tag >/dev/null; then
     _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this setup-node.sh: run update-scripts.sh and try again."
     case " $* " in
         *" --json "*) printf '{"event":"error","msg":"%s"}\n{"event":"done","ok":false,"msg":"%s"}\n' "$_tn_old" "$_tn_old" ;;
@@ -218,7 +219,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
 fi
 unset _tn_old
 
-readonly SCRIPT_VERSION="2.1.1"
+readonly SCRIPT_VERSION="2.1.2"
 readonly SERVICE_NAME="telcoin"
 # The node's role is decided on-chain from committee membership, and the dashboard's
 # validator view follows the on-chain stake status (ConsensusRegistry getValidator).
@@ -2138,7 +2139,17 @@ step_create_infrastructure() {
     # Node flags: asked of the release now, before any key exists, and recorded for a
     # --json finalize.
     prepare_node_extra_flags
-    ensure_chain_configs_available "$NETWORK" || setup_fail "The ${NETWORK} chain configs are not the pinned ones (see above); nothing was copied."
+    # A network with a pinned chain-config tag gets the three files at that tag in
+    # tn_chain_configs_dir, read without moving any checkout; step_write_config copies
+    # them from there. rc 1: refused (not the pinned files, no pins, or a checkout that
+    # cannot be used); rc 2: the clone, the fetch or the install failed.
+    local cc_rc=0
+    ensure_chain_configs_available "$NETWORK" setup_progress || cc_rc=$?
+    case "$cc_rc" in
+        0) ;;
+        1) setup_fail "The ${NETWORK} chain configs are not the pinned ones (see above); nothing was copied." ;;
+        *) setup_fail "Could not get the ${NETWORK} chain configs (see above)." ;;
+    esac
     print_ok "Infrastructure ready"
 }
 
@@ -2346,11 +2357,18 @@ step_write_config() {
         *) setup_fail "no chain-configs for network ${NETWORK}" ;;
     esac
 
-    # TN_GENESIS_DIR (optional) points DIRECTLY at the dir holding genesis.yaml/
-    # committee.yaml/parameters.yaml and is checked FIRST. Never the working
-    # directory: only these absolute places.
+    # Only these absolute places, first match wins, never the working directory:
+    # TN_GENESIS_DIR (--genesis-dir: the dir holding genesis.yaml, committee.yaml and
+    # parameters.yaml); then, on a network with a pinned chain-config tag,
+    # tn_chain_configs_dir, where ensure_chain_configs_available put the files at that
+    # tag, ahead of any checkout (whose default branch can carry files that no longer
+    # match the pins); then the telcoin-network checkout and CONFIG_DIR/chain-configs.
+    local tag pinned_dir=""
+    tag="$(tn_chain_configs_tag "$NETWORK")"
+    [[ -z "$tag" ]] || pinned_dir="$(tn_chain_configs_dir "$NETWORK")"
     local search_paths=(
         ${TN_GENESIS_DIR:+"$TN_GENESIS_DIR"}
+        ${pinned_dir:+"$pinned_dir"}
         "${TN_SOURCE_DIR}/chain-configs/${chain_subdir}"
         "/opt/telcoin-source/chain-configs/${chain_subdir}"
         "${CONFIG_DIR}/chain-configs/${chain_subdir}"
@@ -2368,7 +2386,7 @@ step_write_config() {
         [[ "$try" == 1 ]] || break
         print_warn "Chain config files not found automatically."
         print_info "Copy genesis.yaml, committee.yaml and parameters.yaml from"
-        print_info "  https://github.com/Telcoin-Association/telcoin-network/tree/main/chain-configs/${chain_subdir}/"
+        print_info "  https://github.com/Telcoin-Association/telcoin-network/tree/${tag:-main}/chain-configs/${chain_subdir}/"
         print_info "into ${CONFIG_DIR}/chain-configs/${chain_subdir}/ (or pass --genesis-dir)."
         echo ""
         if json_mode; then
