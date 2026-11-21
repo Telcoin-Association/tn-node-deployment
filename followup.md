@@ -769,7 +769,7 @@ are pulled through the customer's own State Manager association. The account sid
   `printf 'y\n' | update-scripts.sh` works under Run Command; the association prepares and applies
   on a full node and leaves the apply to the operator on a staked validator; c7i is offered in the
   subnet's availability zone.
-- **Before mainnet.** Check that Canonical's Ubuntu 24.04 AMI supports NitroTPM (`describe-images`:
+- **Before mainnet.** Check that Canonical's Ubuntu 26.04 AMI supports NitroTPM (`describe-images`:
   `BootMode` `uefi`, `TpmSupport` `v2.0`). Mainnet seals the passphrase credential with the TPM
   unless the operator passes `--allow-no-tpm`; without NitroTPM the stack needs its own AMI. Then
   revisit the presets and the firewall's `--ssh-from` for mainnet.

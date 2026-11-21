@@ -603,7 +603,7 @@ The stack creates:
 
 - a VPC with one public subnet, an internet gateway and a route, and an Elastic IP that setup detects as the node's public address;
 - a security group that lets in UDP 49590 and 49594 from everywhere, and TCP 80 and 443 on `PublicRPC` only, with no SSH port and all outbound traffic allowed;
-- an Ubuntu 24.04 instance with IMDSv2 required and an encrypted root volume, whose role trusts only the EC2 service and carries only the policy Session Manager and Run Command need, `AmazonSSMManagedInstanceCore`;
+- an Ubuntu 26.04 instance with IMDSv2 required and an encrypted root volume, whose role trusts only the EC2 service and carries only the policy Session Manager and Run Command need, `AmazonSSMManagedInstanceCore`;
 - an encrypted gp3 data volume (10,000 IOPS, 300 MB/s) mounted at `/var/lib/telcoin`, which deleting the stack keeps, with no snapshots or backups, because a snapshot of it is a copy of the node keys;
 - the first-boot preparation: the CVE-2026-31431 mitigation before anything else (see [Operating system](#operating-system)), swap off, the data volume formatted only when it is blank, and the scripts installed in `/home/ubuntu/telcoin-node-scripts`. Time sync stays as the Ubuntu image sets it up, with chrony and the Amazon Time Sync Service. The stack completes only when this preparation succeeded, and rolls back with the reason when it did not.
 

@@ -687,7 +687,7 @@ The stack creates one IAM role, the instance's, so tick `I acknowledge that AWS 
 | `InstanceType` | Empty for the preset's type, or another x86_64 type. Graviton (arm64) types are refused: the image is amd64. |
 | `DataVolumeSize` | `2000` (default) or `4000` GiB. |
 | `AutoUpdate` | `Enabled` (default) or `Disabled`: the daily update association below. |
-| `ImageId` | Canonical's public SSM parameter for the current Ubuntu 24.04 amd64 image. Leave it as it is. |
+| `ImageId` | Canonical's public SSM parameter for the current Ubuntu 26.04 amd64 image. Leave it as it is. Ubuntu 24.04 still works: set it to `/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id`. |
 
 The presets follow the recommended column of section 1.1. A validator also needs the Association's approval and a stake (section 6); the host is the same.
 
@@ -696,7 +696,7 @@ The presets follow the recommended column of section 1.1. A validator also needs
 - A VPC (`10.0.0.0/16`) with one public subnet in the region's first availability zone, an internet gateway and a default route.
 - An Elastic IP on the instance's network interface, in place before the instance boots, so setup detects it as the public IP and advertises it in the multiaddrs.
 - A security group: UDP 49590 and 49594 in from everywhere, TCP 80 and 443 on `PublicRPC` only, no SSH, everything out. TCP 43174, the testnet health monitor's port (section 4.6), stays closed; add a rule for `104.155.184.201/32` yourself if you turn the health monitor on.
-- An Ubuntu 24.04 instance from Canonical's image, with IMDSv2 required and an encrypted 50 GiB gp3 root volume. Its role trusts `ec2.amazonaws.com` only and carries only `AmazonSSMManagedInstanceCore`, the policy Session Manager and Run Command need.
+- An Ubuntu 26.04 instance from Canonical's image, with IMDSv2 required and an encrypted 50 GiB gp3 root volume. Its role trusts `ec2.amazonaws.com` only and carries only `AmazonSSMManagedInstanceCore`, the policy Session Manager and Run Command need.
 - An encrypted gp3 data volume (10,000 IOPS, 300 MB/s), mounted at `/var/lib/telcoin` by UUID with `nofail`, and kept when you delete the stack. The stack takes no snapshots and sets up no backups: a snapshot of this volume is a copy of the node keys (section 4.12).
 - First-boot preparation, as root: the CVE-2026-31431 mitigation (`/etc/modprobe.d/telcoin-algif-aead.conf`, section 1.2) before anything else, swap off, the data volume formatted ext4 only when it carries no filesystem, and the scripts installed for the `ubuntu` user in `/home/ubuntu/telcoin-node-scripts` by the installer of section 2.1. Time sync stays as Canonical's image sets it up (chrony with the Amazon Time Sync Service).
 - The stack reaches `CREATE_COMPLETE` only once that preparation reported success. On a failure it rolls back, the `HostReady` event gives the reason, and `/var/log/cloud-init-output.log` on the instance has the detail.

@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
   Telcoin Network node host (Adiri testnet) in your own AWS account: a VPC with one public
-  subnet, an Elastic IP, a security group for the node's P2P ports, an Ubuntu 24.04 instance
+  subnet, an Elastic IP, a security group for the node's P2P ports, an Ubuntu 26.04 instance
   reached through Session Manager only, and an encrypted gp3 data volume mounted at
   /var/lib/telcoin that is kept when the stack is deleted. The stack leaves a ready host, not a
   running node: open a Session Manager shell and run the SetupCommand and FirewallCommand from
@@ -37,7 +37,7 @@ Metadata:
       AutoUpdate:
         default: Daily pull of signed updates
       ImageId:
-        default: Ubuntu 24.04 image (Canonical's public SSM parameter)
+        default: Ubuntu 26.04 image (Canonical's public SSM parameter)
 
 Parameters:
   Preset:
@@ -83,9 +83,9 @@ Parameters:
       run the apply document.
   ImageId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
-    Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
+    Default: /aws/service/canonical/ubuntu/server/26.04/stable/current/amd64/hvm/ebs-gp3/ami-id
     Description: >-
-      Canonical's public SSM parameter for the current Ubuntu Server 24.04 LTS amd64 image. Every
+      Canonical's public SSM parameter for the current Ubuntu Server 26.04 LTS amd64 image. Every
       stack update resolves it again: once a newer image is out, an update tries to replace the
       instance and rolls back. Change the instance in the EC2 console instead (see the runbook).
 
