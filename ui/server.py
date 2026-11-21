@@ -75,7 +75,7 @@ logging.getLogger("werkzeug").setLevel(logging.WARNING)
 # of the update engine copies in /opt/telcoin-ui-update/ (install-caddy 1.3.0).
 # 1.8.8: on-chain stake status (getValidator) selects the validator view;
 # warn-only hardware preflight; refreshes the engine copies
-UI_VERSION = "2.1.0"
+UI_VERSION = "2.1.1"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -5178,25 +5178,43 @@ def api_update_discard(node_type):
 # ROUTES -- setup preflight
 # =============================================================================
 
-# Hardware tiers, mirroring lib/common.sh (which follows telcoin-network's
-# hardware-requirements doc): (role, label, min physical cores, min RAM GB, min
-# disk GB).
+# Hardware tiers per network, mirroring the HW_TESTNET_* and HW_MAINNET_*
+# constants in lib/common.sh (ui/test_hw_mirror.py compares the two). Each tier
+# is (role, label, min physical cores, min RAM GB, min disk GB). The testnet
+# tiers follow the deployed testnet validators; the mainnet tiers follow
+# telcoin-network's hardware-requirements page and the published benchmarks.
 # All advisory -- the role is decided on-chain, so a host below a tier only gets
 # a warning and the setup wizard never blocks on hardware.
-HW_TIERS = (
-    ("node", "Full node (follower)", 2, 8, 2000),
-    ("rpc", "Public RPC node", 4, 16, 2000),
-    ("validator", "Validator (minimum)", 8, 32, 2000),
-)
-HW_VALIDATOR_RECOMMENDED = {"cpu": 16, "ram_gb": 64, "disk_gb": 4000}
+HW_TIERS = {
+    "testnet": (("node", "Full node (follower)", 2, 8, 350),
+                ("rpc", "Public RPC node", 4, 16, 350),
+                ("validator", "Validator (minimum)", 3, 16, 350)),
+    "mainnet": (("node", "Full node (follower)", 2, 8, 2000),
+                ("rpc", "Public RPC node", 4, 16, 2000),
+                ("validator", "Validator (minimum)", 8, 32, 2000)),
+}
+# The recommended validator host per network (HW_<NET>_VAL_REC_* in
+# lib/common.sh). ecc: the recommendation is ECC RAM; it is never checked.
+HW_VALIDATOR_RECOMMENDED = {
+    "testnet": {"cpu": 4, "ram_gb": 16, "disk_gb": 500, "ecc": False},
+    "mainnet": {"cpu": 16, "ram_gb": 64, "disk_gb": 4000, "ecc": True},
+}
 # A measured value passes at >= 95% of the tier, so a "32 GB" machine whose
 # MemTotal reads a little under 32 GiB (kernel reservations) still counts.
 HW_PASS_PCT = 95
 
 
-def _hw_floor_kb(gb):
-    """The kB value that passes a tier's `gb` minimum (95%)."""
+def _hw_ram_floor_kb(gb):
+    """The MemTotal kB that passes a tier's `gb` RAM minimum (95%). RAM is
+    counted in binary GB (GiB), as check_hardware in lib/common.sh counts it."""
     return gb * 1024 * 1024 * HW_PASS_PCT // 100
+
+
+def _hw_disk_floor_kb(gb):
+    """The filesystem size in kB that passes a tier's `gb` disk minimum (95%).
+    Disks are sold in decimal GB, and check_hardware in lib/common.sh uses the
+    same formula, so 350 GB -> 324707031 kB passes and one kB less does not."""
+    return gb * 1000 ** 3 * HW_PASS_PCT // 100 // 1024
 
 
 def _mem_total_kb():
@@ -5238,23 +5256,27 @@ def _hw_disk(path):
     return out
 
 
-def hardware_profile():
-    """This host against HW_TIERS, for the setup preflight. Each tier is ok only
-    when every measurement is known and passes; `gaps` names the measured values
-    below the tier ("cpu", "ram", "disk"). A value we could not read is neither a
-    pass nor a gap, so such a tier reads ok:false with no gaps (the UI says it
-    could not be measured). CPU is judged on physical cores (physical_cores), as
-    the tiers are; disk on the filesystem's total size."""
+def hardware_profile(network="testnet"):
+    """This host against the HW_TIERS of `network`, for the setup preflight:
+    "mainnet" gets the mainnet tiers, anything else (testnet, devnet, an unknown
+    value, None) the testnet tiers; `network` in the result names the set
+    applied. Each tier is ok only when every measurement is known and passes;
+    `gaps` names the measured values below the tier ("cpu", "ram", "disk"). A
+    value we could not read is neither a pass nor a gap, so such a tier reads
+    ok:false with no gaps (the UI says it could not be measured). CPU is judged
+    on physical cores (physical_cores), as the tiers are; RAM on MemTotal in
+    binary GB; disk on the filesystem's total size in decimal GB."""
+    net = "mainnet" if network == "mainnet" else "testnet"
     cpu = physical_cores()
     ram_kb = _mem_total_kb()
     disk = _hw_disk(DEFAULT_DATA_DIR)
     tiers = []
-    for role, label, min_cpu, min_ram_gb, min_disk_gb in HW_TIERS:
+    for role, label, min_cpu, min_ram_gb, min_disk_gb in HW_TIERS[net]:
         checks = (
             ("cpu", cpu, None if cpu is None else cpu * 100 >= min_cpu * HW_PASS_PCT),
-            ("ram", ram_kb, None if ram_kb is None else ram_kb >= _hw_floor_kb(min_ram_gb)),
+            ("ram", ram_kb, None if ram_kb is None else ram_kb >= _hw_ram_floor_kb(min_ram_gb)),
             ("disk", disk["total_kb"], None if disk["total_kb"] is None
-             else disk["total_kb"] >= _hw_floor_kb(min_disk_gb)),
+             else disk["total_kb"] >= _hw_disk_floor_kb(min_disk_gb)),
         )
         gaps = [name for name, _v, passed in checks if passed is False]
         tiers.append({
@@ -5264,11 +5286,12 @@ def hardware_profile():
             "gaps": gaps,
         })
     return {
+        "network": net,
         "cpu": cpu,
         "ram_kb": ram_kb,
         "disk": disk,
         "tiers": tiers,
-        "validator_recommended": dict(HW_VALIDATOR_RECOMMENDED),
+        "validator_recommended": dict(HW_VALIDATOR_RECOMMENDED[net]),
     }
 
 
@@ -5317,8 +5340,11 @@ def api_preflight():
     # when this is false.
     tpm2 = host_has_tpm()
 
-    # Advisory hardware tiers (see hardware_profile); never blocks setup.
-    hardware = hardware_profile()
+    # Advisory hardware tiers (see hardware_profile) for ?network=, read as
+    # /api/setup/defaults reads it: a missing or unknown value is testnet, never
+    # an error. Never blocks setup.
+    net = network_rule(request.args.get("network")) or "testnet"
+    hardware = hardware_profile(net)
     return jsonify({
         "tpm2": tpm2,
         "systemd": systemd,
