@@ -164,7 +164,8 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
         tn_launch_runner tn_keytool_has tn_keytool _tn_cred_plain_ok _tn_passfile_trim_safe \
         tn_docker_resolve_ref tn_docker_network_ok _tn_guard_network tn_docker_image_network_ok \
         tn_network_config_render tn_node_supports_admission tn_gateway_from_rules_ok \
-        tn_chain_configs_tag tn_chain_configs_dir tn_chain_configs_from_tag >/dev/null; then
+        tn_chain_configs_tag tn_chain_configs_dir tn_chain_configs_from_tag \
+        _tn_chain_configs_clone >/dev/null; then
     _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this edit-config.sh: run update-scripts.sh and try again."
     case " $* " in
         *" --json "*) printf '{"event":"error","msg":"%s"}\n{"event":"done","ok":false,"msg":"%s"}\n' "$_tn_old" "$_tn_old" ;;
@@ -174,7 +175,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
 fi
 unset _tn_old
 
-readonly SCRIPT_VERSION="2.2.1"
+readonly SCRIPT_VERSION="2.2.2"
 
 # The largest bootstrap peers file accepted. A map of a few dozen peers is a
 # few KiB, and the whole map travels as one command-line argument.
@@ -3720,19 +3721,24 @@ refresh_copy_configs() {
 # (tn_chain_configs_tag: testnet) gets the three files of that tag, the ones
 # this script release pins: tn_chain_configs_from_tag reads them into the
 # root-owned pinned directory (tn_chain_configs_dir) without pulling or moving
-# the checkout, and they are copied from there. A node whose data dir already
-# holds the pinned files is told so and left alone: no prompt, no lock, no
-# restart. Mainnet has no tag until the genesis ceremony: nothing is fetched
-# or pulled, and its pins, still empty, refuse the checkout's files. devnet
-# pulls the checkout and copies its files. Before anything is copied: the three
-# files present, the pins (tn_chain_configs_check), the same chain id as the
-# node's genesis.
+# the checkout, and they are copied from there. With no checkout and the pinned
+# files not in place, the menu offers to clone the repository at the tag first
+# (_tn_chain_configs_clone, the clone setup makes), or says how to get the
+# files by hand. A node whose data dir already holds the pinned files (hashed
+# by the service user, whose data dir it is) is told so and left alone: no
+# prompt, no lock, no restart. A network with neither a tag nor pins (mainnet
+# until the genesis ceremony) is refused up front: no prompt, no lock, no git.
+# One with pins but no tag copies the checkout's files as published (no pull).
+# devnet pulls the checkout and copies its files. Before anything is copied:
+# the three files present, the pins (tn_chain_configs_check), the same chain id
+# as the node's genesis. Once the update lock is taken, every way back to the
+# menu releases it before the "Press Enter" prompt.
 refresh_chain_configs() {
     print_header "Refresh Chain Configs"
 
     local source_dir="${TN_ROOT_PREFIX:-}${TN_SOURCE_DIR}"
     local node_data_dir network subdir chain_config_src node_genesis node_id src_id rc
-    local tag had_pinned current f want got
+    local tag had_pinned current f want got pin_dir clone
     if ! node_data_dir="$(detect_data_dir)"; then
         print_error "Cannot tell the node's data dir: DATA_DIR is set more than once in .node-meta. Chain configs unchanged."
         echo ""
@@ -3759,23 +3765,36 @@ refresh_chain_configs() {
         return 0
     fi
 
+    # Neither a tag nor pins (mainnet until the genesis ceremony): there is
+    # nothing this release could install, so refuse before the prompt, the lock
+    # or any git.
+    tag="$(tn_chain_configs_tag "$network")"
+    if [[ -z "$tag" && "$network" != "devnet" && -z "$(tn_chain_config_pin "$network" genesis.yaml)" ]]; then
+        print_error "This script release pins no ${network} chain configs yet, so there is nothing to install. Chain configs unchanged."
+        print_info "They come with a signed scripts release (update-scripts.sh); run this again after one."
+        echo ""
+        read -r -p "  Press Enter to return to menu..." || true
+        return 0
+    fi
+
     # A network with a pinned tag: first, is there anything to do? The node
     # already has the pinned files when the three in its data dir (where
-    # refresh_copy_configs puts them) have the pinned sha256.
-    tag="$(tn_chain_configs_tag "$network")"
+    # refresh_copy_configs puts them) are regular files, not symlinks, with the
+    # pinned sha256. The service user tests and reads them: root never opens a
+    # path that user controls.
     if [[ -n "$tag" ]]; then
         current=true
         for f in genesis/genesis.yaml genesis/committee.yaml parameters.yaml; do
             want="$(tn_chain_config_pin "$network" "${f##*/}")"
-            got=""
-            if [[ -f "${node_data_dir}/${f}" && ! -L "${node_data_dir}/${f}" ]]; then
-                got="$(sha256sum < "${node_data_dir}/${f}" 2>/dev/null)" || got=""
-                got="${got%% *}"
-            fi
+            # shellcheck disable=SC2016  # $1 expands in the child shell
+            got="$(tn_as_service_user sh -c '[ -f "$1" ] && [ ! -L "$1" ] && exec sha256sum < "$1"' \
+                sh "${node_data_dir}/${f}" 2>/dev/null)" || got=""
+            got="${got%% *}"
             [[ -n "$want" && "$got" == "$want" ]] || current=false
         done
         if [[ "$current" == "true" ]]; then
             print_ok "Nothing to refresh: the node's data dir already holds the ${network} chain configs this script release pins (${tag}), so ${TARGET_SERVICE} was not restarted."
+            print_info "If ${TARGET_SERVICE} has not been restarted since these files were copied, use 14) Restart node."
             print_info "New pins come with a signed scripts release (update-scripts.sh); run this again after one."
             echo ""
             read -r -p "  Press Enter to return to menu..." || true
@@ -3791,7 +3810,7 @@ refresh_chain_configs() {
         print_info "Use this when the network restarts with new genesis/committee/parameters."
     else
         print_info "This copies the ${network} chain configs from the repository checkout, as"
-        print_info "published (no pull), to your node data directory, once this script release pins them."
+        print_info "published (no pull), to your node data directory if they match the pins of this script release."
     fi
     echo ""
     print_warn "The node will be restarted to apply the new configs."
@@ -3804,8 +3823,48 @@ refresh_chain_configs() {
         return
     fi
 
+    # Nothing to read the pinned files from (no checkout) and the pinned
+    # directory does not hold them: offer the clone setup makes, at the tag,
+    # over https, without submodules. The question waits with the update lock
+    # free; the lock is taken for the clone, since update-node.sh fetches in the
+    # same checkout, and kept for the rest of the refresh.
+    if [[ -n "$tag" && ! -d "${source_dir}/.git" ]] \
+        && ! tn_chain_configs_check "$(tn_chain_configs_dir "$network")" "$network" >/dev/null 2>&1; then
+        pin_dir="$(tn_chain_configs_dir "$network")"
+        print_warn "There is no repository checkout at ${source_dir} to read the pinned ${network} chain configs (${tag}) from, and ${pin_dir} does not hold them."
+        print_info "They can be read from a clone of the repository at that tag, the one setup makes:"
+        print_info "Tag: ${tag}"
+        print_info "Repository: ${TN_REPO}"
+        print_info "Clone destination: ${source_dir}"
+        clone=declined
+        if confirm "Clone the repository at ${tag} into ${source_dir} now?"; then
+            menu_lock || return 0
+            clone=failed
+            if [[ -d "${source_dir}/.git" ]] || _tn_chain_configs_clone "$source_dir" "$tag"; then
+                clone=cloned
+            fi
+        fi
+        if [[ "$clone" != "cloned" ]]; then
+            edit_unlock
+            if [[ "$clone" == "failed" ]]; then
+                print_error "Could not clone the repository into ${source_dir} (see above). Chain configs unchanged."
+            else
+                print_info "Not cloned. Chain configs unchanged."
+            fi
+            print_info "Clone the repository at that tag (as root), then run this again:"
+            print_info "  sudo git clone --branch ${tag} ${TN_REPO} ${source_dir}"
+            print_info "or put the three files of that tag into ${pin_dir} (root, 0644):"
+            for f in genesis.yaml committee.yaml parameters.yaml; do
+                print_info "  https://raw.githubusercontent.com/Telcoin-Association/telcoin-network/${tag}/chain-configs/${network}/${f}"
+            done
+            echo ""
+            read -r -p "  Press Enter to return to menu..." || true
+            return 0
+        fi
+    fi
+
     # update-node.sh fetches and builds in the same checkout, so this waits for
-    # it too.
+    # it too (a no-op when the clone above took the lock).
     menu_lock || return 0
 
     chain_config_src="${source_dir}/chain-configs/${subdir}"
@@ -3824,11 +3883,10 @@ refresh_chain_configs() {
             if [[ "$rc" -eq 1 ]]; then
                 print_error "The pinned ${network} chain configs (${tag}) were not installed (see above). Chain configs unchanged."
             elif [[ ! -d "${source_dir}/.git" ]]; then
+                # Only when the checkout or the pinned files went away since
+                # the test before the lock.
                 print_error "There is no repository checkout at ${source_dir} to read the pinned ${network} chain configs (${tag}) from, and ${chain_config_src} does not hold them. Chain configs unchanged."
-                print_info "Re-run sudo ./setup-node.sh, which offers to clone the repository and reads them, or put"
-                print_info "genesis.yaml, committee.yaml and parameters.yaml from"
-                print_info "  https://github.com/Telcoin-Association/telcoin-network/tree/${tag}/chain-configs/${network}/"
-                print_info "into ${chain_config_src} (owned by root) and run this again."
+                print_info "Run this again to be offered a clone of the repository at ${tag}."
             else
                 print_error "Could not read the pinned ${network} chain configs (${tag}) from ${source_dir} (see above). Chain configs unchanged."
             fi
@@ -3842,14 +3900,15 @@ refresh_chain_configs() {
         # the rest of the refresh does.
         [[ "$had_pinned" == "true" ]] || edit_baseline_refresh
     elif [[ -d "${source_dir}/.git" && "$network" == "mainnet" ]]; then
-        # No tag yet: nothing is fetched or pulled; the files as published
-        # meet the pins below, which refuse them while they are empty.
+        # Pins but no tag: nothing is fetched or pulled; the files as
+        # published meet the pins below.
         print_info "Mainnet chain configs are used as published (no pull)."
     elif [[ -d "${source_dir}/.git" ]]; then
         # devnet has no pins: the checkout's default branch, pulled.
         print_step "Pulling latest chain configs..."
         if ! git -C "$source_dir" pull; then
             print_error "git pull failed in ${source_dir}. Chain configs unchanged."
+            edit_unlock
             echo ""
             read -r -p "  Press Enter to return to menu..." || true
             return 0
@@ -3862,17 +3921,19 @@ refresh_chain_configs() {
     else
         print_warn "Source directory not found at ${source_dir}"
         print_info "Cannot refresh chain configs without the cloned repository."
+        edit_unlock
         echo ""
-        read -r -p "  Press Enter to return to menu..."
-        return
+        read -r -p "  Press Enter to return to menu..." || true
+        return 0
     fi
 
     # Copy updated configs
     if [[ ! -d "$chain_config_src" ]]; then
         print_warn "Chain config directory not found at ${chain_config_src}"
+        edit_unlock
         echo ""
-        read -r -p "  Press Enter to return to menu..."
-        return
+        read -r -p "  Press Enter to return to menu..." || true
+        return 0
     fi
 
     # Verify source files exist before any copy so we never wipe live state
@@ -3884,15 +3945,17 @@ refresh_chain_configs() {
     if (( ${#missing[@]} > 0 )); then
         print_error "Missing chain config files at ${chain_config_src}:"
         for f in "${missing[@]}"; do print_info "  ${f}"; done
+        edit_unlock
         echo ""
-        read -r -p "  Press Enter to return to menu..."
-        return
+        read -r -p "  Press Enter to return to menu..." || true
+        return 0
     fi
 
     # The pinned hashes (tn_chain_configs_check), before anything is copied.
     if ! tn_chain_configs_check "$chain_config_src" "$network" edit_wait_say; then
         print_error "The chain configs in ${chain_config_src} do not match the ${network} pins (see above). Chain configs unchanged."
         print_info "New pins come with a signed scripts release (update-scripts.sh)."
+        edit_unlock
         echo ""
         read -r -p "  Press Enter to return to menu..." || true
         return 0
@@ -3906,6 +3969,7 @@ refresh_chain_configs() {
     src_id="$(tn_genesis_chain_id "${chain_config_src}/genesis.yaml" 2>/dev/null || true)"
     if [[ -z "$node_id" || -z "$src_id" || "$node_id" != "$src_id" ]]; then
         print_error "Not refreshing: the node's genesis (${node_genesis}) is chain ${node_id:-unknown} and ${chain_config_src}/genesis.yaml is chain ${src_id:-unknown}. Both must be known and equal. Chain configs unchanged."
+        edit_unlock
         echo ""
         read -r -p "  Press Enter to return to menu..." || true
         return 0
@@ -3923,6 +3987,7 @@ refresh_chain_configs() {
         else
             print_error "Copying the chain configs into ${node_data_dir} stopped part way: some files are new and some are not. Run this again before restarting the node."
         fi
+        edit_unlock
         echo ""
         read -r -p "  Press Enter to return to menu..." || true
         return 0
