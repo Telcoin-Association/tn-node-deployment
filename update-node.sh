@@ -112,7 +112,7 @@ unset _tn_old
 # point of the two-phase design. Restore the intended semantics.
 set +e
 
-readonly SCRIPT_VERSION="2.1.1"
+readonly SCRIPT_VERSION="2.1.2"
 # GAR_TAGS_URL is provided by lib/common.sh (sourced above). Re-declaring it
 # readonly here threw "GAR_TAGS_URL: readonly variable" to stderr, which the UI
 # surfaced as "update checks aren't available on this host".
@@ -2655,9 +2655,10 @@ update_on_exit() {
 # On the flock path the lock is held on fd 9, which every child inherits, and a
 # child that outlives this script (cargo still building after a SIGTERM, say)
 # would keep the lock until it exits. So the long-running commands this script
-# runs itself (git fetch and pull, cargo build and its tee, docker pull,
-# systemctl stop) get 9>&-. Children started inside library functions (the
-# epoch wait, the submodule sync) are the library's to close.
+# runs itself (the fetch of origin's tags for --check, the tee of the build log,
+# docker pull, systemctl stop) get 9>&-. Children started inside library
+# functions (the tag fetch and checkout, the cargo build, the epoch wait, the
+# submodule sync) are the library's to close. No git pull runs here.
 update_lock() {
     local cur
     TN_EXIT_TRAP_OWNED=1

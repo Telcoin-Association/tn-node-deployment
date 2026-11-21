@@ -10,7 +10,14 @@
 # run, a network without a tag and --genesis-dir run no git; an unreachable
 # origin falls back to the local copy of the tag; a tag whose files differ from
 # the pins installs nothing; the clone ensure makes is at the tag, without
-# submodules, and a failed clone returns 2 instead of exiting.
+# submodules, and a failed clone returns 2 instead of exiting. After
+# verification (V-FIX-S): git's own reason in the warnings, a repository git
+# cannot read refused, a stray GIT_DIR ignored, every git child with https only,
+# fd 9 closed and (read-only) no lazy fetch, a destination with the right files
+# but another owner or mode reinstalled, a symlinked destination refused, an
+# entry in the way refused before any write, a mismatch named by tag, a git
+# worktree read, a source path in the way refused before the clone question,
+# and staging under the release staging directory.
 #
 # A git wrapper on PATH logs every call (GIT_ALLOW_PROTOCOL, whether fd 9 is
 # open, argv), drops GIT_ALLOW_PROTOCOL so the file transport works (the library
@@ -35,6 +42,9 @@ mkdir -p "$T/bin" "$T/stg" "$T/pfx" "$T/notgit" "$T/bad"
 chmod 0700 "$T/stg"
 TN_ROOT_PREFIX="$T/pfx"
 eval "$(tn_test_source_common)"
+# The helpers stage under the release staging directory (tn_staging_dir).
+# shellcheck disable=SC2034  # read by tn_staging_dir
+TN_RELEASE_STAGING_DIR="$T/stg"
 trap 'tn_test_cleanup; if [[ -n "$RB" ]]; then rm -rf "${RB:?}"; fi' EXIT
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX CONFIG_DIR TN_GENESIS_DIR TN_ASSUME_YES
 
@@ -114,12 +124,17 @@ _tn_root_layout_dir() {
 REAL_GIT="$(command -v git 2>/dev/null || true)"
 ORIG_PATH="$PATH"
 GL="$T/git.log"
+GE="$T/git.env"
 O="$T/origin.git"
 cat > "$T/bin/git" <<SHIM
 #!/bin/sh
 fd9=closed
 if ( true >&9 ) 2>/dev/null; then fd9=open; fi
 printf '%s\n' "gap=\${GIT_ALLOW_PROTOCOL-unset} fd9=\$fd9 \$*" >> "$GL"
+v="\$1"
+[ "\$v" = -C ] && v="\$3"
+printf '%s gap=%s lazy=%s gitdir=%s worktree=%s fd9=%s\n' "\$v" "\${GIT_ALLOW_PROTOCOL-unset}" \
+    "\${GIT_NO_LAZY_FETCH-unset}" "\${GIT_DIR-unset}" "\${GIT_WORK_TREE-unset}" "\$fd9" >> "$GE"
 unset GIT_ALLOW_PROTOCOL
 exec "${REAL_GIT:-/nonexistent/git}" -c "url.${O}.insteadOf=${TN_REPO}" -c http.proxy=http://127.0.0.1:9 "\$@"
 SHIM
@@ -141,6 +156,7 @@ pf() {
     printf '%s|%s\n' "$1" "$2" >> "$PF"
     if [[ $PF_SNOOP == 1 ]]; then
         printf 'stg %s\n' "$(ls -A "$T/stg" | wc -l | tr -d ' ')" >> "$T/snoop"
+        ls -A "$T/stg" >> "$T/snoop.names"
     fi
 }
 CONFIRM_ANSWER=no
@@ -152,7 +168,9 @@ has() { case "$1" in *"$2"*) echo yes ;; *) echo no ;; esac; }
 ran_git() { [[ -s "$GL" ]] && echo yes || echo no; }
 asked() { [[ -s "$CL" ]] && echo yes || echo no; }
 stg_empty() { [[ -z "$(ls -A "$T/stg" 2>/dev/null)" ]] && echo yes || echo no; }
-reset_logs() { : > "$PF"; : > "$GL"; : > "$WL"; : > "$CL"; }
+reset_logs() { : > "$PF"; : > "$GL"; : > "$GE"; : > "$WL"; : > "$CL"; }
+# genv VERB -- the distinct git.env lines of VERB, without the verb.
+genv() { sed -n "s/^$1 //p" "$GE" | LC_ALL=C sort -u; }
 # ft DIR NET [fn] -- tn_chain_configs_from_tag in a subshell (TMPDIR=$T/stg):
 # FT_RC its rc ("exit N" when it did not return), FT_OUT stdout+stderr, PFL the
 # progress-fn lines.
@@ -265,6 +283,17 @@ check "ensure, clone declined: the question" "Clone the repository now to get th
 check "ensure, clone declined: the Skipped warning" yes \
     "$(has "$EN_OUT" "Skipped. You will need to provide chain-config files manually in the next step.")"
 check "ensure, clone declined: nothing cloned" no "$([[ -e "${PFX}${TN_SOURCE_DIR}" ]] && echo yes || echo no)"
+# A source directory that is no checkout: refused before the question (V-FIX-S-08).
+mkdir -p "${PFX}${TN_SOURCE_DIR}"
+printf 'x\n' > "${PFX}${TN_SOURCE_DIR}/README"
+CONFIRM_ANSWER=yes
+en testnet pf
+check "ensure, a non-empty source directory without .git: rc 1, no prompt, no git" "1 no no" "$EN_RC $(asked) $(ran_git)"
+check "ensure, not a checkout: the message" yes \
+    "$(has "$EN_OUT" "warn|${PFX}${TN_SOURCE_DIR} exists but is not a git checkout; move it aside first.")"
+CONFIRM_ANSWER=no
+rm -f "${PFX}${TN_SOURCE_DIR}/README"
+rmdir "${PFX}${TN_SOURCE_DIR}"
 
 # A pinned directory that already holds the files (CONFIG_DIR elsewhere, so the
 # real install below starts from an empty layout).
@@ -364,6 +393,16 @@ check "mismatch: the staging directory was made under TMPDIR while it ran" yes \
     "$(grep -qxF 'stg 1' "$T/snoop" && echo yes || echo no)"
 check "mismatch: the fetch ran with https only and fd 9 closed" yes \
     "$(grep -qxF -- "gap=https fd9=closed -C ${L} fetch --quiet --no-tags origin +refs/tags/${TAG}:refs/tn-remote-tags/${TAG}" "$GL" && echo yes || echo no)"
+check "mismatch: every git child over https, fd 9 closed, no GIT_DIR; the read-only ones without lazy fetch" \
+    "fetch gap=https lazy=unset gitdir=unset worktree=unset fd9=closed|rev-parse gap=https lazy=1 gitdir=unset worktree=unset fd9=closed|cat-file gap=https lazy=1 gitdir=unset worktree=unset fd9=closed" \
+    "fetch $(genv fetch)|rev-parse $(genv rev-parse)|cat-file $(genv cat-file)"
+MAIN_COMMITTEE_SHA="$(sha256sum < "$W/chain-configs/testnet/committee.yaml")"
+check "mismatch: the line names the file at the tag" \
+    "warn|chain-configs/testnet/committee.yaml at ${TAG}: sha256 ${MAIN_COMMITTEE_SHA%% *}, expected ${TESTNET_COMMITTEE_SHA256} (testnet)." \
+    "$(grep -F 'committee.yaml' <<< "$PFL")"
+check_lacks "mismatch: no staging path in the warnings" "$T/stg" "$PFL"
+check "mismatch: the staging directory is tag.<pid>.* (the sweep after a kill finds it)" yes \
+    "$(grep -q "^tag\.$$\." "$T/snoop.names" && echo yes || echo no)"
 # The destination holds two good files and a stale one, in 0700 directories.
 mkdir -p "$D"
 chmod 0700 "$CC" "$D"
@@ -472,7 +511,7 @@ G -C "$S5D" update-ref "refs/tn-remote-tags/${TAG}" "$C_MAIN"
 G clone -q "$O" "$S6D" 2>/dev/null                       # neither
 G -C "$S6D" tag -d "$TAG" >/dev/null 2>&1
 mv "$O" "$O.away"
-OFFLINE="warn|Could not reach origin; reading the testnet chain configs from the local copy of ${TAG}."
+OFFLINE="warn|Could not fetch ${TAG} from origin (fatal: '${O}' does not appear to be a git repository); reading the testnet chain configs from the local copy of ${TAG}."
 dest_clear
 ft "$SRC" testnet pf
 check "offline, an earlier fetch: rc 0, the pinned files" "0 yes" "$FT_RC $(installed)"
@@ -491,7 +530,7 @@ dest_clear
 ft "$S6D" testnet pf
 check "offline, no copy of the tag: rc 2" 2 "$FT_RC"
 check "offline, no copy: the message" yes \
-    "$(has "$PFL" "warn|Could not fetch tag ${TAG} from origin, and the checkout does not have it.")"
+    "$(has "$PFL" "warn|Could not fetch tag ${TAG} from origin (fatal: '${O}' does not appear to be a git repository), and the checkout does not have it.")"
 check "offline, no copy: nothing installed" "no" "$([[ -e "$D/genesis.yaml" ]] && echo yes || echo no)"
 mv "$O.away" "$O"
 check "offline cases: staging removed" yes "$(stg_empty)"
@@ -552,6 +591,10 @@ check "ensure, failing clone: returns 2 (no exit)" 2 "$EN_RC"
 check "ensure, failing clone: the message" yes "$(has "$EN_OUT" "Clone failed. Check your internet connection.")"
 check "ensure, failing clone: the manual command names the repository" yes "$(has "$EN_OUT" "$TN_REPO")"
 check "ensure, failing clone: nothing installed" no "$([[ -e "$D/genesis.yaml" ]] && echo yes || echo no)"
+en testnet pf
+check "ensure, failing clone with a progress fn: rc 2, the reason and the manual command reach it (V-FIX-S-01)" \
+    "2|warn|Clone failed. Check your internet connection.
+warn|Manual clone: git clone --branch ${TAG} ${TN_REPO} ${SRC}" "$EN_RC|$(grep '^warn|' "$PF")"
 mv "$O.away" "$O"
 en testnet
 check "ensure, clone accepted: rc 0, the pinned files" "0 yes" "$EN_RC $(installed)"
@@ -565,6 +608,13 @@ check_lacks "ensure, clone accepted: no --recurse-submodules" "recurse-submodule
 en testnet
 check "ensure after the clone, second run: rc 0, no git" "0 no" "$EN_RC $(ran_git)"
 mv "$SRC" "$T/src-cloned"
+mkdir "$SRC"
+dest_clear
+en testnet
+check "ensure, an empty source directory: asked, cloned into, rc 0, the pinned files" "0 yes yes" \
+    "$EN_RC $(asked) $(installed)"
+check "ensure, an empty source directory: HEAD is the tag's commit" "$C_TAG" "$(ref_of "$SRC" HEAD)"
+mv "$SRC" "$T/src-cloned2"
 mv "$T/src-aside" "$SRC"
 
 # --- attacks -----------------------------------------------------------------------------
@@ -606,11 +656,14 @@ rmdir "$D"
 mkdir -p "$T/elsewhere"
 ln -s "$T/elsewhere" "$D"
 ft "$SRC" testnet pf
-check "destination a symlink to an empty directory: rc 2, nothing written through it" "2 " "$FT_RC $(listing "$T/elsewhere")"
+check "destination a symlink to an empty directory: refused (rc 1), no git, nothing written through it" "1 no " \
+    "$FT_RC $(ran_git) $(listing "$T/elsewhere")"
+check "destination a symlink: the message" \
+    "warn|${D} must be a directory, not a symlink or a file; nothing was installed. Remove it and run again." "$PFL"
 check "destination a symlink: still the symlink, staging removed" "yes yes" "$([[ -L "$D" ]] && echo yes || echo no) $(stg_empty)"
 cp "$FX"/*.yaml "$T/elsewhere/"
 ft "$SRC" testnet pf
-printf 'note: destination a symlink to a directory holding the pinned files: rc %s, git %s\n' "$FT_RC" "$(ran_git)"
+check "destination a symlink to a directory holding the pinned files: refused (rc 1), no git" "1 no" "$FT_RC $(ran_git)"
 rm -f -- "$D" "$T/elsewhere/genesis.yaml" "$T/elsewhere/committee.yaml" "$T/elsewhere/parameters.yaml"
 ft "$SRC" testnet pf
 check "destination back to normal: rc 0" "0 yes" "$FT_RC $(installed)"
@@ -621,8 +674,8 @@ ln -s "$T/pinned-copy" "$D/committee.yaml"
 ft "$SRC" testnet pf
 check "a symlinked file in the destination: rc 2, the link and its target kept" "2 yes yes" \
     "$FT_RC $([[ -L "$D/committee.yaml" ]] && echo yes || echo no) $(cmp -s "$FX/committee.yaml" "$T/pinned-copy" && echo yes || echo no)"
-check "a symlinked file: the message, no temp file left, staging removed" "yes committee.yaml genesis.yaml parameters.yaml yes" \
-    "$(has "$PFL" "warn|Could not install the testnet chain configs from ${TAG} into ${D} (see above).") $(listing "$D") $(stg_empty)"
+check "a symlinked file: the message, no git, no temp file left, staging removed" "yes no committee.yaml genesis.yaml parameters.yaml yes" \
+    "$(has "$PFL" "warn|${D}/committee.yaml is a symlink or not a regular file; nothing was installed. Remove it and run again.") $(ran_git) $(listing "$D") $(stg_empty)"
 rm -f -- "$D/committee.yaml"
 # The second of the three writes fails.
 dest_clear
@@ -649,8 +702,112 @@ check "three concurrent runs: the pinned files, no temp file, staging removed" "
 G --git-dir="$O" update-ref -d "refs/tags/${TAG}"
 dest_clear
 ft "$SRC" testnet pf
-check "tag deleted upstream: rc 0 from the local copy, the warning" "0 yes yes" "$FT_RC $(installed) $(has "$PFL" "$OFFLINE")"
+check "tag deleted upstream: rc 0 from the local copy, the warning names git's reason" "0 yes yes" \
+    "$FT_RC $(installed) $(has "$PFL" "warn|Could not fetch ${TAG} from origin (fatal: couldn't find remote ref refs/tags/${TAG}); reading the testnet chain configs from the local copy of ${TAG}.")"
 G -C "$W" push -q "$O" "refs/tags/${TAG}" 2>/dev/null
+# --- after verification (V-FIX-S) -------------------------------------------------------
+# The pinned files in a directory made by hand under umask 077 (0700, 0600):
+# installed again from there, with no git (V-FIX-S-05).
+dest_clear
+cp "$FX"/*.yaml "$D/"
+chmod 0700 "$CC" "$D"
+chmod 0600 "$D"/*.yaml
+ft "$T/nowhere" testnet pf
+check "modes 0700/0600 with the pinned files: rc 0, no git, the pinned files" "0 no yes" "$FT_RC $(ran_git) $(installed)"
+check "modes 0700/0600: installed again through the root writers" "layout ${CC} root 0755
+layout ${D} root 0755
+write ${D}/committee.yaml 0644 file
+write ${D}/genesis.yaml 0644 file
+write ${D}/parameters.yaml 0644 file" "$(LC_ALL=C sort "$WL")"
+check "modes 0700/0600: the messages" "log|The pinned testnet chain configs are already in ${D}.
+log|Reinstalled the testnet chain configs in ${D} root-owned, directories 0755 and files 0644: their owner or modes were not the ones the install sets." "$PFL"
+if [[ $ROOT_OK == 1 ]]; then
+    check "modes 0700/0600: now root:root 0755 and 0644 (real writers)" "755 0 0|755 0 0|644 0 0" \
+        "$(mode_of "$CC")|$(mode_of "$D")|$(mode_of "$D/committee.yaml")"
+else
+    check "modes 0700/0600: now 0755 and 0644 (stand-ins)" "755|755|644" \
+        "$(mode_of "$CC" | cut -d' ' -f1)|$(mode_of "$D" | cut -d' ' -f1)|$(mode_of "$D/committee.yaml" | cut -d' ' -f1)"
+fi
+ft "$T/nowhere" testnet pf
+check "after the reinstall: in place, nothing written" "0 no |log|The pinned testnet chain configs are already in ${D}." \
+    "$FT_RC $(ran_git) $(cat "$WL")|$PFL"
+if [[ $ROOT_OK == 1 ]]; then
+    chown 65534:65534 "$CC" "$D" "$D"/*.yaml
+    ft "$T/nowhere" testnet pf
+    check "another account's directory with the pinned files: installed again root:root, no git" "0 no 755 0 0 644 0 0" \
+        "$FT_RC $(ran_git) $(mode_of "$D") $(mode_of "$D/committee.yaml")"
+else
+    skip "another account's directory with the pinned files: installed again root:root" "$NO_REAL_WHY"
+fi
+# An entry no install can replace: refused before the first write (V-FIX-S-04).
+dest_clear
+mkdir "$D/committee.yaml"
+S9="$(dest_state)"
+ft "$SRC" testnet pf
+check "a directory named committee.yaml: rc 2, no git, nothing written, the destination as it was" "2 no  yes" \
+    "$FT_RC $(ran_git) $(cat "$WL") $([[ "$(dest_state)" == "$S9" ]] && echo yes || echo no)"
+check "a directory named committee.yaml: the message" \
+    "warn|${D}/committee.yaml is a symlink or not a regular file; nothing was installed. Remove it and run again." "$PFL"
+rmdir "$D/committee.yaml"
+# A stray GIT_DIR and GIT_WORK_TREE do not redirect the helper's git (V-FIX-S-03).
+dest_clear
+export GIT_DIR="$T/nowhere.git" GIT_WORK_TREE="$T"
+ft "$SRC" testnet pf
+unset GIT_DIR GIT_WORK_TREE
+check "a stray GIT_DIR and GIT_WORK_TREE: ignored, rc 0, the pinned files" "0 yes" "$FT_RC $(installed)"
+check "a stray GIT_DIR: every git child without it, over https, fd 9 closed" \
+    "fetch gap=https lazy=unset gitdir=unset worktree=unset fd9=closed|rev-parse gap=https lazy=1 gitdir=unset worktree=unset fd9=closed|cat-file gap=https lazy=1 gitdir=unset worktree=unset fd9=closed" \
+    "fetch $(genv fetch)|rev-parse $(genv rev-parse)|cat-file $(genv cat-file)"
+# A .git that git cannot read: refused with git's reason (V-FIX-S-03).
+mkdir -p "$T/broken"
+printf 'gitdir: %s/no-such-gitdir\n' "$T" > "$T/broken/.git"
+dest_clear
+ft "$T/broken" testnet pf
+check "a .git git cannot read: refused (rc 1), nothing installed" "1 no" \
+    "$FT_RC $([[ -e "$D/genesis.yaml" ]] && echo yes || echo no)"
+check "a .git git cannot read: git's reason" yes \
+    "$(has "$PFL" "warn|Git cannot read the repository in ${T}/broken (fatal: not a git repository: ")"
+if [[ $IS_ROOT == 1 ]]; then
+    S10="$T/src10"
+    G clone -q "$O" "$S10" 2>/dev/null
+    chown -R 65534:65534 "$S10/.git"
+    dest_clear
+    ft "$S10" testnet pf
+    check "another account's .git (dubious ownership): refused (rc 1), nothing installed" "1 no" \
+        "$FT_RC $([[ -e "$D/genesis.yaml" ]] && echo yes || echo no)"
+    check "dubious ownership: git's reason" yes \
+        "$(has "$PFL" "warn|Git cannot read the repository in ${S10} (fatal: detected dubious ownership in repository at ")"
+else
+    skip "another account's .git (dubious ownership)" "not root"
+fi
+# A partial clone: no blob is fetched behind the helper's back (V-FIX-S-10).
+G --git-dir="$O" config uploadpack.allowFilter true
+G clone -q --filter=blob:none --no-checkout "file://$O" "$T/partial" 2>/dev/null
+dest_clear
+ft "$T/partial" testnet pf
+check "a partial clone: rc 2, nothing installed, no lazy fetch" "2 no" \
+    "$FT_RC $([[ -e "$D/genesis.yaml" ]] && echo yes || echo no)"
+check "a partial clone: the blob is named unreadable, not missing" yes \
+    "$(has "$PFL" "warn|Could not read chain-configs/testnet/genesis.yaml at ${TAG} (fatal: ")"
+# A git worktree (.git is a file) is read like any checkout (V-FIX-S-08).
+G -C "$SRC" worktree add -q --detach "$T/wt" "$C_MAIN" 2>/dev/null
+dest_clear
+WT0="$(snap "$T/wt")"
+ft "$T/wt" testnet pf
+check "a git worktree: rc 0, the pinned files" "0 yes" "$FT_RC $(installed)"
+check "a git worktree: unchanged, nothing that moves a checkout" "yes no" \
+    "$([[ "$(snap "$T/wt")" == "$WT0" ]] && echo yes || echo no) $(moved_git)"
+mv "$SRC" "$T/src-main"
+G -C "$T/src-main" worktree add -q --detach "$SRC" "$C_MAIN" 2>/dev/null
+dest_clear
+CONFIRM_ANSWER=yes
+en testnet pf
+CONFIRM_ANSWER=no
+check "ensure, the source checkout is a git worktree: rc 0, no prompt, the pinned files" "0 no yes" \
+    "$EN_RC $(asked) $(installed)"
+G -C "$T/src-main" worktree remove --force "$SRC" 2>/dev/null
+mv "$T/src-main" "$SRC"
+check "every new case left nothing in staging" yes "$(stg_empty)"
 # Devnet keeps its pull (fd 9 closed).
 en devnet
 check "ensure devnet with a checkout: pull --ff-only as before, rc 0" "yes 0" \
