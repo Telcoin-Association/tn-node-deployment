@@ -774,6 +774,11 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   2.5 mm. Any added line needs another cut; the next ones are the firewall sentence with the
   `2) Mainnet` sentence, then the callout. Its "Every node" bullet was shortened to fit and no
   longer names the data directory.
+- `tools/tests/chain_configs_tag_test.sh` still compares three warnings with git's own sentences
+  (a fetch from an origin that is not a repository, a tag the origin does not have, a repository
+  another account owns). They pass with git 2.49, 2.53 and the versions on the CI runners. A
+  fourth such check failed on the runners, whose git words an unreadable repository differently,
+  and now only requires a `fatal: ` line of git's. Closes when the other three do the same.
 - `README.md`, "Node releases", still describes the release key that script releases ship as
   `grantkee.asc` with the earlier RSA key's fingerprint and expiry, while the update-scripts 2.2.0
   changelog entry names the ed25519 key and adds `MavenRain.asc`. Closes when that sentence names
