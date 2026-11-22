@@ -224,7 +224,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
         tn_committee_down_guard tn_service_user_ok tn_service_user_can_run tn_host_baseline_install \
         tn_docker_release_tag_for tn_release_stage tn_source_build tn_install_logrotate \
         tn_os_floor_check tn_docker_network_ok tn_release_tag_grammar tn_mainnet_enabled \
-        tn_mainnet_keygen_enabled tn_release_version_ok \
+        tn_mainnet_keygen_enabled tn_release_version_ok tn_keys_network_ok \
         tn_docker_pull_repo_ok tn_docker_pull_repos_for tn_docker_image_network_ok \
         tn_network_config_render tn_node_supports_admission tn_committee_peers_check \
         tn_trusted_nodes_shape_ok tn_map_addr_check tn_trusted_nodes_node_check tn_local_worker_count \
@@ -462,6 +462,8 @@ step_preflight() {
     echo ""
     print_step "Selecting network..."
     json_mode || select_network
+    # A --json run asked this before the lock (run_json_mode).
+    json_mode || setup_keys_network_check
     # After the network is chosen: check_internet probes that network's own RPC, and
     # check_hardware compares the host with that network's tiers.
     check_internet
@@ -615,6 +617,7 @@ setup_store_passphrase() {
         else
             meta_unset CREDENTIAL_PCRS "$meta" || setup_fail "Could not remove CREDENTIAL_PCRS from ${meta}."
         fi
+        SETUP_PASS_STORED=true
         print_ok "Passphrase stored as an encrypted credential (root, mode 600): ${cred}"
         return 0
     fi
@@ -625,8 +628,79 @@ setup_store_passphrase() {
     write_node_meta "PASSPHRASE_METHOD=stdin"
     meta_unset CREDENTIAL_KEY "$meta" || setup_fail "Could not remove CREDENTIAL_KEY from ${meta}."
     meta_unset CREDENTIAL_PCRS "$meta" || setup_fail "Could not remove CREDENTIAL_PCRS from ${meta}."
+    SETUP_PASS_STORED=true
     print_ok "Passphrase stored for LoadCredential (root, mode 600): ${plain}"
     return 0
+}
+
+# HUP, INT and TERM between setup_hold_signals and setup_release_signals are held: the
+# trap notes the signal, the keytool call and the steps around it finish, and
+# setup_release_signals puts back main's traps and then stops setup with that signal's
+# status, as main's trap would have. step_generate_keys holds them from storing the
+# passphrase until the new keys are checked, so a signal cannot leave keys without it.
+SETUP_PASS_STORED=false
+SETUP_HELD_SIGNAL=""
+setup_hold_signals() {
+    SETUP_HELD_SIGNAL=""
+    trap 'SETUP_HELD_SIGNAL=TERM; SETUP_SIGNAL=TERM' TERM
+    trap 'SETUP_HELD_SIGNAL=INT; SETUP_SIGNAL=INT' INT
+    trap 'SETUP_HELD_SIGNAL=HUP; SETUP_SIGNAL=HUP' HUP
+}
+setup_release_signals() {
+    trap 'SETUP_SIGNAL=TERM; exit 143' TERM
+    trap 'SETUP_SIGNAL=INT; exit 130' INT
+    trap 'SETUP_SIGNAL=HUP; exit 129' HUP
+    case "$SETUP_HELD_SIGNAL" in
+        TERM) SETUP_SIGNAL=TERM; exit 143 ;;
+        INT) SETUP_SIGNAL=INT; exit 130 ;;
+        HUP) SETUP_SIGNAL=HUP; exit 129 ;;
+    esac
+    return 0
+}
+
+# setup_keygen_undo -- a keygen whose new keys are not usable takes back what it made:
+# node-keys/ and node-info.yaml (removed by the service user, whose files they are) and
+# the passphrase setup_store_passphrase stored for them, with its .node-meta record, so
+# the host is as before the keytool ran and keygen can run again. Never fails.
+setup_keygen_undo() {
+    local k
+    tn_as_service_user rm -rf -- "${DATA_DIR}/node-keys" "${DATA_DIR}/node-info.yaml" || true
+    _tn_shred "${CONFIG_DIR}/bls-passphrase.cred"
+    _tn_shred "${CONFIG_DIR}/bls-passphrase"
+    for k in PASSPHRASE_METHOD CREDENTIAL_KEY CREDENTIAL_PCRS; do
+        meta_unset "$k" "${CONFIG_DIR}/.node-meta" 2>/dev/null || true
+    done
+    SETUP_PASS_STORED=false
+    return 0
+}
+
+# setup_keys_found DATA_DIR -- what an earlier keygen left in DATA_DIR and what the
+# operator does with it, as one or more sentences on stdout: the key (node-keys/bls.kw),
+# node-info.yaml and the passphrase stored the way .node-meta's PASSPHRASE_METHOD says.
+# All three: nothing to generate. The key and node-info.yaml without the passphrase (a
+# run stopped between the two, by an older release or by KILL or a power loss): the
+# keys open only with the passphrase typed for that run, so store it if it is still at
+# hand, else remove them, generate again and send the new node-info.yaml. Anything
+# else: the keytool did not finish and its keys were never reported, so remove them.
+setup_keys_found() {
+    local dd="$1" meta="${CONFIG_DIR}/.node-meta" pm="" key="" pass=no
+    pm="$(meta_get PASSPHRASE_METHOD "$meta" 2>/dev/null)" || pm=""
+    case "$pm" in
+        credential) [[ -f "${CONFIG_DIR}/bls-passphrase.cred" ]] && pass=yes ;;
+        stdin|loadcredential) [[ -f "${CONFIG_DIR}/bls-passphrase" ]] && pass=yes ;;
+    esac
+    if [[ ! -f "${dd}/node-keys/bls.kw" || ! -f "${dd}/node-info.yaml" ]]; then
+        printf 'An earlier keygen did not finish: it left no complete key set (node-keys/bls.kw and %s), and keys it did not finish were never reported. Remove %s and %s (sudo rm -rf), then run keygen again.' \
+            "${dd}/node-info.yaml" "${dd}/node-keys" "${dd}/node-info.yaml"
+        return 0
+    fi
+    if [[ "$pass" == "yes" ]]; then
+        printf 'An earlier keygen left the keys, %s and the stored passphrase (PASSPHRASE_METHOD=%s), all in place: there is nothing to generate. Use that node-info.yaml, and finalize this host when its release is out.' "${dd}/node-info.yaml" "$pm"
+        return 0
+    fi
+    key="$(meta_get CREDENTIAL_KEY "$meta" 2>/dev/null)" || key=""
+    printf 'An earlier keygen left the keys and %s but no stored passphrase (no PASSPHRASE_METHOD, or its file is missing): it stopped before it stored the passphrase, and the keys open only with the passphrase typed for that run. If you still have it, store it as OPERATOR.md section 2.12 shows (systemd-creds encrypt --name=bls-passphrase --with-key=%s - %s, then PASSPHRASE_METHOD=credential and CREDENTIAL_KEY=%s in %s). Otherwise remove %s and %s (sudo rm -rf), run keygen again, and send the new node-info.yaml in place of any you sent.' \
+        "${dd}/node-info.yaml" "${key:-host+tpm2}" "${CONFIG_DIR}/bls-passphrase.cred" "${key:-host+tpm2}" "$meta" "${dd}/node-keys" "${dd}/node-info.yaml"
 }
 
 # Kept keys keep their stored passphrase: an encrypted credential stays as it is; a
@@ -1185,12 +1259,24 @@ _preflight_existing() {
 # Stop setup unless the node binary at BINARY_PATH is a mainnet build, judged as a
 # mainnet release binary is (tn_release_version_ok on its --version, no version
 # wanted): exactly one "Build Features:" line, and it is empty. A testnet or a test
-# build is refused before it makes keys or .node-meta names it.
+# build is refused before it makes keys or .node-meta names it. The binary runs only
+# once it passed _tn_root_binary_ok (setup runs it as root), and its --version gets
+# 30 seconds where coreutils timeout exists.
 check_binary_mainnet() {
-    local v="" why=""
-    if ! v="$("$BINARY_PATH" --version 2>&1)"; then
-        setup_fail "Refusing the node binary at ${BINARY_PATH}: its --version did not run, so whether it is a mainnet build cannot be told. The binary was not used."
+    local v="" why="" rc=0
+    if ! _tn_root_binary_ok "$BINARY_PATH"; then
+        setup_fail "refusing ${BINARY_PATH}: the node binary must be a root-owned file, not group- or other-writable, in root-owned directories."
     fi
+    if command -v timeout >/dev/null 2>&1; then
+        v="$(timeout -k 5 30 "$BINARY_PATH" --version 2>&1)" || rc=$?
+    else
+        v="$("$BINARY_PATH" --version 2>&1)" || rc=$?
+    fi
+    case "$rc" in
+        0) ;;
+        124|137) setup_fail "Refusing the node binary at ${BINARY_PATH}: its --version did not finish within 30 seconds, so whether it is a mainnet build cannot be told. The binary was stopped and not used." ;;
+        *) setup_fail "Refusing the node binary at ${BINARY_PATH}: its --version did not run, so whether it is a mainnet build cannot be told. The binary was not used." ;;
+    esac
     why="$(tn_release_version_ok "$v" mainnet "" 2>&1 >/dev/null)" && return 0
     why="${why##*\[WARN\]}"
     why="${why#"${RESET:-}"}"
@@ -2171,10 +2257,14 @@ step_create_infrastructure() {
     # its flags leave them out (and stops when a flag differs). step_create_service
     # later adds the full metadata.
     # OWNERSHIP_LAYOUT=2: this layout is the root-owned one, so nothing is migrated.
+    # NETWORK goes in before any key exists: it is the network the keys are for, and
+    # a later run for another network is refused over mainnet keys
+    # (setup_keys_network_check).
     write_node_meta \
         "HOST_SERVICE_USER=${SERVICE_USER}" \
         "HOST_SERVICE_GROUP=${SERVICE_GROUP}" \
         "INSTALL_METHOD=${INSTALL_METHOD:-binary}" \
+        "NETWORK=${NETWORK}" \
         "DATA_DIR=${DATA_DIR}" \
         "OWNERSHIP_LAYOUT=2"
     write_node_meta_runner
@@ -2227,7 +2317,7 @@ step_generate_keys() {
 
     if [[ -d "${DATA_DIR}/node-keys" ]]; then
         if json_mode; then
-            setup_fail "node-keys already exist at ${DATA_DIR}/node-keys -- refusing to overwrite in non-interactive mode"
+            setup_fail "node-keys already exist at ${DATA_DIR}/node-keys -- refusing to overwrite in non-interactive mode. $(setup_keys_found "$DATA_DIR")"
         fi
         print_warn "Key files already exist in ${DATA_DIR}/node-keys/"
         if ! confirm "Overwrite existing keys?"; then
@@ -2362,7 +2452,21 @@ step_generate_keys() {
     # writes the passphrase to keytool's standard input (--bls-passphrase-source stdin;
     # docker run -i for an image), so it is in no command line and no environment.
     # TN_KEYTOOL_PASS is a plain shell variable for this one call, never exported.
-    local keytool_rc=0
+    # New keys get their stored passphrase first (the encrypted credential, or the root
+    # 0600 file on testnet and devnet: setup_store_passphrase), so keys never exist
+    # without it, and HUP, INT and TERM are held from there until the keys are checked:
+    # a keygen that fails, or whose keytool a signal stopped, takes back what the keytool
+    # wrote and the stored passphrase (setup_keygen_undo) before setup stops. Over keys
+    # that already exist (an interactive overwrite, which the keytool refuses) the
+    # passphrase is stored after the keytool, as before, so the one of the kept keys stays.
+    local keytool_rc=0 fresh=true
+    if [[ -e "${DATA_DIR}/node-keys" || -L "${DATA_DIR}/node-keys" ]]; then
+        fresh=false
+    fi
+    setup_hold_signals
+    if [[ "$fresh" == "true" ]]; then
+        setup_store_passphrase
+    fi
     TN_KEYTOOL_PASS="$TN_SETUP_PASS"
     tn_keytool "$(node_runner_spec)" "$DATA_DIR" generate validator \
         --address "$VALIDATOR_ADDRESS" \
@@ -2371,27 +2475,54 @@ step_generate_keys() {
         ${rpc_args[@]+"${rpc_args[@]}"} || keytool_rc=$?
     unset TN_KEYTOOL_PASS
     if [[ "$keytool_rc" -ne 0 ]]; then
+        if [[ "$fresh" == "true" ]]; then
+            setup_keygen_undo
+            setup_fail "Key generation failed (keytool rc ${keytool_rc}); what it wrote and the stored passphrase were removed, so keygen can run again."
+        fi
         setup_fail "Key generation failed (keytool rc ${keytool_rc})."
     fi
     # The key must be the wrapped one: bls.kw present, no cleartext bls.key. Otherwise
     # the new keys directory goes (removed by the service user, whose directory it is).
     if [[ ! -f "${DATA_DIR}/node-keys/bls.kw" || -e "${DATA_DIR}/node-keys/bls.key" || -L "${DATA_DIR}/node-keys/bls.key" ]]; then
         tn_as_service_user rm -rf -- "${DATA_DIR}/node-keys" || true
+        [[ "$fresh" != "true" ]] || setup_keygen_undo
         setup_fail "Key generation did not leave an encrypted BLS key (node-keys/bls.kw without node-keys/bls.key); the new keys directory was removed."
+    fi
+    if [[ "$fresh" == "true" && ! -f "${DATA_DIR}/node-info.yaml" ]]; then
+        setup_keygen_undo
+        setup_fail "Key generation left no ${DATA_DIR}/node-info.yaml; the new keys and the stored passphrase were removed, so keygen can run again."
     fi
     print_ok "Node keys generated in: ${DATA_DIR}/node-keys/"
 
     # The passphrase the unit loads: the encrypted credential (encrypted from a pipe, no
     # plaintext file) or the root 0600 file (setup_store_passphrase).
-    setup_store_passphrase
+    if [[ "$fresh" != "true" ]]; then
+        setup_store_passphrase
+    fi
+    setup_release_signals
 
     TN_SETUP_PASS=""
 
-    display_node_info "$DATA_DIR" "$VALIDATOR_ADDRESS"
+    # A genesis validator (setup_mainnet_keygen_only) is registered by the genesis, not
+    # by staking: it is shown its node-info.yaml, and json_phase_keygen says what it does
+    # next (setup_mainnet_keygen_next), never display_node_info's onboarding and staking
+    # steps or its stake read from the network RPC.
+    if setup_mainnet_keygen_only; then
+        print_step "Node Identity Information"
+        echo "  Your node-info.yaml has been generated at:"
+        echo "    ${DATA_DIR}/node-info.yaml"
+        print_sep
+        cat "${DATA_DIR}/node-info.yaml"
+        print_sep
+    else
+        display_node_info "$DATA_DIR" "$VALIDATOR_ADDRESS"
+    fi
 
     echo ""
     print_warn "BACK UP YOUR KEYS NOW."
-    print_info "If ${DATA_DIR}/node-keys/ is lost, you must re-register with the Association."
+    if ! setup_mainnet_keygen_only; then
+        print_info "If ${DATA_DIR}/node-keys/ is lost, you must re-register with the Association."
+    fi
     echo ""
     # JSON mode: the UI enforces the "BACKED UP" gate between keygen and finalize,
     # so no blocking prompt here.
@@ -3492,6 +3623,22 @@ setup_mainnet_keygen_only() {
         && ! tn_mainnet_enabled && tn_mainnet_keygen_enabled
 }
 
+# setup_keys_network_check -- stop setup when the keys on this host were generated for
+# mainnet and this run is for another network (tn_keys_network_ok on the NETWORK that
+# step_create_infrastructure records before it makes keys). A finalize or a keygen asks
+# it as soon as it runs as root, before anything on the host changes; an interactive
+# install, once the network is chosen. A --json run without --network is a testnet run.
+setup_keys_network_check() {
+    local why="" rc=0
+    why="$(tn_keys_network_ok "$NETWORK" "${CONFIG_DIR}/.node-meta" 2>&1 >/dev/null)" || rc=$?
+    [[ $rc -ne 0 ]] || return 0
+    if json_mode; then
+        [[ "$NETWORK" != "testnet" ]] || why="${why} A --json run without --network is a testnet run."
+        why="${why} Nothing on this host was changed."
+    fi
+    setup_fail "$why"
+}
+
 # setup_mainnet_keygen_next INFO -- what the operator does with the keys a
 # setup_mainnet_keygen_only run made: send INFO (node-info.yaml), never the keys or
 # the passphrase, and finalize once the mainnet release and genesis are out. On
@@ -3553,6 +3700,11 @@ json_phase_keygen() {
     step_generate_keys
 
     local info="${DATA_DIR}/node-info.yaml" info_content="" done_msg="keys generated -- BACK THEM UP before finalizing"
+    # Success, and the file to send, only with the key, node-info.yaml and the stored
+    # passphrase all in place.
+    if [[ ! -f "${DATA_DIR}/node-keys/bls.kw" || ! -f "$info" || "$SETUP_PASS_STORED" != "true" ]]; then
+        setup_fail "Keygen did not leave the key, ${info} and the stored passphrase all in place, so it does not report success. $(setup_keys_found "$DATA_DIR")"
+    fi
     [[ -f "$info" ]] && info_content="$(json_escape "$(cat "$info")")"
     if setup_mainnet_keygen_only; then
         setup_mainnet_keygen_next "$info"
@@ -3590,11 +3742,22 @@ finalize_install_inputs() {
     setup_meta_read pm PASSPHRASE_METHOD "$meta"
     [[ "$pm" == "loadcredential" ]] && pm=stdin
     PASSPHRASE_METHOD="${pm:-$PASSPHRASE_METHOD}"
+    local why=""
     case "$PASSPHRASE_METHOD" in
-        credential) [[ -f "${CONFIG_DIR}/bls-passphrase.cred" ]] || setup_fail "PASSPHRASE_METHOD=credential but ${CONFIG_DIR}/bls-passphrase.cred is missing: run --phase=keygen first." ;;
-        stdin) [[ -f "${CONFIG_DIR}/bls-passphrase" ]] || setup_fail "PASSPHRASE_METHOD=stdin but ${CONFIG_DIR}/bls-passphrase is missing: run --phase=keygen first." ;;
-        *) setup_fail "No stored BLS passphrase recorded in ${meta} (PASSPHRASE_METHOD): run --phase=keygen first." ;;
+        credential) [[ -f "${CONFIG_DIR}/bls-passphrase.cred" ]] || why="PASSPHRASE_METHOD=credential but ${CONFIG_DIR}/bls-passphrase.cred is missing" ;;
+        stdin) [[ -f "${CONFIG_DIR}/bls-passphrase" ]] || why="PASSPHRASE_METHOD=stdin but ${CONFIG_DIR}/bls-passphrase is missing" ;;
+        *) why="No stored BLS passphrase recorded in ${meta} (PASSPHRASE_METHOD)" ;;
     esac
+    # Over keys an earlier keygen left, say what it left and the way out
+    # (setup_keys_found): another keygen would refuse them.
+    if [[ -n "$why" ]]; then
+        setup_meta_read rec DATA_DIR "$meta"
+        rec="${rec:-$DATA_DIR}"
+        if [[ -e "${rec}/node-keys" ]]; then
+            setup_fail "${why}. $(setup_keys_found "$rec")"
+        fi
+        setup_fail "${why}: run --phase=keygen first."
+    fi
     setup_meta_read rec INSTALL_METHOD "$meta"
     finalize_same_as_keygen install-method "$INSTALL_METHOD" "$rec"
     INSTALL_METHOD="${INSTALL_METHOD:-$rec}"
@@ -3776,7 +3939,8 @@ json_check_install_flags() {
     esac
     # Mainnet keys ahead of mainnet (setup_mainnet_keygen_only): no mainnet release,
     # image or source tag can be verified before genesis, so the node binary is the
-    # operator's own, named by path, and a mainnet build.
+    # operator's own, named by path, and a mainnet build (check_binary_mainnet, which
+    # run_json_mode calls once every other input passed).
     if setup_mainnet_keygen_only; then
         local why="--install-method ${INSTALL_METHOD} cannot install a mainnet node yet"
         case "$INSTALL_METHOD" in
@@ -3786,7 +3950,6 @@ json_check_install_flags() {
         if [[ "$INSTALL_METHOD" != "existing" || -z "$BINARY_PATH" ]]; then
             setup_fail "${why}: before genesis no mainnet release, image or source tag can be verified. Generate the mainnet keys with --phase=keygen --install-method existing --binary-path <a telcoin-network binary built with no build features>; the rest of a mainnet install waits for the script release that enables mainnet (lib/common.sh TN_MAINNET_ENABLED). Nothing on this host was changed."
         fi
-        check_binary_mainnet
     fi
     if [[ "$JSON_PHASE" == "keygen" && -z "$INSTALL_METHOD" ]]; then
         setup_fail "--install-method is missing (expected source, release, docker or existing)"
@@ -3864,6 +4027,9 @@ json_check_keygen_inputs() {
     if [[ -z "$VALIDATOR_ADDRESS" ]]; then
         setup_fail "--address is missing: keygen needs the node's execution address (0x followed by 40 hex digits)."
     fi
+    if [[ "$VALIDATOR_ADDRESS" =~ ^0[xX]0{40}$ ]]; then
+        setup_fail "--address is the zero address: the proof of possession is signed over the node's execution address, which receives its rewards; give that address."
+    fi
     for pair in --external-primary:PRIMARY_MULTIADDR --external-worker:WORKER_MULTIADDR \
                 --listener-primary:PRIMARY_LISTENER_MULTIADDR --listener-worker:WORKER_LISTENER_MULTIADDR; do
         flag="${pair%%:*}"
@@ -3894,7 +4060,13 @@ run_json_mode() {
     json_set_network "$JSON_NETWORK_INPUT"
     json_check_install_flags
     json_check_keygen_inputs
+    # The operator's own binary runs (--version) only once every other input passed,
+    # and only after its ownership and mode check.
+    if setup_mainnet_keygen_only; then
+        check_binary_mainnet
+    fi
     json_require_root
+    setup_keys_network_check
     # An installed node is refused before the lock, whose layout migration would
     # otherwise change an older install first; the phase checks again under the lock.
     json_refuse_installed "$JSON_PHASE"

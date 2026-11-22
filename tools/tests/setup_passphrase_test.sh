@@ -202,10 +202,12 @@ check_rc "testnet: 3 bytes accepted" 0 "$(keygen_inputs abc testnet)"
 reset
 printf 'clear-pass-1\n' > "$T/in"
 export STUB_CLEARTEXT=1
-rc="$(run_main "$T/in" "${KG[@]}" --passphrase-stdin)"
+# New keys get the passphrase stored before the keytool runs, and a failed keygen
+# shreds it again: here the shred removes the file tn_write_root_file's stand-in wrote.
+rc="$( _tn_shred() { command rm -f -- "$T/written/${1##*/}"; }; run_main "$T/in" "${KG[@]}" --passphrase-stdin )"
 unset STUB_CLEARTEXT
 check_rc "cleartext key: rc" 1 "$rc"
-check "cleartext key: keys dir removed, no passphrase file" "no no" \
+check "cleartext key: keys dir removed, the stored passphrase taken back" "no no" \
     "$([[ -e "$T/data/node-keys" ]] && echo yes || echo no) $([[ -e "$T/written/bls-passphrase" ]] && echo yes || echo no)"
 
 # ---- the interactive prompt (twice, checked, asked again) --------------------------------

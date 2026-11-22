@@ -59,6 +59,36 @@ tn_mainnet_keygen_enabled() {
     [[ "$TN_MAINNET_KEYGEN_ENABLED" == "1" ]]
 }
 
+# tn_keys_network_ok WANTED [META] -- rc 0 when a node may be set up for WANTED from
+# the keys on this host, judged by the network .node-meta records for them (NETWORK
+# in META, default node_meta_path; setup-node writes it before it makes keys): none
+# recorded (a host keyed by an older release, which recorded it only at finalize),
+# a network other than mainnet, or WANTED itself. rc 1 when the keys were generated
+# for mainnet and WANTED is another network, rc 2 when NETWORK is set more than once;
+# the reason goes to stderr. Mainnet BLS keys never sign on another network. Reads
+# META only.
+tn_keys_network_ok() {
+    local want="${1:-}" meta="${2:-}" rec="" rc=0
+    if [[ -z "$meta" ]]; then
+        meta="$(node_meta_path 2>/dev/null)" || return 0
+    fi
+    rec="$(meta_get NETWORK "$meta" 2>/dev/null)" || rc=$?
+    case "$rc" in
+        0) ;;
+        1) return 0 ;;
+        *)
+            printf 'NETWORK is set more than once in %s, so the network of the keys on this host cannot be told; remove the extra lines and run again.\n' "$meta" >&2
+            return 2
+            ;;
+    esac
+    if [[ "$rec" != "mainnet" || "$want" == "mainnet" ]]; then
+        return 0
+    fi
+    printf 'The keys on this host were generated for mainnet (NETWORK=mainnet in %s) and must not be used on another network, so a %s node is refused here. Set up the %s node on another host; this one runs mainnet only.\n' \
+        "$meta" "${want:-(none)}" "${want:-other}" >&2
+    return 1
+}
+
 readonly DEVNET_CHAIN_ID="32285"
 readonly DEVNET_CHAIN_NAME="devnet"
 # Devnet now has a global load balancer in front of all five nodes, so it has a

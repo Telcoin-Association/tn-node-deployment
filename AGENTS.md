@@ -85,9 +85,17 @@ A second switch, `readonly TN_MAINNET_KEYGEN_ENABLED=1` (`tn_mainnet_keygen_enab
 setup-node's `setup_mainnet_keygen_only` names that run (`--json`, keygen, mainnet, the first switch 0, the second 1), and only it passes `json_set_network`.
 `json_check_install_flags` then takes `--install-method existing --binary-path` only, because no mainnet release, image or source tag can be verified before genesis; the other methods are refused with a message that names this way.
 `check_binary_mainnet` refuses a binary whose `--version` lists any build feature (`tn_release_version_ok ... mainnet`); it runs again in `_preflight_existing` on every mainnet existing install.
+It runs the binary only after `_tn_root_binary_ok` passed (setup runs as root), under `timeout -k 5 30` where coreutils `timeout` exists, and `run_json_mode` calls it only once `json_check_keygen_inputs` passed.
 `step_create_infrastructure` skips `ensure_chain_configs_available` in that run, and keygen's address, multiaddr, passphrase and existing-keys checks apply unchanged.
 Finalize, a full install, the gateway and the UI (its helper asks `tn_mainnet_enabled` and passes no `--binary-path`) stay refused by the first switch with the message of before; with the second switch at 0 the keygen gets that message too.
 The run leaves the keys, the stored passphrase and keygen's `.node-meta` record, and no chain configs.
+That record includes `NETWORK`, which `step_create_infrastructure` writes on every network before any key exists; it is the network the keys are for.
+`tn_keys_network_ok WANTED [META]` in `lib/common.sh` refuses (rc 1) only when it is `mainnet` and WANTED is another network, so mainnet keys never sign on another network; a host keyed by an older release has no `NETWORK` before finalize and passes, as does every testnet or devnet record.
+setup-node's `setup_keys_network_check` asks it in `run_json_mode` right after the root check (finalize and keygen, before the lock or any write) and in `step_preflight` once an interactive install has its network.
+update-node and edit-config need no call: they stop without an installed unit, which a keygen-only host lacks, and take their network from that same `NETWORK` (`tn_detect_network`).
+For new keys `step_generate_keys` stores the passphrase (`setup_store_passphrase`) before the keytool runs and holds HUP, INT and TERM (`setup_hold_signals` to `setup_release_signals`) until the keys are checked; a keytool that fails or writes no `bls.kw` or `node-info.yaml` gets `setup_keygen_undo` (the new `node-keys/` and `node-info.yaml`, the stored passphrase and its `.node-meta` keys).
+Over keys that already exist (an interactive overwrite, which the keytool refuses) the passphrase is still stored after the keytool, so the kept keys keep theirs.
+`json_phase_keygen` reports success only with the key, `node-info.yaml` and `SETUP_PASS_STORED` all in place, and a keygen re-run over `node-keys/` or a finalize without a stored passphrase says what it found (`setup_keys_found`).
 So a finalize of the launch release must get the chain configs itself (this finalize only searches for them, so a mainnet finalize would need `--genesis-dir`), and it keeps `INSTALL_METHOD=existing`.
 `tools/tests/mainnet_keygen_test.sh` covers both switches.
 

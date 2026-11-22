@@ -347,6 +347,18 @@ Every other script, library and UI file keeps its version. The runbook for the g
   `release`, `docker` and `source` are refused with a message that names this way.
   Finalize, the interactive install and the Node Manager UI stay refused on mainnet with the message of before.
 - An existing binary on mainnet is held to the build-feature rule of mainnet releases and images (none), so a testnet or test build is refused.
+  The mainnet keygen ran the `--binary-path` file as root for its `--version` before it checked that the file is root-owned, and with no time limit.
+  It now runs it only once it is a root-owned file, not group- or other-writable, in root-owned directories (else `refusing <path>: the node binary must be a root-owned file, ...`, as on testnet), after every other input passed, and gives it 30 seconds (`... its --version did not finish within 30 seconds, ...`).
+- Keygen records `NETWORK` in `.node-meta` before it makes the keys, on every network; before, only finalize recorded it, so mainnet keys were finalized as a testnet node without a word.
+  Over keys recorded for mainnet, a finalize, a keygen or an interactive install for any other network (a `--json` run without `--network` is a testnet run) stops right after the root check, before anything on the host changes: `The keys on this host were generated for mainnet (NETWORK=mainnet in <.node-meta>) and must not be used on another network, ...`.
+  A host keyed by an older release, with no `NETWORK` before finalize, and every testnet or devnet record keep the behaviour of before.
+- A SIGHUP, SIGINT or SIGTERM that reached setup during the keytool call left the keys and a valid `node-info.yaml` with no stored passphrase, which a second keygen (`node-keys already exist ...`) and finalize (`No stored BLS passphrase recorded ...`) both refused without saying the way out.
+  New keys now get their stored passphrase before the keytool runs, the three signals are held until the keys are checked, and a keytool that fails or is stopped, or leaves no `node-info.yaml`, has what it wrote and the stored passphrase removed.
+  A keygen reports success, and names the file to send, only with the key, `node-info.yaml` and the stored passphrase all in place.
+  A second keygen over `node-keys/`, and a finalize without a stored passphrase over keys, say what they found and what to do (OPERATOR.md section 2.12).
+- The mainnet keygen also printed the onboarding steps of a testnet validator (governance approval, a ConsensusNFT, the stake it read from the mainnet RPC, `cast send`, `prepare-stake.sh`, re-registering with the Association), none of which applies to a genesis validator.
+  It now shows `node-info.yaml` and then only what a genesis validator does next: send `node-info.yaml`, never the keys or the passphrase, and finalize once the mainnet release and genesis are out; it reads no stake.
+- A `--json` keygen refuses the zero address before the root check (`--address is the zero address: ...`): the proof of possession is signed over the execution address, which receives the rewards.
 
 ### lib/common 2.2.5
 
@@ -423,6 +435,7 @@ Every other script, library and UI file keeps its version. The runbook for the g
   Each refusal names the line, the entry's BLS key shortened and the address; both scripts list the two functions in their library checks.
 - New `tn_trusted_nodes_node_check SPEC FILE`: the release of SPEC parses a trusted nodes map as a `--bootstrap-peers` value, its workers turned into a list; and `tn_local_worker_count DATA_DIR`, the number of workers `node-info.yaml` lists (1 before there is one), which `tn_trusted_nodes_shape_ok FILE [WORKERS]` now takes.
 - New `readonly TN_MAINNET_KEYGEN_ENABLED=1` and `tn_mainnet_keygen_enabled`: while `TN_MAINNET_ENABLED` is 0, they open setup-node's mainnet keygen and nothing else; at 0 that keygen is refused as before.
+- New `tn_keys_network_ok WANTED [META]`: rc 1 when `.node-meta` records `NETWORK=mainnet` and WANTED is another network (the reason on stderr), rc 2 when `NETWORK` is set more than once, else rc 0; setup-node lists it in its library check.
 
 ### Node Manager UI 2.1.3
 
@@ -508,6 +521,7 @@ Every other script, library and UI file keeps its version. The runbook for the g
 | `This script release pins no <network> chain configs yet, so there is nothing to install. Chain configs unchanged.` (menu 13) | Mainnet today: its chain configs come with a signed scripts release. |
 | `--install-method <method> cannot install a mainnet node yet: before genesis no mainnet release, image or source tag can be verified. ...` (mainnet keygen) | Generate the keys with `--install-method existing --binary-path <binary>` (OPERATOR.md section 2.12). |
 | `Refusing the node binary at <path>: it is not a mainnet build (This build has the features <features>; a mainnet build has none.) ...` | Build `telcoin-network` with no build features (`cargo build -p telcoin-network --bin telcoin-network --release --locked`) and pass that binary. |
+| `The keys on this host were generated for mainnet (NETWORK=mainnet in <.node-meta>) and must not be used on another network, so a <network> node is refused here. ...` | Finalize this host with `--network mainnet`; set up the testnet or devnet node on another host. |
 
 ## Left open
 
