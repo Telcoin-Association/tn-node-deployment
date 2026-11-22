@@ -224,6 +224,9 @@ Every other script, library and UI file keeps its version. The runbook for the g
   `trusted-nodes.yaml` was never part of it, so a hub the node stopped listing left the allowlist on the second sync without it, and a peers map that held only part of the committee replaced `committee.yaml` as the floor.
   The floor is now the union of all three files, each one that exists.
   A floor with no address (a validator with neither map and a `committee.yaml` without addresses) is written with a warning that names the two `edit-config.sh --set` commands that fill it; `on` still goes ahead.
+  A resync never takes an address out of the floor on its own: when the files no longer hold an address the floor has (a hub taken out of the trusted nodes map, or a `committee.yaml` gone missing because the data dir's disk is not mounted), it refuses, names the addresses and keeps them in the loaded table; `firewall-setup.sh --p2p-committee sync --accept-floor-shrink` drops them on purpose.
+  With neither `bootstrap-peers.yaml` nor the genesis `committee.yaml` the capture refuses, as it did before: `trusted-nodes.yaml` never stands in for the committee.
+  A symbolic link, directory or FIFO at one of the three refuses the capture too, now with a message that names what is there and the repair (`13) Refresh chain configs` for `committee.yaml`, `edit-config.sh --set` for a map).
 
 ### edit-config 2.2.2
 
@@ -318,7 +321,7 @@ Every other script, library and UI file keeps its version. The runbook for the g
   network. It still only warns, and a `--json` run logs its result as before.
 - `--help` names Ubuntu 26.04 as the recommended OS for mainnet (systemd 255 or later, so
   Ubuntu 24.04 or later).
-- With P2P committee mode on, a re-run that installed a changed bootstrap peers or trusted nodes map runs `firewall-setup.sh --p2p-committee sync` once the node is started and the update lock released; a failed sync is a warning naming that command.
+- With P2P committee mode on, every re-run that completes runs `firewall-setup.sh --p2p-committee sync` once the node is started and the update lock released, whether or not it changed the bootstrap peers or trusted nodes map (a run that installed one and then failed is caught up by the next); a failed sync is a warning naming that command.
 
 ### lib/common 2.2.5
 

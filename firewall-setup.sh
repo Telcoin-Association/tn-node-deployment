@@ -14,6 +14,10 @@
 #       switch: the P2P ports open to every source behind the new-flow limit,
 #       whatever P2P_ALLOW_FROM holds (--enable --p2p-from applies a list to ufw
 #       again); sync resyncs now; status prints its state.
+#   sudo bash firewall-setup.sh --p2p-committee sync --accept-floor-shrink
+#       A resync never drops an address from the allowlist floor on its own:
+#       one whose files no longer hold an address the floor has refuses, naming
+#       it. This resync captures the smaller floor (a hub removed on purpose).
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -87,6 +91,9 @@ FW_GW_NONE=false
 FW_GW_ONLY=false
 # The --p2p-committee verb of this run (on, off, sync or status); empty without one.
 FW_COMMITTEE_VERB=""
+# --accept-floor-shrink of this run: a resync may capture a floor without
+# addresses the saved floor has (fw_allow_capture_floor keep).
+FW_FLOOR_SHRINK=false
 # Filled by fw_preflight: the validated sshd ports and SSH sources, and (lazily,
 # fw_load_p2p_srcs) the P2P sources. An empty source array means "anywhere".
 FW_SSH_PORTS=()
@@ -1316,15 +1323,24 @@ P2P_ALLOW_FROM=${list}"
 # there) and <config dir>/trusted-nodes.yaml (the hubs, which TRUSTED_NODES_FILE
 # names). capture-floor takes them all and unites their addresses, so a partial
 # peers map no longer hides the committee file and a trusted hub stays when the
-# node stops listing it. A missing file is skipped; one that exists must be a
-# regular file, not a symlink. A floor with no address is written and warns
-# (fw_allow_floor_warn). TN_P2P_ALLOW_BIN runs here through fw_allow_run,
-# outside the sync unit's sandbox (which keeps the tool out of /etc/telcoin and
-# the data dir). rc 0 captured; 1 none of the files exists, one is not a regular
-# file, or the data dir cannot be resolved; else the tool's exit code (the floor
-# it had stays); the reason is on stderr.
+# node stops listing it. A missing file is skipped, but one of the first two
+# must exist: trusted-nodes.yaml never stands in for the committee, so with
+# neither (the data dir's disk not mounted, say) nothing is captured. One that
+# exists must be a regular file, not a symlink (fw_allow_floor_src_refuse says
+# what is there instead and how to repair it). A floor with no address is
+# written and warns (fw_allow_floor_warn). With keep (a resync) the floor never
+# loses an address without the operator's word: when the files no longer hold
+# an address the saved floor has (fw_allow_floor_lost), nothing is captured and
+# the refusal names those addresses and --accept-floor-shrink, which lets the
+# capture go ahead (FW_FLOOR_SHRINK); a floor that only grows is captured as
+# before. TN_P2P_ALLOW_BIN runs here through fw_allow_run, outside the sync
+# unit's sandbox (which keeps the tool out of /etc/telcoin and the data dir).
+# rc 0 captured; 1 neither bootstrap-peers.yaml nor committee.yaml exists, one
+# is not a regular file, the data dir cannot be resolved, or with keep an
+# address would be lost; else the tool's exit code (the floor it had stays);
+# the reason is on stderr.
 fw_allow_capture_floor() {
-    local cfg dd src list="" rc=0
+    local keep="${1:-}" cfg dd src list="" lost rc=0 committee=false
     local -a srcs=()
     cfg="$(tn_resolve_config_dir)"
     if ! dd="$(tn_resolve_data_dir)"; then
@@ -1334,15 +1350,23 @@ fw_allow_capture_floor() {
     for src in "${cfg}/bootstrap-peers.yaml" "${dd}/genesis/committee.yaml" "${cfg}/trusted-nodes.yaml"; do
         [[ -e "$src" || -L "$src" ]] || continue
         if [[ -L "$src" || ! -f "$src" ]]; then
-            print_error "${src#"${TN_ROOT_PREFIX:-}"} is not a regular file, so the P2P committee allowlist floor was not captured." >&2
+            fw_allow_floor_src_refuse "$src"
             return 1
         fi
+        [[ "$src" == "${cfg}/trusted-nodes.yaml" ]] || committee=true
         srcs+=("$src")
         list="${list:+${list} }${src#"${TN_ROOT_PREFIX:-}"}"
     done
-    if [[ ${#srcs[@]} -eq 0 ]]; then
-        print_error "${dd#"${TN_ROOT_PREFIX:-}"}/genesis/committee.yaml is missing, and ${cfg#"${TN_ROOT_PREFIX:-}"} holds no bootstrap-peers.yaml or trusted-nodes.yaml, so the P2P committee allowlist floor was not captured." >&2
+    if [[ "$committee" != "true" ]]; then
+        print_error "${dd#"${TN_ROOT_PREFIX:-}"}/genesis/committee.yaml is missing and so is ${cfg#"${TN_ROOT_PREFIX:-}"}/bootstrap-peers.yaml, so the P2P committee allowlist floor was not captured: one of them must name the committee, and trusted-nodes.yaml does not stand in for it. If the data dir is on a disk of its own, it may not be mounted." >&2
         return 1
+    fi
+    if [[ "$keep" == "keep" && "$FW_FLOOR_SHRINK" != "true" ]]; then
+        lost="$(fw_allow_floor_lost "$list" "${srcs[@]}")" || return $?
+        if [[ -n "$lost" ]]; then
+            print_error "The P2P committee allowlist floor was not captured again, so it keeps ${lost}: none of the files it is taken from (${list}) holds them now. Check those files first (a data dir on a disk that is not mounted loses the genesis committee.yaml). If the addresses were taken out on purpose, a hub removed from trusted-nodes.yaml say, drop them from the floor with: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee sync --accept-floor-shrink" >&2
+            return 1
+        fi
     fi
     fw_allow_run capture-floor "${srcs[@]}" || rc=$?
     if [[ $rc -ne 0 ]]; then
@@ -1350,6 +1374,79 @@ fw_allow_capture_floor() {
         return $rc
     fi
     fw_allow_floor_warn "$cfg"
+    return 0
+}
+
+# fw_allow_floor_src_refuse SRC -- the refusal of a floor file SRC that exists but
+# is a symlink or not a regular file: what is there and how to put a regular file
+# back. It is a refusal, not a skip, because the capture runs as root outside the
+# sync unit's sandbox and the tool follows symlinks: the genesis committee.yaml
+# lives in the data dir the service user writes, so following a link there would
+# have root open whatever path the node process chose (the rule edit-config's
+# refresh keeps too); a directory, FIFO, socket or device holds nothing to read;
+# and skipping the file would drop its addresses from the floor. The saved floor
+# stays as it is until the file is repaired. Never fails.
+fw_allow_floor_src_refuse() {
+    local src="$1" shown="${1#"${TN_ROOT_PREFIX:-}"}" what fix
+    if [[ -L "$src" ]]; then
+        what="a symbolic link"
+    elif [[ -d "$src" ]]; then
+        what="a directory"
+    elif [[ -p "$src" ]]; then
+        what="a named pipe (FIFO)"
+    elif [[ -S "$src" ]]; then
+        what="a socket"
+    elif [[ -b "$src" || -c "$src" ]]; then
+        what="a device node"
+    else
+        what="not a regular file"
+    fi
+    case "${src##*/}" in
+        committee.yaml)
+            fix="remove it (sudo rm -r -- ${shown}) and put the network's copy back with 13) Refresh chain configs in: sudo bash ${SCRIPT_DIR}/edit-config.sh" ;;
+        bootstrap-peers.yaml)
+            fix="install the map again, or drop it: sudo bash ${SCRIPT_DIR}/edit-config.sh --set bootstrap_peers=FILE (or bootstrap_peers=none)" ;;
+        *)
+            fix="install the map again, or drop it: sudo bash ${SCRIPT_DIR}/edit-config.sh --set trusted_nodes=FILE (or trusted_nodes=none)" ;;
+    esac
+    print_error "${shown} is ${what}, where the P2P committee allowlist floor reads only a regular file, so the floor was not captured. To repair it, ${fix}; then run: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee sync" >&2
+    return 0
+}
+
+# fw_allow_floor_lost LIST FILE... -- print, space-separated, the addresses of
+# FW_ALLOW_DIR/floor that a capture of FILE... would not hold (nothing when it
+# holds them all, or when the saved floor is missing, not a regular file,
+# unreadable or holds no address, since then there is nothing to keep). The
+# tool captures FILE... into a scratch state dir of its own (mktemp -d under
+# TN_FW_SNAP_PARENT, default /run, removed after), so the saved floor is never
+# touched here and both floors are written by the same parser; their lines are
+# canonical addresses (the floor file's grammar), so they compare as strings.
+# rc 0 compared; 1 no scratch dir could be made; else the scratch capture's exit
+# code; a failure is said on stderr, with LIST naming the files.
+fw_allow_floor_lost() {
+    local list="$1" old="${FW_ALLOW_DIR}/floor" tmp a lost="" rc=0
+    shift
+    [[ -f "$old" && ! -L "$old" ]] || return 0
+    grep -q -v -e '^#' -e '^$' "$old" 2>/dev/null || return 0
+    if ! tmp="$(mktemp -d "${TN_FW_SNAP_PARENT:-/run}/tn-p2p-floor.XXXXXX")"; then
+        print_error "No scratch directory could be made to compare a new P2P committee allowlist floor with the saved one, so the floor was not captured; it keeps the floor it had." >&2
+        return 1
+    fi
+    fw_allow_run_in "$tmp" capture-floor "$@" > /dev/null || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        while IFS= read -r a; do
+            case "$a" in
+                ''|'#'*) continue ;;
+            esac
+            grep -q -x -F -e "$a" "${tmp}/floor" 2>/dev/null || lost="${lost:+${lost} }${a}"
+        done < "$old"
+    fi
+    rm -rf -- "$tmp"
+    if [[ $rc -ne 0 ]]; then
+        print_error "tn-p2p-allow-sync capture-floor ${list} failed (exit ${rc}); the P2P committee allowlist keeps the floor it had." >&2
+        return $rc
+    fi
+    [[ -z "$lost" ]] || printf '%s\n' "$lost"
     return 0
 }
 
@@ -1400,9 +1497,17 @@ fw_committee_require_lib() {
 # descriptor above 2 (not the update lock, not the --json channel) and without
 # TN_BLS_PASSPHRASE. rc is the tool's.
 fw_allow_run() {
+    fw_allow_run_in "$FW_ALLOW_DIR" "$@"
+}
+
+# fw_allow_run_in DIR ARG... -- fw_allow_run with --state-dir DIR, for a scratch
+# state dir (fw_allow_floor_lost). rc is the tool's.
+fw_allow_run_in() {
+    local dir="$1"
+    shift
     (
         unset TN_BLS_PASSPHRASE 2>/dev/null || true
-        _tn_exec_closed "$TN_P2P_ALLOW_BIN" --state-dir "$FW_ALLOW_DIR" "$@"
+        _tn_exec_closed "$TN_P2P_ALLOW_BIN" --state-dir "$dir" "$@"
     ) < /dev/null
 }
 
@@ -2138,7 +2243,7 @@ fw_committee_sync_run() {
         fi
         print_warn "tn-p2p-allow-sync ${TN_P2P_ALLOW_VERSION} could not be installed; syncing with the installed binary."
     fi
-    if ! _tn_root_layout_dir "$FW_ALLOW_DIR" root 0700 || ! fw_allow_write_config || ! fw_allow_capture_floor; then
+    if ! _tn_root_layout_dir "$FW_ALLOW_DIR" root 0700 || ! fw_allow_write_config || ! fw_allow_capture_floor keep; then
         fw_error "The P2P committee allowlist inputs could not be written, so it was not synced; the loaded table stays as it is."
         return 2
     fi
@@ -4545,6 +4650,7 @@ main() {
                       shift; [[ $# -gt 0 ]] && shift; [[ $# -gt 0 ]] && shift ;;
             --p2p-committee)   committee=true; FW_COMMITTEE_VERB="${2:-}"; shift; [[ $# -gt 0 ]] && shift ;;
             --p2p-committee=*) committee=true; FW_COMMITTEE_VERB="${1#*=}"; shift ;;
+            --accept-floor-shrink) FW_FLOOR_SHRINK=true; shift ;;
             --ssh-from)     FW_SSH_FROM="${2:-}"; shift; [[ $# -gt 0 ]] && shift ;;
             --ssh-from=*)   FW_SSH_FROM="${1#*=}"; shift ;;
             --p2p-from)     FW_P2P_FROM="${2:-}"; shift; [[ $# -gt 0 ]] && shift ;;

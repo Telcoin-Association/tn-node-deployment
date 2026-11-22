@@ -449,6 +449,32 @@ TN_P2P_STUB_RC_SYNC=3 run fw_committee_on
 check_rc "on while on: stale resync rc 0" 0 "$RC"
 check "on while on: one plain sync" "--state-dir ${D} capture-floor ${R}/etc/telcoin/bootstrap-peers.yaml
 --state-dir ${D} sync --wait 30" "$(reclog)"
+# a resync whose floor would lose an address it has is refused before the sync,
+# naming the address and --accept-floor-shrink; with that flag (FW_FLOOR_SHRINK)
+# it goes through, and so does one whose floor only grows
+printf '# floor 1\n192.0.2.50\n198.18.0.77\n' > "$D/floor"
+rm -f "$REC.log"
+TN_P2P_STUB_FLOOR="# floor 1
+192.0.2.50" run fw_committee_sync
+check_rc "sync, the floor would shrink: rc 2" 2 "$RC"
+check_in "sync, the floor would shrink: the address named" "so it keeps 198.18.0.77: none of the files it is taken from (/etc/telcoin/bootstrap-peers.yaml) holds them now" "$OUT"
+check_in "sync, the floor would shrink: the flag named" "firewall-setup.sh --p2p-committee sync --accept-floor-shrink" "$OUT"
+check "sync, the floor would shrink: no capture into the state dir, no sync, the floor kept" "0|0|192.0.2.50 198.18.0.77" \
+    "$(reclog | grep -c -- "^--state-dir ${D} ")|$(reclog | grep -c ' sync ')|$(grep -v '^#' "$D/floor" | tr '\n' ' ' | sed 's/ $//')"
+rm -f "$REC.log"
+FW_FLOOR_SHRINK=true TN_P2P_STUB_FLOOR="# floor 1
+192.0.2.50" run fw_committee_sync
+check_rc "sync --accept-floor-shrink: rc 0" 0 "$RC"
+check "sync --accept-floor-shrink: one capture, one sync, the smaller floor" "--state-dir ${D} capture-floor ${R}/etc/telcoin/bootstrap-peers.yaml
+--state-dir ${D} sync --wait 30|192.0.2.50" "$(reclog)|$(grep -v '^#' "$D/floor")"
+rm -f "$REC.log"
+TN_P2P_STUB_FLOOR="# floor 1
+192.0.2.50
+198.18.0.77" run fw_committee_sync
+check_rc "sync, the floor grows: rc 0" 0 "$RC"
+check "sync, the floor grows: captured, then one sync" "--state-dir ${D} capture-floor ${R}/etc/telcoin/bootstrap-peers.yaml
+--state-dir ${D} sync --wait 30" "$(reclog | sed 1d)"
+rm -f "$D/floor"
 
 # --- status report --------------------------------------------------------------------
 printf 'STATUS_VERSION=1\nRESULT=applied\nEPOCH=42\nALLOWED_V4=10\nALLOWED_V6=2\nKEYS=7\nFLOOR=1\nSTALE_SINCE=\nSTALE_REASON=\n' > "$D/status"

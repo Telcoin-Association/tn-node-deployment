@@ -32,12 +32,13 @@
 #                  with no flags: the re-run leaves network-config (its
 #                  committee_peers too), the trusted nodes map and .node-meta
 #                  byte-identical; --trusted-nodes alone over a recorded mode;
-#   the allowlist  a run that changed the bootstrap peers or trusted nodes map
-#                  resyncs the P2P committee allowlist (setup_committee_resync,
-#                  through a firewall-setup.sh stub) when P2P_COMMITTEE is on,
-#                  once the update lock is released after step_create_service;
-#                  an unchanged re-run or committee mode off does not, and a
-#                  failed resync warns with the command;
+#   the allowlist  every run that completes resyncs the P2P committee
+#                  allowlist (setup_committee_resync, through a firewall-setup.sh
+#                  stub) when P2P_COMMITTEE is on, once the update lock is
+#                  released after step_create_service, whether or not it changed
+#                  a map, so a run that installed a map and then failed is
+#                  followed by a resync at the next run; committee mode off does
+#                  not, and a failed resync warns with the command;
 #   the library    a lib/common.sh without the renderer is refused up front;
 #                  --help names both flags and the mainnet default.
 #
@@ -177,6 +178,7 @@ case "$1" in
     finalize) init_node_extra_flags; finalize_node_extra_flags; prepare_node_extra_flags; setup_admission_config; vars ;;
     interactive) init_node_extra_flags; prepare_node_extra_flags; setup_admission_config; vars ;;
     resync) init_node_extra_flags; prepare_node_extra_flags; setup_admission_config; setup_committee_resync; vars ;;
+    failafter) init_node_extra_flags; prepare_node_extra_flags; setup_admission_config; setup_fail "simulated: a later step failed"; vars ;;
     summary) set +u; PASSPHRASE_METHOD=credential; step_final_summary ;;
 esac
 DRV
@@ -541,7 +543,7 @@ check "warning: a mainnet --json keygen warns too, as a log event" "0 yes" \
     "$RC $(has "$(logf "$T/events")" "\"msg\":\"WARNING: ${W_CLOSED}\"")"
 
 # -----------------------------------------------------------------------------
-# the allowlist: a run that changed a map its floor is taken from resyncs it
+# the allowlist: every run that completes resyncs it, a map changed or not
 # -----------------------------------------------------------------------------
 cat > "$T/sn/firewall-setup.sh" <<'FWS'
 #!/bin/sh
@@ -560,7 +562,8 @@ SNM_MODE=closed SNM_TRUSTED="$TRUSTED" drv resync
 check "allowlist: a new trusted nodes map, committee on: one sync" "0|$FW_SYNC" "$RC|$(fwlog)"
 rm -f "$T/fw.log"
 drv resync
-check "allowlist: a re-run that changes no map: no sync" "0|" "$RC|$(fwlog)"
+check "allowlist: a re-run that changes no map: one sync all the same" "0|$FW_SYNC" "$RC|$(fwlog)"
+rm -f "$T/fw.log"
 SNM_TRUSTED="$T/in/trusted-b.yaml" drv resync
 check "allowlist: another trusted nodes map: one sync" "0|$FW_SYNC" "$RC|$(fwlog)"
 rm -f "$T/fw.log"
@@ -569,7 +572,7 @@ check "allowlist: a new bootstrap peers map: one sync" "0|$FW_SYNC" "$RC|$(fwlog
 rm -f "$T/fw.log"
 SNM_FW_RC=2 SNM_TRUSTED="$TRUSTED" drv resync
 check "allowlist: a failed sync warns with the command, setup goes on" "0|$FW_SYNC|yes" \
-    "$RC|$(fwlog)|$(has "$OUT" "not synced with the new peers maps (firewall-setup.sh exit 2); ${FW_FIX}")"
+    "$RC|$(fwlog)|$(has "$OUT" "not synced with the node's settings (firewall-setup.sh exit 2); ${FW_FIX}")"
 rm -f "$T/fw.log"
 sed 's/^P2P_COMMITTEE=on$/P2P_COMMITTEE=off/' "$META" > "$T/meta.off" && mv "$T/meta.off" "$META"
 SNM_TRUSTED="$T/in/trusted-b.yaml" drv resync
@@ -578,6 +581,26 @@ printf 'P2P_COMMITTEE=on\nP2P_COMMITTEE=on\n' >> "$META"
 SNM_TRUSTED="$TRUSTED" drv resync
 check "allowlist: P2P_COMMITTEE twice: no sync, says why" "0||yes" \
     "$RC|$(fwlog)|$(has "$OUT" "P2P_COMMITTEE is set more than once in .node-meta, so the P2P committee allowlist was not synced")"
+# a run that installed a new map and then failed before the resync: the next run
+# sees the same bytes and still resyncs, since the node it restarts runs that map
+for m in trusted peers; do
+    reset
+    marker v0.17.0
+    cp "$T/in/nc-before" "$NC"
+    meta "P2P_COMMITTEE=on"
+    rm -f "$T/fw.log"
+    if [[ "$m" == "trusted" ]]; then
+        SNM_MODE=closed SNM_TRUSTED="$TRUSTED" drv failafter
+        r1="$RC|$(cmp -s "$TRUSTED" "$CFG/trusted-nodes.yaml" && echo installed)|$(fwlog)"
+        SNM_MODE=closed SNM_TRUSTED="$TRUSTED" drv resync
+    else
+        SNM_PEERS="$PEERS" drv failafter
+        r1="$RC|$(cmp -s "$PEERS" "$CFG/bootstrap-peers.yaml" && echo installed)|$(fwlog)"
+        SNM_PEERS="$PEERS" drv resync
+    fi
+    check "allowlist: ${m} map installed by a run that failed later, no sync; the next run with it resyncs" \
+        "1|installed||0|$FW_SYNC" "$r1|$RC|$(fwlog)"
+done
 rm -f "$T/sn/firewall-setup.sh" "$T/fw.log"
 check "order: main resyncs right after it releases the lock that step_create_service held" \
     "step_create_service setup_release_lock setup_committee_resync" \

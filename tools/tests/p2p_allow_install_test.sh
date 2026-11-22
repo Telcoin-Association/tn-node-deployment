@@ -537,9 +537,28 @@ rm -f "$TRUSTED"
 ln -s "$GEN" "$TRUSTED"
 cf_run
 check_rc "floor: a symlinked trusted nodes map refused" 1 "$RC"
-check "floor: a symlinked trusted nodes map is named, nothing handed over" \
-    "1|" "$(grep -c '/etc/telcoin/trusted-nodes.yaml is not a regular file' "$T/err")|$(cat "$REC.log")"
+check "floor: a symlinked trusted nodes map is named with what is there and the repair, nothing handed over" \
+    "1|1|" "$(grep -c '/etc/telcoin/trusted-nodes.yaml is a symbolic link, where the P2P committee allowlist floor reads only a regular file' "$T/err")|$(grep -c -- '--set trusted_nodes=FILE (or trusted_nodes=none); then run: sudo bash .*/firewall-setup.sh --p2p-committee sync' "$T/err")|$(cat "$REC.log")"
 rm -f "$TRUSTED"
+# the genesis committee.yaml lives in the data dir the service user writes: a
+# symlink, a directory or a FIFO there is refused even beside a peers map (root
+# never follows a link that user made), naming what is there and the repair
+printf '{}\n' > "$PEERS"
+cp "$GEN" "$T/gen.saved"
+for kind in link dir fifo; do
+    rm -rf "$GEN"
+    case "$kind" in
+        link) ln -s "$T/gen.saved" "$GEN"; what="a symbolic link" ;;
+        dir) mkdir "$GEN"; what="a directory" ;;
+        fifo) mkfifo "$GEN"; what="a named pipe (FIFO)" ;;
+    esac
+    cf_run
+    check "floor: committee.yaml ${what}, a peers map beside it: refused, what is there and the repair named, nothing handed over" "1|1|1|" \
+        "$RC|$(grep -c "/var/lib/telcoin/genesis/committee.yaml is ${what}, where the P2P committee allowlist floor reads only a regular file" "$T/err")|$(grep -c 'remove it (sudo rm -r -- /var/lib/telcoin/genesis/committee.yaml) and put the network.s copy back with 13) Refresh chain configs in: sudo bash' "$T/err")|$(cat "$REC.log")"
+done
+rm -rf "$GEN"
+cp "$T/gen.saved" "$GEN"
+rm -f "$PEERS"
 printf '{}\n' > "$PEERS"
 export TN_P2P_STUB_STDIN=1
 printf 'not for the tool\n' > "$T/stdin"
@@ -563,9 +582,14 @@ cf_run
 check_rc "floor: DATA_DIR without a genesis committee, no other file, refused" 1 "$RC"
 check "floor: the missing file is named" "1" "$(grep -c '/srv/node/genesis/committee.yaml is missing' "$T/err")"
 check "floor: nothing handed over" "" "$(cat "$REC.log")"
+# the hubs never stand in for the committee: with neither file it names (the
+# data dir's disk not mounted, say), a trusted nodes map alone is refused too
 printf 'HubKey:\n  primary:\n    network_address: /ip4/203.0.113.50/udp/49590/quic-v1/p2p/12D3KooWHub\n' > "$TRUSTED"
 cf_run
-check "floor: no genesis committee, the trusted nodes map alone" "0|--state-dir $FW_ALLOW_DIR capture-floor $TRUSTED" "$RC|$(cat "$REC.log")"
+check "floor: no genesis committee and no peers file, the trusted nodes map alone: refused, nothing handed over" \
+    "1|" "$RC|$(cat "$REC.log")"
+check "floor: that refusal names both files and the unmounted disk" "1|1" \
+    "$(grep -c '/srv/node/genesis/committee.yaml is missing and so is /etc/telcoin/bootstrap-peers.yaml' "$T/err")|$(grep -c 'it may not be mounted' "$T/err")"
 rm -f "$TRUSTED"
 cp "$GEN" "$TN_ROOT_PREFIX/srv/node/genesis/committee.yaml"
 cf_run
@@ -608,6 +632,57 @@ check "floor: a failed capture does not judge the old floor" "2|0" "$RC|$(grep -
 rm -f "$FW_ALLOW_DIR/floor"
 cf_run
 check "floor: no floor file is not judged" "0|0" "$RC|$(grep -c 'floor holds no address' "$T/out")"
+# a resync (keep) never drops an address of the saved floor without the
+# operator's word: the tool captures into a scratch state dir first, and an
+# address the new floor lacks refuses the capture; --accept-floor-shrink
+# (FW_FLOOR_SHRINK) lets it go ahead, and a floor that only grows goes through
+cfk_run() { RC=0; : > "$REC.log"; fw_allow_capture_floor keep > "$T/out" 2>"$T/err" || RC=$?; }
+export TN_FW_SNAP_PARENT="$T/snap"
+mkdir -p "$TN_FW_SNAP_PARENT"
+printf '{}\n' > "$PEERS"
+printf '# floor 1\n192.0.2.1\n198.18.0.77\n' > "$FW_ALLOW_DIR/floor"
+cp "$FW_ALLOW_DIR/floor" "$T/floor.before"
+same_floor() { cmp -s "$T/floor.before" "$FW_ALLOW_DIR/floor" && echo same; }
+export TN_P2P_STUB_FLOOR="# floor 1
+192.0.2.1"
+cfk_run
+check "floor shrink: refused, the lost address, the files and the flag named" "1|1|1" \
+    "$RC|$(grep -c 'keeps 198.18.0.77: none of the files it is taken from (/etc/telcoin/bootstrap-peers.yaml /var/lib/telcoin/genesis/committee.yaml) holds them now' "$T/err")|$(grep -c -- 'firewall-setup.sh --p2p-committee sync --accept-floor-shrink' "$T/err")"
+check "floor shrink: one capture, into a scratch dir, the saved floor untouched" "1|0|same" \
+    "$(grep -c ' capture-floor ' "$REC.log")|$(grep -c -- "--state-dir $FW_ALLOW_DIR " "$REC.log")|$(same_floor)"
+check "floor shrink: the scratch dir is gone" "" "$(ls -A "$TN_FW_SNAP_PARENT")"
+FW_FLOOR_SHRINK=true cfk_run
+check "floor shrink accepted: rc 0, one capture into the state dir, the new floor" "0|--state-dir $FW_ALLOW_DIR capture-floor $PEERS $GEN|$TN_P2P_STUB_FLOOR" \
+    "$RC|$(cat "$REC.log")|$(cat "$FW_ALLOW_DIR/floor")"
+export TN_P2P_STUB_FLOOR="# floor 1
+192.0.2.1
+198.18.0.77"
+cfk_run
+check "floor grows: rc 0, nothing said, the scratch capture then the capture" "0||--state-dir $FW_ALLOW_DIR capture-floor $PEERS $GEN|$TN_P2P_STUB_FLOOR" \
+    "$RC|$(cat "$T/err")|$(sed -n 2p "$REC.log")|$(cat "$FW_ALLOW_DIR/floor")"
+check "floor grows: the first capture went to a scratch dir under TN_FW_SNAP_PARENT" "1" \
+    "$(sed -n 1p "$REC.log" | grep -c -- "^--state-dir $TN_FW_SNAP_PARENT/tn-p2p-floor\.[A-Za-z0-9]* capture-floor $PEERS $GEN\$")"
+cfk_run
+check "floor unchanged: rc 0, captured" "0|--state-dir $FW_ALLOW_DIR capture-floor $PEERS $GEN" "$RC|$(sed -n 2p "$REC.log")"
+cp "$FW_ALLOW_DIR/floor" "$T/floor.before"
+export TN_P2P_STUB_FLOOR="# floor 1"
+cf_run
+check "floor shrink on a first capture (no keep, as on): captured" "0|--state-dir $FW_ALLOW_DIR capture-floor $PEERS $GEN" "$RC|$(cat "$REC.log")"
+cp "$T/floor.before" "$FW_ALLOW_DIR/floor"
+unset TN_P2P_STUB_FLOOR
+cfk_run
+check "floor shrink: a scratch capture that writes no floor loses every address, refused" "1|1|same" \
+    "$RC|$(grep -c 'keeps 192.0.2.1 198.18.0.77: ' "$T/err")|$(same_floor)"
+export TN_P2P_STUB_RC_CAPTURE_FLOOR=4
+cfk_run
+unset TN_P2P_STUB_RC_CAPTURE_FLOOR
+check "floor shrink: a failed scratch capture: its exit code, named, the floor kept, no scratch dir left" "4|1|same|1|" \
+    "$RC|$(grep -c 'capture-floor /etc/telcoin/bootstrap-peers.yaml /var/lib/telcoin/genesis/committee.yaml failed (exit 4)' "$T/err")|$(same_floor)|$(grep -c ' capture-floor ' "$REC.log")|$(ls -A "$TN_FW_SNAP_PARENT")"
+printf '# floor 1\n' > "$FW_ALLOW_DIR/floor"
+cfk_run
+check "floor shrink: a saved floor without an address is not compared" "0|--state-dir $FW_ALLOW_DIR capture-floor $PEERS $GEN" "$RC|$(cat "$REC.log")"
+rm -f "$FW_ALLOW_DIR/floor" "$PEERS"
+unset TN_FW_SNAP_PARENT
 # no descriptor above 2 reaches the tool
 cat > "$TN_P2P_ALLOW_BIN" <<'FDS'
 #!/bin/sh
