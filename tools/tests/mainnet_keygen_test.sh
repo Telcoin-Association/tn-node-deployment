@@ -37,7 +37,8 @@ check "the switch-off copy sets TN_MAINNET_KEYGEN_ENABLED=0" yes \
 
 # Stub node binaries. --version prints one "Build Features:" line holding the
 # features in <stub>.features; any other call is the keytool: it records its argv
-# and stdin and writes an encrypted-looking key and node-info.yaml in --datadir.
+# and stdin and writes an encrypted-looking key and node-info.yaml in --datadir, the
+# latter naming the --address it was given, as the real keytool's does.
 cat > "$T/bin/stub" <<'STUB'
 #!/bin/sh
 if [ "$1" = "--version" ]; then
@@ -48,16 +49,18 @@ fi
 # What .node-meta held when the keys were made.
 [ -f "$REC/meta.log" ] && cp "$REC/meta.log" "$REC/meta.at-keytool"
 dd=""
+addr=""
 prev=""
 for a in "$@"; do
     printf '%s\n' "$a" >> "$REC/keytool.argv"
     [ "$prev" = "--datadir" ] && dd="$a"
+    [ "$prev" = "--address" ] && addr="$a"
     prev="$a"
 done
 cat > "$REC/keytool.stdin"
 mkdir -p "$dd/node-keys"
 : > "$dd/node-keys/bls.kw"
-printf 'name: stub\n' > "$dd/node-info.yaml"
+printf 'name: stub\nexecution_address: %s\n' "$addr" > "$dd/node-info.yaml"
 STUB
 for n in tn-main tn-adiri tn-testutils; do
     cp "$T/bin/stub" "$T/bin/$n"
@@ -438,6 +441,37 @@ cp "$T/meta.nonet" "$CONFIG_DIR/.node-meta"
 check_rc "keygen over keys with no NETWORK recorded: rc 1" 1 "$(over_keys "${KGM[@]}")"
 check "keygen over keys with no NETWORK recorded: all in place" yes "$(has "$(tail -n 1 "$T/out")" "${LEAD} An earlier keygen left the keys, $T/data/node-info.yaml and the stored passphrase (PASSPHRASE_METHOD=credential), all in place")"
 kept "keygen over keys with no NETWORK recorded" "$T/meta.nonet"
+# A node-info.yaml no execution address can be read from (empty, cut short, damaged, a
+# symbolic link) is never "all in place", whatever --address says, and on every network
+# the way out is a new keygen: prepare-stake.sh --rotate-address reads that address first.
+DAMAGED="${LEAD} $T/data/node-info.yaml holds no execution address that can be read (it is empty, cut short or damaged, or a symbolic link, which is not read), so it is not a file to send, and prepare-stake.sh --rotate-address (OPERATOR.md 6.6) cannot sign it again, since it reads that address from it. Start over: remove $T/data/node-keys and $T/data/node-info.yaml (sudo rm -rf), run keygen again with --address ${ADDR}, and send the new node-info.yaml in place of any you sent."
+ni_state() {  # ni_state -- node-info.yaml as it is: a link's target, or the file's checksum
+    if [[ -L "$T/data/node-info.yaml" ]]; then readlink "$T/data/node-info.yaml"; else cksum < "$T/data/node-info.yaml"; fi
+}
+damaged() {  # damaged NAME SAVED_META ARGS... -- over_keys ARGS over the node-info.yaml in place
+    local name="$1" saved="$2" before
+    shift 2
+    cp "$saved" "$CONFIG_DIR/.node-meta"
+    before="$(ni_state)"
+    check_rc "${name}: rc 1" 1 "$(over_keys "$@")"
+    check "${name}: no address, not a file to send, the way to start over" "$(done_false "$DAMAGED")" "$(tail -n 1 "$T/out")"
+    check_lacks "${name}: never 'use that node-info.yaml'" "Use that node-info.yaml" "$(cat "$T/out")"
+    check "${name}: node-info.yaml left as it was" "$before" "$(ni_state)"
+    kept "$name" "$saved"
+}
+: > "$T/data/node-info.yaml"
+damaged "keygen over keys, node-info.yaml empty" "$T/meta.keygen" "${KGM[@]}"
+printf 'name: stub\nbls_public_key: stub\n' > "$T/data/node-info.yaml"
+damaged "keygen over keys, node-info.yaml without execution_address" "$T/meta.keygen" "${KGM[@]}"
+printf 'name: stub\nexecution_address: 0x00000000000000000000\n' > "$T/data/node-info.yaml"
+damaged "keygen over keys, node-info.yaml cut inside the address" "$T/meta.keygen" "${KGM[@]}"
+printf 'name: stub\n' > "$T/data/node-info.yaml"
+damaged "testnet keygen over testnet keys, node-info.yaml without execution_address" "$T/meta.testnet" "${KGT[@]}"
+ni "$ADDR"
+mv "$T/data/node-info.yaml" "$T/ni.target"
+ln -s "$T/ni.target" "$T/data/node-info.yaml"
+damaged "keygen over keys, node-info.yaml a symbolic link to a file for this address" "$T/meta.keygen" "${KGM[@]}"
+command rm -f "$T/data/node-info.yaml" "$T/ni.target"
 command rm -rf "$T/data" "$CONFIG_DIR/.node-meta" "$CONFIG_DIR/bls-passphrase.cred"
 
 # ---- an interrupted keygen --------------------------------------------------------------
@@ -454,9 +488,11 @@ if [ "$1" = "--version" ]; then
     exit 0
 fi
 dd=""
+addr=""
 prev=""
 for a in "$@"; do
     [ "$prev" = "--datadir" ] && dd="$a"
+    [ "$prev" = "--address" ] && addr="$a"
     prev="$a"
 done
 cat > /dev/null
@@ -468,7 +504,7 @@ case "$mode" in
     noinfo) exit 0 ;;
     mid) kill -HUP "$(cat "$REC/setup.pid")"; exit 129 ;;
 esac
-printf 'name: stub\n' > "$dd/node-info.yaml"
+printf 'name: stub\nexecution_address: %s\n' "$addr" > "$dd/node-info.yaml"
 [ "$mode" = after ] && kill -HUP "$(cat "$REC/setup.pid")"
 exit 0
 STUB
@@ -525,7 +561,7 @@ check_lacks "keytool wrote no node-info.yaml: no file to send named" "Send $T/da
 command rm -rf "$T/data" "$CRED"
 mkdir -p "$T/data/node-keys"
 : > "$T/data/node-keys/bls.kw"
-printf 'name: stub\n' > "$T/data/node-info.yaml"
+ni "$ADDR"
 grep -v -E '^(PASSPHRASE_METHOD|CREDENTIAL_KEY)=' "$T/meta.keygen" > "$T/meta.nopass"
 cp "$T/meta.nopass" "$CONFIG_DIR/.node-meta"
 NOPASS="An earlier keygen left the keys and $T/data/node-info.yaml but no stored passphrase (no PASSPHRASE_METHOD, or its file is missing): it stopped before it stored the passphrase, and the keys open only with the passphrase typed for that run. If you still have it, store it as OPERATOR.md section 2.12 shows (systemd-creds encrypt --name=bls-passphrase --with-key=host+tpm2 - $CRED, then PASSPHRASE_METHOD=credential and CREDENTIAL_KEY=host+tpm2 in $CONFIG_DIR/.node-meta). Otherwise remove $T/data/node-keys and $T/data/node-info.yaml (sudo rm -rf), run keygen again, and send the new node-info.yaml in place of any you sent."

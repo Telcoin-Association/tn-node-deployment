@@ -707,11 +707,14 @@ setup_keys_found() {
 # setup_keygen_keys_refuse -- a --json keygen over a DATA_DIR that holds node-keys/
 # stops here, before anything is written, saying what it found against this run:
 # keys recorded for another network (NETWORK in .node-meta) are not this run's; a
-# node-info.yaml whose execution_address is not --address is not the file to send
-# for that address (its proof of possession is signed for the other one), with the
-# documented ways out; else what setup_keys_found says (the same address and
-# network, or no network recorded: all in place, no stored passphrase, or an
-# unfinished keygen). run_json_mode asks before the lock and step_generate_keys
+# node-info.yaml no execution_address (0x and 40 hex digits) can be read from (empty,
+# cut short, damaged, or a symbolic link, which is not read) is not a file to send,
+# and only a new keygen makes one (prepare-stake.sh --rotate-address reads that
+# address first); a node-info.yaml whose execution_address is not --address is not
+# the file to send for that address (its proof of possession is signed for the other
+# one), with the documented ways out; else what setup_keys_found says (the same
+# address and network, or no network recorded: all in place, no stored passphrase,
+# or an unfinished keygen). run_json_mode asks before the lock and step_generate_keys
 # again under it. No node-keys/: returns 0.
 setup_keygen_keys_refuse() {
     local dd="$DATA_DIR" meta="${CONFIG_DIR}/.node-meta" info="${DATA_DIR}/node-info.yaml"
@@ -724,6 +727,10 @@ setup_keygen_keys_refuse() {
     fi
     if [[ -f "$info" && ! -L "$info" ]]; then
         have="$(tn_node_info_field "$info" execution_address 2>/dev/null)" || have=""
+        [[ "$have" =~ ^0[xX][0-9a-fA-F]{40}$ ]] || have=""
+    fi
+    if [[ -z "$have" ]] && [[ -f "$info" || -L "$info" ]]; then
+        setup_fail "${lead} ${info} holds no execution address that can be read (it is empty, cut short or damaged, or a symbolic link, which is not read), so it is not a file to send, and prepare-stake.sh --rotate-address (OPERATOR.md 6.6) cannot sign it again, since it reads that address from it. Start over: remove ${dd}/node-keys and ${info} (sudo rm -rf), run keygen again with --address ${VALIDATOR_ADDRESS}, and send the new node-info.yaml in place of any you sent."
     fi
     want="$(printf '%s' "$VALIDATOR_ADDRESS" | tr 'ABCDEFX' 'abcdefx')"
     if [[ -n "$have" && -n "$want" && "$(printf '%s' "$have" | tr 'ABCDEFX' 'abcdefx')" != "$want" ]]; then
