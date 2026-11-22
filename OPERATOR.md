@@ -887,12 +887,17 @@ unset PASS
 The run checks the binary's build features before anything on the host changes, and runs it for that (`--version`, as root, given 30 seconds) only once it is a root-owned file, not group- or other-writable, in root-owned directories; then it runs the preflight, creates the service user and the directories, records the install and `NETWORK=mainnet` in `.node-meta`, has the keytool generate the keys and the proof of possession for the Safe address, and stores the passphrase as an encrypted credential.
 It gets no chain configs (`Mainnet chain configs are not published before genesis: keygen goes on without them. ...`), writes no unit and starts nothing.
 It ends with `node-info.yaml` and the next steps below; the onboarding and staking steps a testnet run prints do not apply to a genesis validator and are not shown.
-It refuses to run over an existing `node-keys/`.
+It refuses to run over an existing `node-keys/`, and it does so right after the root check, before anything on the host changes (`node-keys already exist at ... nothing on this host was changed.`), saying what it found against this run:
+
+- Keys recorded for another network (`They are recorded for testnet (NETWORK=testnet in /etc/telcoin/.node-meta) and this run is for mainnet, ...`): they are not this run's keys, and the record stays as it is. Generate the mainnet keys on another host, or remove `node-keys/` and `node-info.yaml` first if the keys there are no longer wanted.
+- A `node-info.yaml` for another execution address than `--address` (`... is for the execution address 0xOLD, and this run asks for 0xNEW: its proof of possession is signed for 0xOLD, so it is not the file to send for 0xNEW.`), as after a mistyped Safe address. Before genesis there is no chain for `prepare-stake.sh --rotate-address` (6.6) to check, so remove `node-keys/` and `node-info.yaml`, run keygen again with the right address, and send the new `node-info.yaml` in place of any you sent.
+- The same address and network: what an earlier keygen left, as below.
+
 The passphrase is stored before the keys are made, and a hangup (an SSH drop), Ctrl-C or TERM during key generation is held until the keys are checked, so no run leaves keys without their stored passphrase; a run whose keytool fails or is stopped removes what the keytool wrote and the stored passphrase, and you run it again.
 Send `node-info.yaml` only from a run whose `done` event says `"ok":true`.
 A run killed outright (KILL, a power loss) can still stop between two steps; a second run then names what it found instead of making keys:
 
-- `... all in place: there is nothing to generate.`: the keys, `node-info.yaml` and the stored passphrase are there. Use that `node-info.yaml`.
+- `... all in place: there is nothing to generate.`: the keys, `node-info.yaml` for this `--address` and the stored passphrase are there. Use that `node-info.yaml`.
 - `An earlier keygen did not finish ...`: nothing from that run was reported. Remove `node-keys/` and `node-info.yaml` as the message says and run keygen again.
 - `... but no stored passphrase ...` (left by an earlier script version): the keys open only with the passphrase typed for that run, and finalize refuses them too. If you still have that passphrase, store it, with `--with-key=host` instead on a host keyed with `--allow-no-tpm`:
 
@@ -916,7 +921,8 @@ The proof of possession signs the BLS key and the Safe address only, with no cha
 Once the mainnet release and genesis are published, update the scripts (section 4.1) to the release that enables mainnet and run `setup-node.sh --json --phase=finalize` with the same arguments on this host, as that release's notes say; it uses these keys as they are.
 Finalize keeps the install method and the binary path keygen recorded, and refuses a different `--install-method` or `--binary-path`, so keep the binary at that path.
 This finalize does not fetch the mainnet chain configs itself, so on install day put the published `genesis.yaml`, `committee.yaml` and `parameters.yaml` in a root-owned directory and pass it with `--genesis-dir`, and install the signed mainnet release binary by hand, root-owned, at the path keygen recorded (`grep BINARY_PATH /etc/telcoin/.node-meta`).
-A mainnet BLS key must never sign on another network, so once keygen has recorded `NETWORK=mainnet` (before it makes the keys), setup refuses a finalize, a keygen or an interactive install for testnet or devnet on this host (a `--json` run without `--network` is a testnet run): it stops right after the root check, before anything on the host changes, with `The keys on this host were generated for mainnet (NETWORK=mainnet in /etc/telcoin/.node-meta) and must not be used on another network, ...`.
+A mainnet BLS key must never sign on another network, so once keygen has recorded `NETWORK=mainnet` (before it makes the keys, and kept when a keygen fails), setup refuses a finalize, a keygen or an interactive install for testnet or devnet on this host (a `--json` run without `--network` is a testnet run) with `This host is recorded for mainnet (NETWORK=mainnet in /etc/telcoin/.node-meta, written before keygen makes mainnet keys), and a mainnet BLS key must never be used on another network, ...`.
+A `--json` finalize or keygen stops right after the root check, before anything on the host changes; an interactive install stops once you have chosen the network, after the first preflight steps (the update lock, the needrestart and apt guards that keep package upgrades from restarting the node, the data directory, and `curl` or `git` if they were missing), but before it writes the node's keys, configuration or service.
 Set up a testnet node on another host.
 
 ## 3. Confirm the node is syncing, then synced

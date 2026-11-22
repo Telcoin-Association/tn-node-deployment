@@ -63,10 +63,11 @@ tn_mainnet_keygen_enabled() {
 # the keys on this host, judged by the network .node-meta records for them (NETWORK
 # in META, default node_meta_path; setup-node writes it before it makes keys): none
 # recorded (a host keyed by an older release, which recorded it only at finalize),
-# a network other than mainnet, or WANTED itself. rc 1 when the keys were generated
-# for mainnet and WANTED is another network, rc 2 when NETWORK is set more than once;
-# the reason goes to stderr. Mainnet BLS keys never sign on another network. Reads
-# META only.
+# a network other than mainnet, or WANTED itself. rc 1 when the host is recorded for
+# mainnet and WANTED is another network, rc 2 when NETWORK is set more than once;
+# the reason goes to stderr, and it names the record, not the keys, since a mainnet
+# keygen that failed or was stopped keeps the record without keys. Mainnet BLS keys
+# never sign on another network. Reads META only.
 tn_keys_network_ok() {
     local want="${1:-}" meta="${2:-}" rec="" rc=0
     if [[ -z "$meta" ]]; then
@@ -84,7 +85,7 @@ tn_keys_network_ok() {
     if [[ "$rec" != "mainnet" || "$want" == "mainnet" ]]; then
         return 0
     fi
-    printf 'The keys on this host were generated for mainnet (NETWORK=mainnet in %s) and must not be used on another network, so a %s node is refused here. Set up the %s node on another host; this one runs mainnet only.\n' \
+    printf 'This host is recorded for mainnet (NETWORK=mainnet in %s, written before keygen makes mainnet keys), and a mainnet BLS key must never be used on another network, so a %s node is refused here. Set up the %s node on another host; this one runs mainnet only.\n' \
         "$meta" "${want:-(none)}" "${want:-other}" >&2
     return 1
 }

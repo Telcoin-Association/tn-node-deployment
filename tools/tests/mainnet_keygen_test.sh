@@ -277,7 +277,7 @@ command rm -f "$REC/keytool.argv"
 rc=0; ( main "${KGM[@]}" ) <<< "$PASS" > "$T/out" 2> "$T/err" || rc=$?
 check_rc "existing keys: rc 1" 1 "$rc"
 check "existing keys: refused, saying what it found" yes \
-    "$(has "$(tail -n 1 "$T/out")" "\"msg\":\"node-keys already exist at $T/data/node-keys -- refusing to overwrite in non-interactive mode. An earlier keygen left the keys and $T/data/node-info.yaml but no stored passphrase")"
+    "$(has "$(tail -n 1 "$T/out")" "\"msg\":\"node-keys already exist at $T/data/node-keys -- refusing to overwrite in non-interactive mode; nothing on this host was changed. An earlier keygen left the keys and $T/data/node-info.yaml but no stored passphrase")"
 check "existing keys: no keytool" no "$([[ -e "$REC/keytool.argv" ]] && echo yes || echo no)"
 command rm -rf "$T/data"
 
@@ -316,7 +316,7 @@ check "keys network: no NETWORK recorded (an older keygen) passes" "0 " "$(kn te
 check "keys network: mainnet keys, mainnet node passes" "0 " "$(kn mainnet NETWORK=mainnet)"
 check "keys network: testnet keys, devnet node as before" "0 " "$(kn devnet NETWORK=testnet)"
 check "keys network: mainnet keys, testnet node refused" \
-    "1 The keys on this host were generated for mainnet (NETWORK=mainnet in $T/kn.meta) and must not be used on another network, so a testnet node is refused here. Set up the testnet node on another host; this one runs mainnet only." \
+    "1 This host is recorded for mainnet (NETWORK=mainnet in $T/kn.meta, written before keygen makes mainnet keys), and a mainnet BLS key must never be used on another network, so a testnet node is refused here. Set up the testnet node on another host; this one runs mainnet only." \
     "$(kn testnet NETWORK=mainnet)"
 check "keys network: mainnet keys, devnet node refused" 1 "$(kn devnet NETWORK=mainnet | cut -d' ' -f1)"
 check "keys network: NETWORK twice cannot be told" 2 "$(kn mainnet NETWORK=mainnet NETWORK=testnet | cut -d' ' -f1)"
@@ -348,7 +348,7 @@ untouched() {  # untouched NAME -- the last over_keys run wrote and started noth
     check "$1: the keys are left as they are" "yes yes" \
         "$([[ -f "$T/data/node-keys/bls.kw" ]] && echo yes || echo no) $([[ -f "$T/data/node-info.yaml" ]] && echo yes || echo no)"
 }
-KEYS_MAINNET="The keys on this host were generated for mainnet (NETWORK=mainnet in $CONFIG_DIR/.node-meta) and must not be used on another network, so a testnet node is refused here. Set up the testnet node on another host; this one runs mainnet only."
+KEYS_MAINNET="This host is recorded for mainnet (NETWORK=mainnet in $CONFIG_DIR/.node-meta, written before keygen makes mainnet keys), and a mainnet BLS key must never be used on another network, so a testnet node is refused here. Set up the testnet node on another host; this one runs mainnet only."
 check_rc "testnet finalize over mainnet keys: rc 1" 1 "$(over_keys --json --phase=finalize --network testnet "${LST[@]}")"
 check "testnet finalize over mainnet keys: refused" \
     "$(done_false "${KEYS_MAINNET} A --json run without --network is a testnet run. Nothing on this host was changed.")" "$(tail -n 1 "$T/out")"
@@ -372,14 +372,72 @@ check "interactive testnet install over mainnet keys: refused" "1 yes" "${rc} $(
 # A mainnet finalize passes the check (with mainnet enabled, as in the launch release)
 # and goes on to write the config and the service.
 rc="$( tn_mainnet_enabled() { return 0; }; over_keys --json --phase=finalize --network mainnet "${LST[@]}" )"
-check_lacks "mainnet finalize over mainnet keys: not refused for the network" "generated for mainnet" "$(cat "$T/out")"
+check_lacks "mainnet finalize over mainnet keys: not refused for the network" "recorded for mainnet" "$(cat "$T/out")"
 check "mainnet finalize over mainnet keys: goes on to the config and the service" "yes yes" \
     "$([[ -e "$REC/write-config" ]] && echo yes || echo no) $([[ -e "$REC/create-service" ]] && echo yes || echo no)"
 # A host keyed by an older release (no NETWORK): a testnet finalize goes on as before.
 grep -v '^NETWORK=' "$T/meta.keygen" > "$CONFIG_DIR/.node-meta"
 over_keys --json --phase=finalize --network testnet "${LST[@]}" > /dev/null
-check_lacks "no NETWORK recorded: a testnet finalize is not refused for the network" "generated for mainnet" "$(cat "$T/out")"
+check_lacks "no NETWORK recorded: a testnet finalize is not refused for the network" "recorded for mainnet" "$(cat "$T/out")"
 check "no NETWORK recorded: a testnet finalize goes on to the config" yes "$([[ -e "$REC/write-config" ]] && echo yes || echo no)"
+command rm -rf "$T/data" "$CONFIG_DIR/.node-meta" "$CONFIG_DIR/bls-passphrase.cred"
+
+# ---- a keygen over keys that are there ---------------------------------------------------
+# It stops before the lock and before anything is written (.node-meta, the keytool, the
+# lock), and says what it found against this run: the same address and network (the
+# node-info.yaml to send), another address (both named, and the way to start over), or
+# keys recorded for another network (not this run's; the record stays).
+mkdir -p "$T/data/node-keys"
+: > "$T/data/node-keys/bls.kw"
+: > "$CONFIG_DIR/bls-passphrase.cred"
+ni() { printf 'name: stub\nexecution_address: %s\n' "$1" > "$T/data/node-info.yaml"; }
+kept() {  # kept NAME SAVED_META -- the last over_keys run changed nothing: .node-meta, no write, keytool or lock
+    local f seen=""
+    for f in "$REC/meta.log" "$REC/keytool.argv" "$REC/credential" "$T/update.lock"; do
+        [[ -e "$f" ]] && seen="${seen} ${f##*/}"
+    done
+    check "$1: nothing written, no keytool, no lock" "same" \
+        "$(cmp -s "$2" "$CONFIG_DIR/.node-meta" && echo same || echo changed)${seen}"
+}
+LEAD="node-keys already exist at $T/data/node-keys -- refusing to overwrite in non-interactive mode; nothing on this host was changed."
+cp "$T/meta.keygen" "$CONFIG_DIR/.node-meta"
+ni "$ADDR"
+check_rc "keygen over keys, the same address and network: rc 1" 1 "$(over_keys "${KGM[@]}")"
+check "keygen over keys, the same address and network: all in place, use that node-info.yaml" \
+    "$(done_false "${LEAD} An earlier keygen left the keys, $T/data/node-info.yaml and the stored passphrase (PASSPHRASE_METHOD=credential), all in place: there is nothing to generate. Use that node-info.yaml, and finalize this host when its release is out.")" \
+    "$(tail -n 1 "$T/out")"
+kept "keygen over keys, the same address and network" "$T/meta.keygen"
+ni "0x000000000000000000000000000007310005EED3"
+over_keys "${KGM[@]}" > /dev/null
+check "keygen over keys, the same address in capitals: all in place" yes "$(has "$(tail -n 1 "$T/out")" "all in place: there is nothing to generate")"
+OTHER="0x000000000000000000000000000007310005eed4"
+ni "$OTHER"
+check_rc "keygen over keys, another address: rc 1" 1 "$(over_keys "${KGM[@]}")"
+check "keygen over keys, another address: both named, the way to start over, never 'use that node-info.yaml'" \
+    "$(done_false "${LEAD} $T/data/node-info.yaml is for the execution address ${OTHER}, and this run asks for ${ADDR}: its proof of possession is signed for ${OTHER}, so it is not the file to send for ${ADDR}. Before genesis there is no mainnet chain for prepare-stake.sh --rotate-address (OPERATOR.md 6.6) to check, so start over: remove $T/data/node-keys and $T/data/node-info.yaml (sudo rm -rf), run keygen again with --address ${ADDR}, and send the new node-info.yaml in place of any you sent.")" \
+    "$(tail -n 1 "$T/out")"
+kept "keygen over keys, another address" "$T/meta.keygen"
+# A testnet keygen over testnet keys for another address names the rotation of 6.6.
+sed 's/^NETWORK=.*/NETWORK=testnet/' "$T/meta.keygen" > "$T/meta.testnet"
+cp "$T/meta.testnet" "$CONFIG_DIR/.node-meta"
+check_rc "testnet keygen over testnet keys, another address: rc 1" 1 "$(over_keys "${KGT[@]}")"
+check "testnet keygen over testnet keys, another address: names prepare-stake.sh --rotate-address" yes \
+    "$(has "$(tail -n 1 "$T/out")" "so it is not the file to send for ${ADDR}. Before these keys stake, sudo bash ${SCRIPT_DIR}/prepare-stake.sh --rotate-address ${ADDR} signs it for that address with the same keys (OPERATOR.md 6.6); or remove $T/data/node-keys and $T/data/node-info.yaml (sudo rm -rf) and run keygen again with that address.")"
+kept "testnet keygen over testnet keys, another address" "$T/meta.testnet"
+# Testnet keys, a mainnet keygen: refused for the network, and the record stays testnet.
+ni "$ADDR"
+check_rc "mainnet keygen over testnet keys: rc 1" 1 "$(over_keys "${KGM[@]}")"
+check "mainnet keygen over testnet keys: refused, the record named" \
+    "$(done_false "${LEAD} They are recorded for testnet (NETWORK=testnet in $CONFIG_DIR/.node-meta) and this run is for mainnet, so they are not this run's keys and their node-info.yaml is not to be sent for it. Generate the mainnet keys on another host, or, if the testnet keys here are no longer wanted, remove $T/data/node-keys and $T/data/node-info.yaml (sudo rm -rf) and run keygen again.")" \
+    "$(tail -n 1 "$T/out")"
+kept "mainnet keygen over testnet keys" "$T/meta.testnet"
+check_lacks "mainnet keygen over testnet keys: never offered for the genesis" "Use that node-info.yaml" "$(cat "$T/out")"
+# No NETWORK recorded (keys from an older release): the message of before, without the writes.
+grep -v '^NETWORK=' "$T/meta.keygen" > "$T/meta.nonet"
+cp "$T/meta.nonet" "$CONFIG_DIR/.node-meta"
+check_rc "keygen over keys with no NETWORK recorded: rc 1" 1 "$(over_keys "${KGM[@]}")"
+check "keygen over keys with no NETWORK recorded: all in place" yes "$(has "$(tail -n 1 "$T/out")" "${LEAD} An earlier keygen left the keys, $T/data/node-info.yaml and the stored passphrase (PASSPHRASE_METHOD=credential), all in place")"
+kept "keygen over keys with no NETWORK recorded" "$T/meta.nonet"
 command rm -rf "$T/data" "$CONFIG_DIR/.node-meta" "$CONFIG_DIR/bls-passphrase.cred"
 
 # ---- an interrupted keygen --------------------------------------------------------------
@@ -473,7 +531,7 @@ cp "$T/meta.nopass" "$CONFIG_DIR/.node-meta"
 NOPASS="An earlier keygen left the keys and $T/data/node-info.yaml but no stored passphrase (no PASSPHRASE_METHOD, or its file is missing): it stopped before it stored the passphrase, and the keys open only with the passphrase typed for that run. If you still have it, store it as OPERATOR.md section 2.12 shows (systemd-creds encrypt --name=bls-passphrase --with-key=host+tpm2 - $CRED, then PASSPHRASE_METHOD=credential and CREDENTIAL_KEY=host+tpm2 in $CONFIG_DIR/.node-meta). Otherwise remove $T/data/node-keys and $T/data/node-info.yaml (sudo rm -rf), run keygen again, and send the new node-info.yaml in place of any you sent."
 rc=0; ( main "${MK[@]}" --install-method existing --binary-path "$T/bin/tn-sig" --data-dir "$T/data" ) <<< "$PASS" > "$T/out" 2> "$T/err" || rc=$?
 check "keys without a stored passphrase, re-run: rc 1, the state and the way out" \
-    "1 $(done_false "node-keys already exist at $T/data/node-keys -- refusing to overwrite in non-interactive mode. ${NOPASS}")" "${rc} $(tail -n 1 "$T/out")"
+    "1 $(done_false "node-keys already exist at $T/data/node-keys -- refusing to overwrite in non-interactive mode; nothing on this host was changed. ${NOPASS}")" "${rc} $(tail -n 1 "$T/out")"
 check "keys without a stored passphrase, re-run: keys left, no credential made" "key info no-cred" "$(left)"
 cp "$T/meta.nopass" "$CONFIG_DIR/.node-meta"
 rc="$( tn_mainnet_enabled() { return 0; }; over_keys --json --phase=finalize --network mainnet "${LST[@]}" )"

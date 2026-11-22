@@ -704,6 +704,40 @@ setup_keys_found() {
         "${dd}/node-info.yaml" "${key:-host+tpm2}" "${CONFIG_DIR}/bls-passphrase.cred" "${key:-host+tpm2}" "$meta" "${dd}/node-keys" "${dd}/node-info.yaml"
 }
 
+# setup_keygen_keys_refuse -- a --json keygen over a DATA_DIR that holds node-keys/
+# stops here, before anything is written, saying what it found against this run:
+# keys recorded for another network (NETWORK in .node-meta) are not this run's; a
+# node-info.yaml whose execution_address is not --address is not the file to send
+# for that address (its proof of possession is signed for the other one), with the
+# documented ways out; else what setup_keys_found says (the same address and
+# network, or no network recorded: all in place, no stored passphrase, or an
+# unfinished keygen). run_json_mode asks before the lock and step_generate_keys
+# again under it. No node-keys/: returns 0.
+setup_keygen_keys_refuse() {
+    local dd="$DATA_DIR" meta="${CONFIG_DIR}/.node-meta" info="${DATA_DIR}/node-info.yaml"
+    local lead rec="" have="" want="" out
+    [[ -e "${dd}/node-keys" || -L "${dd}/node-keys" ]] || return 0
+    lead="node-keys already exist at ${dd}/node-keys -- refusing to overwrite in non-interactive mode; nothing on this host was changed."
+    rec="$(meta_get NETWORK "$meta" 2>/dev/null)" || rec=""
+    if [[ -n "$rec" && "$rec" != "$NETWORK" ]]; then
+        setup_fail "${lead} They are recorded for ${rec} (NETWORK=${rec} in ${meta}) and this run is for ${NETWORK}, so they are not this run's keys and their node-info.yaml is not to be sent for it. Generate the ${NETWORK} keys on another host, or, if the ${rec} keys here are no longer wanted, remove ${dd}/node-keys and ${info} (sudo rm -rf) and run keygen again."
+    fi
+    if [[ -f "$info" && ! -L "$info" ]]; then
+        have="$(tn_node_info_field "$info" execution_address 2>/dev/null)" || have=""
+    fi
+    want="$(printf '%s' "$VALIDATOR_ADDRESS" | tr 'ABCDEFX' 'abcdefx')"
+    if [[ -n "$have" && -n "$want" && "$(printf '%s' "$have" | tr 'ABCDEFX' 'abcdefx')" != "$want" ]]; then
+        out="${lead} ${info} is for the execution address ${have}, and this run asks for ${VALIDATOR_ADDRESS}: its proof of possession is signed for ${have}, so it is not the file to send for ${VALIDATOR_ADDRESS}."
+        if setup_mainnet_keygen_only; then
+            out="${out} Before genesis there is no mainnet chain for prepare-stake.sh --rotate-address (OPERATOR.md 6.6) to check, so start over: remove ${dd}/node-keys and ${info} (sudo rm -rf), run keygen again with --address ${VALIDATOR_ADDRESS}, and send the new node-info.yaml in place of any you sent."
+        else
+            out="${out} Before these keys stake, sudo bash ${SCRIPT_DIR}/prepare-stake.sh --rotate-address ${VALIDATOR_ADDRESS} signs it for that address with the same keys (OPERATOR.md 6.6); or remove ${dd}/node-keys and ${info} (sudo rm -rf) and run keygen again with that address."
+        fi
+        setup_fail "$out"
+    fi
+    setup_fail "${lead} $(setup_keys_found "$dd")"
+}
+
 # Kept keys keep their stored passphrase: an encrypted credential stays as it is; a
 # root-only file moves into the credential when PASSPHRASE_METHOD is credential (read
 # with the read builtin, shredded after), else stays. Stops when neither exists.
@@ -2318,7 +2352,7 @@ step_generate_keys() {
 
     if [[ -d "${DATA_DIR}/node-keys" ]]; then
         if json_mode; then
-            setup_fail "node-keys already exist at ${DATA_DIR}/node-keys -- refusing to overwrite in non-interactive mode. $(setup_keys_found "$DATA_DIR")"
+            setup_keygen_keys_refuse
         fi
         print_warn "Key files already exist in ${DATA_DIR}/node-keys/"
         if ! confirm "Overwrite existing keys?"; then
@@ -4075,6 +4109,11 @@ run_json_mode() {
     # An installed node is refused before the lock, whose layout migration would
     # otherwise change an older install first; the phase checks again under the lock.
     json_refuse_installed "$JSON_PHASE"
+    # So are a keygen's existing keys, which step_generate_keys would refuse only
+    # after step_create_infrastructure rewrote .node-meta (NETWORK among it).
+    if [[ "$JSON_PHASE" == "keygen" ]]; then
+        setup_keygen_keys_refuse
+    fi
     setup_take_lock
     export TN_ASSUME_YES=true   # non-interactive: auto-accept confirms (no stdin)
     case "$JSON_PHASE" in
