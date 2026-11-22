@@ -44,6 +44,21 @@ tn_mainnet_enabled() {
     [[ "$TN_MAINNET_ENABLED" == "1" ]]
 }
 
+# While TN_MAINNET_ENABLED is 0, this opens one mainnet path and nothing else:
+# setup-node --json --phase=keygen --network mainnet with the operator's own node
+# binary (--install-method existing --binary-path), so validators can generate
+# their keys and proofs of possession before the mainnet genesis, its chain
+# configs or a signed mainnet release exist. That run needs no chain configs and
+# never starts the node. Finalize, a full install, the gateway and the Node
+# Manager UI stay refused by TN_MAINNET_ENABLED; at 0 this keygen is refused too.
+readonly TN_MAINNET_KEYGEN_ENABLED=1
+
+# tn_mainnet_keygen_enabled -- rc 0 when this script release offers mainnet key
+# generation ahead of mainnet (TN_MAINNET_KEYGEN_ENABLED is 1), rc 1 otherwise.
+tn_mainnet_keygen_enabled() {
+    [[ "$TN_MAINNET_KEYGEN_ENABLED" == "1" ]]
+}
+
 readonly DEVNET_CHAIN_ID="32285"
 readonly DEVNET_CHAIN_NAME="devnet"
 # Devnet now has a global load balancer in front of all five nodes, so it has a

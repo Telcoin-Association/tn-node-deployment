@@ -81,6 +81,16 @@ fails unless the three agree. The launch release flips all three in one change, 
 the mainnet chain-config tag and pins (`MAINNET_CHAIN_CONFIGS_TAG`, `tn_chain_config_pin`) and
 `MIN_SOURCE_VERSION_MAINNET`.
 
+A second switch, `readonly TN_MAINNET_KEYGEN_ENABLED=1` (`tn_mainnet_keygen_enabled`), opens one mainnet path while `TN_MAINNET_ENABLED` is 0: `setup-node.sh --json --phase=keygen --network mainnet`, because validators generate their keys and proofs of possession before the genesis that is built from their `node-info.yaml` files.
+setup-node's `setup_mainnet_keygen_only` names that run (`--json`, keygen, mainnet, the first switch 0, the second 1), and only it passes `json_set_network`.
+`json_check_install_flags` then takes `--install-method existing --binary-path` only, because no mainnet release, image or source tag can be verified before genesis; the other methods are refused with a message that names this way.
+`check_binary_mainnet` refuses a binary whose `--version` lists any build feature (`tn_release_version_ok ... mainnet`); it runs again in `_preflight_existing` on every mainnet existing install.
+`step_create_infrastructure` skips `ensure_chain_configs_available` in that run, and keygen's address, multiaddr, passphrase and existing-keys checks apply unchanged.
+Finalize, a full install, the gateway and the UI (its helper asks `tn_mainnet_enabled` and passes no `--binary-path`) stay refused by the first switch with the message of before; with the second switch at 0 the keygen gets that message too.
+The run leaves the keys, the stored passphrase and keygen's `.node-meta` record, and no chain configs.
+So a finalize of the launch release must get the chain configs itself (this finalize only searches for them, so a mainnet finalize would need `--genesis-dir`), and it keeps `INSTALL_METHOD=existing`.
+`tools/tests/mainnet_keygen_test.sh` covers both switches.
+
 Each network has its own image package, and the channel follows the release tag: mainnet
 `ghcr.io/telcoin-association/tn-mainnet` (`TN_MAINNET_IMAGE_REPO`, tags `vX.Y.Z`), testnet
 `ghcr.io/telcoin-association/tn-testnet` (`TN_TESTNET_IMAGE_REPO`, tags `vX.Y.Z-adiri`), and

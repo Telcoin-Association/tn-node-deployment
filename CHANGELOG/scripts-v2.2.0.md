@@ -338,6 +338,12 @@ Every other script, library and UI file keeps its version. The runbook for the g
   Setup now runs edit-config's shape check on the map in its preflight, before key generation or any install step, on a map it reads back from `.node-meta` on a re-run, and again just before the install, and stops with `--trusted-nodes: <reason>.` naming the line and the entry; nothing is written and the node is not started.
   The check also refuses an address that is not an IP address with UDP and QUIC v1 (a DNS name, TCP, a value that is no multiaddr): `the network_address of <key>... is a DNS name (...): the node does not resolve names, so it would never dial it. Give the IP address instead; ...`.
   A `--bootstrap-peers` map is held to the same address rule before the release's parser, which accepts such an address.
+- Mainnet validators can generate their keys before the mainnet genesis exists (OPERATOR.md section 2.12).
+  `--json --phase=keygen --network mainnet` stopped at `Mainnet is not enabled in this script release ...` for every install method, and with only that switch on it still stopped before key generation, at the empty chain-config pins, after it had created the service user, the directories and `.node-meta`.
+  It now runs with `--install-method existing --binary-path <binary>`: a binary whose `--version` lists any build feature is refused before anything on the host changes, the chain configs are skipped, the keytool signs the proof of possession for `--address`, the passphrase is stored as an encrypted credential, and the run says to send `node-info.yaml` and never `node-keys/` or the passphrase.
+  `release`, `docker` and `source` are refused with a message that names this way.
+  Finalize, the interactive install and the Node Manager UI stay refused on mainnet with the message of before.
+- An existing binary on mainnet is held to the build-feature rule of mainnet releases and images (none), so a testnet or test build is refused.
 
 ### lib/common 2.2.5
 
@@ -412,6 +418,7 @@ Every other script, library and UI file keeps its version. The runbook for the g
 - New `tn_trusted_nodes_shape_ok FILE`, the trusted nodes map's shape check, moved here from edit-config so setup-node runs the same one, and new `tn_map_addr_check FILE`, which it calls.
   `tn_map_addr_check` refuses a `network_address` that is not `/ip4/<address>/udp/<port>/quic-v1` or the same with `/ip6`, with an optional `/p2p/<peer id>`: a DNS name (`/dns`, `/dns4`, `/dns6`, `/dnsaddr`), which the node keeps and never dials because it does not resolve names, a `/tcp` address, which it does not dial either, and a value the node stops on.
   Each refusal names the line, the entry's BLS key shortened and the address; both scripts list the two functions in their library checks.
+- New `readonly TN_MAINNET_KEYGEN_ENABLED=1` and `tn_mainnet_keygen_enabled`: while `TN_MAINNET_ENABLED` is 0, they open setup-node's mainnet keygen and nothing else; at 0 that keygen is refused as before.
 
 ### Node Manager UI 2.1.3
 
@@ -495,6 +502,8 @@ Every other script, library and UI file keeps its version. The runbook for the g
 | `Nothing to refresh: the node's data dir already holds the <network> chain configs this script release pins (<tag>), ...` (menu 13) | Nothing; use `14) Restart node` if the node was not restarted after those files were copied. |
 | `Clone the repository at <tag> into <dir> now?` (menu 13) | No checkout and no pinned files. Answer yes, or follow the manual clone command and the raw-file URLs it prints. |
 | `This script release pins no <network> chain configs yet, so there is nothing to install. Chain configs unchanged.` (menu 13) | Mainnet today: its chain configs come with a signed scripts release. |
+| `--install-method <method> cannot install a mainnet node yet: before genesis no mainnet release, image or source tag can be verified. ...` (mainnet keygen) | Generate the keys with `--install-method existing --binary-path <binary>` (OPERATOR.md section 2.12). |
+| `Refusing the node binary at <path>: it is not a mainnet build (This build has the features <features>; a mainnet build has none.) ...` | Build `telcoin-network` with no build features (`cargo build -p telcoin-network --bin telcoin-network --release --locked`) and pass that binary. |
 
 ## Left open
 

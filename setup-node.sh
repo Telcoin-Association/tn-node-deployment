@@ -79,6 +79,12 @@
 # checked, it is checked and pulled as keygen's would be, and recorded in .node-meta
 # before the config, the unit and the container. On mainnet a new image is named by
 # --release-tag only (a digest alone is taken only for a release this node recorded).
+# On mainnet an existing binary must be a mainnet build: its --version prints one empty
+# "Build Features:" line. While this release does not offer mainnet, the one mainnet
+# run it takes is the key generation ahead of genesis: --json --phase=keygen --network
+# mainnet --install-method existing --binary-path <binary> --address <validator Safe>.
+# It gets no chain configs and starts nothing; send node-info.yaml from the data dir,
+# never node-keys/ or the passphrase, and finalize once the mainnet release is out.
 #
 # NODE FLAGS (optional). Setup asks the installed release whether it knows each flag
 # given, and stops when it does not.
@@ -218,6 +224,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
         tn_committee_down_guard tn_service_user_ok tn_service_user_can_run tn_host_baseline_install \
         tn_docker_release_tag_for tn_release_stage tn_source_build tn_install_logrotate \
         tn_os_floor_check tn_docker_network_ok tn_release_tag_grammar tn_mainnet_enabled \
+        tn_mainnet_keygen_enabled tn_release_version_ok \
         tn_docker_pull_repo_ok tn_docker_pull_repos_for tn_docker_image_network_ok \
         tn_network_config_render tn_node_supports_admission tn_committee_peers_check \
         tn_trusted_nodes_shape_ok tn_map_addr_check \
@@ -1170,6 +1177,24 @@ _preflight_existing() {
     if ! verify_binary "$BINARY_PATH"; then
         setup_fail "Cannot verify binary at ${BINARY_PATH}."
     fi
+    if [[ "$NETWORK" == "mainnet" ]]; then
+        check_binary_mainnet
+    fi
+}
+
+# Stop setup unless the node binary at BINARY_PATH is a mainnet build, judged as a
+# mainnet release binary is (tn_release_version_ok on its --version, no version
+# wanted): exactly one "Build Features:" line, and it is empty. A testnet or a test
+# build is refused before it makes keys or .node-meta names it.
+check_binary_mainnet() {
+    local v="" why=""
+    if ! v="$("$BINARY_PATH" --version 2>&1)"; then
+        setup_fail "Refusing the node binary at ${BINARY_PATH}: its --version did not run, so whether it is a mainnet build cannot be told. The binary was not used."
+    fi
+    why="$(tn_release_version_ok "$v" mainnet "" 2>&1 >/dev/null)" && return 0
+    why="${why##*\[WARN\]}"
+    why="${why#"${RESET:-}"}"
+    setup_fail "Refusing the node binary at ${BINARY_PATH}: it is not a mainnet build (${why# }). A mainnet node runs telcoin-network built with no build features (cargo build -p telcoin-network --bin telcoin-network --release --locked). The binary was not used."
 }
 
 # 0 when BINARY_PATH can go into the start wrapper: an absolute path of letters, digits
@@ -2167,8 +2192,14 @@ step_create_infrastructure() {
     # cannot be used); rc 2: the clone, the fetch or the install failed. The helper's
     # warning names the cause (a --json log event before this error), so the rc-1 line
     # stays true for every refusal.
+    # Mainnet keys ahead of genesis (setup_mainnet_keygen_only): there are no mainnet
+    # chain configs to get, and keygen does not read them.
     local cc_rc=0
-    ensure_chain_configs_available "$NETWORK" setup_progress || cc_rc=$?
+    if setup_mainnet_keygen_only; then
+        setup_progress info "Mainnet chain configs are not published before genesis: keygen goes on without them. Finalize needs them, and runs only from the script release that pins them."
+    else
+        ensure_chain_configs_available "$NETWORK" setup_progress || cc_rc=$?
+    fi
     case "$cc_rc" in
         0) ;;
         1) setup_fail "The ${NETWORK} chain configs were refused (see above); nothing was copied." ;;
@@ -3438,15 +3469,46 @@ json_on_exit() {
     return "$rc"
 }
 
+# setup_mainnet_keygen_only -- rc 0 when this run is the one mainnet path a release
+# that does not offer mainnet yet still takes: --json --phase=keygen --network mainnet
+# with tn_mainnet_enabled saying no and tn_mainnet_keygen_enabled saying yes. It runs
+# the node binary the operator names (--install-method existing --binary-path, a
+# mainnet build: check_binary_mainnet), generates the keys and the proof of
+# possession for the --address it is given, skips the chain configs (none exist
+# before genesis) and stops. Finalize stays refused until mainnet is enabled.
+setup_mainnet_keygen_only() {
+    json_mode && [[ "$JSON_PHASE" == "keygen" && "$JSON_NETWORK_INPUT" == "mainnet" ]] \
+        && ! tn_mainnet_enabled && tn_mainnet_keygen_enabled
+}
+
+# setup_mainnet_keygen_next INFO -- what the operator does with the keys a
+# setup_mainnet_keygen_only run made: send INFO (node-info.yaml), never the keys or
+# the passphrase, and finalize once the mainnet release and genesis are out. On
+# stderr and, in --json mode, as log events.
+setup_mainnet_keygen_next() {
+    local line
+    for line in \
+        "Send ${1} to the genesis ceremony: it is public and holds this node's public keys, its addresses, the execution address ${VALIDATOR_ADDRESS} and the proof of possession signed for it." \
+        "Never send or copy anywhere ${DATA_DIR}/node-keys/ (bls.kw is the BLS private key) or the BLS passphrase. Back both up offline now: the genesis registers this identity, and losing either one loses it." \
+        "Mainnet is not finalized here. Once the mainnet release and genesis are published, update these scripts to the release that enables mainnet and run setup-node.sh --json --phase=finalize on this host; it uses these keys as they are."; do
+        print_info "$line"
+        if json_mode; then
+            json_event log "$line"
+        fi
+    done
+    return 0
+}
+
 json_set_network() {
     case "${1:-testnet}" in
         testnet|adiri)  # network-gated: adiri is read as testnet
             NETWORK="testnet"; CHAIN_ID="$TESTNET_CHAIN_ID"; CHAIN_NAME="$TESTNET_CHAIN_NAME"
             RPC_URL="${TESTNET_RPC_URL:-}"; EXPLORER_URL="${TESTNET_EXPLORER:-}" ;;
         mainnet)
-            # Refused while this release does not offer mainnet (tn_mainnet_enabled);
+            # Refused while this release does not offer mainnet (tn_mainnet_enabled),
+            # except for the key generation ahead of it (setup_mainnet_keygen_only);
             # run_json_mode calls this first, before anything touches the box.
-            tn_mainnet_enabled \
+            tn_mainnet_enabled || setup_mainnet_keygen_only \
                 || setup_fail "Mainnet is not enabled in this script release (lib/common.sh TN_MAINNET_ENABLED); nothing on this host was changed."
             NETWORK="mainnet"; CHAIN_ID="$MAINNET_CHAIN_ID"; CHAIN_NAME="$MAINNET_CHAIN_NAME"
             RPC_URL="${MAINNET_RPC_URL:-}"; EXPLORER_URL="${MAINNET_EXPLORER:-}" ;;
@@ -3479,9 +3541,13 @@ json_phase_keygen() {
     json_event step "Generating node keys"
     step_generate_keys
 
-    local info="${DATA_DIR}/node-info.yaml" info_content=""
+    local info="${DATA_DIR}/node-info.yaml" info_content="" done_msg="keys generated -- BACK THEM UP before finalizing"
     [[ -f "$info" ]] && info_content="$(json_escape "$(cat "$info")")"
-    json_done "{\"event\":\"done\",\"ok\":true,\"phase\":\"keygen\",\"node_type\":\"observer\",\"node_info_path\":\"$(json_escape "$info")\",\"keys_dir\":\"$(json_escape "${DATA_DIR}/node-keys")\",\"node_info\":\"${info_content}\",\"msg\":\"keys generated -- BACK THEM UP before finalizing\"}"
+    if setup_mainnet_keygen_only; then
+        setup_mainnet_keygen_next "$info"
+        done_msg="mainnet keys generated -- BACK THEM UP; send ${info} only, never the keys or the passphrase; finalize once the mainnet release and genesis are published"
+    fi
+    json_done "{\"event\":\"done\",\"ok\":true,\"phase\":\"keygen\",\"node_type\":\"observer\",\"node_info_path\":\"$(json_escape "$info")\",\"keys_dir\":\"$(json_escape "${DATA_DIR}/node-keys")\",\"node_info\":\"${info_content}\",\"msg\":\"$(json_escape "$done_msg")\"}"
 }
 
 # finalize_same_as_keygen FLAG VALUE RECORDED -- stop when a finalize flag and the
@@ -3697,6 +3763,20 @@ json_check_install_flags() {
         ""|source|release|docker|existing) ;;
         *) setup_fail "unknown --install-method ${INSTALL_METHOD} (expected source, release, docker or existing)" ;;
     esac
+    # Mainnet keys ahead of mainnet (setup_mainnet_keygen_only): no mainnet release,
+    # image or source tag can be verified before genesis, so the node binary is the
+    # operator's own, named by path, and a mainnet build.
+    if setup_mainnet_keygen_only; then
+        local why="--install-method ${INSTALL_METHOD} cannot install a mainnet node yet"
+        case "$INSTALL_METHOD" in
+            "") why="--install-method is missing" ;;
+            existing) why="--install-method existing needs --binary-path PATH here" ;;
+        esac
+        if [[ "$INSTALL_METHOD" != "existing" || -z "$BINARY_PATH" ]]; then
+            setup_fail "${why}: before genesis no mainnet release, image or source tag can be verified. Generate the mainnet keys with --phase=keygen --install-method existing --binary-path <a telcoin-network binary built with no build features>; the rest of a mainnet install waits for the script release that enables mainnet (lib/common.sh TN_MAINNET_ENABLED). Nothing on this host was changed."
+        fi
+        check_binary_mainnet
+    fi
     if [[ "$JSON_PHASE" == "keygen" && -z "$INSTALL_METHOD" ]]; then
         setup_fail "--install-method is missing (expected source, release, docker or existing)"
     fi

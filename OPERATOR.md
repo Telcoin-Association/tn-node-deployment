@@ -217,6 +217,7 @@ Mainnet has not launched, and the scripts still lack two mainnet values that are
 A script release that sets them is announced at launch; until then a mainnet install stops before it changes anything.
 This release also keeps mainnet switched off (`TN_MAINNET_ENABLED=0` in `lib/common.sh`): option 2 of the setup network menu still reads `(coming soon)` and answers `Mainnet has not launched yet.`, `setup-node.sh --json --network mainnet` stops with `Mainnet is not enabled in this script release (lib/common.sh TN_MAINNET_ENABLED); nothing on this host was changed.`, and the Node Manager UI refuses a mainnet setup.
 The launch release switches it on together with the pins.
+One mainnet step is open before that: validators generate their mainnet keys with their own binary before the genesis exists (section 2.12, `TN_MAINNET_KEYGEN_ENABLED=1` in `lib/common.sh`).
 The mainnet image package is already set: `ghcr.io/telcoin-association/tn-mainnet`, where the release pipeline publishes the mainnet images (testnet's are in `ghcr.io/telcoin-association/tn-testnet`; the release tag picks the package).
 A mainnet node names its image by its release tag, and the digest comes from the signed release; a digest given alone is taken only when `.node-meta` records it as the image of a mainnet release this node has installed (section 4.3).
 Before you treat an endpoint as a given network, check its chain ID:
@@ -849,6 +850,45 @@ Ask for more in Service Quotas before a sixth node in one region.
 **Cost.**
 You pay AWS directly, mainly for the instance (by the hour, by type), the data volume (its size, plus the provisioned 15,000 IOPS and 300 MiB/s above what gp3 includes, 3,000 IOPS and 125 MiB/s), the Elastic IP (public IPv4 addresses are billed by the hour), and data transfer out to the internet: P2P traffic to peers, and on `PublicRPC` the RPC traffic.
 The AWS Pricing Calculator gives the figures for your region.
+
+### 2.12 Generate mainnet keys before genesis
+
+The mainnet genesis is built from the validators' `node-info.yaml` files, so a mainnet validator generates its keys before the genesis, its chain configs or a signed mainnet release exist.
+This script release opens that one step on mainnet (`TN_MAINNET_KEYGEN_ENABLED=1` in `lib/common.sh`); every other mainnet path stays refused until the launch release (section 1.5).
+The Node Manager UI does not offer it.
+
+You need:
+
+- The Safe address assigned to your validator (`0x` and 40 hex digits). It is signed into the proof of possession, becomes the validator's execution address in the genesis, and receives its rewards.
+- A `telcoin-network` binary built with no build features, from the commit the mainnet release is cut from: `cargo build -p telcoin-network --bin telcoin-network --release --locked` at the workspace root. Keep the `-p telcoin-network`: without it cargo builds a test binary (`Build Features: test_utils`). `telcoin-network --version` must print an empty `Build Features:` line; setup refuses a binary whose line names any feature, a testnet build included. Install it root-owned where the service user can run it, for example `sudo install -o root -g root -m 0755 target/release/telcoin-network /usr/local/bin/telcoin-network`.
+- The public IP address and the ports the node will use. They go into `node-info.yaml` and from there into the genesis `committee.yaml`. Setup generates one worker.
+- A mainnet host as in section 1: Ubuntu 24.04 or later, a usable TPM2 (or `--allow-no-tpm`), and a BLS passphrase of at least 16 bytes.
+
+```bash
+ARGS=(--network mainnet --install-method existing --binary-path /usr/local/bin/telcoin-network
+  --address 0xYOUR_VALIDATOR_SAFE
+  --external-primary /ip4/203.0.113.10/udp/49590/quic-v1
+  --external-worker  /ip4/203.0.113.10/udp/49594/quic-v1
+  --listener-primary /ip4/10.0.0.5/udp/49590/quic-v1
+  --listener-worker  /ip4/10.0.0.5/udp/49594/quic-v1)
+read -rs PASS
+printf '%s\n' "$PASS" | sudo bash ~/telcoin-node-scripts/setup-node.sh --json --phase=keygen --passphrase-stdin "${ARGS[@]}"
+unset PASS
+```
+
+The run checks the binary's build features before anything on the host changes, then runs the preflight, creates the service user and the directories, records the install in `.node-meta`, has the keytool generate the keys and the proof of possession for the Safe address, and stores the passphrase as an encrypted credential.
+It gets no chain configs (`Mainnet chain configs are not published before genesis: keygen goes on without them. ...`), writes no unit and starts nothing.
+It refuses to run over an existing `node-keys/`.
+Before anything on the host changes, `--install-method release`, `docker` or `source` stops with `--install-method <method> cannot install a mainnet node yet: before genesis no mainnet release, image or source tag can be verified. Generate the mainnet keys with --phase=keygen --install-method existing --binary-path <...>`, and a binary with build features with `Refusing the node binary at <path>: it is not a mainnet build (This build has the features <features>; a mainnet build has none.)`.
+
+Send `node-info.yaml` from the data directory (`/var/lib/telcoin/node-info.yaml` by default; the run prints the path, and its `done` event carries the file in `node_info`).
+It is public: the node's name, BLS public key, primary and worker addresses and network keys, the execution address and the proof of possession.
+Never send or copy anywhere `node-keys/` (`bls.kw` is the BLS private key, wrapped with the passphrase) or the passphrase.
+Back both up offline now (section 2.5): together they are the identity the genesis registers, and losing either one loses it.
+
+The proof of possession signs the BLS key and the Safe address only, with no chain ID or genesis hash, so it stays valid for whatever genesis is built.
+Once the mainnet release and genesis are published, update the scripts (section 4.1) to the release that enables mainnet and run `setup-node.sh --json --phase=finalize` with the same arguments on this host, as that release's notes say; it uses these keys as they are.
+Finalize keeps the install method and the binary path keygen recorded, and refuses a different `--install-method` or `--binary-path`, so keep the binary at that path.
 
 ## 3. Confirm the node is syncing, then synced
 
@@ -2619,7 +2659,7 @@ sudo bash ~/telcoin-node-scripts/setup-node.sh --json --phase=finalize "${ARGS[@
 - Finalize's `done` adds `operator_guide` (the URL of this runbook) and `public_rpc` (`enabled`, `domain`, `http`, `ws`).
 - The inputs are checked before anything runs as root. A flag with no value, an unknown phase, network or install method, a malformed URL, an image that is not the network's repository by digest, a ref that is not a release tag of the network, and a relative `--binary-path` each stop the run with an `error` event.
 - `--data-dir`, the four multiaddr flags, `--address`, `--passphrase-method`, `--service-user` and `--service-group` are checked before root too, and a `--json` keygen without `--address` stops with an error that names it.
-- `--network` takes `testnet` (or `adiri`), `mainnet` or `devnet`. A mainnet install stops until the mainnet values in section 1.5 are set.
+- `--network` takes `testnet` (or `adiri`), `mainnet` or `devnet`. A mainnet install stops until the mainnet values in section 1.5 are set; only the mainnet keygen of section 2.12 runs before that.
 - `--install-method` takes `source` or `release` (each with `--release-tag <tag>`; `--build-ref` is the older name), `docker` or `existing`. A Docker keygen takes `--release-tag <tag>` or `--docker-image <repository>@sha256:<digest>`; with neither it picks the newest release image (section 2.3; never a release candidate), by digest, and records it. For `existing`, `--binary-path <path>` (absolute) names the binary and, in `--json` mode, implies `existing`; without it keygen searches PATH, `/usr/local/bin`, `/opt` and `/home`, and stops when it finds none. A finalize whose keygen ran under `setup-node.sh` 1.2.1 or older has no recorded binary, so pass `--binary-path` to it.
 - Node flags: `--bootstrap-peers <file>`, `--enable-state-export` and `--state-export-keep <n>` (section 2.7), and `--admission open|grace|closed` with `--trusted-nodes <file>` (section 2.9).
   Finalize reads the admission choices back from what keygen recorded, as it does the node flags.
