@@ -1326,7 +1326,9 @@ At any epoch, the node also refuses an entry with an empty address, or one whose
 The scripts take the map from the bootstrap peers file, and a new data dir starts at epoch 0 at any time, so they write it only when it lists every validator under `authorities` in the data dir's `genesis/committee.yaml`, this node included; keys beside them, such as hubs, are fine.
 Before every write (setup, and the `admission`, `trusted_nodes` and `bootstrap_peers` edits of `edit-config.sh`) `tn_committee_peers_check` compares the keys; a map that lists fewer, such as one of hubs alone or of the other validators without this node, is left out of `committee_peers` with a warning (`<map> lacks <n> of the <m> validators of the genesis committee in <file> (<the first three keys>), so it is not written to network-config as committee_peers: ...`), and the run goes on.
 The map stays installed and on the start line, so the node still dials it at start, and it stays in the floor of the [P2P committee allowlist](#p2p-committee-allowlist).
-The check compares keys only, not the number of workers in each entry.
+Only the map's first-level keys count, as the node reads them: a validator's block indented under another entry, or a key inside a flow value or a quoted value, is none.
+When the map has an entry for this node, it must carry the primary and worker network keys of the data dir's `node-info.yaml`, because the node stops at every start on its own entry with other keys; such a map is left out the same way, with a warning that starts `<map> has an entry for this node, <key>…, whose network keys are not this node's own`.
+The check does not compare the number of workers in each entry.
 A `bootstrap_peers` edit on a node with an admission mode writes `network-config` again, so `committee_peers` follows the peers map.
 
 The node reads these entries from `MIN_ADMISSION_VERSION` (0.17.0, in `lib/common.sh`) on.
@@ -2150,7 +2152,7 @@ With no repository checkout and no pinned files, menu 13 runs setup's checks for
 Declined or failed, it prints a manual `sudo git clone --branch <tag> ...` line and the three raw-file URLs; it no longer tells you to re-run `setup-node.sh`.
 After `Nothing to refresh: ...` a line points to `14) Restart node`, and a network this release pins nothing for (mainnet today) is refused before any prompt: `This script release pins no mainnet chain configs yet, so there is nothing to install. Chain configs unchanged.`
 The update lock is free at every "Press Enter", a git worktree checkout is read, and the AIDE baseline is made again whenever the refresh wrote under `/etc/telcoin/chain-configs/`, a reinstall that only corrects owner or modes included.
-The `admission`, `trusted_nodes` and `bootstrap_peers` edits write the bootstrap peers map as `committee_peers` only when it lists every validator of the genesis `committee.yaml`, as setup-node v2.1.4 does; a map that lists fewer is installed as before and left out of `committee_peers` with a warning, so the node starts at epoch 0.
+The `admission`, `trusted_nodes` and `bootstrap_peers` edits write the bootstrap peers map as `committee_peers` only when it lists every validator of the genesis `committee.yaml` and its entry for this node holds this node's network keys, as setup-node v2.1.4 does; any other map is installed as before and left out of `committee_peers` with a warning, so the node starts at epoch 0.
 `--set trusted_nodes=` and `--set bootstrap_peers=` refuse a `network_address` that is a DNS name (`/dns`, `/dns4`, `/dns6`, `/dnsaddr`), uses TCP or is no multiaddr, naming the line and the entry: the node never dials such an address.
 Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
 
@@ -2166,7 +2168,7 @@ Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
 A refused chain-config step reads `The <network> chain configs were refused (see above); nothing was copied.` instead of "not the pinned ones", which was wrong for a refused checkout.
 When the files cannot be found, the error lists each directory once, and the hint says where the files are at the tag and names `--genesis-dir <dir>`.
 Fix for validators set up with `--admission` and a `--bootstrap-peers` map that does not list the whole genesis committee (a map of hubs alone, or of the other validators without this node): setup wrote it as `committee_peers`, and the node then exited within a second of every start during epoch 0 (`Error: committee_peers: missing validator <key>`).
-Setup now writes `committee_peers` only from a map that lists every validator of the genesis `committee.yaml`; any other map is left out of it with a warning naming the gap, and stays installed, dialed and in the allowlist floor.
+Setup now writes `committee_peers` only from a map that lists every validator of the genesis `committee.yaml` at its first level and holds this node's own network keys in this node's entry; any other map is left out of it with a warning naming the gap, and stays installed, dialed and in the allowlist floor.
 Fix for validators given a trusted hubs map the node cannot use: `--trusted-nodes` checked only the file, so a hub entry pasted from `node-info.yaml` (workers as a list), one without a `network_key` or one with a DNS name passed, and the node then refused to start, or started and never dialed the hub.
 Setup now runs edit-config's shape check, which also refuses `/dns*`, `/tcp` and malformed addresses, in the preflight; the bootstrap peers map gets the same address rule.
 Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).

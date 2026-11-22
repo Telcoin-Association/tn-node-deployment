@@ -748,6 +748,27 @@ drv set "bootstrap_peers=$T/in/peers-both.yaml"
 check "no genesis committee.yaml: rc 0, left out, says why" "0 yes 0 yes" \
     "$RC $(has "$(calls)" "render $DD grace $DEST none") $(grep -c '^committee_peers' "$NC") $(has "$OUT" "$DD/genesis/committee.yaml cannot be read, so $PEERS was not checked against the genesis committee")"
 mv "$T/committee.saved" "$DD/genesis/committee.yaml"
+# the map as the node reads it: K2's block indented under the hub's entry is a
+# field of that entry, not a validator of the map
+{ cat "$T/in/peers-hub.yaml"; sed 's/^/  /' "$T/in/peers.yaml"; } > "$T/in/peers-nested.yaml"
+chmod 0644 "$T/in/peers-nested.yaml"
+drv set "bootstrap_peers=$T/in/peers-nested.yaml"
+check "bootstrap_peers=<the validator indented under the hub>: installed, rendered without committee_peers, the gap named" "0 same yes 0 yes" \
+    "$RC $(cmp -s "$T/in/peers-nested.yaml" "$PEERS" && echo same) $(has "$(calls)" "render $DD grace $DEST none") $(grep -c '^committee_peers' "$NC") $(has "$OUT" "$CP_GAP")"
+# this node is K2: its entry must carry the network keys of its node-info.yaml
+ni2() {
+    printf 'bls_public_key: %s\np2p_info:\n  primary:\n    network_address: /ip4/198.51.100.21/udp/49590/quic-v1\n    network_key: 4XTTMpeer1p\n  workers:\n    - network_address: /ip4/198.51.100.21/udp/49594/quic-v1\n      network_key: %s\n' "$K2" "$1" > "$DD/node-info.yaml"
+}
+ni2 4XTTMnewer
+drv set "bootstrap_peers=$T/in/peers-both.yaml"
+check "bootstrap_peers=<the committee, this node's entry stale>: rc 0, installed, rendered without committee_peers, the entry named" "0 same yes 0 yes" \
+    "$RC $(cmp -s "$T/in/peers-both.yaml" "$PEERS" && echo same) $(has "$(calls)" "render $DD grace $DEST none") $(grep -c '^committee_peers' "$NC") $(has "$OUT" "$PEERS has an entry for this node, ${K2:0:16}…, whose network keys are not this node's own (the primary and worker network_key in $DD/node-info.yaml), so it is not written to network-config as committee_peers")"
+ni2 4XTTMpeer1w
+drv set admission=closed
+check "admission=closed, this node's entry with its own keys: committee_peers is the map, no warning" \
+    "0|$(echo 'committee_peers:'; sed 's/^/  /' "$T/in/peers-both.yaml")|no" \
+    "$RC|$(sed -n '/^committee_peers:/,$p' "$NC")|$(has "$OUT" "WARN")"
+rm -f "$DD/node-info.yaml"
 
 # ---- the library and --help -----------------------------------------------------
 help="$(bash "$TN_TEST_REPO/edit-config.sh" --help 2>&1)"

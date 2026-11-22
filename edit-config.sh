@@ -102,10 +102,11 @@
 #                                     with the trusted nodes below and the
 #                                     installed bootstrap peers map as
 #                                     committee_peers when it lists every
-#                                     genesis validator (one that lists fewer
-#                                     would stop the node at epoch 0, so it is
-#                                     left out with a warning). Closed admits
-#                                     only the previous, current and next
+#                                     genesis validator and its entry for this
+#                                     node holds this node's network keys (any
+#                                     other map would stop the node at start,
+#                                     so it is left out with a warning). Closed
+#                                     admits only the previous, current and next
 #                                     committees, the trusted nodes and the
 #                                     bootstrap peers; Grace enforces nothing
 #                                     beyond Open and differs only in the

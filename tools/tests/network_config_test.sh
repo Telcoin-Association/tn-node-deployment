@@ -741,6 +741,112 @@ SERVICE_USER=nosuchuser
 cpc "$CI/full.yaml"
 check "committee check: no service user to read as fails" "1 yes" "$RC $(cp_has "$OUT" "could not be checked against the genesis committee")"
 SERVICE_USER=telcoin
+# a key of the map is one of its top-level map, as the node reads it
+awk -v k="$V5" '/^[^ \t]/ { n = (index($0, k ":") == 1) } { print (n ? "  " : "") $0 }' "$CI/full.yaml" > "$CI/nested.yaml"
+cpc "$CI/nested.yaml"
+check "committee check: a validator's block indented under another entry fails, naming it" "1 yes" \
+    "$RC $(cp_has "$OUT" "$CI/nested.yaml lacks 1 of the 5 ${CP_IN} (${V5:0:16}…), so it is not written")"
+# cp_json KEY [MORE]: one JSON entry, MORE inside its value
+cp_json() { printf '"%s": {"primary": {"network_address": "/ip4/192.0.2.1/udp/1/quic-v1", "network_key": "k"}, "workers": [{"network_address": "/ip4/192.0.2.1/udp/2/quic-v1", "network_key": "kw"}]%s}' "$1" "${2:-}"; }
+printf '{%s, %s, %s, %s}\n' "$(cp_json "$V1")" "$(cp_json "$V2")" "$(cp_json "$V3")" "$(cp_json "$V4" ", $(cp_json "$V5")")" > "$CI/nested.json"
+cpc "$CI/nested.json"
+check "committee check: a JSON key inside another entry fails" "1 yes" "$RC $(cp_has "$OUT" "lacks 1 of the 5 ${CP_IN} (${V5:0:16}…)")"
+sed 's/"//g' "$CI/nested.json" > "$CI/nested-flow.yaml"
+cpc "$CI/nested-flow.yaml"
+check "committee check: a flow-style key inside another entry fails" "1 yes" "$RC $(cp_has "$OUT" "lacks 1 of the 5 ${CP_IN} (${V5:0:16}…)")"
+# cp_lines KEY: the same entry over four lines
+cp_lines() { printf '  "%s": {\n    "primary": {"network_address": "/ip4/192.0.2.1/udp/1/quic-v1", "network_key": "k"},\n    "workers": [{"network_address": "/ip4/192.0.2.1/udp/2/quic-v1", "network_key": "kw"}]\n  }' "$1"; }
+{
+    printf '{\n'
+    for k in "$V1" "$V2" "$V3" "$V4"; do cp_lines "$k"; printf ',\n'; done
+    cp_lines "$V5"
+    printf '\n}\n'
+} > "$CI/lines.json"
+cpc "$CI/lines.json"
+check "committee check: a JSON map over several lines passes" "0|" "$RC|$OUT"
+{
+    cp_drop "$V5" "$CI/full.yaml"
+    printf '%s:\n  primary:\n    network_address: "/dns4/%s:x/udp/1/quic-v1"\n    network_key: h\n  workers:\n    - network_address: /ip4/192.0.2.9/udp/2/quic-v1\n      network_key: hw\n' "$HUB" "$V5"
+} > "$CI/inquotes.yaml"
+cpc "$CI/inquotes.yaml"
+check "committee check: a key inside a quoted value, a colon after it, fails" "1 yes" "$RC $(cp_has "$OUT" "lacks 1 of the 5 ${CP_IN} (${V5:0:16}…)")"
+{
+    cp_drop "$V5" "$CI/full.yaml"
+    printf '%s: {primary: {network_address: /ip4/192.0.2.9/udp/1/quic-v1, network_key: h}, workers: [],\n%s: {primary: {network_address: /ip4/192.0.2.8/udp/1/quic-v1, network_key: x}}}\n' "$HUB" "$V5"
+} > "$CI/inflow.yaml"
+cpc "$CI/inflow.yaml"
+check "committee check: a key at column 0 inside a flow value left open fails" "1 yes" "$RC $(cp_has "$OUT" "lacks 1 of the 5 ${CP_IN} (${V5:0:16}…)")"
+awk '/^    network_address:/ { sub(/network_address: /, "network_address:\n      ") } { print }' "$CI/full.yaml" \
+    | sed 's/^    - network_address/  - network_address/; s/^      network_key/    network_key/' > "$CI/layout.yaml"
+cpc "$CI/layout.yaml"
+check "committee check: a value on the line after its key and a list at its key's column pass" "0|" "$RC|$OUT"
+{
+    cp_drop "$V5" "$CI/full.yaml"
+    printf '? %s\n: {primary: {network_address: /ip4/192.0.2.8/udp/1/quic-v1, network_key: x}, workers: []}\n' "$V5"
+} > "$CI/explicit.yaml"
+cpc "$CI/explicit.yaml"
+check "committee check: an explicit key is not read: fails, naming the line" \
+    "1|$CI/explicit.yaml holds YAML this check does not read at line $(( $(cp_drop "$V5" "$CI/full.yaml" | wc -l) + 1 )) (an anchor, a tag, a block scalar, an explicit key or a value over several lines), so it is not written to network-config as committee_peers: ${CP_TAIL}" \
+    "$RC|$OUT"
+# the entry of this node: the network keys of the data dir's node-info.yaml
+# (none so far, so no entry was compared). V1's entry comes first in full.yaml.
+P1="$(awk '/^    network_key:/ { print $2; exit }' "$CI/full.yaml")"
+W1="$(awk '/^      network_key:/ { print $2; exit }' "$CI/full.yaml")"
+# cp_ni KEY PRIMARY WORKER...: node-info.yaml in $CD, as keytool writes it
+cp_ni() {
+    local k="$1" p="$2" w
+    shift 2
+    {
+        printf -- '---\nname: node-1\nbls_public_key: %s\np2p_info:\n  primary:\n    network_address: /ip4/203.0.113.1/udp/49590/quic-v1/p2p/12D3KooWP\n    network_key: %s\n    rpc: ~\n  workers:\n' "$k" "$p"
+        for w in "$@"; do
+            printf '    - network_address: /ip4/203.0.113.1/udp/49594/quic-v1/p2p/12D3KooWW\n      network_key: %s\n      rpc: ~\n' "$w"
+        done
+        printf 'execution_address: "0x0000000000000000000000000000000000000001"\n'
+    } > "$CD/node-info.yaml"
+}
+CP_OWN="a node whose committee_peers entry for itself names other network keys than its node-info.yaml refuses to start, at every epoch. The map stays installed and in use: the node still dials its peers at start, keeps its trusted hubs and finds the other validators through peer discovery, and the P2P committee allowlist keeps the map in its floor. To have it written as committee_peers, give that entry the network keys of $CD/node-info.yaml (keys made again after the map was shared leave it stale) and install it again with edit-config.sh --set bootstrap_peers=FILE."
+cp_ni "$V1" "$P1" "$W1"
+cpc "$CI/full.yaml"
+check "committee check: this node's entry with its own network keys passes" "0|" "$RC|$OUT"
+cp_ni "$V1" 4XTTMstale "$W1"
+cpc "$CI/full.yaml"
+check "committee check: this node's entry with another primary network_key fails, naming the entry" \
+    "1|$CI/full.yaml has an entry for this node, ${V1:0:16}…, whose network keys are not this node's own (the primary and worker network_key in $CD/node-info.yaml), so it is not written to network-config as committee_peers: ${CP_OWN}" \
+    "$RC|$OUT"
+cp_ni "$V1" "$P1" 4XTTMstale
+cpc "$CI/full.yaml"
+check "committee check: this node's entry with another worker network_key fails" "1 yes" "$RC $(cp_has "$OUT" "has an entry for this node, ${V1:0:16}…, whose network keys are not")"
+cp_ni "$V1" "$W1" "$P1"
+cpc "$CI/full.yaml"
+check "committee check: this node's primary and worker keys swapped fail" "1 yes" "$RC $(cp_has "$OUT" "has an entry for this node, ${V1:0:16}…")"
+cp_ni "$V1" "$P1" "$W1" 4XTTMsecond
+cpc "$CI/full.yaml"
+check "committee check: a node of two workers, the entry listing worker 0 alone, passes" "0|" "$RC|$OUT"
+{
+    sed -n '1,7p' "$CI/full.yaml"
+    printf '    - network_address: /ip4/203.0.113.1/udp/49595/quic-v1\n      network_key: 4XTTMother\n'
+    sed '1,7d' "$CI/full.yaml"
+} > "$CI/second.yaml"
+cpc "$CI/second.yaml"
+check "committee check: a node of two workers, the entry's worker 1 not its own, fails" "1 yes" "$RC $(cp_has "$OUT" "has an entry for this node, ${V1:0:16}…")"
+cp_ni "$V1" k kw
+cpc "$CI/full.json"
+check "committee check: a JSON entry of this node without its worker fails" "1 yes" "$RC $(cp_has "$OUT" "has an entry for this node, ${V1:0:16}…")"
+cpc "$CI/lines.json"
+check "committee check: a JSON entry of this node with its own keys passes" "0|" "$RC|$OUT"
+cp_ni "$V1" k other
+cpc "$CI/lines.json"
+check "committee check: a JSON entry of this node with another worker key fails" "1 yes" "$RC $(cp_has "$OUT" "has an entry for this node, ${V1:0:16}…")"
+cpc "$CI/nested.json"
+check "committee check: a gap is named before the entry of this node" "1 yes" "$RC $(cp_has "$OUT" "lacks 1 of the 5 ${CP_IN} (${V5:0:16}…)")"
+cp_ni "$HUB" "$P1" "$W1"
+cpc "$CI/full.yaml"
+check "committee check: a node the map has no entry for passes" "0|" "$RC|$OUT"
+printf 'bls_public_key: %s\np2p_info: &a\n' "$V1" > "$CD/node-info.yaml"
+cpc "$CI/full.yaml"
+check "committee check: a node-info.yaml that is not read fails" "1 yes" \
+    "$RC $(cp_has "$OUT" "$CD/node-info.yaml cannot be read, so $CI/full.yaml was not checked against this node's own network keys and is not written")"
+rm -f "$CD/node-info.yaml"
 
 # ---- a real service account ----------------------------------------------------
 echo "== a real service account owns the data dir"

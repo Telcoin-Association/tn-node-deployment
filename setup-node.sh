@@ -117,9 +117,10 @@
 #                            committee_peers from the --bootstrap-peers map (each left
 #                            out when its flag is). The map goes in only when it lists
 #                            every validator of the genesis committee, this node
-#                            included: one that lists fewer would stop the node at
-#                            epoch 0, so it is left out with a warning, and the node
-#                            still dials it. Closed admits only the previous,
+#                            included, and its entry for this node holds the network
+#                            keys of node-info.yaml: the node would stop at start on
+#                            another map, so that is left out with a warning, and the
+#                            node still dials it. Closed admits only the previous,
 #                            current and next committees, the trusted nodes and the
 #                            bootstrap peers; Grace enforces nothing beyond Open and
 #                            differs only in the status the node reports. Needs a node

@@ -696,6 +696,41 @@ check "committee: a re-run reads the map back and leaves it out again" "0 ${DD} 
 SNM_PEERS="$T/in/peers-all.yaml" drv interactive
 check "committee: a re-run with the whole committee writes committee_peers" "0 ${DD} closed ${CFG}/trusted-nodes.yaml ${CFG}/bootstrap-peers.yaml 1" \
     "$RC $(logf "$T/render.log") $(grep -c '^committee_peers:' "$NC")"
+# the map as the node reads it: GenesisVal9's block indented under GenesisVal8 is
+# a field of that entry, not a validator of the map
+awk '/^GenesisVal9:/ { n = 1 } /^HubBLSkey1:/ { n = 0 } { print (n ? "  " : "") $0 }' "$T/in/peers-all.yaml" > "$T/in/peers-nested.yaml"
+chmod 0644 "$T/in/peers-nested.yaml"
+reset
+marker v0.17.0
+cp "$T/in/nc-before" "$NC"
+SNM_MODE=closed SNM_TRUSTED="$TRUSTED" SNM_PEERS="$T/in/peers-nested.yaml" drv interactive
+check "committee: a validator's block indented under another, left out with the gap named" "0 ${DD} closed ${CFG}/trusted-nodes.yaml none yes" \
+    "$RC $(logf "$T/render.log") $(has "$OUT" "[WARN] ${CFG}/bootstrap-peers.yaml lacks 1 of the 10 validators of the genesis committee in ${DD}/genesis/committee.yaml (GenesisVal9…), ${CP_LEFT}")"
+check "committee: the indented map installed as given, network-config without committee_peers" "same|$(cat "$T/in/nc-closed-nopeers")" \
+    "$(cmp -s "$T/in/peers-nested.yaml" "$CFG/bootstrap-peers.yaml" && echo same)|$(cat "$NC")"
+# this node is GenesisVal0: its entry must carry the network keys of its
+# node-info.yaml, at every epoch
+ni0() {
+    printf 'bls_public_key: GenesisVal0\np2p_info:\n  primary:\n    network_address: /ip4/198.51.100.30/udp/49590/quic-v1\n    network_key: %s\n  workers:\n    - network_address: /ip4/198.51.100.30/udp/49594/quic-v1\n      network_key: %s\n' "$1" "$2" > "$DD/node-info.yaml"
+}
+ni0 4XTTMv30p 4XTTMnew30w
+reset
+marker v0.17.0
+cp "$T/in/nc-before" "$NC"
+SNM_MODE=closed SNM_TRUSTED="$TRUSTED" SNM_PEERS="$T/in/peers-all.yaml" drv interactive
+check "committee: this node's entry with a worker key not its own, left out with the entry named" "0 ${DD} closed ${CFG}/trusted-nodes.yaml none yes" \
+    "$RC $(logf "$T/render.log") $(has "$OUT" "[WARN] ${CFG}/bootstrap-peers.yaml has an entry for this node, GenesisVal0…, whose network keys are not this node's own (the primary and worker network_key in ${DD}/node-info.yaml), so it is not written to network-config as committee_peers: a node whose committee_peers entry for itself names other network keys than its node-info.yaml refuses to start, at every epoch.")"
+check "committee: the stale entry installed and on the launch line, network-config without committee_peers" "same|yes|$(cat "$T/in/nc-closed-nopeers")" \
+    "$(cmp -s "$T/in/peers-all.yaml" "$CFG/bootstrap-peers.yaml" && echo same)|$(has "$OUT" "$CP_FLAGS")|$(cat "$NC")"
+ni0 4XTTMv30p 4XTTMv30w
+reset
+marker v0.17.0
+cp "$T/in/nc-before" "$NC"
+SNM_MODE=closed SNM_TRUSTED="$TRUSTED" SNM_PEERS="$T/in/peers-all.yaml" drv interactive
+check "committee: this node's entry with its own keys, rendered with the map as before" \
+    "0 ${DD} closed ${CFG}/trusted-nodes.yaml ${CFG}/bootstrap-peers.yaml|$(cat "$T/in/nc-closed-nopeers"; echo 'committee_peers:'; sed 's/^/  /' "$T/in/peers-all.yaml")" \
+    "$RC $(logf "$T/render.log")|$(cat "$NC")"
+rm -f "$DD/node-info.yaml"
 # keygen, then finalize: the warning is a log event of the finalize
 reset
 marker v0.17.0
