@@ -227,7 +227,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
         tn_mainnet_keygen_enabled tn_release_version_ok \
         tn_docker_pull_repo_ok tn_docker_pull_repos_for tn_docker_image_network_ok \
         tn_network_config_render tn_node_supports_admission tn_committee_peers_check \
-        tn_trusted_nodes_shape_ok tn_map_addr_check \
+        tn_trusted_nodes_shape_ok tn_map_addr_check tn_trusted_nodes_node_check tn_local_worker_count \
         tn_chain_configs_tag tn_chain_configs_dir tn_chain_configs_from_tag >/dev/null; then
     _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this setup-node.sh: run update-scripts.sh and try again."
     case " $* " in
@@ -1587,13 +1587,14 @@ peers_file_ok() {
 # never reaches a command line, but it does not stay private either: the installed copy
 # is 0644, so the service user can read it; and a list of hubs never comes near 64 KiB),
 # in the shape the node reads (tn_trusted_nodes_shape_ok, the check edit-config runs
-# too, addresses included). The node has no check flag for this map and stops at start
-# on one it cannot read, so this runs before anything is written: in the preflight, on
-# a recorded map read back and just before the install. Otherwise 1, with the reason on
-# stdout.
+# too, addresses included, with the worker ids of the workers DATA_DIR's node runs).
+# The node has no check flag for this map and stops at start on one it cannot read, so
+# this runs before anything is written: in the preflight, on a recorded map read back
+# and just before the install, where the node binary reads it too
+# (install_trusted_nodes). Otherwise 1, with the reason on stdout.
 trusted_nodes_file_ok() {
     _setup_map_file_ok "$1" "trusted nodes" "the installed copy is world-readable (0644)" || return 1
-    tn_trusted_nodes_shape_ok "$1"
+    tn_trusted_nodes_shape_ok "$1" "$(tn_local_worker_count "${DATA_DIR:-}")"
 }
 
 # _setup_map_file_ok FILE KIND WHY -- the checks of peers_file_ok and
@@ -2571,7 +2572,7 @@ prepare_node_extra_flags() {
         BOOTSTRAP_PEERS_SRC="$peers"
     fi
     if [[ -n "$TRUSTED_NODES_SRC" ]]; then
-        install_trusted_nodes "$TRUSTED_NODES_SRC" "$trusted"
+        install_trusted_nodes "$spec" "$TRUSTED_NODES_SRC" "$trusted"
         TRUSTED_NODES_SRC="$trusted"
     fi
     NODE_EXTRA_FLAGS="$flags"
@@ -2754,11 +2755,21 @@ setup_committee_resync() {
 # Install the trusted nodes map SRC as DEST, root-owned 0644, with tn_write_root_file
 # (a temp file beside DEST, then one rename), so the service user can read it when
 # setup_admission_config writes it into network-config. SRC is checked again just
-# before it is read. SRC that is DEST already (a re-run, or a finalize that read
-# keygen's record back) stays as it is.
+# before it is read, and then by the release of runner SPEC
+# (tn_trusted_nodes_node_check): this is the first point of a run with a node binary
+# or image, and it comes before network-config is written and before a running node
+# is restarted. A map the release rejects stops setup with the node's reason; a check
+# that cannot run warns, and the map is installed unchecked. SRC that is DEST already
+# (a re-run, or a finalize that read keygen's record back) stays as it is.
 install_trusted_nodes() {
-    local src="$1" dest="$2" msg=""
+    local spec="$1" src="$2" dest="$3" msg="" rc=0
     msg="$(trusted_nodes_file_ok "$src")" || setup_fail "--trusted-nodes: ${msg}."
+    msg="$(tn_trusted_nodes_node_check "$spec" "$src")" || rc=$?
+    case "$rc" in
+        0) ;;
+        1) setup_fail "--trusted-nodes: $(node_release_label) does not read ${src} (${msg}; the line and column count in that file). Each network_key and network_address (its IP address and /p2p peer id) must be the hub's own, as in its node-info.yaml, and no field may appear twice." ;;
+        *) setup_warn "Could not check the trusted nodes map in ${src} with $(node_release_label) (${msg}); installing it unchecked." ;;
+    esac
     if [[ "$src" == "$dest" ]]; then
         return 0
     fi

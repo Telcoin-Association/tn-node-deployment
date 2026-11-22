@@ -151,7 +151,14 @@ tn_write_root_file() {
     cat > "$1" && chmod "$2" "$1"
 }
 tn_node_has_flag() { return 0; }
-tn_node_parse_check() { return 0; }
+# the node's parse check: the map it is given goes to parse.map; SNM_PARSE_ERR
+# makes it refuse with that reason, as clap words it
+tn_node_parse_check() {
+    printf '%s\n' "$3" > "$SNM_DIR/parse.map"
+    [ -z "${SNM_PARSE_ERR:-}" ] && return 0
+    printf "error: invalid value '…' for '--bootstrap-peers <MAP>': %s\n" "$SNM_PARSE_ERR"
+    return 1
+}
 # the peers map's own installer chowns to root; here it copies (the real one
 # goes through a temp file, so the installed map given again stays)
 install_bootstrap_peers() {
@@ -728,7 +735,8 @@ cp "$T/in/committee1.yaml" "$DD/genesis/committee.yaml"
 # -----------------------------------------------------------------------------
 # the shapes: the table of trusted_shapes.sh, which edit_config_admission_test.sh
 # runs too. A map the node cannot use stops the run in the preflight, naming the
-# line, the entry and the reason, with nothing installed, recorded or rendered.
+# line, the entry and the reason, with nothing installed, recorded or rendered;
+# one the node binary refuses stops it at the install, the same way.
 # -----------------------------------------------------------------------------
 # shellcheck source=tools/tests/trusted_shapes.sh
 . "$(dirname "${BASH_SOURCE[0]}")/trusted_shapes.sh"
@@ -747,9 +755,16 @@ while read -r class name reason; do
     reset
     marker v0.17.0
     cp "$T/in/nc-before" "$NC"
+    if [[ "$class" == node ]]; then
+        SNM_PARSE_ERR="$reason" SNM_MODE=closed SNM_TRUSTED="$T/shapes/${name}.yaml" drv interactive
+        check "shape ${name}, ${class}: refused at the install" "1 yes" \
+            "$RC $(has "$OUT" "--trusted-nodes: the node binary at ${T}/fx/opt/telcoin-network (v0.17.0) does not read ${T}/shapes/${name}.yaml (${reason}")"
+        check "shape ${name}, ${class}: nothing written" "||same" "$(untouched)"
+        continue
+    fi
     SNM_MODE=closed SNM_TRUSTED="$T/shapes/${name}.yaml" drv interactive
-    if [[ "$class" == kept ]]; then
-        check "shape ${name}: installed and rendered" "0 yes yes" \
+    if [[ "$class" == kept || "$class" == start ]]; then
+        check "shape ${name}, ${class}: installed and rendered" "0 yes yes" \
             "$RC $(cmp -s "$T/shapes/${name}.yaml" "$CFG/trusted-nodes.yaml" && echo yes) $(has "$(logf "$T/render.log")" "closed ${CFG}/trusted-nodes.yaml none")"
         continue
     fi
@@ -776,6 +791,34 @@ meta ADMISSION_MODE=closed "TRUSTED_NODES_FILE=$T/shapes/workers-list.yaml"
 drv interactive
 check "shapes: a recorded map the node cannot read stops a re-run, nothing rendered" "1 yes yes" \
     "$RC $(has "$OUT" "TRUSTED_NODES_FILE in ${META}: line ") $([[ ! -s "$T/render.log" ]] && cmp -s "$T/in/nc-before" "$NC" && echo yes)"
+# the node binary reads the map before network-config is written, and so before
+# a re-run restarts a running node: a recorded map it refuses stops the re-run
+reset
+marker v0.17.0
+cp "$T/in/nc-before" "$NC"
+meta ADMISSION_MODE=closed "TRUSTED_NODES_FILE=$T/shapes/well.yaml"
+SNM_PARSE_ERR="data did not match any variant of untagged enum PrimaryWorkersRepr at line 1 column 132" drv interactive
+check "shapes: a recorded map the node binary refuses stops a re-run, nothing rendered" "1 yes yes" \
+    "$RC $(has "$OUT" "does not read ${T}/shapes/well.yaml (data did not match any variant") $([[ ! -s "$T/render.log" ]] && cmp -s "$T/in/nc-before" "$NC" && echo yes)"
+# what the node binary is given: the map line for line, its workers a list,
+# without a byte order mark or CRLF line ends
+for name in well bom crlf; do
+    reset
+    marker v0.17.0
+    SNM_MODE=closed SNM_TRUSTED="$T/shapes/${name}.yaml" drv interactive
+    check "shapes: ${name} goes to the node binary with its workers as a list" "0 yes" \
+        "$RC $(shape_map well "$SK1" "$SK2" | sed 's/^    0:$/    -/' | { if [[ "$name" == crlf ]]; then head -n 8; else cat; fi; } | cmp -s - "$T/parse.map" && echo yes)"
+done
+# the worker ids are those of the workers the data dir's node-info.yaml lists
+printf 'p2p_info:\n  primary:\n    network_address: /ip4/127.0.0.1/udp/49590/quic-v1\n    network_key: k\n  workers:\n    - network_address: /ip4/127.0.0.1/udp/49594/quic-v1\n      network_key: k0\n    - network_address: /ip4/127.0.0.1/udp/49595/quic-v1\n      network_key: k1\n' > "$DD/node-info.yaml"
+reset
+SNM_MODE=closed SNM_TRUSTED="$T/shapes/well.yaml" drv init
+check "shapes: worker 0 alone, the data dir's node runs two: refused in the preflight" "1 yes" \
+    "$RC $(has "$OUT" "--trusted-nodes: the workers of ${SK1:0:16}... name 1 of the 2 workers this node runs: each entry holds workers 0 to 1")"
+SNM_MODE=closed SNM_TRUSTED="$T/shapes/workers-three.yaml" drv init
+check "shapes: workers 0, 1 and 2, the data dir's node runs two: refused, naming worker 2" "1 yes" \
+    "$RC $(has "$OUT" "worker 2 of ${SK1:0:16}... is not one this node runs: it runs 2 workers, so each entry holds workers 0 to 1")"
+rm -f "$DD/node-info.yaml"
 # the same address rule for the bootstrap peers map, which the node's own parse
 # check lets through
 sed 's|/ip4/198.51.100.21/udp/49590|/dns4/peer.example.org/udp/49590|' "$PEERS" > "$T/in/peers-dns.yaml"
@@ -784,6 +827,12 @@ reset
 SNM_PEERS="$T/in/peers-dns.yaml" drv init
 check "shapes: --bootstrap-peers with a DNS name stops in the preflight" "1 yes" \
     "$RC $(has "$OUT" "--bootstrap-peers: line 3: the network_address of PeerBLSkey1 is a DNS name (/dns4/peer.example.org")"
+awk 'NR == 3 { sub(/network_address: /, "network_address:\n      ") } { print }' "$T/in/peers-dns.yaml" > "$T/in/peers-dns-next.yaml"
+chmod 0644 "$T/in/peers-dns-next.yaml"
+reset
+SNM_PEERS="$T/in/peers-dns-next.yaml" drv init
+check "shapes: --bootstrap-peers with a DNS name on the line after its key stops in the preflight" "1 yes" \
+    "$RC $(has "$OUT" "--bootstrap-peers: line 4: the network_address of PeerBLSkey1 is a DNS name (/dns4/peer.example.org")"
 
 # -----------------------------------------------------------------------------
 # the library gate and --help

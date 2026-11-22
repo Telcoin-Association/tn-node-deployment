@@ -175,7 +175,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
         tn_launch_runner tn_keytool_has tn_keytool _tn_cred_plain_ok _tn_passfile_trim_safe \
         tn_docker_resolve_ref tn_docker_network_ok _tn_guard_network tn_docker_image_network_ok \
         tn_network_config_render tn_node_supports_admission tn_committee_peers_check tn_gateway_from_rules_ok \
-        tn_trusted_nodes_shape_ok tn_map_addr_check \
+        tn_trusted_nodes_shape_ok tn_map_addr_check tn_trusted_nodes_node_check tn_local_worker_count \
         tn_chain_configs_tag tn_chain_configs_dir tn_chain_configs_from_tag \
         _tn_chain_configs_clone tn_chain_config_pin _tn_chain_configs_dest_ok \
         _tn_chain_configs_clone_target _tn_chain_configs_in_place >/dev/null; then
@@ -1671,13 +1671,14 @@ set_admission() {
 }
 
 # edit_trusted_install SRC TMP DEST -- copy SRC into the root-only temp file TMP,
-# check the copy (its size, then tn_trusted_nodes_shape_ok, which setup-node runs
-# on the operator's file too) and install it as DEST, root 0644, through
-# tn_write_root_file after edit_backup, unless DEST already holds the same bytes.
-# What is installed is what passed, and nothing is written before it has. rc 1,
-# reported, otherwise.
+# check the copy (its size, then tn_trusted_nodes_shape_ok with the workers of the
+# node's data dir and tn_trusted_nodes_node_check with the installed release
+# EDIT_SPEC, both of which setup-node runs on the operator's file too) and install it
+# as DEST, root 0644, through tn_write_root_file after edit_backup, unless DEST
+# already holds the same bytes. What is installed is what passed, and nothing is
+# written before it has. rc 1, reported, otherwise.
 edit_trusted_install() {
-    local src="$1" tmp="$2" dest="$3" size="" msg
+    local src="$1" tmp="$2" dest="$3" size="" msg dd rc=0
     if cat -- "$src" > "$tmp" 2>/dev/null; then
         size="$(wc -c < "$tmp" 2>/dev/null | tr -d '[:space:]')"
     fi
@@ -1685,8 +1686,18 @@ edit_trusted_install() {
         edit_error "${src} could not be read, or changed while it was being read. Check the file and try again."
         return 1
     fi
-    if ! msg="$(tn_trusted_nodes_shape_ok "$tmp")"; then
+    dd="$(detect_data_dir 2>/dev/null)" || dd=""
+    if ! msg="$(tn_trusted_nodes_shape_ok "$tmp" "$(tn_local_worker_count "$dd")")"; then
         edit_error "${src} is not a trusted nodes map: ${msg}. Each key is a hub's BLS public key, and each entry the hub's primary (network_address, network_key) and its workers keyed by worker id, with the addresses and keys from its node-info.yaml."
+        return 1
+    fi
+    edit_log "Checking ${src} with the node binary (${EDIT_SPEC})"
+    msg="$(tn_trusted_nodes_node_check "$EDIT_SPEC" "$tmp")" || rc=$?
+    if [[ $rc -eq 1 ]]; then
+        edit_error "the node rejects ${src} as a trusted nodes map (${msg}; the line and column count in that file). Each network_key and network_address (its IP address and /p2p peer id) must be the hub's own, as in its node-info.yaml, and no field may appear twice."
+        return 1
+    elif [[ $rc -ne 0 ]]; then
+        edit_error "could not check ${src} with the node binary: ${msg}"
         return 1
     fi
     if [[ -f "$dest" && ! -L "$dest" ]] && cmp -s "$tmp" "$dest"; then

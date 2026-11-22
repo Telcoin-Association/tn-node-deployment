@@ -254,6 +254,8 @@ Every other script, library and UI file keeps its version. The runbook for the g
 - Fix for the same `committee_peers` gap as in [setup-node 2.1.4](#setup-node-214): `--set admission=`, `--set trusted_nodes=` and `--set bootstrap_peers=` (and the menu items and the Node Manager UI path that reach them) write the bootstrap peers map as `committee_peers` only when it lists every validator of the genesis `committee.yaml`.
   A map that lists fewer is installed and put on the start line as before, the edit goes on with a warning, and `network-config` gets no `committee_peers`, so the node starts instead of exiting at epoch 0.
 - `--set trusted_nodes=` refuses, besides the shapes it refused before, a `network_address` that is a DNS name (`/dns`, `/dns4`, `/dns6`, `/dnsaddr`), uses TCP or is no multiaddr, naming the line and the entry; the node would never dial a hub given by name, and stops at start on a malformed address.
+  It also refuses worker ids other than those of the node's workers, and a map the installed release's parser rejects, quoting the node's reason; a map with CRLF line ends or a byte order mark, which it refused before, is taken.
+  A quoted field name (`"primary":`) is taken, and UDP port 0, which the node never dials, is refused; so is a DNS name on the line after `network_address:` in a bootstrap peers map.
   `--set bootstrap_peers=` (and the menu and the Node Manager UI path that reach it) refuses the same addresses before the node's parse check, which takes them.
   The shape check now lives in `lib/common.sh`, shared with setup-node.
 - `--set gateway_upstream=<ipv4[,ipv4...]>` is for a validator whose gateway runs on another
@@ -336,6 +338,7 @@ Every other script, library and UI file keeps its version. The runbook for the g
   Setup checked only that the file existed, was readable and was small enough, so a hub entry pasted whole from `node-info.yaml` (workers as a list, beside `name` and the other fields), one without a `network_key` and one whose address was a DNS name were installed and written into `network-config` with exit 0.
   The node then exited at start on the first two (`Error: bad yaml data`), and with a `/dns4/...` hub it started but never dialed it, saying so only at debug log level, while the P2P committee allowlist took no address from it.
   Setup now runs edit-config's shape check on the map in its preflight, before key generation or any install step, on a map it reads back from `.node-meta` on a re-run, and again just before the install, and stops with `--trusted-nodes: <reason>.` naming the line and the entry; nothing is written and the node is not started.
+  The check holds the worker ids to those of the node's workers (`0` alone for one), and just before the install the release's own parser reads the map, so a bad BLS key, `network_key`, IP literal or peer id, a field given twice or a stray deeper line stops setup with the node's reason before `network-config` is written or a running node restarted.
   The check also refuses an address that is not an IP address with UDP and QUIC v1 (a DNS name, TCP, a value that is no multiaddr): `the network_address of <key>... is a DNS name (...): the node does not resolve names, so it would never dial it. Give the IP address instead; ...`.
   A `--bootstrap-peers` map is held to the same address rule before the release's parser, which accepts such an address.
 - Mainnet validators can generate their keys before the mainnet genesis exists (OPERATOR.md section 2.12).
@@ -418,6 +421,7 @@ Every other script, library and UI file keeps its version. The runbook for the g
 - New `tn_trusted_nodes_shape_ok FILE`, the trusted nodes map's shape check, moved here from edit-config so setup-node runs the same one, and new `tn_map_addr_check FILE`, which it calls.
   `tn_map_addr_check` refuses a `network_address` that is not `/ip4/<address>/udp/<port>/quic-v1` or the same with `/ip6`, with an optional `/p2p/<peer id>`: a DNS name (`/dns`, `/dns4`, `/dns6`, `/dnsaddr`), which the node keeps and never dials because it does not resolve names, a `/tcp` address, which it does not dial either, and a value the node stops on.
   Each refusal names the line, the entry's BLS key shortened and the address; both scripts list the two functions in their library checks.
+- New `tn_trusted_nodes_node_check SPEC FILE`: the release of SPEC parses a trusted nodes map as a `--bootstrap-peers` value, its workers turned into a list; and `tn_local_worker_count DATA_DIR`, the number of workers `node-info.yaml` lists (1 before there is one), which `tn_trusted_nodes_shape_ok FILE [WORKERS]` now takes.
 - New `readonly TN_MAINNET_KEYGEN_ENABLED=1` and `tn_mainnet_keygen_enabled`: while `TN_MAINNET_ENABLED` is 0, they open setup-node's mainnet keygen and nothing else; at 0 that keygen is refused as before.
 
 ### Node Manager UI 2.1.3

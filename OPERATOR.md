@@ -527,7 +527,8 @@ One correct entry, for a hub with one worker, with the values taken from the hub
 
 - It must be a regular file of at most 64 KiB that other users can read (`chmod 644`), as for the peers map (section 2.7).
 - Setup installs it as `/etc/telcoin/trusted-nodes.yaml` (root 0644) and writes it into `network-config` under `trusted_nodes`.
-- `setup-node.sh` and `edit-config.sh` check its shape with one check before they write anything: keys of 131 or 132 base58 characters, each named once, `primary` and `workers` as above with at least one worker id from 0 to 65535, block YAML only, and every `network_address` an IP address as above.
+- `setup-node.sh` and `edit-config.sh` check its shape with one check before they write anything: keys of 131 or 132 base58 characters, each named once, `primary` and `workers` as above with the worker ids of the workers this node runs (`0` alone for the one worker setup installs), block YAML only (a byte order mark and CRLF line ends are fine), and every `network_address` an IP address as above.
+  The node binary then reads the map too, before network-config is written or a running node restarted, and judges every BLS key, `network_key` and `network_address` as it does at start; its refusal reads `--trusted-nodes: <the node binary> does not read <file> (<the node's reason>; the line and column count in that file). ...` at setup, `the node rejects <file> as a trusted nodes map (<the node's reason>; ...)` in `edit-config.sh`.
   Setup runs it in the preflight, before any key generation or install step, on a map it reads back from `.node-meta` on a re-run, and again just before the install; `edit-config.sh` runs it on a root-only copy.
   A refusal writes nothing, restarts nothing and names the line and the entry, with the key shortened: `--trusted-nodes: <reason>.` at setup, `<file> is not a trusted nodes map: <reason>. Each key is a hub's BLS public key, and each entry the hub's primary (network_address, network_key) and its workers keyed by worker id, with the addresses and keys from its node-info.yaml.` in `edit-config.sh`.
   For a name the reason reads `line <n>: the network_address of <key>... is a DNS name (<address>...): the node does not resolve names, so it would never dial it. Give the IP address instead; the node takes /ip4/<address>/udp/<port>/quic-v1/p2p/<peer id> (or /ip6/...), as node-info.yaml writes it`.
@@ -588,8 +589,9 @@ sudo bash ~/telcoin-node-scripts/edit-config.sh --set admission=closed
 
 - `MIN_ADMISSION_VERSION` (0.17.0) is a placeholder until the node team names the first release that reads the entries; `setup-node.sh --help` and `edit-config.sh --help` repeat it.
 - `committee_peers` comes from the bootstrap peers map and is written only when that map lists the whole genesis committee (above); a map that lists fewer keeps the node starting but leaves it without a launch inventory.
-- The shape check is the scripts' own, since the node has no check flag for the file; it takes block YAML only, so a JSON or flow-style map is refused, and the node still stops at start on a map that passes it with too few worker ids or a peer id that is not one.
-  A node-side check of the file would replace it.
+- The node has no check flag for the file, so the scripts check its shape themselves and have the node binary parse it as a bootstrap peers map, which holds the same entries; block YAML only, so a JSON or flow-style map is refused.
+  The node still stops at start on a map that passes both when a `/p2p` peer id is not the one of its `network_key`, or a network key is this node's or another hub's, which the node checks only at start: `edit-config.sh` then rolls the change back, but a `setup-node.sh` re-run over a running node leaves it stopped until the map is fixed.
+  A node-side check of the file would replace both.
 - When the release cannot be told, `--admission` and the two edits warn and write anyway rather than stop.
 - A Docker finalize without `--release-tag` asks the image registry which release the recorded image belongs to, because keygen records no release tag; when that lookup fails, it cannot tell the release and warns.
 - `update-node.sh` does not check the floor: an update to a release below 0.17.0 leaves the settings in `network-config`, where that release ignores them.

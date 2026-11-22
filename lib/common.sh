@@ -3237,23 +3237,28 @@ tn_committee_peers_check() {
     return 1
 }
 
-# tn_trusted_nodes_shape_ok FILE -- rc 0 when FILE has the shape of the node's
-# trusted nodes map in block YAML: top-level keys that are BLS public keys
+# tn_trusted_nodes_shape_ok FILE [WORKERS] -- rc 0 when FILE has the shape of the
+# node's trusted nodes map in block YAML: top-level keys that are BLS public keys
 # (base58 of the 96-byte key, 131 or 132 characters, as node-info.yaml writes
 # them), each named once and holding primary and workers and nothing else (the
-# node refuses unknown fields there). primary has a network_address and a
-# network_key that are not empty; workers holds at least one worker id (a whole
-# number from 0 to 65535, each once), each a block with a network_address and a
+# node refuses unknown fields there; a field name may be quoted). primary has a
+# network_address and a network_key that are not empty; workers holds the worker
+# ids 0 to WORKERS-1 and no others (WORKERS, default 1, is how many workers this
+# node runs, tn_local_worker_count: the node stops at start on any other set), each
+# id a plain number named once and a block with a network_address and a
 # network_key of its own. So an entry copied whole from a node-info.yaml, whose
 # workers are a list, is refused. Every network_address is one the node can
 # dial (tn_map_addr_check). Comments, blank lines and a leading "---" may
-# appear. The node has no check flag for this map, so setup-node and
-# edit-config run this before they install one; a map that passes and is still
-# wrong stops the node at start. Otherwise rc 1, with the reason on stdout.
+# appear, and a byte order mark and CRLF line ends are read past, as the
+# renderer drops them. The node has no check flag for this map, so setup-node and
+# edit-config run this, then tn_trusted_nodes_node_check, before they install
+# one; a map that passes both and is still wrong stops the node at start.
+# Otherwise rc 1, with the reason on stdout.
 tn_trusted_nodes_shape_ok() {
-    local out rc=0
+    local out rc=0 nwk="${2:-1}"
+    [[ "$nwk" =~ ^[1-9][0-9]{0,4}$ ]] || nwk=1
     # the awk text holds no single quote; sq carries one
-    out="$(awk -v sq="'" '
+    out="$(awk -v sq="'" -v nwk="$nwk" '
         function short(k) { return (length(k) > 16) ? substr(k, 1, 16) "..." : k }
         function fail(msg) { reason = msg; failed = 1; exit }
         # what the current worker still lacks once it ends
@@ -3273,6 +3278,7 @@ tn_trusted_nodes_shape_ok() {
             if (!nkey) return "the primary of " short(key) " has no network_key"
             if (!work) return "the entry " short(key) " has no workers"
             if (!nw) return "the workers of " short(key) " name no worker id"
+            if (nw < nwk) return "the workers of " short(key) " name " nw " of the " nwk " workers this node runs: each entry holds " wl
             return ""
         }
         # whether the value after the first colon is something other than null
@@ -3282,9 +3288,17 @@ tn_trusted_nodes_shape_ok() {
             sub(/[ \t]+$/, "", s)
             return !(s == "" || s == "~" || s == "null" || s == "\"\"" || s == sq sq)
         }
+        BEGIN {
+            bom = "\357\273\277"
+            nwk += 0
+            wl = (nwk == 1) ? "worker 0 alone" : "workers 0 to " (nwk - 1)
+        }
         {
             s = $0
-            if (s ~ /\r$/) fail("line " NR " ends in a carriage return; save the file with plain line ends")
+            # read as tn_network_config_render reads the map: a byte order mark and
+            # CRLF line ends, which a file saved on Windows may carry, are not in it
+            if (NR == 1 && index(s, bom) == 1) s = substr(s, length(bom) + 1)
+            sub(/\r$/, "", s)
             if (s ~ /^[ \t]*$/ || s ~ /^[ \t]*#/) next
             if (s ~ /^(---|[.][.][.])[ \t]*$/) {
                 if (seen) ended = 1
@@ -3295,6 +3309,9 @@ tn_trusted_nodes_shape_ok() {
             if (s ~ /^ *\t/) fail("line " NR " is indented with a tab; YAML indents with spaces")
             match(s, /^ */)
             ind = RLENGTH
+            # a quoted field name ("primary":) is the same field to the node
+            if (ind > 0 && match(s, "^ *[\"" sq "][a-z_]+[\"" sq "]"))
+                s = substr(s, 1, ind) substr(s, ind + 2, RLENGTH - ind - 2) substr(s, RLENGTH + 1)
             if (ind == 0) {
                 m = lacks()
                 if (m != "") fail(m)
@@ -3369,8 +3386,10 @@ tn_trusted_nodes_shape_ok() {
                     c = substr(s, ind + 1)
                     id = c
                     sub(/[ \t]*:.*$/, "", id)
-                    if (id !~ /^[0-9]+$/ || id + 0 > 65535)
-                        fail("line " NR ": " short(id) " is not a worker id; the workers of " short(key) " are keyed by numbers from 0 to 65535")
+                    if (id !~ /^(0|[1-9][0-9]*)$/)
+                        fail("line " NR ": " short(id) " is not a worker id; the workers of " short(key) " are keyed by plain numbers from 0, as 0, 1, 2")
+                    if (id + 0 >= nwk)
+                        fail("line " NR ": worker " id " of " short(key) " is not one this node runs: it runs " nwk " worker" (nwk == 1 ? "" : "s") ", so each entry holds " wl " (the node stops at start on any other worker id)")
                     if (c !~ /^[0-9]+[ \t]*:[ \t]*(#.*)?$/)
                         fail("line " NR ": write worker " id " of " short(key) " as a block, with network_address and network_key on their own lines below it")
                     if ((id + 0) in wids) fail("line " NR ": the entry " short(key) " has worker " id " twice")
@@ -3410,22 +3429,75 @@ tn_trusted_nodes_shape_ok() {
     tn_map_addr_check "$1"
 }
 
+# tn_trusted_nodes_node_check SPEC FILE -- rc 0 when the node binary of runner SPEC
+# reads every entry of FILE, a trusted nodes map tn_trusted_nodes_shape_ok passed.
+# The node has no check flag for this map, but its entries and those of a
+# --bootstrap-peers map are one entry type (a primary and workers, each a
+# network_address and a network_key), so FILE goes to tn_node_parse_check as a
+# --bootstrap-peers map: line for line, read as the shape check reads it, with each
+# worker id turned into a list item ("0:" becomes "-"). The node then parses every
+# BLS key, network_key and network_address (its IP literal and /p2p peer id) and
+# every YAML line as it does at start, and a refusal names a line of FILE. It
+# cannot see what the node checks only at start: the worker ids (the shape check
+# holds them to 0, 1, ...), whether a /p2p peer id is the one of its network_key,
+# and whether a network key is this node's or another hub's. rc 1 refused, with the
+# node's reason on stdout; rc 4 the check could not run.
+tn_trusted_nodes_node_check() {
+    local map out rc=0
+    # the awk text holds no single quote; sq carries one
+    map="$(awk -v sq="'" '
+        BEGIN { bom = "\357\273\277"; wk = -1 }
+        {
+            s = $0
+            if (NR == 1 && index(s, bom) == 1) s = substr(s, length(bom) + 1)
+            sub(/\r$/, "", s)
+            match(s, /^ */)
+            ind = RLENGTH
+            t = substr(s, ind + 1)
+            if (t != "" && t !~ /^[ \t]*#/) {
+                if (wk >= 0 && ind <= wk) wk = -1
+                if (wk >= 0 && wi < 0) wi = ind
+                if (wk >= 0 && ind == wi) s = substr(s, 1, ind) "-"
+                else if (ind > 0 && t ~ ("^[\"" sq "]?workers[\"" sq "]?[ \t]*:")) { wk = ind; wi = -1 }
+            }
+            print s
+        }' "$2" 2>/dev/null)" || { printf 'could not read %s\n' "$2"; return 4; }
+    out="$(tn_node_parse_check "$1" --bootstrap-peers "$map")" || rc=$?
+    # the reason, without the flag the map went in through
+    out="${out#error: }"
+    printf '%s\n' "${out#"invalid value '…' for '--bootstrap-peers <MAP>': "}"
+    return "$rc"
+}
+
+# tn_local_worker_count DATA_DIR -- how many workers the node of DATA_DIR runs: the
+# workers its node-info.yaml lists (tn_node_info_worker_ports), or 1 before there is
+# one, as setup-node generates the keys of one worker.
+tn_local_worker_count() {
+    local ports
+    ports="$(tn_node_info_worker_ports "${1%/}/node-info.yaml" 2>/dev/null)" || ports=""
+    if [[ -z "$ports" ]]; then
+        printf '1\n'
+        return 0
+    fi
+    printf '%s\n' "$ports" | awk 'END { print NR }'
+}
+
 # tn_map_addr_check FILE -- rc 0 when every network_address in the trusted nodes
 # or bootstrap peers map FILE is one the node can dial:
 # /ip4/<address>/udp/<port>/quic-v1 or /ip6/<address>/udp/<port>/quic-v1,
 # optionally followed by /p2p/<peer id>, as node-info.yaml writes them. The
 # node's P2P transport is QUIC over IP and nothing else. It starts with an
-# address that names a host (/dns, /dns4, /dns6, /dnsaddr) or another transport
-# (/tcp) and keeps it, but never dials it and says so only at debug log level,
-# and the P2P committee allowlist takes no address from a host name. A value
-# that is no multiaddr, or a peer id with a character outside letters and
-# digits, stops the node at start. The node's own parse check of a peers map
-# (node --bootstrap-peers MAP --help) accepts the first two. The map is read
-# line by line, block or flow YAML: a value may be quoted, a "#" comment is not
-# read, and the entry a refusal names is the last key at column 0 above the
-# address. Otherwise rc 1, with the first refusal on stdout: its line, the
-# entry's BLS key and the address (both shortened) and what the node takes
-# instead.
+# address that names a host (/dns, /dns4, /dns6, /dnsaddr), another transport
+# (/tcp) or UDP port 0 and keeps it, but never dials it and says so only at
+# debug log level, and the P2P committee allowlist takes no address from a host
+# name. A value that is no multiaddr, or a peer id with a character outside
+# letters and digits, stops the node at start. The node's own parse check of a
+# peers map (node --bootstrap-peers MAP --help) accepts the first three. The map
+# is read line by line, block or flow YAML: a value may be quoted or on the line
+# after its key, a "#" comment is not read, and the entry a refusal names is the
+# last key at column 0 above the address. Otherwise rc 1, with the first
+# refusal on stdout: its line, the entry's BLS key and the address (both
+# shortened) and what the node takes instead.
 tn_map_addr_check() {
     local out rc=0
     # the awk text holds no single quote; sq carries one
@@ -3447,7 +3519,7 @@ tn_map_addr_check() {
             } else if (p[2] == "ip6") {
                 if (p[3] !~ /^[0-9A-Fa-f:.]+$/ || p[3] !~ /:/) return 0
             } else return 0
-            if (p[4] != "udp" || p[5] !~ /^[0-9]+$/ || length(p[5]) > 5 || p[5] + 0 > 65535) return 0
+            if (p[4] != "udp" || p[5] !~ /^[0-9]+$/ || length(p[5]) > 5 || p[5] + 0 > 65535 || p[5] + 0 == 0) return 0
             if (p[6] != "quic-v1") return 0
             if (n == 8 && (p[7] != "p2p" || p[8] !~ /^[0-9A-Za-z]+$/)) return 0
             return 1
@@ -3462,9 +3534,12 @@ tn_map_addr_check() {
                 sub(/"?[ \t]*:.*$/, "", key)
                 sub(/^"/, "", key)
             }
+            # a value on the line after "network_address:" is that address
+            if (pend && s ~ /[^ \t]/) { pend = 0; sub(/^[ \t]*/, "network_address: ", s) }
             t = s
             while (match(t, /network_address"?[ \t]*:[ \t]*/)) {
                 t = substr(t, RSTART + RLENGTH)
+                pend = (t == "")
                 v = t
                 if (substr(v, 1, 1) == "\"") {
                     v = substr(v, 2)

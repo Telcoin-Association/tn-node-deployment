@@ -179,7 +179,14 @@ tn_host_baseline_refresh() { :; }
 tn_local_rpc_url() { printf 'http://127.0.0.1:8545\n'; }
 tn_launch_runner() { printf '%s\n' "${ECA_SPEC:-binary:$ECA_DIR/fx/opt/telcoin/telcoin-network}"; }
 tn_node_has_flag() { return 0; }
-tn_node_parse_check() { return 0; }
+# the node's parse check: the map it is given goes to parse.map; ECA_PARSE_ERR
+# makes it refuse with that reason, as clap words it
+tn_node_parse_check() {
+    printf '%s\n' "$3" > "$ECA_DIR/parse.map"
+    [ -z "${ECA_PARSE_ERR:-}" ] && return 0
+    printf "error: invalid value '…' for '--bootstrap-peers <MAP>': %s\n" "$ECA_PARSE_ERR"
+    return 1
+}
 edit_require_root() { :; }
 edit_lock() { EDIT_LOCK_HELD=true; return 0; }
 resolve_target() {
@@ -456,8 +463,6 @@ hub "$K1" 10 | sed 's|network_address: .*|network_address: ~|' > "$T/in/bad.yaml
 bad "null address" "the network_address of"
 { hub "$K1" 10; printf -- '---\n'; hub "$K2" 11; } > "$T/in/bad.yaml"
 bad "second document" "starts a second YAML document"
-hub "$K1" 10 | awk '{ printf "%s\r\n", $0 }' > "$T/in/bad.yaml"
-bad "CRLF" "ends in a carriage return"
 printf '# no hubs yet\n---\n' > "$T/in/bad.yaml"
 bad "no entries" "holds no BLS public key entries"
 printf '  %s:\n' "$K1" > "$T/in/bad.yaml"
@@ -473,7 +478,9 @@ wk() { printf '    %s:\n      network_address: /ip4/203.0.113.10/udp/49594/quic-
 { prim "$K1"; printf '  workers:\n'; wk zero; } > "$T/in/bad.yaml"
 bad "worker id not a number" "zero is not a worker id; the workers of"
 { prim "$K1"; printf '  workers:\n'; wk 70000; } > "$T/in/bad.yaml"
-bad "worker id past 65535" "70000 is not a worker id"
+bad "worker id past 65535" "worker 70000 of ${K1:0:16}... is not one this node runs: it runs 1 worker, so each entry holds worker 0 alone"
+{ prim "$K1"; printf '  workers:\n'; wk 0; wk 1; } > "$T/in/bad.yaml"
+bad "workers 0 and 1 on a node of one worker" "worker 1 of ${K1:0:16}... is not one this node runs"
 { prim "$K1"; printf '  workers:\n'; wk '"0"'; } > "$T/in/bad.yaml"
 bad "worker id quoted" "is not a worker id"
 for v in '~' '{}' 0; do
@@ -496,11 +503,29 @@ bad "worker without network_address, then another field" "has no network_address
 bad "worker in flow style" "write worker 0 of"
 { prim "$K1"; printf '  workers:\n'; wk 0 | sed 's|network_address: .*|network_address: ""|'; } > "$T/in/bad.yaml"
 bad "worker with an empty network_address" "the network_address of worker 0 of"
-# what the node takes: a 132-character key, several workers, the last id 65535
-{ prim "${K1}a"; printf '  workers:\n'; wk 0; wk 1; printf '    65535:   # the last id\n      network_address: /ip4/203.0.113.10/udp/49599/quic-v1\n      network_key: 4XTTMhubx\n      rpc: {}\n'; } > "$T/in/good.yaml"
+# what the node takes: a 132-character key, the worker ids of the workers its
+# node-info.yaml lists (one when there is none), an rpc field
+{ prim "${K1}a"; printf '  workers:\n    0:   # the one worker\n      network_address: /ip4/203.0.113.10/udp/49599/quic-v1\n      network_key: 4XTTMhubx\n      rpc: {}\n'; } > "$T/in/good.yaml"
 chmod 0644 "$T/in/good.yaml"
 drv set "trusted_nodes=$T/in/good.yaml"
-check "a 132-character key and workers 0, 1 and 65535: installed" "0 yes" "$RC $(cmp -s "$T/in/good.yaml" "$DEST" && echo yes)"
+check "a 132-character key and worker 0: installed" "0 yes" "$RC $(cmp -s "$T/in/good.yaml" "$DEST" && echo yes)"
+check "the node is given the map with its workers as a list" "$(sed 's/^    0:   # the one worker$/    -/' "$T/in/good.yaml")" "$(cat "$T/parse.map")"
+printf 'p2p_info:\n  primary:\n    network_address: /ip4/127.0.0.1/udp/49590/quic-v1\n    network_key: k\n  workers:\n    - network_address: /ip4/127.0.0.1/udp/49594/quic-v1\n      network_key: k0\n    - network_address: /ip4/127.0.0.1/udp/49595/quic-v1\n      network_key: k1\n' > "$DD/node-info.yaml"
+{ prim "$K1"; printf '  workers:\n'; wk 0; wk 1; } > "$T/in/two.yaml"
+chmod 0644 "$T/in/two.yaml"
+drv set "trusted_nodes=$T/in/two.yaml"
+check "workers 0 and 1 on a node whose node-info.yaml lists two: installed" "0 yes" "$RC $(cmp -s "$T/in/two.yaml" "$DEST" && echo yes)"
+cp "$T/in/good.yaml" "$T/in/bad.yaml"
+bad "worker 0 alone on a node of two workers" "the workers of ${K1:0:16}... name 1 of the 2 workers this node runs: each entry holds workers 0 to 1"
+rm -f "$DD/node-info.yaml"
+hub "$K1" 10 | awk '{ printf "%s\r\n", $0 }' > "$T/in/good.yaml"
+drv set "trusted_nodes=$T/in/good.yaml"
+check "CRLF line ends: installed as given, the node given the map without them" "0 yes yes" \
+    "$RC $(cmp -s "$T/in/good.yaml" "$DEST" && echo yes) $(hub "$K1" 10 | sed 's/^    0:$/    -/' | cmp -s - "$T/parse.map" && echo yes)"
+hub "$K1" 10 > "$T/in/bad.yaml"
+export ECA_PARSE_ERR="data did not match any variant of untagged enum PrimaryWorkersRepr at line 1 column 132"
+bad "the node binary refuses it" "the node rejects $T/in/bad.yaml as a trusted nodes map (data did not match any variant of untagged enum PrimaryWorkersRepr at line 1 column 132; the line and column count in that file)"
+unset ECA_PARSE_ERR
 hub "$K1" 10 > "$T/in/bad.yaml"
 chmod 0600 "$T/in/bad.yaml"
 snap
@@ -515,14 +540,20 @@ mkdir -p "$T/shapes"
 reset ADMISSION_MODE=closed
 while read -r class name reason; do
     shape_map "$name" "$K1" "$K2" > "$T/shapes/${name}.yaml"
-    if [[ "$class" == kept ]]; then
+    if [[ "$class" == kept || "$class" == start ]]; then
         chmod 0644 "$T/shapes/${name}.yaml"
         drv set "trusted_nodes=$T/shapes/${name}.yaml"
-        check "shape ${name}: installed and rendered" "0 yes yes" \
+        check "shape ${name}, ${class}: installed and rendered" "0 yes yes" \
             "$RC $(cmp -s "$T/shapes/${name}.yaml" "$DEST" && echo yes) $(has "$(calls)" "render $DD closed $DEST none")"
         continue
     fi
     cp "$T/shapes/${name}.yaml" "$T/in/bad.yaml"
+    if [[ "$class" == node ]]; then
+        export ECA_PARSE_ERR="$reason"
+        bad "shape ${name}, ${class}" "the node rejects $T/in/bad.yaml as a trusted nodes map (${reason}"
+        unset ECA_PARSE_ERR
+        continue
+    fi
     bad "shape ${name}, ${class}" "$reason"
     if [[ "$class" == new ]]; then
         check "shape ${name}: the refusal names the entry" yes "$(has "$OUT" "of ${K1:0:16}...")"
