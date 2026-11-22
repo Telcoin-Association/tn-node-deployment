@@ -894,6 +894,17 @@ fresh_flags; FW_SSH_FROM="203.0.113.0/24, 192.0.2.1"; FW_P2P_ANYWHERE=true
 FW_SSH_SRCS=("203.0.113.0/24" "192.0.2.1")
 fw_persist_sources
 check "persist writes the lists" "set SSH_ALLOW_FROM 203.0.113.0/24,192.0.2.1
-unset P2P_ALLOW_FROM" "$(cat "$META_CALLS")"
+unset P2P_ALLOW_FROM
+unset P2P_PER_SOURCE" "$(cat "$META_CALLS")"
+# a P2P list given again ends the kill switch's set-aside (P2P_PER_SOURCE=off)
+: > "$META_CALLS"
+fresh_flags; FW_P2P_FROM="198.51.100.7"; FW_P2P_SRCS=("198.51.100.7")
+fw_persist_sources
+check "persist: --p2p-from writes the list and removes P2P_PER_SOURCE" "set P2P_ALLOW_FROM 198.51.100.7
+unset P2P_PER_SOURCE" "$(cat "$META_CALLS")"
+: > "$META_CALLS"
+fresh_flags; FW_SSH_FROM="192.0.2.1"; FW_SSH_SRCS=("192.0.2.1")
+fw_persist_sources
+check "persist: no P2P flag leaves P2P_PER_SOURCE alone" "set SSH_ALLOW_FROM 192.0.2.1" "$(cat "$META_CALLS")"
 
 finish

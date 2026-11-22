@@ -211,6 +211,11 @@ Every other script, library and UI file keeps its version. The runbook for the g
 - `--enable` works on a host with a gateway and no node: SSH, 80 and 443, no P2P and no health
   rule. Such a host keeps its SSH source list in the gateway's meta file, so a replaced list has
   its old sources removed and a plain `--enable` applies it again.
+- Fix for validators in P2P committee mode with a static source list.
+  `--p2p-committee off`, the kill switch, turned `P2P_ALLOW_FROM` back into per-source `ufw` rules and deleted the open rule, so every committee peer outside that list lost the P2P ports (seen on ufw and nftables: 3 of 3 datagrams before `off`, 0 of 3 after).
+  `off` now opens the P2P ports to every source behind the new-flow limit, whatever the list holds and whether or not the ports took only that list before committee mode.
+  The list stays in `.node-meta` for the next `on`, and the new key `P2P_PER_SOURCE=off` keeps later `--enable` and `--reset` runs from applying it to `ufw` until `--enable --p2p-from <list>` (or `--p2p-anywhere`) removes the key.
+  The undo of an unfinished `on` still puts the rules from before it back.
 
 ### edit-config 2.2.2
 

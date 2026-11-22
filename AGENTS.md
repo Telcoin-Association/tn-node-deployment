@@ -335,7 +335,11 @@ Rules for any code that touches it:
 - Never hold the tool's lock (`/var/lib/telcoin-p2p-allow/lock`) while the binary runs: a second open file description conflicts with the tool's own `flock`, and the tool skips its run as busy (exit 4).
   The timer never takes the update lock either; the verbs take the update lock (`fw_meta_lock`) and pass `--wait 30` to the tool.
 - `off` never runs the binary, so it works with the binary missing or broken and with an older library; it holds `flock -w 30` on the tool's lock itself around the table delete and the removal of the state dir.
-  It puts the non-committee P2P path back (`fw_p2p_allow`, `fw_p2p_limit_sync`) before it removes anything, and writes `P2P_COMMITTEE=off` last, so a partial `off` still reads as on and the next run finishes it.
+  It never makes P2P narrower: it opens the P2P ports to every source behind the new-flow limit (`fw_p2p_open`: each open rule before the per-source rules of `P2P_ALLOW_FROM` go, then `fw_p2p_limit_sync`) before it removes anything, whatever the static list holds and whether or not the ports took only that list before `on`, so a committee peer the allowlist admitted keeps its path.
+  `P2P_ALLOW_FROM` stays in `.node-meta` for committee mode; `fw_p2p_set_aside` records `P2P_PER_SOURCE=off` before the rules change, which makes `fw_sources p2p` give no list, so `--enable`, `--reset`, "Manage node ports" and the status keep P2P open until `--enable --p2p-from` (or `--p2p-anywhere`) removes the key in `fw_persist_sources`.
+  The allowlist config reads `P2P_ALLOW_FROM` itself and is not affected.
+  The undo of an unfinished `on` is not the kill switch: `fw_allow_undo_on` takes `fw_committee_teardown back`, the rules from before the run (`fw_p2p_allow`).
+  `off` writes `P2P_COMMITTEE=off` last, only after the allowlist is gone and `P2P_PER_SOURCE=off` is recorded, so a partial `off` still reads as on and the next run finishes it.
   `remove-node.sh` (`_rm_p2p_allow`) holds it the same way on fd 8; on a busy lock, one it cannot open, or no `flock`, it leaves the table and the state dir for a later run and warns.
   Both open the lock only when it is missing or a regular file, never through a symlink: a FIFO there would block the open, and a failed `exec 8>>` prints a raw shell error and ends a POSIX-mode shell.
 - The tool runs its `--nft` default, `/usr/sbin/nft` (`FW_ALLOW_NFT`), because neither the units nor the verbs pass `--nft`.

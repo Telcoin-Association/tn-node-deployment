@@ -33,8 +33,11 @@
 #      loaded again with nft -f and when a changed snapshot makes one
 #      --p2p-committee sync load a changed program.
 #   7. An element deleted by hand comes back after one --p2p-committee sync.
-#   8. --p2p-committee off: table inet tn_p2p, its boot copy and unit, and
-#      ufw's user.rules and user6.rules are byte-identical to before on, and no
+#   8. A static source given while committee mode is on (--enable --p2p-from,
+#      the advice for a peer behind NAT), then --p2p-committee off: the P2P
+#      ports stay open to every source, so table inet tn_p2p, its boot copy and
+#      unit, and ufw's user.rules and user6.rules are byte-identical to before
+#      on; P2P_ALLOW_FROM is kept and set aside (P2P_PER_SOURCE=off), and no
 #      unit, state dir or binary of the allowlist is left.
 # On exit everything this file made is removed and the files it replaced are
 # put back; ufw is turned off again when it was off before.
@@ -541,12 +544,20 @@ indent < "$T/fw.out"
 check_rc "firewall-setup.sh --p2p-committee sync" 0 "$rc"
 check "healed: allow_v4 is whole again" "$expect" "$(set_elems allow_v4)"
 
-step "8: firewall-setup.sh --p2p-committee off brings the earlier P2P firewall back byte for byte"
+step "8: a static source in committee mode, then firewall-setup.sh --p2p-committee off leaves the P2P ports open to every source"
+run_fw --enable --p2p-from 203.0.113.30
+rc=$?
+indent < "$T/fw.out"
+check_rc "firewall-setup.sh --enable --p2p-from 203.0.113.30 (committee mode on)" 0 "$rc"
+check_has "allow_v4 holds 203.0.113.30 (static host)" "203.0.113.30" "$(set_elems allow_v4)"
 run_fw --p2p-committee off
 rc=$?
 indent < "$T/fw.out"
 check_rc "firewall-setup.sh --p2p-committee off" 0 "$rc"
+check "off says the P2P ports are open to every source" "yes" "$(grep -q 'are open to every source\.' "$T/fw.out" && echo yes)"
 check ".node-meta says P2P_COMMITTEE=off" "P2P_COMMITTEE=off" "$(grep '^P2P_COMMITTEE=' /etc/telcoin/.node-meta)"
+check ".node-meta keeps P2P_ALLOW_FROM" "P2P_ALLOW_FROM=203.0.113.30" "$(grep '^P2P_ALLOW_FROM=' /etc/telcoin/.node-meta)"
+check ".node-meta sets it aside" "P2P_PER_SOURCE=off" "$(grep '^P2P_PER_SOURCE=' /etc/telcoin/.node-meta)"
 check "table inet tn_p2p_allow gone" "no" "$(table_loaded tn_p2p_allow)"
 check "table inet tn_p2p byte-identical to before on" "$(cat "$T/before/tn_p2p")" "$(nft list table inet tn_p2p 2>&1)"
 for f in "$LIMIT_FILE" "$UNIT_D/$LIMIT" /etc/ufw/user.rules /etc/ufw/user6.rules; do

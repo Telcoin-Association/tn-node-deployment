@@ -435,6 +435,7 @@ re-run of setup. The keys the scripts read back:
 | `SSH_ALLOW_FROM`, `P2P_ALLOW_FROM` | firewall-setup | The source lists of [Firewall Setup](#firewall-setup) |
 | `ENABLE_ALERTS` | setup-node, setup-alerts, remove-node | `true`, `pending` (asked for during setup, not enabled yet) or `false`; absent means off. See [Private alerts](#private-alerts-every-network) |
 | `P2P_COMMITTEE` | firewall-setup | `on` while the [P2P committee allowlist](#p2p-committee-allowlist) is on, `off` after `--p2p-committee off`; absent reads as off, and a key set twice is refused |
+| `P2P_PER_SOURCE` | firewall-setup | `off` after `--p2p-committee off` on a host with `P2P_ALLOW_FROM`: the P2P ports stay open to every address and the list only feeds the committee allowlist; `--p2p-from` or `--p2p-anywhere` removes it |
 
 A `.node-meta` saved with CRLF line endings (edited on Windows, say) is read correctly, and the next script that writes a key rewrites the file with LF endings.
 
@@ -864,6 +865,7 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh --enable --p2p-from /root/tn-
 - `--p2p-from CIDR[,CIDR]` or `--p2p-from FILE` allows the P2P ports from those sources only and removes the open rule for each port.
 - A file holds one or more entries per line, separated by commas; `#` starts a comment. Every entry must be an address or a CIDR of /8 or narrower, without leading zeros; the first bad entry stops the run before anything changes. An IPv6 entry must parse as Rust's `Ipv6Addr` parses it (`tn-p2p-allow-sync` reads `P2P_ALLOW_FROM` with that grammar): eight groups of 1 to 4 hex digits, or fewer around one `::`, with no zone (`%eth0`), brackets or dotted IPv4 tail (write `::ffff:192.0.2.1` as `::ffff:c000:201`), so a typo such as `2001:db8:::1` or `2001:db8::12345` is refused before anything is written.
 - The lists are stored in `.node-meta` as `SSH_ALLOW_FROM` and `P2P_ALLOW_FROM` and used by later runs. A new list replaces the stored one and deletes the rules of the sources it drops. `--ssh-anywhere` and `--p2p-anywhere` drop a stored list; neither can be combined with its `--*-from` flag.
+- After `--p2p-committee off` the stored P2P list is set aside (`P2P_PER_SOURCE=off`, see [P2P committee allowlist](#p2p-committee-allowlist)): later runs keep the P2P ports open to every address until `--p2p-from` gives a list again.
 - **Mainnet refuses to enable the firewall without an SSH source list**: give `--ssh-from` (or have `SSH_ALLOW_FROM` stored), or pass `--ssh-anywhere` to keep SSH open to every address on purpose. The Node Manager UI's `--json --enable` refuses the same way.
 
 `--enable` exits 0 when the rules are in place, 1 when it refused and changed nothing, 2 when a step failed and the old rules were restored, and 3 when even the restore failed (the message names the saved rule files).
@@ -940,9 +942,10 @@ It is a server task: the Node Manager UI shows the allowlist but cannot turn it 
   It exits 0 when the tool reports `result=applied` or `result=unchanged`, 1 when it refused (committee mode is off, the update lock is held, `P2P_COMMITTEE` is set twice), 2 when a step failed (with the tool's `reason=`), and 3 when the tool kept its last-good set (stale) or another run held the tool's lock.
 - `off` is the kill switch.
   It never runs the tool, so it works with the binary missing or broken and with an older library.
-  It puts the earlier P2P path back first (with a source list the per-source `ufw` rules return and the open rule goes; without one the new-flow limit and its boot copy return), then stops and removes the timer, the sync service and the boot unit, deletes the table and the state dir, removes the tool and only then records `P2P_COMMITTEE=off`.
-  `ufw`'s rule files and the limit files end byte for byte as they were before `on`.
-  Exit 0 off, 1 refused, 3 partly done: the message names the command that finishes it, and while the allowlist is not gone `P2P_COMMITTEE` stays `on`, so a rerun of `off` finishes it.
+  It first opens the P2P ports to every source behind the new-flow limit, whatever `P2P_ALLOW_FROM` holds and whether or not the ports took only that list before `on` (each open rule goes in before the per-source rules of the list go, then the limit and its boot copy return), then stops and removes the timer, the sync service and the boot unit, deletes the table and the state dir, removes the tool and only then records `P2P_COMMITTEE=off`.
+  On a host without a source list, `ufw`'s rule files and the limit files end byte for byte as they were before `on`.
+  With one, `P2P_ALLOW_FROM` stays for the next `on`, and `P2P_PER_SOURCE=off`, written before the rules change, keeps later `--enable`, `--reset` and "Manage node ports" runs from turning it into per-source rules until `--enable --p2p-from <list>` (which the message names) or `--p2p-anywhere`.
+  Exit 0 off, 1 refused, 3 partly done: the message names the command that finishes it, and while the allowlist is not gone or `P2P_PER_SOURCE=off` is not written `P2P_COMMITTEE` stays `on`, so a rerun of `off` finishes it.
 - `status` prints the allowlist lines of the status screen (also under "View current firewall status"): whether the table is loaded and what it holds, the last sync and its age, staleness and its reason, the two counters, and whether the timer and the boot unit are in place, each warning with the command that fixes it.
   `rpc-method-missing`, `snapshot-version-*`, `epoch-regressed` and `state-invalid` warn at once, and so do a failed last sync (`RESULT=error`, its reason named) and a failed last run of `telcoin-p2p-allow-sync.service` (exit 3 and 4 count as success), in check-node's words; any other reason once the tool reports the run stale.
 - Every writer of the tool's inputs resyncs, and only while `P2P_COMMITTEE` is on: `--enable`, `--reset`, the menu's enable and the UI's enable (after the source list is stored), `edit-config.sh` after an edit that changed `/etc/telcoin/node.env` (it holds the P2P listener addresses) or the bootstrap peers, and after the chain-config refresh (the genesis `committee.yaml` feeds the floor), each once the node came back from its restart, the menu's Restart node (an edit saved with "restart later" reaches the node only then), and `migrate-node-naming.sh` after it rewrote `RPC_PORT`.
@@ -2280,6 +2283,8 @@ Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
 - `--json --status` gains `gateway_from`, and the status screen and the expected rules show two
   rows per gateway source. A Caddyfile with the gateway site counts as a public edge, so 80 and
   443 survive a `--reset`. `--enable` works on a host with a gateway and no node.
+- Fix for validators in P2P committee mode with a static source list: `--p2p-committee off` turned `P2P_ALLOW_FROM` back into per-source rules and cut off every committee peer outside it.
+  It now opens the P2P ports to every source behind the new-flow limit, keeps the list for the next `on` and records `P2P_PER_SOURCE=off`, so later runs keep them open until `--enable --p2p-from <list>`.
 
 Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
 

@@ -11,8 +11,9 @@
 #       P2P committee allowlist: on lets only the sources the node's admission
 #       snapshot lists (plus the bootstrap floor and P2P_ALLOW_FROM) reach the P2P
 #       ports, and a timer keeps it in step with the committee; off is the kill
-#       switch back to the earlier P2P rules and new-flow limit; sync resyncs now;
-#       status prints its state.
+#       switch: the P2P ports open to every source behind the new-flow limit,
+#       whatever P2P_ALLOW_FROM holds (--enable --p2p-from applies a list to ufw
+#       again); sync resyncs now; status prints its state.
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -452,11 +453,12 @@ fw_p2p_all_open() {
 # whatever the source list, and nothing is deleted: the allowlist (nftables table
 # inet tn_p2p_allow, which holds the source list as static entries) drops every
 # source it does not list, ufw's open rule admits the rest, and per-source rules
-# already there stay for the way back. Otherwise, with a P2P source list
-# (--p2p-from, or P2P_ALLOW_FROM in .node-meta) it adds one rule per source and
-# port and then deletes the open rule of that port (IPv4 and IPv6 together). The
-# first ufw call that fails is reported (fw_try) and ends it with rc 1, so the
-# caller stops there; an unreadable source list is rc 1 too.
+# already there stay until the kill switch (fw_p2p_open). Otherwise, with a P2P
+# source list (--p2p-from, or P2P_ALLOW_FROM in .node-meta unless the kill
+# switch set it aside, see fw_sources) it adds one rule per source and port and
+# then deletes the open rule of that port (IPv4 and IPv6 together). The first
+# ufw call that fails is reported (fw_try) and ends it with rc 1, so the caller
+# stops there; an unreadable source list is rc 1 too.
 fw_p2p_allow() {
     local port label s
     fw_load_p2p_srcs || return 1
@@ -474,6 +476,49 @@ fw_p2p_allow() {
         fi
     done < <(fw_p2p_ports)
     return 0
+}
+
+# fw_p2p_open -- the kill switch's P2P rules: every P2P port open to every
+# source. Per port, the open rule goes in first and only then are the
+# per-source rules of the stored list (P2P_ALLOW_FROM in .node-meta, whatever
+# fw_sources says) deleted, so no source that reached the port loses it in
+# between. Other rules on the P2P ports stay. The first ufw call that fails is
+# reported (fw_try) and ends it with rc 1.
+fw_p2p_open() {
+    local port label s stored
+    local -a srcs=()
+    stored="$(addon_meta_get P2P_ALLOW_FROM 2>/dev/null)" || stored=""
+    while IFS= read -r s; do
+        s="${s//[[:space:]]/}"
+        [[ -n "$s" ]] || continue
+        fw_src_deletable "$s" && srcs+=("$s")
+    done <<< "$(printf '%s\n' "$stored" | tr ',' '\n')"
+    while read -r port label; do
+        [[ -n "$port" ]] || continue
+        fw_try "ufw allow ${port}/udp" ufw allow "${port}/udp" || return 1
+        for s in ${srcs[@]+"${srcs[@]}"}; do
+            fw_try "ufw delete allow from ${s} to any port ${port} proto udp" ufw delete allow from "$s" to any port "$port" proto udp || return 1
+        done
+    done < <(fw_p2p_ports)
+    return 0
+}
+
+# fw_p2p_set_aside -- record that the kill switch opened P2P: when
+# P2P_ALLOW_FROM in .node-meta holds a list, write P2P_PER_SOURCE=off, so the
+# runs after this one (--enable, --reset, "Manage node ports", the status) keep
+# the P2P ports open to every source (fw_sources) while the list still feeds the
+# committee allowlist, until --enable --p2p-from or --p2p-anywhere removes the
+# key (fw_persist_sources). The run itself applies no P2P source list from here
+# on (FW_P2P_SRCS empty). rc 0 written or nothing to write; 1 the write failed.
+fw_p2p_set_aside() {
+    local stored per
+    FW_P2P_SRCS=()
+    FW_P2P_LOADED=true
+    stored="$(addon_meta_get P2P_ALLOW_FROM 2>/dev/null)" || stored="unreadable"
+    [[ -n "$stored" ]] || return 0
+    per="$(addon_meta_get P2P_PER_SOURCE on 2>/dev/null)" || per=""
+    [[ "$per" == "off" ]] && return 0
+    meta_set P2P_PER_SOURCE off
 }
 
 # fw_port_ok VALUE -- 0 when VALUE is a decimal port 1-65535 without leading zeros.
@@ -516,12 +561,15 @@ fw_src_list() {
 # --ssh-from / --p2p-from / --gateway-from value of this run, else SSH_ALLOW_FROM /
 # P2P_ALLOW_FROM / GATEWAY_ALLOW_FROM in .node-meta, else nothing (anywhere for
 # ssh and p2p, no gateway source for gw). --ssh-anywhere / --p2p-anywhere /
-# --gateway-from none print nothing, and so does gw on a host with no node. On a
-# host with a worker gateway and no node (FW_GW_ONLY) the stored SSH list is
-# SSH_ALLOW_FROM in gateway.meta. rc 1 on an invalid entry or a key set more than
-# once (message on stderr).
+# --gateway-from none print nothing, and so does gw on a host with no node. So
+# does p2p when the kill switch set the stored list aside (P2P_PER_SOURCE=off in
+# .node-meta, fw_p2p_set_aside): the P2P ports stay open to every source, and
+# P2P_ALLOW_FROM only feeds the committee allowlist, until a --p2p-from list is
+# given again. On a host with a worker gateway and no node (FW_GW_ONLY) the
+# stored SSH list is SSH_ALLOW_FROM in gateway.meta. rc 1 on an invalid entry or
+# a key set more than once (message on stderr).
 fw_sources() {
-    local kind="$1" given anywhere key flag stored rc=0 where=".node-meta"
+    local kind="$1" given anywhere key flag stored per rc=0 where=".node-meta"
     case "$kind" in
         ssh) given="$FW_SSH_FROM"; anywhere="$FW_SSH_ANYWHERE"; key="SSH_ALLOW_FROM"; flag="--ssh-from" ;;
         p2p) given="$FW_P2P_FROM"; anywhere="$FW_P2P_ANYWHERE"; key="P2P_ALLOW_FROM"; flag="--p2p-from" ;;
@@ -545,6 +593,10 @@ fw_sources() {
         where="the worker gateway's gateway.meta"
         stored="$(tn_gateway_meta_get "$key")" || return 1
     else
+        if [[ "$kind" == "p2p" ]]; then
+            per="$(addon_meta_get P2P_PER_SOURCE on)" || return 1
+            [[ "$per" == "off" ]] && return 0
+        fi
         stored="$(addon_meta_get "$key")" || return 1
     fi
     [[ -n "$stored" ]] || return 0
@@ -1717,19 +1769,24 @@ fw_allow_uninstall() {
     return "$rc"
 }
 
-# fw_committee_teardown NODES [keep-binary] -- leave committee mode. The P2P ufw
-# rules and the new-flow limit go back to the non-committee path first
-# (FW_COMMITTEE_ACTIVE=false; fw_p2p_allow when a node is installed, which with
-# a source list brings its per-source rules back and deletes the open rule;
-# fw_p2p_limit_sync, which without one brings the limit and its boot copy
-# back), so P2P never goes without the filter that path uses; then
+# fw_committee_teardown NODES open|back [keep-binary] -- leave committee mode.
+# The P2P ufw rules and the new-flow limit go to the non-committee path first
+# (FW_COMMITTEE_ACTIVE=false), so P2P never goes without the filter that path
+# uses: with open, the kill switch's way, every P2P port open to every source
+# (fw_p2p_open, after fw_p2p_set_aside emptied this run's P2P source list); with
+# back, the undo of an unfinished on, the rules from before it (fw_p2p_allow,
+# which with a source list brings its per-source rules back and deletes the
+# open rule); both only when a node is installed. Then fw_p2p_limit_sync, which
+# without a source list brings the limit and its boot copy back, and
 # fw_allow_uninstall. rc 0; 1 a ufw rule failed (said; the allowlist is gone
 # anyway, and P2P takes what ufw has); 2 fw_allow_uninstall left something
 # (said).
 fw_committee_teardown() {
-    local nodes="$1" keep="${2:-}" rc=0 urc=0
+    local nodes="$1" way="$2" keep="${3:-}" rc=0 urc=0
     FW_COMMITTEE_ACTIVE=false
-    if [[ "$nodes" != "none" ]]; then
+    if [[ "$nodes" != "none" && "$way" == "open" ]]; then
+        fw_p2p_open || rc=1
+    elif [[ "$nodes" != "none" ]]; then
         fw_p2p_allow || rc=1
     fi
     fw_p2p_limit_sync "$nodes"
@@ -1739,14 +1796,15 @@ fw_committee_teardown() {
 }
 
 # fw_allow_undo_on NODES -- turn a committee mode that fw_committee_on did not
-# finish off again (fw_committee_teardown), keeping a binary that was there
-# before the run. rc as fw_committee_teardown.
+# finish off again (fw_committee_teardown back: the P2P rules from before the
+# run), keeping a binary that was there before the run. rc as
+# fw_committee_teardown.
 fw_allow_undo_on() {
     local keep="keep-binary"
     if [[ "$FW_ALLOW_BIN_CHANGED" == "new" ]]; then
         keep=""
     fi
-    fw_committee_teardown "$1" "$keep"
+    fw_committee_teardown "$1" back "$keep"
 }
 
 # fw_allow_fresh LINE -- rc 0 when LINE, a tn-p2p-allow-sync sync line, says
@@ -1925,7 +1983,7 @@ fw_committee_on() {
     else
         FW_ALLOW_INFLIGHT=""
         print_ok "P2P committee mode is on: only the sources the allowlist lists reach UDP $(fw_p2p_port_text) ($(fw_allow_summary "$line"))."
-        print_info "${FW_ALLOW_TIMER} syncs it every 5 minutes; sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee off returns to the earlier P2P rules."
+        print_info "${FW_ALLOW_TIMER} syncs it every 5 minutes; sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee off opens the P2P ports to every source again."
     fi
     fw_baseline_refresh
     return "$rc"
@@ -2021,20 +2079,23 @@ fw_committee_sync_run() {
     return 2
 }
 
-# fw_committee_off -- firewall-setup.sh --p2p-committee off, the kill switch: back
-# to the P2P rules of the non-committee path (fw_committee_teardown: ufw and the
+# fw_committee_off -- firewall-setup.sh --p2p-committee off, the kill switch: the
+# P2P ports open to every source, behind the new-flow limit, whatever the P2P
+# source list holds, so a committee peer the allowlist admitted is never cut off
+# (fw_p2p_set_aside records it as P2P_PER_SOURCE=off, which keeps the stored
+# list out of ufw on later runs; fw_committee_teardown open: ufw and the
 # new-flow limit first, then the units, the table, FW_ALLOW_DIR and the binary),
-# then P2P_COMMITTEE=off in .node-meta and the host baseline. It never runs
-# tn-p2p-allow-sync, so it also works with an older library. Nothing to do when
-# P2P_COMMITTEE is off and nothing of the allowlist is on the host. Until
-# P2P_COMMITTEE=off is written a stop is finished by fw_allow_on_exit. rc 0 off;
-# 1 refused, nothing changed (systemctl or flock missing, the new-flow rate or
-# burst or the P2P source list invalid, the update lock held elsewhere,
-# P2P_COMMITTEE set twice); 3
-# partly done (said; P2P_COMMITTEE stays as it was when the allowlist could not
-# be removed).
+# then P2P_COMMITTEE=off in .node-meta and the host baseline. P2P_ALLOW_FROM
+# stays for committee mode; --enable --p2p-from applies a list to ufw again. It
+# never runs tn-p2p-allow-sync, so it also works with an older library. Nothing
+# to do when P2P_COMMITTEE is off and nothing of the allowlist is on the host.
+# Until P2P_COMMITTEE=off is written a stop is finished by fw_allow_on_exit. rc
+# 0 off; 1 refused, nothing changed (systemctl or flock missing, the new-flow
+# rate or burst or the P2P source list invalid, the update lock held elsewhere,
+# P2P_COMMITTEE set twice); 3 partly done (said; P2P_COMMITTEE stays as it was
+# when the allowlist could not be removed or P2P_PER_SOURCE=off not written).
 fw_committee_off() {
-    local nodes mode t rc=0
+    local nodes mode t stored rc=0 arc=0
     for t in systemctl flock; do
         if ! command -v "$t" >/dev/null 2>&1; then
             fw_error "${t} is not installed, so P2P committee mode cannot be turned off here; nothing was changed."
@@ -2056,22 +2117,40 @@ fw_committee_off() {
         return 0
     fi
     FW_ALLOW_INFLIGHT="off"
-    fw_committee_teardown "$nodes" || rc=$?
-    # P2P_COMMITTEE=off only once the allowlist is gone, so a partial off still
-    # reads as on and the next run finishes it.
-    if [[ "$rc" -ne 2 ]] && ! meta_set P2P_COMMITTEE off; then
+    # The stored P2P source list is set aside before any rule changes, so this
+    # run and every later one keep the P2P ports open; a stop from here on is
+    # finished by fw_allow_on_exit, which opens them too.
+    fw_p2p_set_aside || arc=1
+    fw_committee_teardown "$nodes" open || rc=$?
+    # P2P_COMMITTEE=off only once the allowlist is gone and P2P_PER_SOURCE=off is
+    # recorded, so a partial off still reads as on and the next run finishes it.
+    if [[ "$rc" -ne 2 && "$arc" -ne 0 ]]; then
+        rc=5
+    elif [[ "$rc" -ne 2 ]] && ! meta_set P2P_COMMITTEE off; then
         rc=4
     fi
     FW_ALLOW_INFLIGHT=""
     fw_baseline_refresh
+    stored="$(addon_meta_get P2P_ALLOW_FROM 2>/dev/null)" || stored=""
     case "$rc" in
         0)
-            print_ok "P2P committee mode is off: the P2P ports take the earlier ufw rules and new-flow limit again."
+            if [[ "$nodes" == "none" ]]; then
+                print_ok "P2P committee mode is off."
+                return 0
+            fi
+            print_ok "P2P committee mode is off: UDP $(fw_p2p_port_text) are open to every source."
+            if [[ -n "$stored" ]]; then
+                print_info "P2P_ALLOW_FROM (${stored}) stays in .node-meta for committee mode but is no longer applied to ufw, even where the P2P ports took only that list before committee mode was turned on. To limit them to a source list again, run: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --enable --p2p-from ${stored}"
+            else
+                print_info "To limit them to a source list, run: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --enable --p2p-from <list>"
+            fi
             return 0 ;;
         1)
             fw_error "P2P committee mode is off, but the P2P ufw rules could not all be put back; run: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --enable" ;;
         2)
             fw_error "P2P committee mode was only partly turned off (see above); P2P_COMMITTEE stays ${mode}. Fix that and run: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee off" ;;
+        5)
+            fw_error "The P2P committee allowlist is removed and the P2P ports are open to every source, but P2P_PER_SOURCE=off could not be written to .node-meta, so P2P_COMMITTEE stays ${mode}; run: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee off" ;;
         *)
             fw_error "The P2P committee allowlist is removed, but P2P_COMMITTEE=off could not be written to .node-meta; run: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee off" ;;
     esac
@@ -2117,6 +2196,9 @@ fw_committee_report() {
     fi
     if [[ "$mode" != "on" ]]; then
         print_info "P2P committee allowlist: off (sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee on turns it on)"
+        if [[ "$(addon_meta_get P2P_PER_SOURCE on 2>/dev/null)" == "off" ]] && text="$(addon_meta_get P2P_ALLOW_FROM 2>/dev/null)" && [[ -n "$text" ]]; then
+            print_info "P2P source list: P2P_ALLOW_FROM (${text}) feeds only the allowlist since --p2p-committee off, so the P2P ports stay open to every source; --enable --p2p-from applies a list to ufw again"
+        fi
         return 0
     fi
     bin="${TN_P2P_ALLOW_BIN:-}"
@@ -2184,11 +2266,12 @@ fw_committee_report() {
 # fw_allow_on_exit RC -- the run is ending (exit RC) while fw_committee_on or
 # fw_committee_off was changing the mode (FW_ALLOW_INFLIGHT). An unfinished on
 # is undone (fw_allow_undo_on), unless P2P_COMMITTEE=on was written already; an
-# unfinished off is finished (fw_committee_teardown, P2P_COMMITTEE=off). Then the
+# unfinished off is finished (fw_p2p_set_aside, fw_committee_teardown open,
+# P2P_COMMITTEE=off). Then the
 # host baseline, when the binary, the new-flow limit or the mode changed.
 # Reported with fw_error either way. Never fails.
 fw_allow_on_exit() {
-    local rc="$1" what="$FW_ALLOW_INFLIGHT" nodes mode urc=0 refresh=true
+    local rc="$1" what="$FW_ALLOW_INFLIGHT" nodes mode urc=0 arc=0 refresh=true
     FW_ALLOW_INFLIGHT=""
     nodes="$(detect_installed_nodes)"
     case "$what" in
@@ -2205,8 +2288,9 @@ fw_allow_on_exit() {
                 fw_error "Stopped (exit ${rc}) while P2P committee mode was being turned on, and turning it off again did not finish; run: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee off"
             fi ;;
         off)
-            fw_committee_teardown "$nodes" >/dev/null 2>&1 || urc=$?
-            if [[ "$urc" -ne 2 ]] && meta_set P2P_COMMITTEE off >/dev/null 2>&1; then
+            fw_p2p_set_aside >/dev/null 2>&1 || arc=1
+            fw_committee_teardown "$nodes" open >/dev/null 2>&1 || urc=$?
+            if [[ "$urc" -ne 2 && "$arc" -eq 0 ]] && meta_set P2P_COMMITTEE off >/dev/null 2>&1; then
                 fw_error "Stopped (exit ${rc}) while P2P committee mode was being turned off; the removal was finished."
             else
                 fw_error "Stopped (exit ${rc}) while P2P committee mode was being turned off, and the removal did not finish; run: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee off"
@@ -2892,7 +2976,8 @@ fw_apply_rules() {
 # fw_persist_sources -- record the source lists given on this run in .node-meta
 # (SSH_ALLOW_FROM, P2P_ALLOW_FROM, GATEWAY_ALLOW_FROM as comma lists;
 # --ssh-anywhere / --p2p-anywhere / --gateway-from none remove the key), so a
-# later enable keeps them. On a host with a worker gateway and no node
+# later enable keeps them; --p2p-from and --p2p-anywhere also remove the kill
+# switch's P2P_PER_SOURCE=off (fw_p2p_set_aside). On a host with a worker gateway and no node
 # (FW_GW_ONLY) only the SSH list is kept, as SSH_ALLOW_FROM in gateway.meta (it
 # goes with the gateway: setup-gateway.sh --remove deletes that file). Call
 # fw_meta_lock first. rc 1 when a write failed (warned).
@@ -2924,6 +3009,10 @@ fw_persist_sources() {
         meta_set P2P_ALLOW_FROM "$v" || rc=1
     elif [[ "$FW_P2P_ANYWHERE" == "true" ]]; then
         meta_unset P2P_ALLOW_FROM || rc=1
+    fi
+    # A P2P list given again (or none) ends the kill switch's set-aside.
+    if [[ -n "$FW_P2P_FROM" || "$FW_P2P_ANYWHERE" == "true" ]]; then
+        meta_unset P2P_PER_SOURCE || rc=1
     fi
     if [[ -n "$FW_GW_FROM" ]]; then
         v="$(printf '%s\n' ${FW_GW_SRCS[@]+"${FW_GW_SRCS[@]}"} | paste -sd, -)"
@@ -3703,7 +3792,8 @@ caddy_serves_public_edge() {
 # <spec> is "<port>/<proto>" or the literal "overlay-ssh"; <source> is a hint
 # (anywhere|restricted|<cidr>[,<cidr>...]): the SSH and the P2P rows name their
 # source list (--ssh-from / --p2p-from of this run, else SSH_ALLOW_FROM /
-# P2P_ALLOW_FROM in .node-meta) joined with commas, say anywhere without one, and
+# P2P_ALLOW_FROM in .node-meta, which the kill switch can set aside, see
+# fw_sources) joined with commas, say anywhere without one, and
 # say "unknown (... source list not usable)" when the list cannot be read (a key
 # set more than once, an invalid entry), which every enable also refuses. In P2P
 # committee mode (P2P_COMMITTEE=on in .node-meta) the P2P rows say "committee

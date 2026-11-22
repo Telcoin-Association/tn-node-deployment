@@ -383,6 +383,7 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh --json --enable --ssh-from 19
 
 - `--ssh-from CIDR[,CIDR]` or `--ssh-from <file>` (one source per line) limits SSH to those sources; `--p2p-from` does the same for the P2P ports. The lists are stored in `.node-meta` as `SSH_ALLOW_FROM` and `P2P_ALLOW_FROM`, and a new list replaces the old one's rules. Addresses with leading zeros, `/0` and masks wider than `/8` are refused. An IPv6 entry must parse as Rust's `Ipv6Addr` parses it, the grammar `tn-p2p-allow-sync` reads `P2P_ALLOW_FROM` with: hex groups only, at most one `::`, and no zone (`%eth0`), brackets or dotted IPv4 tail (write `::ffff:192.0.2.1` as `::ffff:c000:201`), so a typo is refused before anything is written.
 - `--ssh-anywhere` and `--p2p-anywhere` drop a stored list and open the port to every address again. Each cannot be combined with its `-from` twin.
+- After `--p2p-committee off` (section 2.10) the stored P2P list is set aside (`P2P_PER_SOURCE=off`): the P2P ports stay open to every address on later runs until `--p2p-from` gives a list again.
 - `--gateway-from <list|file>` lets those hosts reach the node's RPC port and health port 43174, on every network, for a worker gateway on another host (section 4.15). It goes with `--enable` or `--reset`, is stored as `GATEWAY_ALLOW_FROM` and applied again by every later `--enable` and `--reset`; `--gateway-from none` removes the list and its rules. While `GATEWAY_UPSTREAM` is set in `.node-meta`, `--reset`, `--gateway-from none` and a list that leaves out a host it names are refused (section 4.15).
 - On a Google Cloud VM the IAP range `35.235.240.0/20` is added to the SSH sources, so the console's SSH button keeps working.
 - On mainnet, enabling the firewall without SSH sources is refused unless you pass `--ssh-anywhere`. The health port 43174 is never opened to everyone.
@@ -624,7 +625,8 @@ A step after that sync that fails turns committee mode off again and exits 2; ex
 **The static list in committee mode.**
 `P2P_ALLOW_FROM` (from `--p2p-from`) becomes part of the table: host entries join the allow sets and networks go to the static sets `static_v4` and `static_v6`.
 `ufw` keeps its open P2P rule while committee mode is on, and keeps any per-source rules it had, so the table alone decides which sources pass.
-Change the list with `sudo bash ~/telcoin-node-scripts/firewall-setup.sh --enable --p2p-from <list>` (or `--p2p-anywhere`), which records it and resyncs the allowlist; after `off` the list goes back to per-source `ufw` rules, with the open rule removed.
+Change the list with `sudo bash ~/telcoin-node-scripts/firewall-setup.sh --enable --p2p-from <list>` (or `--p2p-anywhere`), which records it and resyncs the allowlist.
+`off` does not turn the list into per-source `ufw` rules: the P2P ports stay open to every source (see Day 2), and the list waits in `.node-meta` for the next `on`.
 A multicast, link-local or unspecified host in the list stops the config write, since it is never a peer's source: `P2P_ALLOW_FROM in .node-meta lists <entry>, an unspecified, multicast or link-local address that is never a peer's source, so the P2P committee allowlist config was not written; pass --p2p-from again without it.`
 
 **When a node sends from an address it does not advertise.**
@@ -632,6 +634,7 @@ Committee-mode validators admit a peer by the addresses its record carries.
 A validator behind NAT, on a multi-homed host, or with IPv6 temporary (privacy) addresses can send from an address that is not in its record, and every committee-mode peer drops those packets; the same happens on your table to a peer that does so.
 Keep the address the node sends from equal to the one it advertises (the external multiaddrs in `node-info.yaml`, section 1.3), and turn IPv6 temporary addresses off on its interface.
 When a known peer still arrives from another address, add that address to `P2P_ALLOW_FROM` with `--enable --p2p-from`: the static list is always admitted.
+Adding it does not change what the kill switch does: after `--p2p-committee off` the P2P ports are open to every source, not only to the static list.
 A rising `tn_drop_p2p_unlisted` counter in `--p2p-committee status` while a committee peer cannot connect points at this.
 
 **Day 2.**
@@ -644,7 +647,11 @@ A rising `tn_drop_p2p_unlisted` counter in `--p2p-committee status` while a comm
 - `--p2p-committee status` shows whether the table is loaded and what it holds, the last sync and its age, staleness and its reason, the two counters (`packets accepted from listed sources`, `dropped from others`), and whether the timer and the boot unit are in place.
   It warns at once of `rpc-method-missing`, `snapshot-version-*`, `epoch-regressed` and `state-invalid`, of a failed last sync (`its last sync failed (<reason>, failing since <time>)`) and of a failed last run of `telcoin-p2p-allow-sync.service`, in the words `check-node.sh` uses (below), and of any other reason once the tool reports the run stale.
   `journalctl -t tn-p2p-allow` holds the tool's log lines from the timer runs.
-- During an incident, `--p2p-committee off` is the kill switch: it never runs the tool, puts the earlier P2P rules and the new-flow limit back byte for byte, then removes the units, the table, the state dir and the tool.
+- During an incident, `--p2p-committee off` is the kill switch: it never runs the tool, opens the P2P ports to every source behind the new-flow limit, then removes the units, the table, the state dir and the tool.
+  It opens them whatever `P2P_ALLOW_FROM` holds, also on a host whose P2P ports took only that list before committee mode was turned on, so no committee peer the allowlist admitted is cut off.
+  It prints `P2P committee mode is off: UDP 49590 and 49594 are open to every source.`, and with a list kept, the command that limits the ports to it again.
+  `P2P_ALLOW_FROM` stays in `.node-meta` for the next `on`, and `P2P_PER_SOURCE=off` next to it keeps later `--enable` and `--reset` runs from turning it into per-source rules.
+  To limit the P2P ports to a list again, run `sudo bash ~/telcoin-node-scripts/firewall-setup.sh --enable --p2p-from <list>`, which removes `P2P_PER_SOURCE`.
   `on` later starts again from the node's snapshot.
 
 **What `check-node.sh` reports.**
@@ -2743,7 +2750,7 @@ Start with `sudo bash ~/telcoin-node-scripts/check-node.sh` and `journalctl -u t
 | `wss://<domain>/` returns 502 | Nothing listens on the WebSocket port 8546 yet. | Wait if the node is still starting. Otherwise check `install-caddy.sh --phase=rpc-status`; after `migrate-node-naming.sh`, re-run `rpc-enable`. |
 | `firewall-setup.sh` stops right after `Firewall is active` in `1) View current firewall status` | A bug in `firewall-setup.sh` before 1.6.0. | `bash ~/telcoin-node-scripts/update-scripts.sh`. |
 | `P2P committee mode was not turned on: <reason>. Nothing was changed.` | The node's snapshot is not authoritative yet (often right after a restart), its release lacks `tn_admissionSnapshot`, or the snapshot lists no address beyond the floor; the reason says which. A tool that cannot be installed says `tn-p2p-allow-sync <tag> is not installed` instead. | Section 2.10, "What `on` refuses, and why". |
-| A committee peer cannot connect after `--p2p-committee on`, and `tn_drop_p2p_unlisted` rises in `--p2p-committee status` | The peer sends from an address its record does not carry (NAT, multi-homing, IPv6 temporary addresses), or the allowlist is stale. | Run `check-node.sh`; add the peer's source to `P2P_ALLOW_FROM` with `--enable --p2p-from` (section 2.10); `--p2p-committee off` is the kill switch. |
+| A committee peer cannot connect after `--p2p-committee on`, and `tn_drop_p2p_unlisted` rises in `--p2p-committee status` | The peer sends from an address its record does not carry (NAT, multi-homing, IPv6 temporary addresses), or the allowlist is stale. | Run `check-node.sh`; add the peer's source to `P2P_ALLOW_FROM` with `--enable --p2p-from` (section 2.10); `--p2p-committee off` is the kill switch, which opens the P2P ports to every source. |
 | `check-node.sh` warns or fails on a `P2P committee` line | The allowlist is missing, stale, behind the committee or out of step with the node's config. | The table in section 2.10, "What `check-node.sh` reports". |
 | The node cannot decrypt its BLS key at start | The stored passphrase is not the one the keys were generated with. | Store the correct one with `edit-config.sh` option 5, `1) Change the stored passphrase`; it never re-encrypts the keys. |
 | The node does not start after a firmware, Secure Boot or TPM change; systemd cannot decrypt `bls-passphrase.cred` | The credential is bound to the TPM (and to PCRs with `--bind-pcrs`), and the state changed or the TPM was reset. | `sudo bash ~/telcoin-node-scripts/edit-config.sh --reseal` after a PCR change. After a TPM reset or a move to another host, store the passphrase you kept offline again with option 5. |
