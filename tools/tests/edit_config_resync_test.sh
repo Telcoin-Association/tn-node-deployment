@@ -153,6 +153,16 @@ check "sync failed: warned with the command" yes \
 export FW_STUB_RC=3
 resync on "$ENVF"
 check "stale: the timer named" yes "$(has "$OUT" "keeps its last-good set for now")"
+# a floor shrink pending (exit 4) names --accept-floor-shrink, an off that did not
+# finish (exit 5) the rerun of off; neither names a plain sync
+export FW_STUB_RC=4
+resync on "$TRUSTED"
+check "floor kept: names --accept-floor-shrink, not a plain sync" "yes no" \
+    "$(has "$OUT" "The P2P committee allowlist floor keeps addresses that the bootstrap peers map, the trusted nodes map and the genesis committee.yaml no longer hold (firewall-setup.sh exit 4, which names them), so they stay allowed; if they were taken out on purpose, drop them with: sudo bash ${T}/h/firewall-setup.sh --p2p-committee sync --accept-floor-shrink") $(has "$OUT" "run: sudo bash ${T}/h/firewall-setup.sh --p2p-committee sync")"
+export FW_STUB_RC=5
+resync on "$ENVF"
+check "unfinished off: names the rerun of off, not sync" "yes no" \
+    "$(has "$OUT" "The P2P committee allowlist was not synced with this edit: a --p2p-committee off did not finish (firewall-setup.sh exit 5); finish it with: sudo bash ${T}/h/firewall-setup.sh --p2p-committee off") $(has "$OUT" "run: sudo bash ${T}/h/firewall-setup.sh --p2p-committee sync")"
 export FW_STUB_RC=0
 
 # --- --json: events on fd 3, the child's output never there --------------------------

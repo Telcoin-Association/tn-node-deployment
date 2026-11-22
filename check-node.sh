@@ -2504,7 +2504,9 @@ _cn_src_join() {
 }
 
 # check_p2p_committee -- the P2P committee allowlist, when P2P_COMMITTEE=on in
-# .node-meta; silent when it is off and when all is well. A failure when
+# .node-meta; silent when it is off and when all is well. One failure, naming the
+# rerun of --p2p-committee off, and nothing else checked, when the sync timer's
+# unit file is gone (an off that did not finish). A failure when
 # tn-p2p-allow-sync is missing, when nftables has no table inet tn_p2p_allow (P2P
 # is then open to every source), when `tn-p2p-allow-sync check` finds an address
 # of the current committee missing from the allow sets (at most five named), and
@@ -2528,7 +2530,7 @@ _cn_src_join() {
 check_p2p_committee() {
     local dir meta mode rc=0 fix bin_ok=1 tables="" loaded=unknown st="" cfg=""
     local result reason since base dur line now age out crc res w verdict mtotal xtotal
-    local ushow ures ustat why
+    local ushow ures ustat why unit left
     local miss="" mism="" nmiss=0 nmism=0 named_miss=0 named_mism=0 tok="" l v have want drift=""
     local reason_re=' reason=([A-Za-z0-9._:-]+) '
     local -a words=()
@@ -2551,6 +2553,25 @@ check_p2p_committee() {
     fi
     if [[ -e "$dir" ]] && { [[ ! -r "$dir" ]] || [[ ! -x "$dir" ]]; }; then
         print_info "P2P committee allowlist not checked: ${dir} is readable by root only (run with sudo)."
+        return 0
+    fi
+
+    # on writes the timer unit before it records P2P_COMMITTEE=on and off removes
+    # it first, so the mode on without it is an off that did not finish: only a
+    # rerun of off finishes it, and a sync refuses.
+    unit="${TN_ROOT_PREFIX:-}/etc/systemd/system/telcoin-p2p-allow-sync.timer"
+    if [[ ! -e "$unit" && ! -L "$unit" ]]; then
+        left="nft could not list the tables, so whether table inet tn_p2p_allow is still loaded was not checked"
+        if command -v nft >/dev/null 2>&1 && tables="$(nft list tables < /dev/null 2>/dev/null)"; then
+            if grep -qx 'table inet tn_p2p_allow' <<< "$tables"; then
+                left="table inet tn_p2p_allow is still loaded, so the P2P ports drop every source it does not list"
+            else
+                left="the table is gone, so the P2P ports take what ufw admits"
+            fi
+        fi
+        print_error "P2P committee mode is on in .node-meta, but a --p2p-committee off did not finish (the allowlist timer is gone; ${left})."
+        print_info "  Fix: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee off  (finishes the off)"
+        (( ++HEALTH_ISSUES ))
         return 0
     fi
 

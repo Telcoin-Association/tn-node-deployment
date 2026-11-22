@@ -1126,7 +1126,8 @@ restart_ui_if_present() {
 # the lock itself (the report after it changes nothing). A no-op while
 # P2P_COMMITTEE is off. NON-FATAL by design, like the two steps above: the ERR
 # trap is still armed, so every command is guarded, and a failed sync is a
-# warning naming the command to run.
+# warning naming the command to run (--accept-floor-shrink for a kept floor, exit
+# 4; the rerun of off for an unfinished off, exit 5; else the sync).
 resync_committee_allowlist() {
     local mode rc=0
     mode="$(meta_get P2P_COMMITTEE 2>/dev/null)" || rc=$?
@@ -1139,9 +1140,12 @@ resync_committee_allowlist() {
     tn_release_update_lock 2>/dev/null || true
     rc=0
     bash "${SCRIPT_DIR}/firewall-setup.sh" --p2p-committee sync < /dev/null || rc=$?
-    if [[ $rc -ne 0 && $rc -ne 3 ]]; then
-        print_warn "The P2P committee allowlist was not synced with the new layout (firewall-setup.sh exit ${rc}); run: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee sync"
-    fi
+    case "$rc" in
+        0|3) ;;
+        4) print_warn "The P2P committee allowlist floor keeps addresses that the bootstrap peers map, the trusted nodes map and the genesis committee.yaml no longer hold (firewall-setup.sh exit 4, which names them), so they stay allowed; if they were taken out on purpose, drop them with: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee sync --accept-floor-shrink" ;;
+        5) print_warn "The P2P committee allowlist was not synced with the new layout: a --p2p-committee off did not finish (firewall-setup.sh exit 5); finish it with: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee off" ;;
+        *) print_warn "The P2P committee allowlist was not synced with the new layout (firewall-setup.sh exit ${rc}); run: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee sync" ;;
+    esac
     return 0
 }
 

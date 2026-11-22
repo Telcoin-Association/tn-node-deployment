@@ -16,8 +16,9 @@
 #       again); sync resyncs now; status prints its state.
 #   sudo bash firewall-setup.sh --p2p-committee sync --accept-floor-shrink
 #       A resync never drops an address from the allowlist floor on its own:
-#       one whose files no longer hold an address the floor has refuses, naming
-#       it. This resync captures the smaller floor (a hub removed on purpose).
+#       one whose files no longer hold an address the floor has keeps the floor
+#       it had, names the address and syncs with that floor (exit 4). This
+#       resync captures the smaller floor (a hub removed on purpose).
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -94,6 +95,9 @@ FW_COMMITTEE_VERB=""
 # --accept-floor-shrink of this run: a resync may capture a floor without
 # addresses the saved floor has (fw_allow_capture_floor keep).
 FW_FLOOR_SHRINK=false
+# Set by fw_allow_capture_floor keep when it kept the saved floor because a new
+# capture would drop addresses: those addresses, space-separated; else empty.
+FW_FLOOR_KEPT=""
 # Filled by fw_preflight: the validated sshd ports and SSH sources, and (lazily,
 # fw_load_p2p_srcs) the P2P sources. An empty source array means "anywhere".
 FW_SSH_PORTS=()
@@ -1330,18 +1334,21 @@ P2P_ALLOW_FROM=${list}"
 # what is there instead and how to repair it). A floor with no address is
 # written and warns (fw_allow_floor_warn). With keep (a resync) the floor never
 # loses an address without the operator's word: when the files no longer hold
-# an address the saved floor has (fw_allow_floor_lost), nothing is captured and
-# the refusal names those addresses and --accept-floor-shrink, which lets the
-# capture go ahead (FW_FLOOR_SHRINK); a floor that only grows is captured as
-# before. TN_P2P_ALLOW_BIN runs here through fw_allow_run, outside the sync
-# unit's sandbox (which keeps the tool out of /etc/telcoin and the data dir).
-# rc 0 captured; 1 neither bootstrap-peers.yaml nor committee.yaml exists, one
-# is not a regular file, the data dir cannot be resolved, or with keep an
-# address would be lost; else the tool's exit code (the floor it had stays);
-# the reason is on stderr.
+# an address the saved floor has (fw_allow_floor_lost), nothing is captured, the
+# saved floor stays as it is (FW_FLOOR_KEPT names those addresses) and a warning
+# names them and --accept-floor-shrink, which lets the capture go ahead
+# (FW_FLOOR_SHRINK); the resync then goes on with the saved floor. A floor that
+# only grows is captured as before. TN_P2P_ALLOW_BIN runs here through
+# fw_allow_run, outside the sync unit's sandbox (which keeps the tool out of
+# /etc/telcoin and the data dir).
+# rc 0 captured, or with keep the saved floor kept (FW_FLOOR_KEPT set); 1
+# neither bootstrap-peers.yaml nor committee.yaml exists, one is not a regular
+# file or the data dir cannot be resolved; else the tool's exit code (the floor
+# it had stays); the reason is on stderr.
 fw_allow_capture_floor() {
     local keep="${1:-}" cfg dd src list="" lost rc=0 committee=false
     local -a srcs=()
+    FW_FLOOR_KEPT=""
     cfg="$(tn_resolve_config_dir)"
     if ! dd="$(tn_resolve_data_dir)"; then
         print_error "The data dir cannot be resolved, so the genesis committee cannot be read and the P2P committee allowlist floor was not captured." >&2
@@ -1364,8 +1371,9 @@ fw_allow_capture_floor() {
     if [[ "$keep" == "keep" && "$FW_FLOOR_SHRINK" != "true" ]]; then
         lost="$(fw_allow_floor_lost "$list" "${srcs[@]}")" || return $?
         if [[ -n "$lost" ]]; then
-            print_error "The P2P committee allowlist floor was not captured again, so it keeps ${lost}: none of the files it is taken from (${list}) holds them now. Check those files first (a data dir on a disk that is not mounted loses the genesis committee.yaml). If the addresses were taken out on purpose, a hub removed from trusted-nodes.yaml say, drop them from the floor with: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee sync --accept-floor-shrink" >&2
-            return 1
+            FW_FLOOR_KEPT="$lost"
+            print_warn "The P2P committee allowlist floor was not captured again, so it keeps ${lost}: none of the files it is taken from (${list}) holds them now. The sync goes on with the floor it had, so they stay allowed, and an address added to those files is not on the floor until it is captured again. Check those files first (a data dir on a disk that is not mounted loses the genesis committee.yaml). If the addresses were taken out on purpose, a hub removed from trusted-nodes.yaml say, drop them from the floor with: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee sync --accept-floor-shrink" >&2
+            return 0
         fi
     fi
     fw_allow_run capture-floor "${srcs[@]}" || rc=$?
@@ -1866,12 +1874,16 @@ fw_allow_off_unfinished() {
 }
 
 # fw_allow_off_unfinished_text -- the words for an unfinished off: whether the
-# allowlist table is still loaded, and the command that finishes the off.
+# allowlist table is still loaded, is gone, or could not be checked (no nft, or
+# nft could not list the tables), and the command that finishes the off.
 fw_allow_off_unfinished_text() {
-    local tables left="the table is gone, so the P2P ports take what ufw admits"
-    if command -v nft >/dev/null 2>&1 && tables="$(nft list tables 2>/dev/null)" \
-        && grep -qx 'table inet tn_p2p_allow' <<< "$tables"; then
-        left="table inet tn_p2p_allow is still loaded, so the P2P ports drop every source it does not list"
+    local tables left="nft could not list the tables, so whether table inet tn_p2p_allow is still loaded was not checked"
+    if command -v nft >/dev/null 2>&1 && tables="$(nft list tables 2>/dev/null)"; then
+        if grep -qx 'table inet tn_p2p_allow' <<< "$tables"; then
+            left="table inet tn_p2p_allow is still loaded, so the P2P ports drop every source it does not list"
+        else
+            left="the table is gone, so the P2P ports take what ufw admits"
+        fi
     fi
     printf 'P2P committee mode is on in .node-meta, but a --p2p-committee off did not finish (the allowlist timer is gone; %s); finish it with: sudo bash %s/firewall-setup.sh --p2p-committee off' "$left" "$SCRIPT_DIR"
 }
@@ -2051,7 +2063,7 @@ fw_allow_reason_text() {
 # an absolute path (the scripts' own nft calls), systemctl and flock are there,
 # and the new-flow rate and burst and the P2P source list are valid; when
 # P2P_COMMITTEE is on already it is a resync (fw_committee_sync; its rc, with a
-# stale or busy sync 0). Under the update lock (fw_meta_lock): the pinned
+# stale or busy sync or a kept floor 0 and an unfinished off 1). Under the update lock (fw_meta_lock): the pinned
 # tn-p2p-allow-sync (fw_allow_bin_ensure), FW_ALLOW_DIR root 0700, its config
 # and floor; then one
 # `sync --require-authoritative --wait 30`, which loads the table and writes
@@ -2111,11 +2123,13 @@ fw_committee_on() {
         print_info "P2P committee mode is on already; syncing it."
         rc=0
         fw_committee_sync || rc=$?
-        # a stale or busy sync keeps the loaded set and the mode stays on; 3 is
-        # reserved for an undo that did not finish.
-        if [[ "$rc" -eq 3 ]]; then
-            rc=0
-        fi
+        # a stale or busy sync, or one that kept the saved floor (said), keeps the
+        # mode on; 3 is reserved for an undo that did not finish. An unfinished
+        # off is a refusal (said, naming the rerun of off).
+        case "$rc" in
+            3|4) rc=0 ;;
+            5) rc=1 ;;
+        esac
         return "$rc"
     fi
     fw_allow_bin_ensure fw_baseline_say || rc=$?
@@ -2201,13 +2215,18 @@ fw_committee_on() {
 # says what is left and that a rerun of off finishes it. After an
 # install or upgrade of the binary the host baseline is made again on every
 # return, whatever the steps after it did; with quiet the hook's caller makes it
-# itself. rc 0 fresh; 1 refused (off, an unfinished off, the lock held
+# itself. A floor that would lose addresses is not captured (fw_allow_capture_floor
+# keep): the sync goes on with the saved floor, and the run ends with rc 4 so the
+# hooks can name --accept-floor-shrink. rc 0 fresh; 1 refused (off, the lock held
 # elsewhere, P2P_COMMITTEE set twice); 2 a step failed (said, with the tool's
 # reason= when it gave one); 3 the tool kept its last-good set (stale) or
-# another run held its lock.
+# another run held its lock; 4 fresh, stale or busy with the saved floor kept
+# (FW_FLOOR_KEPT; said); 5 refused because an off did not finish (said, naming
+# the rerun of off).
 fw_committee_sync() {
     local rc=0
     FW_ALLOW_BIN_CHANGED=""
+    FW_FLOOR_KEPT=""
     fw_committee_sync_run "${1:-}" || rc=$?
     if [[ "${1:-}" != "quiet" && -n "$FW_ALLOW_BIN_CHANGED" ]]; then
         fw_baseline_refresh
@@ -2233,7 +2252,7 @@ fw_committee_sync_run() {
     fw_meta_lock || return 1
     if fw_allow_off_unfinished; then
         fw_error "The P2P committee allowlist was not installed or synced again: $(fw_allow_off_unfinished_text)"
-        return 1
+        return 5
     fi
     fw_allow_bin_ensure fw_baseline_say || rc=$?
     if [[ "$rc" -ne 0 ]]; then
@@ -2268,16 +2287,19 @@ fw_committee_sync_run() {
             if [[ "$quiet" != "quiet" ]]; then
                 print_ok "P2P committee allowlist $(fw_allow_word "$line" result): $(fw_allow_summary "$line")."
             fi
+            [[ -z "$FW_FLOOR_KEPT" ]] || return 4
             return 0 ;;
         3)
             if [[ "$quiet" != "quiet" ]]; then
                 print_warn "P2P committee allowlist kept its last-good set: $(fw_allow_reason_text "$reason")."
             fi
+            [[ -z "$FW_FLOOR_KEPT" ]] || return 4
             return 3 ;;
         4)
             if [[ "$quiet" != "quiet" ]]; then
                 print_warn "Another tn-p2p-allow-sync run held its lock for 30 seconds; ${FW_ALLOW_TIMER} syncs again within 5 minutes."
             fi
+            [[ -z "$FW_FLOOR_KEPT" ]] || return 4
             return 3 ;;
     esac
     fw_error "tn-p2p-allow-sync sync failed (exit ${rc}${reason:+, reason=${reason}}); the P2P committee allowlist keeps the table it has loaded. See: journalctl -t tn-p2p-allow"
@@ -4750,7 +4772,9 @@ main() {
     # --p2p-committee VERB: each verb takes the update lock itself, and its exit
     # code is the run's (on: 0 on, 1 refused, 2 undone or an older library, 3
     # partial; off: 0, 1, 3; sync: 0 fresh, 1 refused, 2 failed or an older
-    # library, 3 stale or busy; status: 0).
+    # library, 3 stale or busy, 4 synced with the saved floor, which keeps
+    # addresses until --accept-floor-shrink, 5 refused because an off did not
+    # finish; status: 0).
     if [[ "$committee" == "true" ]]; then
         check_root
         fw_load_network || exit 1

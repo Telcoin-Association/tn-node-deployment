@@ -634,8 +634,10 @@ cf_run
 check "floor: no floor file is not judged" "0|0" "$RC|$(grep -c 'floor holds no address' "$T/out")"
 # a resync (keep) never drops an address of the saved floor without the
 # operator's word: the tool captures into a scratch state dir first, and an
-# address the new floor lacks refuses the capture; --accept-floor-shrink
-# (FW_FLOOR_SHRINK) lets it go ahead, and a floor that only grows goes through
+# address the new floor lacks keeps the saved floor (no capture, rc 0 so the
+# resync goes on, FW_FLOOR_KEPT naming the addresses); --accept-floor-shrink
+# (FW_FLOOR_SHRINK) lets the capture go ahead, and a floor that only grows goes
+# through
 cfk_run() { RC=0; : > "$REC.log"; fw_allow_capture_floor keep > "$T/out" 2>"$T/err" || RC=$?; }
 export TN_FW_SNAP_PARENT="$T/snap"
 mkdir -p "$TN_FW_SNAP_PARENT"
@@ -646,14 +648,14 @@ same_floor() { cmp -s "$T/floor.before" "$FW_ALLOW_DIR/floor" && echo same; }
 export TN_P2P_STUB_FLOOR="# floor 1
 192.0.2.1"
 cfk_run
-check "floor shrink: refused, the lost address, the files and the flag named" "1|1|1" \
-    "$RC|$(grep -c 'keeps 198.18.0.77: none of the files it is taken from (/etc/telcoin/bootstrap-peers.yaml /var/lib/telcoin/genesis/committee.yaml) holds them now' "$T/err")|$(grep -c -- 'firewall-setup.sh --p2p-committee sync --accept-floor-shrink' "$T/err")"
+check "floor shrink: kept, rc 0, FW_FLOOR_KEPT, the lost address, the files and the flag named" "0|198.18.0.77|1|1" \
+    "$RC|$FW_FLOOR_KEPT|$(grep -c 'keeps 198.18.0.77: none of the files it is taken from (/etc/telcoin/bootstrap-peers.yaml /var/lib/telcoin/genesis/committee.yaml) holds them now. The sync goes on with the floor it had' "$T/err")|$(grep -c -- 'firewall-setup.sh --p2p-committee sync --accept-floor-shrink' "$T/err")"
 check "floor shrink: one capture, into a scratch dir, the saved floor untouched" "1|0|same" \
     "$(grep -c ' capture-floor ' "$REC.log")|$(grep -c -- "--state-dir $FW_ALLOW_DIR " "$REC.log")|$(same_floor)"
 check "floor shrink: the scratch dir is gone" "" "$(ls -A "$TN_FW_SNAP_PARENT")"
 FW_FLOOR_SHRINK=true cfk_run
-check "floor shrink accepted: rc 0, one capture into the state dir, the new floor" "0|--state-dir $FW_ALLOW_DIR capture-floor $PEERS $GEN|$TN_P2P_STUB_FLOOR" \
-    "$RC|$(cat "$REC.log")|$(cat "$FW_ALLOW_DIR/floor")"
+check "floor shrink accepted: rc 0, one capture into the state dir, the new floor, nothing kept" "0|--state-dir $FW_ALLOW_DIR capture-floor $PEERS $GEN|$TN_P2P_STUB_FLOOR|" \
+    "$RC|$(cat "$REC.log")|$(cat "$FW_ALLOW_DIR/floor")|$FW_FLOOR_KEPT"
 export TN_P2P_STUB_FLOOR="# floor 1
 192.0.2.1
 198.18.0.77"
@@ -671,8 +673,8 @@ check "floor shrink on a first capture (no keep, as on): captured" "0|--state-di
 cp "$T/floor.before" "$FW_ALLOW_DIR/floor"
 unset TN_P2P_STUB_FLOOR
 cfk_run
-check "floor shrink: a scratch capture that writes no floor loses every address, refused" "1|1|same" \
-    "$RC|$(grep -c 'keeps 192.0.2.1 198.18.0.77: ' "$T/err")|$(same_floor)"
+check "floor shrink: a scratch capture that writes no floor loses every address, kept" "0|192.0.2.1 198.18.0.77|1|same" \
+    "$RC|$FW_FLOOR_KEPT|$(grep -c 'keeps 192.0.2.1 198.18.0.77: ' "$T/err")|$(same_floor)"
 export TN_P2P_STUB_RC_CAPTURE_FLOOR=4
 cfk_run
 unset TN_P2P_STUB_RC_CAPTURE_FLOOR

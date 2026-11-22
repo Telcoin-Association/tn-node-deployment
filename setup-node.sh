@@ -2863,7 +2863,9 @@ require_admission_release() {
 # lock, because that run takes the lock itself. It runs whether or not this run
 # changed a file: an earlier run may have installed a map and failed before its own
 # resync, and a sync with nothing new is a no-op. With committee mode off it does
-# nothing. A failure is a warning naming the command to run. Never fails.
+# nothing. A failure is a warning naming the command to run: --accept-floor-shrink
+# when the sync kept the saved floor (exit 4), the rerun of off when an off did
+# not finish (exit 5), else the sync. Never fails.
 setup_committee_resync() {
     local mode rc=0 fix="sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee sync"
     mode="$(meta_get P2P_COMMITTEE "${CONFIG_DIR}/.node-meta" 2>/dev/null)" || rc=$?
@@ -2879,6 +2881,8 @@ setup_committee_resync() {
     case "$rc" in
         0) ;;
         3) setup_warn "The P2P committee allowlist keeps its last-good set for now (the node may not answer yet after its restart); telcoin-p2p-allow-sync.timer syncs it again within 5 minutes." ;;
+        4) setup_warn "The P2P committee allowlist floor keeps addresses that the bootstrap peers map, the trusted nodes map and the genesis committee.yaml no longer hold (firewall-setup.sh exit 4, which names them), so they stay allowed; if they were taken out on purpose, drop them with: ${fix} --accept-floor-shrink" ;;
+        5) setup_warn "The P2P committee allowlist was not synced with the node's settings: a --p2p-committee off did not finish (firewall-setup.sh exit 5); finish it with: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee off" ;;
         *) setup_warn "The P2P committee allowlist was not synced with the node's settings (firewall-setup.sh exit ${rc}); run: ${fix}" ;;
     esac
     return 0

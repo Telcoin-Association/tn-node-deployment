@@ -418,6 +418,7 @@ cn_clean() {
     : > "$T/fx/.nft.allow"
     rm -f "$T/fx/.nft.table" "$REC.log" "$REC.argv" "$REC.env" "$REC.stdin" "$SYSTEMCTL_LOG"
     printf '%s\n' telcoin-p2p-allow-sync.timer telcoin-p2p-allow.service > "$T/fx/.systemctl.enabled"
+    mkdir -p "$T/fx/etc/systemd/system" && : > "$T/fx/etc/systemd/system/telcoin-p2p-allow-sync.timer"
     unset NFT_LIST_FAIL LOCAL_RPC_MODE TN_P2P_STUB_RC_CHECK SYSTEMCTL_SHOW
     export CN_FW_JSON="$FW_JSON_OK" TN_P2P_STUB_OUT_CHECK="$CHECK_OK"
     CN_EPOCH_LINE="42 1000 21600 1 -"
@@ -447,6 +448,22 @@ meta "NETWORK=testnet" "P2P_COMMITTEE=on" "P2P_COMMITTEE=on"
 run check_p2p_committee
 check "committee: P2P_COMMITTEE twice warns, nothing checked" "yes 0 no" \
     "$(has "$OUT" "P2P_COMMITTEE is set more than once") $ADDED $(called)"
+
+# an off that did not finish (the timer unit gone, the mode still on): one
+# failure naming the rerun of off, never sync, and the tool is not run
+cn_clean
+rm -f "$T/fx/etc/systemd/system/telcoin-p2p-allow-sync.timer" "$TN_P2P_ALLOW_BIN"
+run check_p2p_committee
+check "committee: unfinished off, table loaded: one failure naming off, not sync" "yes yes yes no 1 no" \
+    "$(has "$OUT" "a --p2p-committee off did not finish (the allowlist timer is gone; table inet tn_p2p_allow is still loaded") $(has "$OUT" "Fix: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee off  (finishes the off)") $(has "$OUT" "[ERROR]") $(has "$OUT" "--p2p-committee sync") $ADDED $(called)"
+rm -f "$T/fx/.nft.allow"
+run check_p2p_committee
+check "committee: unfinished off, table gone: said, one failure" "yes 1" \
+    "$(has "$OUT" "the allowlist timer is gone; the table is gone, so the P2P ports take what ufw admits") $ADDED"
+NFT_LIST_FAIL=1 run check_p2p_committee
+check "committee: unfinished off, nft cannot list: not called gone" "yes no 1" \
+    "$(has "$OUT" "the allowlist timer is gone; nft could not list the tables, so whether table inet tn_p2p_allow is still loaded was not checked") $(has "$OUT" "the table is gone") $ADDED"
+unset NFT_LIST_FAIL
 
 cn_clean
 rm -f "$TN_P2P_ALLOW_BIN"

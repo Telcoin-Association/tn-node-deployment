@@ -592,6 +592,14 @@ SNM_FW_RC=2 SNM_TRUSTED="$TRUSTED" drv resync
 check "allowlist: a failed sync warns with the command, setup goes on" "0|$FW_SYNC|yes" \
     "$RC|$(fwlog)|$(has "$OUT" "not synced with the node's settings (firewall-setup.sh exit 2); ${FW_FIX}")"
 rm -f "$T/fw.log"
+SNM_FW_RC=4 SNM_TRUSTED="$TRUSTED" drv resync
+check "allowlist: a kept floor (exit 4) names --accept-floor-shrink, not a plain sync" "0|yes|no" \
+    "$RC|$(has "$OUT" "floor keeps addresses that the bootstrap peers map, the trusted nodes map and the genesis committee.yaml no longer hold (firewall-setup.sh exit 4, which names them), so they stay allowed; if they were taken out on purpose, drop them with: sudo bash ${T}/sn/firewall-setup.sh --p2p-committee sync --accept-floor-shrink")|$(has "$OUT" "${FW_FIX}")"
+rm -f "$T/fw.log"
+SNM_FW_RC=5 SNM_TRUSTED="$TRUSTED" drv resync
+check "allowlist: an unfinished off (exit 5) names the rerun of off, not sync" "0|yes|no" \
+    "$RC|$(has "$OUT" "not synced with the node's settings: a --p2p-committee off did not finish (firewall-setup.sh exit 5); finish it with: sudo bash ${T}/sn/firewall-setup.sh --p2p-committee off")|$(has "$OUT" "${FW_FIX}")"
+rm -f "$T/fw.log"
 sed 's/^P2P_COMMITTEE=on$/P2P_COMMITTEE=off/' "$META" > "$T/meta.off" && mv "$T/meta.off" "$META"
 SNM_TRUSTED="$T/in/trusted-b.yaml" drv resync
 check "allowlist: committee off: no sync" "0|" "$RC|$(fwlog)"

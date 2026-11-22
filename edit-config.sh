@@ -1076,7 +1076,9 @@ edit_baseline_refresh() {
 # The sync is firewall-setup.sh --p2p-committee sync, run once this run has
 # released the update lock, because that run takes the lock itself. A no-op while
 # P2P_COMMITTEE is off. A failure is a warning, before the done event, naming the
-# command to run. Never fails.
+# command to run: --accept-floor-shrink when the sync kept the saved floor (exit
+# 4), the rerun of off when an off did not finish (exit 5), else the sync. Never
+# fails.
 edit_committee_resync() {
     local f mode rc=0 hit=false
     [[ ${#EDIT_BK_FILES[@]} -gt 0 ]] || hit=true
@@ -1099,6 +1101,8 @@ edit_committee_resync() {
     case "$rc" in
         0) ;;
         3) edit_warn "The P2P committee allowlist keeps its last-good set for now (the node may not answer yet after its restart); telcoin-p2p-allow-sync.timer syncs it again within 5 minutes." ;;
+        4) edit_warn "The P2P committee allowlist floor keeps addresses that the bootstrap peers map, the trusted nodes map and the genesis committee.yaml no longer hold (firewall-setup.sh exit 4, which names them), so they stay allowed; if they were taken out on purpose, drop them with: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee sync --accept-floor-shrink" ;;
+        5) edit_warn "The P2P committee allowlist was not synced with this edit: a --p2p-committee off did not finish (firewall-setup.sh exit 5); finish it with: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee off" ;;
         *) edit_warn "The P2P committee allowlist was not synced with this edit (firewall-setup.sh exit ${rc}); run: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee sync" ;;
     esac
     return 0

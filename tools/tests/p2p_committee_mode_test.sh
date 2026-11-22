@@ -449,18 +449,37 @@ TN_P2P_STUB_RC_SYNC=3 run fw_committee_on
 check_rc "on while on: stale resync rc 0" 0 "$RC"
 check "on while on: one plain sync" "--state-dir ${D} capture-floor ${R}/etc/telcoin/bootstrap-peers.yaml
 --state-dir ${D} sync --wait 30" "$(reclog)"
-# a resync whose floor would lose an address it has is refused before the sync,
-# naming the address and --accept-floor-shrink; with that flag (FW_FLOOR_SHRINK)
-# it goes through, and so does one whose floor only grows
+# a resync whose floor would lose an address it has keeps the saved floor (no
+# capture into the state dir), names the address and --accept-floor-shrink, and
+# still rewrites the units and syncs with that floor: rc 4, quiet or not, and 4
+# over a stale or busy sync; on while on is rc 0. With that flag (FW_FLOOR_SHRINK)
+# the capture goes through, and so does one whose floor only grows
 printf '# floor 1\n192.0.2.50\n198.18.0.77\n' > "$D/floor"
-rm -f "$REC.log"
+rm -f "$REC.log" "$SYNCU"
 TN_P2P_STUB_FLOOR="# floor 1
 192.0.2.50" run fw_committee_sync
-check_rc "sync, the floor would shrink: rc 2" 2 "$RC"
-check_in "sync, the floor would shrink: the address named" "so it keeps 198.18.0.77: none of the files it is taken from (/etc/telcoin/bootstrap-peers.yaml) holds them now" "$OUT"
+check_rc "sync, the floor would shrink: rc 4" 4 "$RC"
+check_in "sync, the floor would shrink: the address named, the sync goes on" "so it keeps 198.18.0.77: none of the files it is taken from (/etc/telcoin/bootstrap-peers.yaml) holds them now. The sync goes on with the floor it had, so they stay allowed" "$OUT"
 check_in "sync, the floor would shrink: the flag named" "firewall-setup.sh --p2p-committee sync --accept-floor-shrink" "$OUT"
-check "sync, the floor would shrink: no capture into the state dir, no sync, the floor kept" "0|0|192.0.2.50 198.18.0.77" \
-    "$(reclog | grep -c -- "^--state-dir ${D} ")|$(reclog | grep -c ' sync ')|$(grep -v '^#' "$D/floor" | tr '\n' ' ' | sed 's/ $//')"
+check_lacks "sync, the floor would shrink: never says the inputs were not written" "inputs could not be written" "$OUT"
+check "sync, the floor would shrink: no capture into the state dir, one sync, the floor kept, the unit rewritten" "0|1|192.0.2.50 198.18.0.77|yes" \
+    "$(reclog | grep -c -- "^--state-dir ${D} capture-floor")|$(reclog | grep -c -- "^--state-dir ${D} sync --wait 30$")|$(grep -v '^#' "$D/floor" | tr '\n' ' ' | sed 's/ $//')|$([[ -e "$SYNCU" ]] && echo yes || echo no)"
+check_in "sync, the floor would shrink: the sync's own line" "P2P committee allowlist applied: epoch 42" "$OUT"
+TN_P2P_STUB_FLOOR="# floor 1
+192.0.2.50" run fw_committee_sync quiet
+check "sync quiet, the floor would shrink: rc 4, still said" "4|yes" "$RC|$(grep -qF 'so it keeps 198.18.0.77' <<< "$OUT" && echo yes || echo no)"
+TN_P2P_STUB_RC_SYNC=3 TN_P2P_STUB_OUT_SYNC="result=stale reason=rpc-unreachable epoch=42 v4=10 v6=2 static=0 floor=1 keys=7 dns_skipped=0 unparsed=0" \
+    TN_P2P_STUB_FLOOR="# floor 1
+192.0.2.50" run fw_committee_sync
+check_rc "sync, the floor would shrink, stale: rc 4" 4 "$RC"
+TN_P2P_STUB_RC_SYNC=2 TN_P2P_STUB_FLOOR="# floor 1
+192.0.2.50" run fw_committee_sync
+check_rc "sync, the floor would shrink, the sync fails: rc 2" 2 "$RC"
+rm -f "$REC.log"
+TN_P2P_STUB_FLOOR="# floor 1
+192.0.2.50" run fw_committee_on
+check "on while on, the floor would shrink: rc 0, one sync, the floor kept" "0|1|192.0.2.50 198.18.0.77" \
+    "$RC|$(reclog | grep -c -- "^--state-dir ${D} sync --wait 30$")|$(grep -v '^#' "$D/floor" | tr '\n' ' ' | sed 's/ $//')"
 rm -f "$REC.log"
 FW_FLOOR_SHRINK=true TN_P2P_STUB_FLOOR="# floor 1
 192.0.2.50" run fw_committee_sync
@@ -1236,6 +1255,32 @@ check_has "enable --p2p-from (committee on): config takes the new list" "P2P_ALL
 check_lacks "enable --p2p-from (committee on): no per-source ufw rule" "198.51.100.7" "$(cat "$R/etc/ufw/user.rules")"
 check_has "enable --p2p-from (committee on): open rule kept" "allow 49590/udp" "$(cat "$R/etc/ufw/user.rules")"
 check "enable --p2p-from (committee on): limit stays off" "no" "$(yn limit_present)"
+# a floor shrink pending (an address of the saved floor no file holds now): the
+# NAT-peer remedy still finishes its resync, with the saved floor, and says so;
+# so does --p2p-committee sync, which exits 4
+printf '# floor 1\n192.0.2.50\n198.18.0.77\n' > "$D/floor"
+rm -f "$REC.log" "$SYNCU"
+TN_P2P_STUB_FLOOR="# floor 1
+192.0.2.50" drun --enable --ssh-anywhere --p2p-from 198.51.100.9
+check_rc "enable --p2p-from, a shrink pending: rc 0" 0 "$RC"
+check_has "enable --p2p-from, a shrink pending: config takes the new list" "P2P_ALLOW_FROM=198.51.100.9" "$(cat "$D/config")"
+check "enable --p2p-from, a shrink pending: no capture into the state dir, one sync, the floor kept, the unit rewritten" \
+    "0|1|192.0.2.50 198.18.0.77|yes" \
+    "$(reclog | grep -c -- "^--state-dir ${D} capture-floor")|$(reclog | grep -c -- "^--state-dir ${D} sync --wait 30$")|$(grep -v '^#' "$D/floor" | tr '\n' ' ' | sed 's/ $//')|$(yn test -e "$SYNCU")"
+check_lacks "enable --p2p-from, a shrink pending: never says the inputs were not written" "inputs could not be written" "$OUT"
+check_in "enable --p2p-from, a shrink pending: the floor kept, the sync goes on" "so it keeps 198.18.0.77: none of the files it is taken from (/etc/telcoin/bootstrap-peers.yaml) holds them now. The sync goes on with the floor it had" "$OUT"
+check_in "enable --p2p-from, a shrink pending: names --accept-floor-shrink" "--p2p-committee sync --accept-floor-shrink" "$OUT"
+rm -f "$REC.log"
+TN_P2P_STUB_FLOOR="# floor 1
+192.0.2.50" drun --p2p-committee sync
+check_rc "sync, a shrink pending: rc 4" 4 "$RC"
+check "sync, a shrink pending: one sync, the floor kept" "1|192.0.2.50 198.18.0.77" \
+    "$(reclog | grep -c -- "^--state-dir ${D} sync --wait 30$")|$(grep -v '^#' "$D/floor" | tr '\n' ' ' | sed 's/ $//')"
+rm -f "$REC.log"
+TN_P2P_STUB_FLOOR="# floor 1
+192.0.2.50" drun --p2p-committee sync --accept-floor-shrink
+check "sync --accept-floor-shrink: rc 0, the smaller floor" "0|192.0.2.50" "$RC|$(grep -v '^#' "$D/floor")"
+drun --enable --ssh-anywhere --p2p-from 198.51.100.7
 rm -f "$REC.log"
 drun --json --enable --ssh-anywhere
 check_rc "json enable (committee on): rc 0" 0 "$RC"
@@ -1308,10 +1353,18 @@ for args in "--enable --ssh-anywhere" "--reset --ssh-anywhere" "--p2p-committee 
 done
 check_rc "partial off, then on: refused" 1 "$RC"
 drun --p2p-committee sync
-check_rc "partial off, then sync: refused" 1 "$RC"
+check_rc "partial off, then sync: refused, rc 5" 5 "$RC"
 drun --p2p-committee status
 check_in "partial off, status: says the off did not finish" "a --p2p-committee off did not finish (the allowlist timer is gone; the table is gone" "$OUT"
 check_lacks "partial off, status: never names sync" "--p2p-committee sync" "$OUT"
+# the table still loaded, and nft unable to list the tables: never "gone"
+nft -f - <<< "$ALLOW_PROG" > /dev/null 2>&1
+drun --p2p-committee status
+check_in "partial off, table loaded, status: says it is loaded" "the allowlist timer is gone; table inet tn_p2p_allow is still loaded" "$OUT"
+NFT_LIST_FAIL=1 drun --p2p-committee status
+check_in "partial off, nft cannot list, status: not checked" "the allowlist timer is gone; nft could not list the tables, so whether table inet tn_p2p_allow is still loaded was not checked" "$OUT"
+check_lacks "partial off, nft cannot list, status: never says gone" "the table is gone" "$OUT"
+nft delete table inet tn_p2p_allow > /dev/null 2>&1
 drun --p2p-committee off
 check_rc "partial off, a second off: rc 0" 0 "$RC"
 check_has "partial off, a second off: P2P_COMMITTEE=off" "P2P_COMMITTEE=off" "$(cat "$META")"
