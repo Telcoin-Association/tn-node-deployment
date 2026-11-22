@@ -755,6 +755,13 @@ chmod 0644 "$T/in/peers-nested.yaml"
 drv set "bootstrap_peers=$T/in/peers-nested.yaml"
 check "bootstrap_peers=<the validator indented under the hub>: installed, rendered without committee_peers, the gap named" "0 same yes 0 yes" \
     "$RC $(cmp -s "$T/in/peers-nested.yaml" "$PEERS" && echo same) $(has "$(calls)" "render $DD grace $DEST none") $(grep -c '^committee_peers' "$NC") $(has "$OUT" "$CP_GAP")"
+# the committee's validator listed twice: the node takes the map on its launch
+# line, but stops at every start on a committee_peers that holds it
+{ cat "$T/in/peers-both.yaml"; cat "$T/in/peers.yaml"; } > "$T/in/peers-dup.yaml"
+chmod 0644 "$T/in/peers-dup.yaml"
+drv set "bootstrap_peers=$T/in/peers-dup.yaml"
+check "bootstrap_peers=<a validator listed twice>: installed, rendered without committee_peers, the key named" "0 same yes 0 yes" \
+    "$RC $(cmp -s "$T/in/peers-dup.yaml" "$PEERS" && echo same) $(has "$(calls)" "render $DD grace $DEST none") $(grep -c '^committee_peers' "$NC") $(has "$OUT" "$PEERS lists ${K2:0:16}… more than once at its first level, so it is not written to network-config as committee_peers: a node whose committee_peers names a key twice cannot read its network-config and refuses to start, at every epoch")"
 # this node is K2: its entry must carry the network keys of its node-info.yaml
 ni2() {
     printf 'bls_public_key: %s\np2p_info:\n  primary:\n    network_address: /ip4/198.51.100.21/udp/49590/quic-v1\n    network_key: 4XTTMpeer1p\n  workers:\n    - network_address: /ip4/198.51.100.21/udp/49594/quic-v1\n      network_key: %s\n' "$K2" "$1" > "$DD/node-info.yaml"

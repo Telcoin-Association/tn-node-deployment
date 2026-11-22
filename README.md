@@ -1328,6 +1328,7 @@ Before every write (setup, and the `admission`, `trusted_nodes` and `bootstrap_p
 The map stays installed and on the start line, so the node still dials it at start, and it stays in the floor of the [P2P committee allowlist](#p2p-committee-allowlist).
 Only the map's first-level keys count, as the node reads them: a validator's block indented under another entry, or a key inside a flow value or a quoted value, is none.
 When the map has an entry for this node, it must carry the primary and worker network keys of the data dir's `node-info.yaml`, because the node stops at every start on its own entry with other keys; such a map is left out the same way, with a warning that starts `<map> has an entry for this node, <key>…, whose network keys are not this node's own`.
+A map that lists one key twice at its first level is left out too (`<map> lists <key>… more than once at its first level`): the node takes it on its start line, the last entry for the key winning, but cannot read a `committee_peers` that holds it and stops at every start.
 The check does not compare the number of workers in each entry.
 A `bootstrap_peers` edit on a node with an admission mode writes `network-config` again, so `committee_peers` follows the peers map.
 
@@ -2168,7 +2169,7 @@ Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
 A refused chain-config step reads `The <network> chain configs were refused (see above); nothing was copied.` instead of "not the pinned ones", which was wrong for a refused checkout.
 When the files cannot be found, the error lists each directory once, and the hint says where the files are at the tag and names `--genesis-dir <dir>`.
 Fix for validators set up with `--admission` and a `--bootstrap-peers` map that does not list the whole genesis committee (a map of hubs alone, or of the other validators without this node): setup wrote it as `committee_peers`, and the node then exited within a second of every start during epoch 0 (`Error: committee_peers: missing validator <key>`).
-Setup now writes `committee_peers` only from a map that lists every validator of the genesis `committee.yaml` at its first level and holds this node's own network keys in this node's entry; any other map is left out of it with a warning naming the gap, and stays installed, dialed and in the allowlist floor.
+Setup now writes `committee_peers` only from a map that lists every validator of the genesis `committee.yaml` at its first level, each key once, and holds this node's own network keys in this node's entry; any other map is left out of it with a warning naming the gap, and stays installed, dialed and in the allowlist floor.
 Fix for validators given a trusted hubs map the node cannot use: `--trusted-nodes` checked only the file, so a hub entry pasted from `node-info.yaml` (workers as a list), one without a `network_key` or one with a DNS name passed, and the node then refused to start, or started and never dialed the hub.
 Setup now runs edit-config's shape check, which also refuses `/dns*`, `/tcp` and malformed addresses, in the preflight; the bootstrap peers map gets the same address rule.
 Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).

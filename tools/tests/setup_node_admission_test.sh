@@ -716,6 +716,18 @@ check "committee: a validator's block indented under another, left out with the 
     "$RC $(logf "$T/render.log") $(has "$OUT" "[WARN] ${CFG}/bootstrap-peers.yaml lacks 1 of the 10 validators of the genesis committee in ${DD}/genesis/committee.yaml (GenesisVal9…), ${CP_LEFT}")"
 check "committee: the indented map installed as given, network-config without committee_peers" "same|$(cat "$T/in/nc-closed-nopeers")" \
     "$(cmp -s "$T/in/peers-nested.yaml" "$CFG/bootstrap-peers.yaml" && echo same)|$(cat "$NC")"
+# a validator listed twice: the node takes the map on its launch line, but stops at
+# every start on a committee_peers that holds it, so it is left out with the key named
+{ cat "$T/in/peers-all.yaml"; peer GenesisVal3 53; } > "$T/in/peers-dup.yaml"
+chmod 0644 "$T/in/peers-dup.yaml"
+reset
+marker v0.17.0
+cp "$T/in/nc-before" "$NC"
+SNM_MODE=closed SNM_TRUSTED="$TRUSTED" SNM_PEERS="$T/in/peers-dup.yaml" drv interactive
+check "committee: a validator listed twice, left out with the key named" "0 ${DD} closed ${CFG}/trusted-nodes.yaml none yes" \
+    "$RC $(logf "$T/render.log") $(has "$OUT" "[WARN] ${CFG}/bootstrap-peers.yaml lists GenesisVal3… more than once at its first level, so it is not written to network-config as committee_peers: a node whose committee_peers names a key twice cannot read its network-config and refuses to start, at every epoch")"
+check "committee: the map with a validator twice installed and on the launch line, network-config without committee_peers" "same|yes|$(cat "$T/in/nc-closed-nopeers")" \
+    "$(cmp -s "$T/in/peers-dup.yaml" "$CFG/bootstrap-peers.yaml" && echo same)|$(has "$OUT" "$CP_FLAGS")|$(cat "$NC")"
 # this node is GenesisVal0: its entry must carry the network keys of its
 # node-info.yaml, at every epoch
 ni0() {

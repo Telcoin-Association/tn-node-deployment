@@ -3162,15 +3162,18 @@ tn_network_config_render() {
 # tn_committee_peers_check DATA_DIR MAP -- whether the peers map MAP (the installed
 # bootstrap-peers.yaml) may go into DATA_DIR/network-config as committee_peers: only
 # when every validator of the genesis committee, DATA_DIR/genesis/committee.yaml, is a
-# key of MAP, this node's own key included, and MAP's entry for this node, when it has
-# one, names the network keys of DATA_DIR/node-info.yaml. A node whose committee_peers
-# is not empty and misses one refuses to start while its chain is at epoch 0
+# key of MAP, this node's own key included, no key is listed twice at MAP's first
+# level, and MAP's entry for this node, when it has one, names the network keys of
+# DATA_DIR/node-info.yaml. A node whose committee_peers is not empty and misses one refuses to start while its chain is at epoch 0
 # ("committee_peers: missing validator <key>"), in every admission mode, and a new
 # data dir always starts at epoch 0; a key outside the committee, a hub's, does not
 # stop it. A node whose own entry there names another primary network_key, or another
 # network_key for a worker it runs, refuses to start at every epoch ("network key
-# does not match node configuration"). The files are read as the service user
-# (tn_as_service_user), because they sit in the data dir that user writes. MAP is read
+# does not match node configuration"). One whose committee_peers names a key twice
+# cannot read network-config and refuses to start at every epoch ("bad yaml data"),
+# although the node takes the same map on its launch line (the last entry for the
+# key wins). The files are read as the service user (tn_as_service_user), because
+# they sit in the data dir that user writes. MAP is read
 # as YAML in block or flow style, JSON included, and its keys are those of its
 # top-level map, as the node reads them: a key indented under another entry, inside a
 # flow value or inside a quoted value is none. Anchors, tags, block scalars, explicit
@@ -3179,9 +3182,9 @@ tn_network_config_render() {
 # "authorities:" entry. A data dir without node-info.yaml (keygen writes it before
 # any render) has no own entry to compare.
 #   rc 0  MAP holds every validator and this node's own keys; prints nothing
-#   rc 1  MAP misses at least one, its entry for this node names other network keys,
-#         a file cannot be read, the committee file names no validator, or the check
-#         could not run: one line on stdout says which, that MAP is left out of
+#   rc 1  MAP misses at least one, lists a key twice, its entry for this node names
+#         other network keys, a file cannot be read, the committee file names no
+#         validator, or the check could not run: one line on stdout says which, that MAP is left out of
 #         committee_peers but stays installed and in use, and how to have it written
 tn_committee_peers_check() {
     local dd="${1:-}" map="${2:-}" cf ni nf prog out rc=0 nmiss="" ntotal="" k1="" k2="" k3=""
@@ -3193,8 +3196,9 @@ tn_committee_peers_check() {
     # The awk text holds no single quote. exit 3: the committee file cannot be
     # read, 4: it names no validator, 5: MAP cannot be read, 6: node-info.yaml
     # cannot be read, 7: MAP holds YAML the reader does not read (its line on
-    # stdout), 1: the gaps, as "MISSING TOTAL KEY KEY KEY" (the first three), 8: the
-    # entry of this node names other network keys (its key on stdout).
+    # stdout), 9: MAP lists a key twice at its first level (the key on stdout), 1:
+    # the gaps, as "MISSING TOTAL KEY KEY KEY" (the first three), 8: the entry of
+    # this node names other network keys (its key on stdout).
     # shellcheck disable=SC2016
     prog='
         function die() { bad = 1; return "" }
@@ -3207,8 +3211,13 @@ tn_committee_peers_check() {
             d++; T[d] = t; F[d] = f; C[d] = c; P[d] = 0
             K[d] = (t == "s") ? (f ? 0 : -1) : ""
         }
-        # a key of the top-level map: MAP lists it
-        function top(k) { if (rdmap && d == 1) have[k] = 1 }
+        # a key of the top-level map: MAP lists it; the first one it lists twice
+        # is kept in dup
+        function top(k) {
+            if (!rdmap || d != 1) return
+            if ((k in have) && dup == "") dup = k
+            have[k] = 1
+        }
         # a scalar at the path K[1], K[2] ...: node-info.yaml keeps it; in MAP the
         # network keys of the entry of this node are compared with it
         function val(v,    p, i) {
@@ -3451,8 +3460,10 @@ tn_committee_peers_check() {
                     nw[0] = ni["p2p_info" SUBSEP "worker" SUBSEP "network_key"]
             }
             rdmap = 1
+            dup = ""
             if (rd(mf) < 0) exit 5
             if (bad) { print bln; exit 7 }
+            if (dup != "") { print dup; exit 9 }
             n = 0
             for (i = 1; i <= m; i++)
                 if (!(order[i] in have)) miss[++n] = order[i]
@@ -3494,6 +3505,10 @@ tn_committee_peers_check() {
         7)
             [[ "$out" =~ ^[0123456789]+$ ]] || out="?"
             why="${map} holds YAML this check does not read at line ${out} (an anchor, a tag, a block scalar, an explicit key or a value over several lines), so it is not written to network-config as committee_peers"
+            ;;
+        9)
+            why="${map} lists ${out:0:16}… more than once at its first level, so it is not written to network-config as committee_peers"
+            tail="a node whose committee_peers names a key twice cannot read its network-config and refuses to start, at every epoch, while the map on its launch line keeps the last entry for that key. The map stays installed and in use: the node still dials its peers at start, keeps its trusted hubs and finds the other validators through peer discovery, and the P2P committee allowlist keeps the map in its floor. To have it written as committee_peers, keep one entry per key (check that the one kept has that validator's addresses) and install it again with edit-config.sh --set bootstrap_peers=FILE."
             ;;
         8)
             why="${map} has an entry for this node, ${out:0:16}…, whose network keys are not this node's own (the primary and worker network_key in ${ni}), so it is not written to network-config as committee_peers"

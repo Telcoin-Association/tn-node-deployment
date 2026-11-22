@@ -788,6 +788,30 @@ cpc "$CI/explicit.yaml"
 check "committee check: an explicit key is not read: fails, naming the line" \
     "1|$CI/explicit.yaml holds YAML this check does not read at line $(( $(cp_drop "$V5" "$CI/full.yaml" | wc -l) + 1 )) (an anchor, a tag, a block scalar, an explicit key or a value over several lines), so it is not written to network-config as committee_peers: ${CP_TAIL}" \
     "$RC|$OUT"
+# a key listed twice at the first level: the node takes such a map on its launch
+# line (the last entry wins) but cannot read a committee_peers that holds it, and
+# stops at every start; a validator or a hub, block or flow, quoted or not
+CP_DUP="a node whose committee_peers names a key twice cannot read its network-config and refuses to start, at every epoch, while the map on its launch line keeps the last entry for that key. The map stays installed and in use: the node still dials its peers at start, keeps its trusted hubs and finds the other validators through peer discovery, and the P2P committee allowlist keeps the map in its floor. To have it written as committee_peers, keep one entry per key (check that the one kept has that validator's addresses) and install it again with edit-config.sh --set bootstrap_peers=FILE."
+{ cat "$CI/full.yaml"; cp_entry "$V1" 41; } > "$CI/dup.yaml"
+cpc "$CI/dup.yaml"
+check "committee check: a validator listed twice fails, naming it" \
+    "1|$CI/dup.yaml lists ${V1:0:16}… more than once at its first level, so it is not written to network-config as committee_peers: ${CP_DUP}" \
+    "$RC|$OUT"
+{ cat "$CI/full.yaml"; cp_entry "$V3" 43 | sed "1s/^${V3}:/\"${V3}\":/"; } > "$CI/dup-quoted.yaml"
+cpc "$CI/dup-quoted.yaml"
+check "committee check: a validator listed twice, once quoted, fails" "1 yes" "$RC $(cp_has "$OUT" "lists ${V3:0:16}… more than once at its first level")"
+{ cat "$CI/full.yaml"; cp_entry "$HUB" 20; cp_entry "$HUB" 21; } > "$CI/dup-hub.yaml"
+cpc "$CI/dup-hub.yaml"
+check "committee check: a hub listed twice fails too" "1 yes" "$RC $(cp_has "$OUT" "lists ${HUB:0:16}… more than once at its first level")"
+sed "s|}}\$|}, $(cp_json "$V2")}|" "$CI/full.json" > "$CI/dup.json"
+cpc "$CI/dup.json"
+check "committee check: a JSON map with a key twice fails" "1 yes" "$RC $(cp_has "$OUT" "$CI/dup.json lists ${V2:0:16}… more than once at its first level")"
+{ cat "$CI/full.yaml"; printf '%s:\n  primary:\n    network_address: /ip4/192.0.2.9/udp/1/quic-v1\n    network_key: h\n  workers:\n    - network_address: /ip4/192.0.2.9/udp/2/quic-v1\n      network_key: hw\n  %s: {}\n' "$HUB" "$V2"; } > "$CI/dup-nested.yaml"
+cpc "$CI/dup-nested.yaml"
+check "committee check: a key again only below the first level is no duplicate" "0|" "$RC|$OUT"
+{ cp_drop "$V5" "$CI/full.yaml"; cp_entry "$V1" 41; } > "$CI/dup-four.yaml"
+cpc "$CI/dup-four.yaml"
+check "committee check: a key twice is named before a validator left out" "1 yes" "$RC $(cp_has "$OUT" "lists ${V1:0:16}… more than once")"
 # the entry of this node: the network keys of the data dir's node-info.yaml
 # (none so far, so no entry was compared). V1's entry comes first in full.yaml.
 P1="$(awk '/^    network_key:/ { print $2; exit }' "$CI/full.yaml")"
