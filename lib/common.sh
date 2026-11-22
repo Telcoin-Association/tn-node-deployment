@@ -3222,6 +3222,261 @@ tn_committee_peers_check() {
     return 1
 }
 
+# tn_trusted_nodes_shape_ok FILE -- rc 0 when FILE has the shape of the node's
+# trusted nodes map in block YAML: top-level keys that are BLS public keys
+# (base58 of the 96-byte key, 131 or 132 characters, as node-info.yaml writes
+# them), each named once and holding primary and workers and nothing else (the
+# node refuses unknown fields there). primary has a network_address and a
+# network_key that are not empty; workers holds at least one worker id (a whole
+# number from 0 to 65535, each once), each a block with a network_address and a
+# network_key of its own. So an entry copied whole from a node-info.yaml, whose
+# workers are a list, is refused. Every network_address is one the node can
+# dial (tn_map_addr_check). Comments, blank lines and a leading "---" may
+# appear. The node has no check flag for this map, so setup-node and
+# edit-config run this before they install one; a map that passes and is still
+# wrong stops the node at start. Otherwise rc 1, with the reason on stdout.
+tn_trusted_nodes_shape_ok() {
+    local out rc=0
+    # the awk text holds no single quote; sq carries one
+    out="$(awk -v sq="'" '
+        function short(k) { return (length(k) > 16) ? substr(k, 1, 16) "..." : k }
+        function fail(msg) { reason = msg; failed = 1; exit }
+        # what the current worker still lacks once it ends
+        function wlacks() {
+            if (wid == "") return ""
+            if (!waddr) return "worker " wid " of " short(key) " has no network_address"
+            if (!wnkey) return "worker " wid " of " short(key) " has no network_key"
+            return ""
+        }
+        # what the current entry still lacks once it ends
+        function lacks() {
+            if (key == "") return ""
+            w = wlacks()
+            if (w != "") return w
+            if (!prim) return "the entry " short(key) " has no primary"
+            if (!addr) return "the primary of " short(key) " has no network_address"
+            if (!nkey) return "the primary of " short(key) " has no network_key"
+            if (!work) return "the entry " short(key) " has no workers"
+            if (!nw) return "the workers of " short(key) " name no worker id"
+            return ""
+        }
+        # whether the value after the first colon is something other than null
+        function has_value(s) {
+            sub(/^[^:]*:[ \t]*/, "", s)
+            sub(/[ \t]+#.*$/, "", s)
+            sub(/[ \t]+$/, "", s)
+            return !(s == "" || s == "~" || s == "null" || s == "\"\"" || s == sq sq)
+        }
+        {
+            s = $0
+            if (s ~ /\r$/) fail("line " NR " ends in a carriage return; save the file with plain line ends")
+            if (s ~ /^[ \t]*$/ || s ~ /^[ \t]*#/) next
+            if (s ~ /^(---|[.][.][.])[ \t]*$/) {
+                if (seen) ended = 1
+                next
+            }
+            if (ended) fail("line " NR " starts a second YAML document; the file holds one map")
+            seen = 1
+            if (s ~ /^ *\t/) fail("line " NR " is indented with a tab; YAML indents with spaces")
+            match(s, /^ */)
+            ind = RLENGTH
+            if (ind == 0) {
+                m = lacks()
+                if (m != "") fail(m)
+                k = s
+                sub(/[ \t]+#.*$/, "", k)
+                sub(/[ \t]+$/, "", k)
+                if (k !~ /:$/) fail("line " NR " is not a BLS public key and a colon, with the entry indented below it")
+                k = substr(k, 1, length(k) - 1)
+                q = substr(k, 1, 1)
+                if ((q == "\"" || q == sq) && length(k) > 2 && substr(k, length(k), 1) == q)
+                    k = substr(k, 2, length(k) - 2)
+                if (k !~ /^[1-9A-HJ-NP-Za-km-z]+$/)
+                    fail("line " NR ": " short(k) " is not a BLS public key (base58, as in node-info.yaml)")
+                if (length(k) < 131 || length(k) > 132)
+                    fail("line " NR ": " short(k) " is not a BLS public key: it is " length(k) " characters long, and a key is 131 or 132 (96 bytes in base58, as in node-info.yaml)")
+                if (k in keys) fail("line " NR ": the BLS key " short(k) " is in the map twice")
+                keys[k] = 1
+                n++
+                key = k
+                fld = 0; pfld = 0; prim = 0; addr = 0; nkey = 0; work = 0; inprim = 0
+                inwork = 0; wfld = 0; nw = 0; wid = ""; split("", wids)
+                next
+            }
+            if (key == "") fail("line " NR " is indented, but no BLS public key comes before it")
+            if (fld == 0) fld = ind
+            if (ind < fld) fail("line " NR " is indented less than the lines above it in the entry " short(key))
+            if (ind == fld) {
+                m = wlacks()
+                if (m != "") fail(m)
+                wid = ""
+                c = substr(s, ind + 1)
+                f = c
+                sub(/[ \t]*:.*$/, "", f)
+                inprim = 0
+                inwork = 0
+                if (f == "primary") {
+                    if (prim) fail("line " NR ": the entry " short(key) " has primary twice")
+                    if (c !~ /^primary:[ \t]*(#.*)?$/)
+                        fail("line " NR ": write primary as a block, with network_address and network_key on their own lines below it")
+                    prim = 1
+                    inprim = 1
+                    pfld = 0
+                } else if (f == "workers") {
+                    if (work) fail("line " NR ": the entry " short(key) " has workers twice")
+                    if (c !~ /^workers:[ \t]*(#.*)?$/)
+                        fail("line " NR ": write workers as a block: each worker id on its own line below it, holding network_address and network_key")
+                    work = 1
+                    inwork = 1
+                } else {
+                    fail("line " NR ": " short(f) " is not a field of a trusted node; an entry holds primary and workers")
+                }
+                next
+            }
+            if (inprim) {
+                if (pfld == 0) pfld = ind
+                if (ind == pfld) {
+                    c = substr(s, ind + 1)
+                    if (c ~ /^network_address[ \t]*:/) {
+                        if (!has_value(c)) fail("line " NR ": the network_address of " short(key) " is empty")
+                        addr = 1
+                    } else if (c ~ /^network_key[ \t]*:/) {
+                        if (!has_value(c)) fail("line " NR ": the network_key of " short(key) " is empty")
+                        nkey = 1
+                    }
+                }
+            } else if (inwork) {
+                if (wfld == 0) wfld = ind
+                if (ind < wfld) fail("line " NR " is indented less than the worker ids above it in the entry " short(key))
+                if (ind == wfld) {
+                    m = wlacks()
+                    if (m != "") fail(m)
+                    c = substr(s, ind + 1)
+                    id = c
+                    sub(/[ \t]*:.*$/, "", id)
+                    if (id !~ /^[0-9]+$/ || id + 0 > 65535)
+                        fail("line " NR ": " short(id) " is not a worker id; the workers of " short(key) " are keyed by numbers from 0 to 65535")
+                    if (c !~ /^[0-9]+[ \t]*:[ \t]*(#.*)?$/)
+                        fail("line " NR ": write worker " id " of " short(key) " as a block, with network_address and network_key on their own lines below it")
+                    if ((id + 0) in wids) fail("line " NR ": the entry " short(key) " has worker " id " twice")
+                    wids[id + 0] = 1
+                    nw++
+                    wid = id; wefld = 0; waddr = 0; wnkey = 0
+                    next
+                }
+                if (wefld == 0) wefld = ind
+                if (ind == wefld) {
+                    c = substr(s, ind + 1)
+                    if (c ~ /^network_address[ \t]*:/) {
+                        if (!has_value(c)) fail("line " NR ": the network_address of worker " wid " of " short(key) " is empty")
+                        waddr = 1
+                    } else if (c ~ /^network_key[ \t]*:/) {
+                        if (!has_value(c)) fail("line " NR ": the network_key of worker " wid " of " short(key) " is empty")
+                        wnkey = 1
+                    }
+                }
+            }
+        }
+        END {
+            if (!failed) {
+                reason = lacks()
+                if (reason != "") failed = 1
+                else if (n == 0) { reason = "it holds no BLS public key entries"; failed = 1 }
+            }
+            if (failed) {
+                print reason
+                exit 1
+            }
+        }' "$1" 2>&1)" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        printf '%s' "${out:-could not read ${1}}"
+        return 1
+    fi
+    tn_map_addr_check "$1"
+}
+
+# tn_map_addr_check FILE -- rc 0 when every network_address in the trusted nodes
+# or bootstrap peers map FILE is one the node can dial:
+# /ip4/<address>/udp/<port>/quic-v1 or /ip6/<address>/udp/<port>/quic-v1,
+# optionally followed by /p2p/<peer id>, as node-info.yaml writes them. The
+# node's P2P transport is QUIC over IP and nothing else. It starts with an
+# address that names a host (/dns, /dns4, /dns6, /dnsaddr) or another transport
+# (/tcp) and keeps it, but never dials it and says so only at debug log level,
+# and the P2P committee allowlist takes no address from a host name. A value
+# that is no multiaddr, or a peer id with a character outside letters and
+# digits, stops the node at start. The node's own parse check of a peers map
+# (node --bootstrap-peers MAP --help) accepts the first two. The map is read
+# line by line, block or flow YAML: a value may be quoted, a "#" comment is not
+# read, and the entry a refusal names is the last key at column 0 above the
+# address. Otherwise rc 1, with the first refusal on stdout: its line, the
+# entry's BLS key and the address (both shortened) and what the node takes
+# instead.
+tn_map_addr_check() {
+    local out rc=0
+    # the awk text holds no single quote; sq carries one
+    out="$(awk -v sq="'" '
+        function short(s, n) { return (length(s) > n) ? substr(s, 1, n) "..." : s }
+        function ip4(a,    n, p, i) {
+            n = split(a, p, ".")
+            if (n != 4) return 0
+            for (i = 1; i <= 4; i++)
+                if (p[i] !~ /^[0-9]+$/ || length(p[i]) > 3 || p[i] + 0 > 255) return 0
+            return 1
+        }
+        # whether A is IP, then UDP and QUIC v1, then an optional peer id
+        function dialable(a,    n, p) {
+            n = split(a, p, "/")
+            if ((n != 6 && n != 8) || p[1] != "") return 0
+            if (p[2] == "ip4") {
+                if (!ip4(p[3])) return 0
+            } else if (p[2] == "ip6") {
+                if (p[3] !~ /^[0-9A-Fa-f:.]+$/ || p[3] !~ /:/) return 0
+            } else return 0
+            if (p[4] != "udp" || p[5] !~ /^[0-9]+$/ || length(p[5]) > 5 || p[5] + 0 > 65535) return 0
+            if (p[6] != "quic-v1") return 0
+            if (n == 8 && (p[7] != "p2p" || p[8] !~ /^[0-9A-Za-z]+$/)) return 0
+            return 1
+        }
+        {
+            s = $0
+            sub(/\r$/, "", s)
+            sub(/(^|[ \t])#.*$/, "", s)
+            gsub(sq, "\"", s)
+            if (s ~ /^"?[0-9A-Za-z]/) {
+                key = s
+                sub(/"?[ \t]*:.*$/, "", key)
+                sub(/^"/, "", key)
+            }
+            t = s
+            while (match(t, /network_address"?[ \t]*:[ \t]*/)) {
+                t = substr(t, RSTART + RLENGTH)
+                v = t
+                if (substr(v, 1, 1) == "\"") {
+                    v = substr(v, 2)
+                    sub(/".*$/, "", v)
+                } else {
+                    sub(/[ \t]*[],}].*$/, "", v)
+                    sub(/[ \t]+$/, "", v)
+                }
+                if (v == "" || dialable(v)) continue
+                if (v ~ /^\/dns(4|6|addr)?\//)
+                    why = "is a DNS name (" short(v, 40) "): the node does not resolve names, so it would never dial it. Give the IP address instead"
+                else
+                    why = "(" short(v, 40) ") is not an address the node can dial"
+                of = (key == "") ? "" : " of " short(key, 16)
+                print "line " NR ": the network_address" of " " why "; the node takes /ip4/<address>/udp/<port>/quic-v1/p2p/<peer id> (or /ip6/...), as node-info.yaml writes it"
+                bad = 1
+                exit 1
+            }
+        }
+        END { if (bad) exit 1 }' "$1" 2>&1)" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        printf '%s' "${out:-could not read ${1}}"
+        return 1
+    fi
+    return 0
+}
+
 # Record the ref of the source binary that was just installed, in a marker next
 # to the binary (<install_dir>/telcoin-network.version). The UI reads this to show
 # the version of the RUNNING binary instead of `git describe` of the source

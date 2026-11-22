@@ -19,8 +19,11 @@
 #                  show and the menu reflect the settings; trusted_nodes=none
 #                  removes the entry, the map and the record; a bootstrap peers
 #                  edit carries committee_peers along;
-#   the shape      a malformed trusted nodes map is refused before anything is
-#                  written;
+#   the shape      a malformed trusted nodes map, or one with an address the
+#                  node cannot dial, is refused before anything is written
+#                  (the table of trusted_shapes.sh, which
+#                  setup_node_admission_test.sh runs too), and so is a
+#                  bootstrap peers map with such an address;
 #   the restart    the committee guard and the epoch wait run before the
 #                  restart, a refusal puts every file back, and a node that does
 #                  not come back healthy has network-config, the map and
@@ -504,6 +507,42 @@ snap
 drv set "trusted_nodes=$T/in/bad.yaml"
 check "map other users cannot read: refused, nothing written" "1|yes||same" \
     "$RC|$(has "$OUT" "other users cannot read it")|$(calls)|$(same)"
+
+# ---- the shapes table, which setup_node_admission_test.sh runs too ---------------
+# shellcheck source=tools/tests/trusted_shapes.sh
+. "$(dirname "${BASH_SOURCE[0]}")/trusted_shapes.sh"
+mkdir -p "$T/shapes"
+reset ADMISSION_MODE=closed
+while read -r class name reason; do
+    shape_map "$name" "$K1" "$K2" > "$T/shapes/${name}.yaml"
+    if [[ "$class" == kept ]]; then
+        chmod 0644 "$T/shapes/${name}.yaml"
+        drv set "trusted_nodes=$T/shapes/${name}.yaml"
+        check "shape ${name}: installed and rendered" "0 yes yes" \
+            "$RC $(cmp -s "$T/shapes/${name}.yaml" "$DEST" && echo yes) $(has "$(calls)" "render $DD closed $DEST none")"
+        continue
+    fi
+    cp "$T/shapes/${name}.yaml" "$T/in/bad.yaml"
+    bad "shape ${name}, ${class}" "$reason"
+    if [[ "$class" == new ]]; then
+        check "shape ${name}: the refusal names the entry" yes "$(has "$OUT" "of ${K1:0:16}...")"
+    fi
+done <<ROWS
+$(shape_rows)
+ROWS
+# the same address rule for a bootstrap peers map, which the node's parse check
+# lets through
+sed 's|/ip4/198.51.100.21/udp/49590|/dns4/peer.example.org/udp/49590|' "$T/in/peers.yaml" > "$T/in/peers-dns.yaml"
+chmod 0644 "$T/in/peers-dns.yaml"
+cp "$T/in/peers.yaml" "$PEERS"
+launch peers
+snap
+cp -p "$PEERS" "$T/snap/peers-before"
+drv set "bootstrap_peers=$T/in/peers-dns.yaml"
+check "bootstrap_peers with a DNS name: refused, naming the line and the entry" "1 yes yes" \
+    "$RC $(has "$OUT" "is not a bootstrap peers map the node can use: line 3: the network_address of ${K2:0:16}... is a DNS name (/dns4/peer.example.org") $(has "$OUT" "the node does not resolve names")"
+check "bootstrap_peers with a DNS name: nothing written or restarted" "|same|same" \
+    "$(logf "$T/rootw.log")$(calls)|$(same)|$(cmp -s "$T/snap/peers-before" "$PEERS" && echo same)"
 
 # ---- the restart window and the rollback ----------------------------------------
 reset ADMISSION_MODE=closed

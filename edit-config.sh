@@ -73,9 +73,12 @@
 #   bootstrap_peers=<path>|none       peers the node dials at start instead of
 #                                     the bootstrap servers in its genesis: an
 #                                     absolute path to a YAML or JSON map keyed
-#                                     by BLS public key, at most 64 KiB. The
-#                                     node binary checks it, then it is
-#                                     installed as /etc/telcoin/bootstrap-peers.yaml.
+#                                     by BLS public key, at most 64 KiB, every
+#                                     network_address an IP address (/ip4 or
+#                                     /ip6, UDP, QUIC v1): the node does not
+#                                     resolve DNS names. The node binary
+#                                     checks it, then it is installed as
+#                                     /etc/telcoin/bootstrap-peers.yaml.
 # network-gated: release named in the testnet tag form; edit_need_flag asks the installed release on any network
 #                                     Needs v0.15.0-adiri or later and a start
 #                                     wrapper (a node started straight from its
@@ -112,7 +115,12 @@
 #                                     set: an absolute path to a YAML map keyed
 #                                     by BLS public key, each entry the hub's
 #                                     primary {network_address, network_key}
-#                                     and its workers by id, at most 64 KiB.
+#                                     and its workers by id, at most 64 KiB,
+#                                     every network_address an IP address
+#                                     (/ip4 or /ip6, UDP, QUIC v1): the node
+#                                     does not resolve DNS names. An entry
+#                                     pasted from node-info.yaml, which lists
+#                                     its workers, is refused.
 #                                     The node has no check for this map, so
 #                                     its shape is checked here and a node
 #                                     that does not come back healthy is
@@ -167,6 +175,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
         tn_launch_runner tn_keytool_has tn_keytool _tn_cred_plain_ok _tn_passfile_trim_safe \
         tn_docker_resolve_ref tn_docker_network_ok _tn_guard_network tn_docker_image_network_ok \
         tn_network_config_render tn_node_supports_admission tn_committee_peers_check tn_gateway_from_rules_ok \
+        tn_trusted_nodes_shape_ok tn_map_addr_check \
         tn_chain_configs_tag tn_chain_configs_dir tn_chain_configs_from_tag \
         _tn_chain_configs_clone tn_chain_config_pin _tn_chain_configs_dest_ok \
         _tn_chain_configs_clone_target _tn_chain_configs_in_place >/dev/null; then
@@ -1288,8 +1297,10 @@ _edit_map_file_ok() {
 
 # set_bootstrap_peers VALUE -- VALUE is an absolute path to a YAML or JSON map
 # of peers keyed by BLS public key, which the node dials at start instead of
-# the bootstrap servers in its genesis; or none. The installed release checks
-# the map itself (tn_node_parse_check), the file is installed as
+# the bootstrap servers in its genesis; or none. Every network_address in it
+# must be one the node can dial (tn_map_addr_check: an IP address, UDP, QUIC
+# v1), the installed release checks the map itself (tn_node_parse_check), which
+# accepts a DNS name the node never resolves, the file is installed as
 # <config dir>/bootstrap-peers.yaml (0644, root), and the node command gets
 # --bootstrap-peers "$(cat <that file>)", which the start wrapper expands at
 # each start. A systemd unit cannot run that $(cat ...), so a node started
@@ -1345,6 +1356,13 @@ set_bootstrap_peers() {
     if ! peers_file_ok "$tmp" >/dev/null; then
         rm -f "$tmp"
         edit_error "${value} changed while it was being copied. Check the file and try again."
+        return 1
+    fi
+    # The parse check below takes an address the node never dials (a DNS name,
+    # TCP), so the addresses are checked first.
+    if ! msg="$(tn_map_addr_check "$tmp")"; then
+        rm -f "$tmp"
+        edit_error "${value} is not a bootstrap peers map the node can use: ${msg}."
         return 1
     fi
     edit_log "Checking ${value} with the node binary (${spec})"
@@ -1436,177 +1454,6 @@ set_state_export() {
 # change: a node that does not come back healthy, a refused restart or a stopped
 # run puts both back byte for byte, network-config read and written by the
 # service user (edit_backup_copy, edit_restore_one).
-
-# trusted_nodes_shape_ok FILE -- rc 0 when FILE has the shape of the node's
-# trusted nodes map in block YAML: top-level keys that are BLS public keys
-# (base58 of the 96-byte key, 131 or 132 characters, as node-info.yaml writes
-# them), each named once and holding primary and workers and nothing else (the
-# node refuses unknown fields there). primary has a network_address and a
-# network_key that are not empty; workers holds at least one worker id (a whole
-# number from 0 to 65535, each once), each a block with a network_address and a
-# network_key of its own. Comments, blank lines and a leading "---" may appear.
-# The node has no check flag for this map, so this is the whole check before
-# the restart; a map that passes and is still wrong stops the node, and the edit
-# is rolled back. Otherwise rc 1, with the reason on stdout.
-trusted_nodes_shape_ok() {
-    local out rc=0
-    # the awk text holds no single quote; sq carries one
-    out="$(awk -v sq="'" '
-        function short(k) { return (length(k) > 16) ? substr(k, 1, 16) "..." : k }
-        function fail(msg) { reason = msg; failed = 1; exit }
-        # what the current worker still lacks once it ends
-        function wlacks() {
-            if (wid == "") return ""
-            if (!waddr) return "worker " wid " of " short(key) " has no network_address"
-            if (!wnkey) return "worker " wid " of " short(key) " has no network_key"
-            return ""
-        }
-        # what the current entry still lacks once it ends
-        function lacks() {
-            if (key == "") return ""
-            w = wlacks()
-            if (w != "") return w
-            if (!prim) return "the entry " short(key) " has no primary"
-            if (!addr) return "the primary of " short(key) " has no network_address"
-            if (!nkey) return "the primary of " short(key) " has no network_key"
-            if (!work) return "the entry " short(key) " has no workers"
-            if (!nw) return "the workers of " short(key) " name no worker id"
-            return ""
-        }
-        # whether the value after the first colon is something other than null
-        function has_value(s) {
-            sub(/^[^:]*:[ \t]*/, "", s)
-            sub(/[ \t]+#.*$/, "", s)
-            sub(/[ \t]+$/, "", s)
-            return !(s == "" || s == "~" || s == "null" || s == "\"\"" || s == sq sq)
-        }
-        {
-            s = $0
-            if (s ~ /\r$/) fail("line " NR " ends in a carriage return; save the file with plain line ends")
-            if (s ~ /^[ \t]*$/ || s ~ /^[ \t]*#/) next
-            if (s ~ /^(---|[.][.][.])[ \t]*$/) {
-                if (seen) ended = 1
-                next
-            }
-            if (ended) fail("line " NR " starts a second YAML document; the file holds one map")
-            seen = 1
-            if (s ~ /^ *\t/) fail("line " NR " is indented with a tab; YAML indents with spaces")
-            match(s, /^ */)
-            ind = RLENGTH
-            if (ind == 0) {
-                m = lacks()
-                if (m != "") fail(m)
-                k = s
-                sub(/[ \t]+#.*$/, "", k)
-                sub(/[ \t]+$/, "", k)
-                if (k !~ /:$/) fail("line " NR " is not a BLS public key and a colon, with the entry indented below it")
-                k = substr(k, 1, length(k) - 1)
-                q = substr(k, 1, 1)
-                if ((q == "\"" || q == sq) && length(k) > 2 && substr(k, length(k), 1) == q)
-                    k = substr(k, 2, length(k) - 2)
-                if (k !~ /^[1-9A-HJ-NP-Za-km-z]+$/)
-                    fail("line " NR ": " short(k) " is not a BLS public key (base58, as in node-info.yaml)")
-                if (length(k) < 131 || length(k) > 132)
-                    fail("line " NR ": " short(k) " is not a BLS public key: it is " length(k) " characters long, and a key is 131 or 132 (96 bytes in base58, as in node-info.yaml)")
-                if (k in keys) fail("line " NR ": the BLS key " short(k) " is in the map twice")
-                keys[k] = 1
-                n++
-                key = k
-                fld = 0; pfld = 0; prim = 0; addr = 0; nkey = 0; work = 0; inprim = 0
-                inwork = 0; wfld = 0; nw = 0; wid = ""; split("", wids)
-                next
-            }
-            if (key == "") fail("line " NR " is indented, but no BLS public key comes before it")
-            if (fld == 0) fld = ind
-            if (ind < fld) fail("line " NR " is indented less than the lines above it in the entry " short(key))
-            if (ind == fld) {
-                m = wlacks()
-                if (m != "") fail(m)
-                wid = ""
-                c = substr(s, ind + 1)
-                f = c
-                sub(/[ \t]*:.*$/, "", f)
-                inprim = 0
-                inwork = 0
-                if (f == "primary") {
-                    if (prim) fail("line " NR ": the entry " short(key) " has primary twice")
-                    if (c !~ /^primary:[ \t]*(#.*)?$/)
-                        fail("line " NR ": write primary as a block, with network_address and network_key on their own lines below it")
-                    prim = 1
-                    inprim = 1
-                    pfld = 0
-                } else if (f == "workers") {
-                    if (work) fail("line " NR ": the entry " short(key) " has workers twice")
-                    if (c !~ /^workers:[ \t]*(#.*)?$/)
-                        fail("line " NR ": write workers as a block: each worker id on its own line below it, holding network_address and network_key")
-                    work = 1
-                    inwork = 1
-                } else {
-                    fail("line " NR ": " short(f) " is not a field of a trusted node; an entry holds primary and workers")
-                }
-                next
-            }
-            if (inprim) {
-                if (pfld == 0) pfld = ind
-                if (ind == pfld) {
-                    c = substr(s, ind + 1)
-                    if (c ~ /^network_address[ \t]*:/) {
-                        if (!has_value(c)) fail("line " NR ": the network_address of " short(key) " is empty")
-                        addr = 1
-                    } else if (c ~ /^network_key[ \t]*:/) {
-                        if (!has_value(c)) fail("line " NR ": the network_key of " short(key) " is empty")
-                        nkey = 1
-                    }
-                }
-            } else if (inwork) {
-                if (wfld == 0) wfld = ind
-                if (ind < wfld) fail("line " NR " is indented less than the worker ids above it in the entry " short(key))
-                if (ind == wfld) {
-                    m = wlacks()
-                    if (m != "") fail(m)
-                    c = substr(s, ind + 1)
-                    id = c
-                    sub(/[ \t]*:.*$/, "", id)
-                    if (id !~ /^[0-9]+$/ || id + 0 > 65535)
-                        fail("line " NR ": " short(id) " is not a worker id; the workers of " short(key) " are keyed by numbers from 0 to 65535")
-                    if (c !~ /^[0-9]+[ \t]*:[ \t]*(#.*)?$/)
-                        fail("line " NR ": write worker " id " of " short(key) " as a block, with network_address and network_key on their own lines below it")
-                    if ((id + 0) in wids) fail("line " NR ": the entry " short(key) " has worker " id " twice")
-                    wids[id + 0] = 1
-                    nw++
-                    wid = id; wefld = 0; waddr = 0; wnkey = 0
-                    next
-                }
-                if (wefld == 0) wefld = ind
-                if (ind == wefld) {
-                    c = substr(s, ind + 1)
-                    if (c ~ /^network_address[ \t]*:/) {
-                        if (!has_value(c)) fail("line " NR ": the network_address of worker " wid " of " short(key) " is empty")
-                        waddr = 1
-                    } else if (c ~ /^network_key[ \t]*:/) {
-                        if (!has_value(c)) fail("line " NR ": the network_key of worker " wid " of " short(key) " is empty")
-                        wnkey = 1
-                    }
-                }
-            }
-        }
-        END {
-            if (!failed) {
-                reason = lacks()
-                if (reason != "") failed = 1
-                else if (n == 0) { reason = "it holds no BLS public key entries"; failed = 1 }
-            }
-            if (failed) {
-                print reason
-                exit 1
-            }
-        }' "$1" 2>&1)" || rc=$?
-    if [[ $rc -ne 0 ]]; then
-        printf '%s' "${out:-could not read ${1}}"
-        return 1
-    fi
-    return 0
-}
 
 # edit_admission_recorded -- set EDIT_ADM_MODE and EDIT_ADM_TRUSTED to
 # ADMISSION_MODE and TRUSTED_NODES_FILE in .node-meta, as setup-node writes them
@@ -1824,10 +1671,11 @@ set_admission() {
 }
 
 # edit_trusted_install SRC TMP DEST -- copy SRC into the root-only temp file TMP,
-# check the copy (its size, then trusted_nodes_shape_ok) and install it as DEST,
-# root 0644, through tn_write_root_file after edit_backup, unless DEST already
-# holds the same bytes. What is installed is what passed, and nothing is written
-# before it has. rc 1, reported, otherwise.
+# check the copy (its size, then tn_trusted_nodes_shape_ok, which setup-node runs
+# on the operator's file too) and install it as DEST, root 0644, through
+# tn_write_root_file after edit_backup, unless DEST already holds the same bytes.
+# What is installed is what passed, and nothing is written before it has. rc 1,
+# reported, otherwise.
 edit_trusted_install() {
     local src="$1" tmp="$2" dest="$3" size="" msg
     if cat -- "$src" > "$tmp" 2>/dev/null; then
@@ -1837,8 +1685,8 @@ edit_trusted_install() {
         edit_error "${src} could not be read, or changed while it was being read. Check the file and try again."
         return 1
     fi
-    if ! msg="$(trusted_nodes_shape_ok "$tmp")"; then
-        edit_error "${src} is not a trusted nodes map: ${msg}. Each key is a hub's BLS public key, and each entry the hub's primary (network_address, network_key) and workers, as in its node-info.yaml."
+    if ! msg="$(tn_trusted_nodes_shape_ok "$tmp")"; then
+        edit_error "${src} is not a trusted nodes map: ${msg}. Each key is a hub's BLS public key, and each entry the hub's primary (network_address, network_key) and its workers keyed by worker id, with the addresses and keys from its node-info.yaml."
         return 1
     fi
     if [[ -f "$dest" && ! -L "$dest" ]] && cmp -s "$tmp" "$dest"; then

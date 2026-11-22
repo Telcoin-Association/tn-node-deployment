@@ -253,6 +253,9 @@ Every other script, library and UI file keeps its version. The runbook for the g
 - With P2P committee mode on, an edit that changed the trusted nodes map (`--set trusted_nodes=`, or the menu) resyncs the allowlist once the node came back from its restart, as an edit of the bootstrap peers already did, so the floor holds the new hubs at once instead of after the next timer run.
 - Fix for the same `committee_peers` gap as in [setup-node 2.1.4](#setup-node-214): `--set admission=`, `--set trusted_nodes=` and `--set bootstrap_peers=` (and the menu items and the Node Manager UI path that reach them) write the bootstrap peers map as `committee_peers` only when it lists every validator of the genesis `committee.yaml`.
   A map that lists fewer is installed and put on the start line as before, the edit goes on with a warning, and `network-config` gets no `committee_peers`, so the node starts instead of exiting at epoch 0.
+- `--set trusted_nodes=` refuses, besides the shapes it refused before, a `network_address` that is a DNS name (`/dns`, `/dns4`, `/dns6`, `/dnsaddr`), uses TCP or is no multiaddr, naming the line and the entry; the node would never dial a hub given by name, and stops at start on a malformed address.
+  `--set bootstrap_peers=` (and the menu and the Node Manager UI path that reach it) refuses the same addresses before the node's parse check, which takes them.
+  The shape check now lives in `lib/common.sh`, shared with setup-node.
 - `--set gateway_upstream=<ipv4[,ipv4...]>` is for a validator whose gateway runs on another
   host. It binds the RPC and the health listener to every interface and adds none of the
   public-RPC limit flags. `off` puts both binds back; the `--healthcheck` value from before is kept
@@ -329,6 +332,12 @@ Every other script, library and UI file keeps its version. The runbook for the g
   A map of the hubs alone, or of the other validators without this node, did exactly that.
   Setup now checks the map against the validators of the data dir's genesis `committee.yaml` first and writes `committee_peers` only when every one of them, this node included, is a key of the map; keys beside them, such as hubs, are fine, and a complete map is written as before, byte for byte.
   A map that lists fewer is left out of `committee_peers` with a warning naming how many validators are missing and the first three, and setup goes on: the map stays installed, on the start line (the node still dials it) and in the P2P committee allowlist's floor.
+- Fix for validators given trusted hubs with `--trusted-nodes`.
+  Setup checked only that the file existed, was readable and was small enough, so a hub entry pasted whole from `node-info.yaml` (workers as a list, beside `name` and the other fields), one without a `network_key` and one whose address was a DNS name were installed and written into `network-config` with exit 0.
+  The node then exited at start on the first two (`Error: bad yaml data`), and with a `/dns4/...` hub it started but never dialed it, saying so only at debug log level, while the P2P committee allowlist took no address from it.
+  Setup now runs edit-config's shape check on the map in its preflight, before key generation or any install step, on a map it reads back from `.node-meta` on a re-run, and again just before the install, and stops with `--trusted-nodes: <reason>.` naming the line and the entry; nothing is written and the node is not started.
+  The check also refuses an address that is not an IP address with UDP and QUIC v1 (a DNS name, TCP, a value that is no multiaddr): `the network_address of <key>... is a DNS name (...): the node does not resolve names, so it would never dial it. Give the IP address instead; ...`.
+  A `--bootstrap-peers` map is held to the same address rule before the release's parser, which accepts such an address.
 
 ### lib/common 2.2.5
 
@@ -400,6 +409,9 @@ Every other script, library and UI file keeps its version. The runbook for the g
 - New `tn_committee_peers_check DATA_DIR MAP`: rc 0 when every validator under `authorities` in `DATA_DIR/genesis/committee.yaml` is a key of the peers map MAP (YAML or JSON), else rc 1 with one line that names the gap (a count and the first three keys) or why the check could not run.
   It reads both files as the service user, since the committee file sits in the data dir that user writes.
   setup-node and edit-config call it before every render of `committee_peers` and list it in their library checks.
+- New `tn_trusted_nodes_shape_ok FILE`, the trusted nodes map's shape check, moved here from edit-config so setup-node runs the same one, and new `tn_map_addr_check FILE`, which it calls.
+  `tn_map_addr_check` refuses a `network_address` that is not `/ip4/<address>/udp/<port>/quic-v1` or the same with `/ip6`, with an optional `/p2p/<peer id>`: a DNS name (`/dns`, `/dns4`, `/dns6`, `/dnsaddr`), which the node keeps and never dials because it does not resolve names, a `/tcp` address, which it does not dial either, and a value the node stops on.
+  Each refusal names the line, the entry's BLS key shortened and the address; both scripts list the two functions in their library checks.
 
 ### Node Manager UI 2.1.3
 

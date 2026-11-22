@@ -6,8 +6,13 @@
 #   the flags      main's option loop takes both, and refuses an empty or
 #                  missing value; init_node_extra_flags keeps the mode in lower
 #                  case, refuses another word, checks the trusted nodes file as
-#                  a peers file is checked (the peers refusals are unchanged),
-#                  refuses --trusted-nodes without --admission in a --json keygen
+#                  a peers file is checked (the peers refusals are unchanged)
+#                  and its shape with edit-config's check, so a shape of
+#                  trusted_shapes.sh the node cannot use (the table
+#                  edit_config_admission_test.sh runs too) and a peers map
+#                  with a DNS name stop the run in the preflight with nothing
+#                  written, also over a recorded map and in a --json keygen;
+#                  it refuses --trusted-nodes without --admission in a --json keygen
 #                  (elsewhere the read-back checks the pair) and refuses a
 #                  --release-tag below the floor before anything else;
 #   the read-back  admission_read_back fills a flag left out from .node-meta
@@ -210,7 +215,7 @@ metakey() { grep "^$1=" "$META" 2>/dev/null || true; }
 # ---- inputs -------------------------------------------------------------------
 cat > "$T/in/trusted.yaml" <<'TRU'
 # hubs for the closed validator
-HubBLSkey1:
+pDmpE29YEhr93MPVPCGkWx3BsCcow4oExmxv5viJz2GTjsaXwc3YwKxE1CFdVuTVSudsFDutFSVmtgF98Abs56JZPfGQs6GzbqXDFkGA1eZx2edkwfP2Q6eRLo8coLhvTNj:
   primary:
     network_address: /ip4/203.0.113.10/udp/49590/quic-v1/p2p/12D3KooWHubPrimary
     network_key: 4XTTMhubprimary
@@ -251,7 +256,7 @@ admission:
   mode: Closed
 trusted_nodes:
   # hubs for the closed validator
-  HubBLSkey1:
+  pDmpE29YEhr93MPVPCGkWx3BsCcow4oExmxv5viJz2GTjsaXwc3YwKxE1CFdVuTVSudsFDutFSVmtgF98Abs56JZPfGQs6GzbqXDFkGA1eZx2edkwfP2Q6eRLo8coLhvTNj:
     primary:
       network_address: /ip4/203.0.113.10/udp/49590/quic-v1/p2p/12D3KooWHubPrimary
       network_key: 4XTTMhubprimary
@@ -719,6 +724,66 @@ check "committee: no genesis committee.yaml, the map is left out and setup goes 
 check "order: step_write_config runs right before step_create_service in every run" "2 2" \
     "$(grep -c '^    step_create_service$' "$SN") $(awk '/^    step_write_config$/ { w = NR } /^    step_create_service$/ && w && NR - w <= 2 { n++ } END { print n + 0 }' "$SN")"
 cp "$T/in/committee1.yaml" "$DD/genesis/committee.yaml"
+
+# -----------------------------------------------------------------------------
+# the shapes: the table of trusted_shapes.sh, which edit_config_admission_test.sh
+# runs too. A map the node cannot use stops the run in the preflight, naming the
+# line, the entry and the reason, with nothing installed, recorded or rendered.
+# -----------------------------------------------------------------------------
+# shellcheck source=tools/tests/trusted_shapes.sh
+. "$(dirname "${BASH_SOURCE[0]}")/trusted_shapes.sh"
+SK1=pDmpE29YEhr93MPVPCGkWx3BsCcow4oExmxv5viJz2GTjsaXwc3YwKxE1CFdVuTVSudsFDutFSVmtgF98Abs56JZPfGQs6GzbqXDFkGA1eZx2edkwfP2Q6eRLo8coLhvTNj
+SK2=rZdhyVGJAtz7kyFtFARWVVcw5DB3o9E4GvPN6zuKfUhUBGFRvEK2PgEV44CJt9wu9GMyssFQBFXRknrenuhJixo9KCADrZzHdtcvAwAYDmcLc7Ugh9epGc5LRZC5TK2hnYA
+mkdir -p "$T/shapes"
+# untouched -- nothing installed, recorded or rendered, network-config as before
+untouched() {
+    printf '%s|%s|%s' "$(logf "$T/rootw.log")$(logf "$T/render.log")" \
+        "$([[ -e "$META" ]] && echo meta)$([[ -e "$CFG/trusted-nodes.yaml" ]] && echo map)" \
+        "$(cmp -s "$T/in/nc-before" "$NC" && echo same)"
+}
+while read -r class name reason; do
+    shape_map "$name" "$SK1" "$SK2" > "$T/shapes/${name}.yaml"
+    chmod 0644 "$T/shapes/${name}.yaml"
+    reset
+    marker v0.17.0
+    cp "$T/in/nc-before" "$NC"
+    SNM_MODE=closed SNM_TRUSTED="$T/shapes/${name}.yaml" drv interactive
+    if [[ "$class" == kept ]]; then
+        check "shape ${name}: installed and rendered" "0 yes yes" \
+            "$RC $(cmp -s "$T/shapes/${name}.yaml" "$CFG/trusted-nodes.yaml" && echo yes) $(has "$(logf "$T/render.log")" "closed ${CFG}/trusted-nodes.yaml none")"
+        continue
+    fi
+    check "shape ${name}, ${class}: refused in the preflight" "1 yes yes" "$RC $(has "$OUT" "--trusted-nodes: ") $(has "$OUT" "$reason")"
+    check "shape ${name}, ${class}: nothing written" "||same" "$(untouched)"
+    if [[ "$class" == new ]]; then
+        check "shape ${name}: the refusal names the entry" yes "$(has "$OUT" "of ${SK1:0:16}...")"
+    fi
+done <<ROWS
+$(shape_rows)
+ROWS
+# a --json keygen stops before the key generation; a recorded map is held to the
+# same check on a re-run
+reset
+marker v0.17.0
+cp "$T/in/nc-before" "$NC"
+SNM_JSON=true SNM_PHASE=keygen SNM_MODE=closed SNM_TRUSTED="$T/shapes/dns4.yaml" drv keygen
+check "shapes: a --json keygen with a DNS name stops, nothing written" "1 yes ||same" \
+    "$RC $(has "$OUT" "is a DNS name (/dns4/hub.example.org") $(untouched)"
+reset
+marker v0.17.0
+cp "$T/in/nc-before" "$NC"
+meta ADMISSION_MODE=closed "TRUSTED_NODES_FILE=$T/shapes/workers-list.yaml"
+drv interactive
+check "shapes: a recorded map the node cannot read stops a re-run, nothing rendered" "1 yes yes" \
+    "$RC $(has "$OUT" "TRUSTED_NODES_FILE in ${META}: line ") $([[ ! -s "$T/render.log" ]] && cmp -s "$T/in/nc-before" "$NC" && echo yes)"
+# the same address rule for the bootstrap peers map, which the node's own parse
+# check lets through
+sed 's|/ip4/198.51.100.21/udp/49590|/dns4/peer.example.org/udp/49590|' "$PEERS" > "$T/in/peers-dns.yaml"
+chmod 0644 "$T/in/peers-dns.yaml"
+reset
+SNM_PEERS="$T/in/peers-dns.yaml" drv init
+check "shapes: --bootstrap-peers with a DNS name stops in the preflight" "1 yes" \
+    "$RC $(has "$OUT" "--bootstrap-peers: line 3: the network_address of PeerBLSkey1 is a DNS name (/dns4/peer.example.org")"
 
 # -----------------------------------------------------------------------------
 # the library gate and --help

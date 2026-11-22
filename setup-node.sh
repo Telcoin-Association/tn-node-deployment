@@ -88,9 +88,12 @@
 #                            a YAML or JSON map keyed by BLS public key; each entry is a
 #                            node's primary and workers, as under p2p_info in its
 #                            node-info.yaml. At most 64 KiB, and readable by other users
-#                            (chmod 644): the map does not stay private. Setup checks it
-#                            with the release's own parser and installs it, world-readable,
-#                            as /etc/telcoin/bootstrap-peers.yaml; the start wrapper passes
+#                            (chmod 644): the map does not stay private. Every
+#                            network_address is an IP address (/ip4 or /ip6, UDP, QUIC
+#                            v1): the node does not resolve DNS names. Setup checks the
+#                            map with the release's own parser and installs it,
+#                            world-readable, as /etc/telcoin/bootstrap-peers.yaml; the
+#                            start wrapper passes
 #                            --bootstrap-peers "$(cat /etc/telcoin/bootstrap-peers.yaml)",
 #                            so the file is read again at every start.
 #   --enable-state-export    Export each epoch's final execution state under
@@ -126,7 +129,11 @@
 #                            entry the node's primary {network_address, network_key}
 #                            and its workers by id ({<id>: {network_address,
 #                            network_key}}). At most 64 KiB, and readable by other users
-#                            (chmod 644). Setup installs it, world-readable, as
+#                            (chmod 644). Every network_address is an IP address (/ip4
+#                            or /ip6, UDP, QUIC v1): the node does not resolve DNS names.
+#                            Setup checks the map's shape before anything is written (an
+#                            entry pasted from a node-info.yaml, whose workers are a
+#                            list, is refused), installs it, world-readable, as
 #                            /etc/telcoin/trusted-nodes.yaml and writes it into
 #                            network-config under trusted_nodes.
 # In a --json finalize run, a flag left out is read back from what keygen recorded in
@@ -213,6 +220,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
         tn_os_floor_check tn_docker_network_ok tn_release_tag_grammar tn_mainnet_enabled \
         tn_docker_pull_repo_ok tn_docker_pull_repos_for tn_docker_image_network_ok \
         tn_network_config_render tn_node_supports_admission tn_committee_peers_check \
+        tn_trusted_nodes_shape_ok tn_map_addr_check \
         tn_chain_configs_tag tn_chain_configs_dir tn_chain_configs_from_tag >/dev/null; then
     _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this setup-node.sh: run update-scripts.sh and try again."
     case " $* " in
@@ -1541,18 +1549,26 @@ node_flag_warnings() {
 # group and other users can read too. The map reaches the node as one command-line
 # argument, and Linux allows 128 KiB for one. The read bits matter because the map does
 # not stay private anyway: the installed copy is 0644, and the parse check passes the map
-# on the command line of the node binary, where other local users can see it. Otherwise
-# 1, with the reason on stdout.
+# on the command line of the node binary, where other local users can see it. Every
+# network_address in it must be one the node can dial (tn_map_addr_check: an IP
+# address, UDP, QUIC v1); the node's parser, asked later, accepts a DNS name the node
+# never resolves. Otherwise 1, with the reason on stdout.
 peers_file_ok() {
-    _setup_map_file_ok "$1" peers "the installed copy is world-readable (0644) and the check passes the map on the command line of the node binary, where other users can see it"
+    _setup_map_file_ok "$1" peers "the installed copy is world-readable (0644) and the check passes the map on the command line of the node binary, where other users can see it" || return 1
+    tn_map_addr_check "$1"
 }
 
-# 0 when FILE can hold a trusted nodes map, by the rules of a peers map: the map never
-# reaches a command line, but it does not stay private either (the installed copy is
-# 0644, so the service user can read it), and a list of hubs never comes near 64 KiB.
-# Otherwise 1, with the reason on stdout.
+# 0 when FILE can hold a trusted nodes map: a file by the rules of a peers map (the map
+# never reaches a command line, but it does not stay private either: the installed copy
+# is 0644, so the service user can read it; and a list of hubs never comes near 64 KiB),
+# in the shape the node reads (tn_trusted_nodes_shape_ok, the check edit-config runs
+# too, addresses included). The node has no check flag for this map and stops at start
+# on one it cannot read, so this runs before anything is written: in the preflight, on
+# a recorded map read back and just before the install. Otherwise 1, with the reason on
+# stdout.
 trusted_nodes_file_ok() {
-    _setup_map_file_ok "$1" "trusted nodes" "the installed copy is world-readable (0644)"
+    _setup_map_file_ok "$1" "trusted nodes" "the installed copy is world-readable (0644)" || return 1
+    tn_trusted_nodes_shape_ok "$1"
 }
 
 # _setup_map_file_ok FILE KIND WHY -- the checks of peers_file_ok and

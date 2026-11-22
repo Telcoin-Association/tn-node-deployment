@@ -433,6 +433,7 @@ The node treats these peers as discovery hints only: it does not keep them conne
 - The file is a YAML or JSON map keyed by BLS public key. Each value is that node's `primary` and `workers` entries, copied from under `p2p_info` in its `node-info.yaml`.
 - It must be a regular file of at most 64 KiB that other users can read (`chmod 644`). The map does not stay private: setup installs it world-readable as `/etc/telcoin/bootstrap-peers.yaml`, and its check passes the map on the node binary's command line. A file its group or other users cannot read is refused, with the `chmod` to run.
 - Setup checks the map with the release's own parser and stops with the parser's reason if a key or value is wrong.
+- Every `network_address` is an IP address (`/ip4/<address>/udp/<port>/quic-v1/p2p/<peer id>` or the same with `/ip6`), as for the trusted nodes file (section 2.9): the node does not resolve names and never dials a `/dns...` or `/tcp` address, which its parser takes. Setup and `edit-config.sh` refuse one in the preflight, before the parser runs, naming the line and the entry: `line <n>: the network_address of <key>... is a DNS name (...)`.
 - The start script passes `--bootstrap-peers "$(cat /etc/telcoin/bootstrap-peers.yaml)"`, so the node reads the file again at every start. An edit to that file takes effect at the next restart without any check; `edit-config.sh` checks a new map before it installs it.
 - With an admission mode (section 2.9) the map is also written into `network-config` as `committee_peers`, but only when it lists every validator of the genesis committee, this node included.
   A map that lists fewer is installed and dialed as usual and left out of `committee_peers`, with a warning.
@@ -504,24 +505,31 @@ sudo bash ~/telcoin-node-scripts/setup-node.sh --admission closed --trusted-node
 **The trusted nodes file.**
 A YAML map keyed by each hub's BLS public key (base58, as in the hub's `node-info.yaml`).
 Each entry holds the hub's `primary`, with its `network_address` and `network_key`, and its `workers`, keyed by worker id, each with its own `network_address` and `network_key`.
+Do not paste an entry from a node-info file; workers are keyed by id.
+`node-info.yaml` lists the workers under `p2p_info` and adds fields such as `name`, and the node stops at start on either.
 Unlike the bootstrap peers map, `workers` is a map by worker id, not a list, and an entry holds nothing besides `primary` and `workers`.
 The node wants the worker ids `0` up to its own number of workers less one in every entry (`0` alone with one worker).
+Every `network_address` is an IP address: `/ip4/<address>/udp/<port>/quic-v1` or the same with `/ip6`, followed by `/p2p/<peer id>` as in the hub's `node-info.yaml` (the `/p2p/` part may be left out).
+The node does not resolve names: it starts with a `/dns`, `/dns4`, `/dns6` or `/dnsaddr` address, or a `/tcp` one, but never dials it, and says so only at debug log level, and the P2P committee allowlist (section 2.10) takes no address from a name.
+One correct entry, for a hub with one worker, with the values taken from the hub's `node-info.yaml` (`bls_public_key`, and under `p2p_info` the primary's and the first worker's `network_address` and `network_key`):
 
 ```yaml
-<hub BLS public key>:
+<hub bls_public_key>:
   primary:
-    network_address: /ip4/198.51.100.30/udp/49590/quic-v1/p2p/<peer id>
-    network_key: <primary network key>
+    network_address: /ip4/198.51.100.30/udp/49590/quic-v1/p2p/<primary peer id>
+    network_key: <primary network_key>
   workers:
     0:
-      network_address: /ip4/198.51.100.30/udp/49594/quic-v1/p2p/<peer id>
-      network_key: <worker network key>
+      network_address: /ip4/198.51.100.30/udp/49594/quic-v1/p2p/<worker peer id>
+      network_key: <worker network_key>
 ```
 
 - It must be a regular file of at most 64 KiB that other users can read (`chmod 644`), as for the peers map (section 2.7).
 - Setup installs it as `/etc/telcoin/trusted-nodes.yaml` (root 0644) and writes it into `network-config` under `trusted_nodes`.
-- `edit-config.sh --set trusted_nodes=FILE` checks its shape first, on a root-only copy: keys of 131 or 132 base58 characters, each named once, `primary` and `workers` as above with at least one worker id from 0 to 65535, block YAML only.
-  A refusal writes nothing and names the line: `<file> is not a trusted nodes map: <reason>. Each key is a hub's BLS public key, and each entry the hub's primary (network_address, network_key) and workers, as in its node-info.yaml.`
+- `setup-node.sh` and `edit-config.sh` check its shape with one check before they write anything: keys of 131 or 132 base58 characters, each named once, `primary` and `workers` as above with at least one worker id from 0 to 65535, block YAML only, and every `network_address` an IP address as above.
+  Setup runs it in the preflight, before any key generation or install step, on a map it reads back from `.node-meta` on a re-run, and again just before the install; `edit-config.sh` runs it on a root-only copy.
+  A refusal writes nothing, restarts nothing and names the line and the entry, with the key shortened: `--trusted-nodes: <reason>.` at setup, `<file> is not a trusted nodes map: <reason>. Each key is a hub's BLS public key, and each entry the hub's primary (network_address, network_key) and its workers keyed by worker id, with the addresses and keys from its node-info.yaml.` in `edit-config.sh`.
+  For a name the reason reads `line <n>: the network_address of <key>... is a DNS name (<address>...): the node does not resolve names, so it would never dial it. Give the IP address instead; the node takes /ip4/<address>/udp/<port>/quic-v1/p2p/<peer id> (or /ip6/...), as node-info.yaml writes it`.
 - The map needs an admission mode: `--trusted-nodes` with no mode given or recorded stops setup, and `edit-config.sh` says `trusted_nodes needs an admission mode, which goes into network-config with it: set admission to open, grace or closed first`.
 - When a peer rotates its network key, a Closed node denies the new key until the peer's new record resolves; switching to Grace for the rotation, or putting the new binding in this file, avoids the wait, because a configured hub wins over a cached record.
 
@@ -579,8 +587,8 @@ sudo bash ~/telcoin-node-scripts/edit-config.sh --set admission=closed
 
 - `MIN_ADMISSION_VERSION` (0.17.0) is a placeholder until the node team names the first release that reads the entries; `setup-node.sh --help` and `edit-config.sh --help` repeat it.
 - `committee_peers` comes from the bootstrap peers map and is written only when that map lists the whole genesis committee (above); a map that lists fewer keeps the node starting but leaves it without a launch inventory.
-- Setup checks a `--trusted-nodes` file as it checks a peers map, and the library only that it starts with a map; the shape check runs in `edit-config.sh` alone, which takes block YAML only (a JSON or flow-style map that setup takes is refused there).
-  A node-side check of the file would replace both.
+- The shape check is the scripts' own, since the node has no check flag for the file; it takes block YAML only, so a JSON or flow-style map is refused, and the node still stops at start on a map that passes it with too few worker ids or a peer id that is not one.
+  A node-side check of the file would replace it.
 - When the release cannot be told, `--admission` and the two edits warn and write anyway rather than stop.
 - A Docker finalize without `--release-tag` asks the image registry which release the recorded image belongs to, because keygen records no release tag; when that lookup fails, it cannot tell the release and warns.
 - `update-node.sh` does not check the floor: an update to a release below 0.17.0 leaves the settings in `network-config`, where that release ignores them.
@@ -2731,6 +2739,7 @@ Start with `sudo bash ~/telcoin-node-scripts/check-node.sh` and `journalctl -u t
 | `--bootstrap-peers needs telcoin-network v0.15.0-adiri or later, and ... does not have it.` (setup), or `the installed release has no --bootstrap-peers; update the node first` (edit-config) | The node release lacks the flag. The same messages name `--enable-state-export` (`v0.13.0-adiri`) and `--state-export-keep` (`v0.15.0-adiri`). | Pick a newer release, update the node (section 4.2), or leave the flag out. |
 | `<file> is mode 600: other users cannot read it. ... Run chmod 644 <file> first.` | Setup and `edit-config.sh` take only a peers file that other users can read, because the installed copy is world-readable. | `chmod 644 <file>`, then run it again. |
 | `the node rejects <file> as a --bootstrap-peers map (...)` | A key is not a BLS public key, or a value is not the `primary` and `workers` entries of that node's `node-info.yaml`. | Fix the map (section 2.7). |
+| `line <n>: the network_address of <key>... is a DNS name (...): the node does not resolve names, so it would never dial it.` (setup, after `--trusted-nodes:` or `--bootstrap-peers:`; `edit-config.sh`), or `... is not an address the node can dial` | A trusted nodes or bootstrap peers map names a host, or another transport, where the node needs an IP address and QUIC: the node would start, keep the entry and never dial it. Nothing was written. | Put the IP address in, `/ip4/<address>/udp/<port>/quic-v1/p2p/<peer id>` as in that node's `node-info.yaml` (sections 2.7, 2.9), and run the command again. |
 | `[WARN] /etc/telcoin/bootstrap-peers.yaml lacks <n> of the <m> validators of the genesis committee in .../genesis/committee.yaml (...), so it is not written to network-config as committee_peers: ...` | With an admission mode, the bootstrap peers map does not list every genesis validator (a map of hubs only, or of the other validators without this node). The node would not start during epoch 0 with it as `committee_peers`, so it was left out; the node still dials the map. | Nothing stops. To have it written, add the validators the warning names, this node included, and run `edit-config.sh --set bootstrap_peers=FILE` (section 2.9). |
 | `Error: committee_peers: missing validator <key>` in `journalctl -u telcoin`, the node stopping within a second of each start | `network-config` holds a `committee_peers` map without that genesis validator, written by hand or by scripts older than this check, and the node's chain is at epoch 0. | Run `edit-config.sh --set bootstrap_peers=FILE` again (it leaves an incomplete map out), or add the validator to the map (section 2.9). |
 | `bootstrap_peers needs a start wrapper: ...`, or `... move it to the current unit and start script first: sudo ./edit-config.sh --migrate-credential (nothing was changed)` | A node that starts straight from its systemd unit, holds the passphrase in the unit, or uses the old TPM method. | `sudo bash ~/telcoin-node-scripts/edit-config.sh --migrate-credential` (section 4.8). |
