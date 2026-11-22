@@ -896,7 +896,7 @@ On any network but testnet and devnet the status screen does not show the Uptime
 
 On a validator, P2P committee mode lets only the sources the node itself lists reach the P2P ports and drops every other source before `ufw` sees it.
 The list comes from the node's admission snapshot (`tn_admissionSnapshot` on its local RPC): every address the snapshot holds, in the primary and every worker swarm, for the committees, the validators the node tracks for a coming seat, and its trusted and bootstrap peers.
-The bootstrap floor and the P2P source list are always in it as well, so a wrong snapshot can never cut the peers the node starts with.
+The floor (the bootstrap peers, the genesis committee and the trusted hubs) and the P2P source list are always in it as well, so a wrong snapshot can never cut the peers the node starts with or its hubs.
 It is meant for a closed validator (see [Node admission settings](#node-admission-settings)); hubs and observers keep open P2P.
 [OPERATOR.md section 2.10](OPERATOR.md#210-p2p-committee-allowlist-validators) has the procedure, the day-2 steps and the limits.
 
@@ -948,7 +948,7 @@ It is a server task: the Node Manager UI shows the allowlist but cannot turn it 
   Exit 0 off, 1 refused, 3 partly done: the message names the command that finishes it, and while the allowlist is not gone or `P2P_PER_SOURCE=off` is not written `P2P_COMMITTEE` stays `on`, so a rerun of `off` finishes it.
 - `status` prints the allowlist lines of the status screen (also under "View current firewall status"): whether the table is loaded and what it holds, the last sync and its age, staleness and its reason, the two counters, and whether the timer and the boot unit are in place, each warning with the command that fixes it.
   `rpc-method-missing`, `snapshot-version-*`, `epoch-regressed` and `state-invalid` warn at once, and so do a failed last sync (`RESULT=error`, its reason named) and a failed last run of `telcoin-p2p-allow-sync.service` (exit 3 and 4 count as success), in check-node's words; any other reason once the tool reports the run stale.
-- Every writer of the tool's inputs resyncs, and only while `P2P_COMMITTEE` is on: `--enable`, `--reset`, the menu's enable and the UI's enable (after the source list is stored), `edit-config.sh` after an edit that changed `/etc/telcoin/node.env` (it holds the P2P listener addresses) or the bootstrap peers, and after the chain-config refresh (the genesis `committee.yaml` feeds the floor), each once the node came back from its restart, the menu's Restart node (an edit saved with "restart later" reaches the node only then), and `migrate-node-naming.sh` after it rewrote `RPC_PORT`.
+- Every writer of the tool's inputs resyncs, and only while `P2P_COMMITTEE` is on: `--enable`, `--reset`, the menu's enable and the UI's enable (after the source list is stored), `edit-config.sh` after an edit that changed `/etc/telcoin/node.env` (it holds the P2P listener addresses), the bootstrap peers or the trusted nodes (both feed the floor), and after the chain-config refresh (the genesis `committee.yaml` feeds the floor too), each once the node came back from its restart, the menu's Restart node (an edit saved with "restart later" reaches the node only then), a `setup-node.sh` re-run that installed a changed bootstrap peers or trusted nodes map, once the node is started, and `migrate-node-naming.sh` after it rewrote `RPC_PORT`.
   A hook runs `firewall-setup.sh --p2p-committee sync` as a child once it has released its own update lock, and a failure there is a warning naming that command.
   `update-scripts.sh` prints `sudo bash <tree>/firewall-setup.sh --p2p-committee sync` after an install that changed `firewall-setup.sh` or `lib/common.sh` while the timer unit exists; it never runs it.
 
@@ -978,7 +978,7 @@ The scripts write `config`; the tool writes the rest, each file 0600.
 | File | What it holds |
 |---|---|
 | `config` | `CONFIG_VERSION=1`, `RPC_PORT` (the node's RPC port from `.node-meta`), `P2P_PORTS` (the node's P2P ports, each once) and `P2P_ALLOW_FROM` (the stored source list). A multicast, link-local or unspecified host in the list refuses the write, since it is never a peer's source |
-| `floor` | The addresses of `/etc/telcoin/bootstrap-peers.yaml`, or of the genesis `committee.yaml` in the data dir when there is no peers file, captured by `tn-p2p-allow-sync capture-floor` at `on` and every resync |
+| `floor` | The addresses of `/etc/telcoin/bootstrap-peers.yaml`, the genesis `committee.yaml` in the data dir and `/etc/telcoin/trusted-nodes.yaml`, each one that exists, captured by `tn-p2p-allow-sync capture-floor` at `on` and every resync; an empty floor warns |
 | `current.nft` | The last program loaded, which the boot unit loads |
 | `state.json` | The per-key memory |
 | `status` | `KEY=VALUE` lines the scripts read key by key: `RESULT`, `LAST_GOOD`, `EPOCH`, `STALE_SINCE`, `STALE_REASON`, the set sizes and more |

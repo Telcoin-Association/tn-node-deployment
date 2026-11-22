@@ -32,6 +32,12 @@
 #                  with no flags: the re-run leaves network-config (its
 #                  committee_peers too), the trusted nodes map and .node-meta
 #                  byte-identical; --trusted-nodes alone over a recorded mode;
+#   the allowlist  a run that changed the bootstrap peers or trusted nodes map
+#                  resyncs the P2P committee allowlist (setup_committee_resync,
+#                  through a firewall-setup.sh stub) when P2P_COMMITTEE is on,
+#                  once the update lock is released after step_create_service;
+#                  an unchanged re-run or committee mode off does not, and a
+#                  failed resync warns with the command;
 #   the library    a lib/common.sh without the renderer is refused up front;
 #                  --help names both flags and the mainnet default.
 #
@@ -170,6 +176,7 @@ case "$1" in
     keygen) init_node_extra_flags; prepare_node_extra_flags; vars ;;
     finalize) init_node_extra_flags; finalize_node_extra_flags; prepare_node_extra_flags; setup_admission_config; vars ;;
     interactive) init_node_extra_flags; prepare_node_extra_flags; setup_admission_config; vars ;;
+    resync) init_node_extra_flags; prepare_node_extra_flags; setup_admission_config; setup_committee_resync; vars ;;
     summary) set +u; PASSPHRASE_METHOD=credential; step_final_summary ;;
 esac
 DRV
@@ -532,6 +539,49 @@ marker v0.17.0
 SNM_NETWORK=mainnet SNM_JSON=true SNM_PHASE=keygen SNM_MODE=closed drv keygen
 check "warning: a mainnet --json keygen warns too, as a log event" "0 yes" \
     "$RC $(has "$(logf "$T/events")" "\"msg\":\"WARNING: ${W_CLOSED}\"")"
+
+# -----------------------------------------------------------------------------
+# the allowlist: a run that changed a map its floor is taken from resyncs it
+# -----------------------------------------------------------------------------
+cat > "$T/sn/firewall-setup.sh" <<'FWS'
+#!/bin/sh
+printf 'firewall-setup %s stdin=%s\n' "$*" "$(cat | wc -c | tr -d ' ')" >> "$SNM_DIR/fw.log"
+exit "${SNM_FW_RC:-0}"
+FWS
+fwlog() { logf "$T/fw.log"; }
+FW_SYNC="firewall-setup --p2p-committee sync stdin=0"
+FW_FIX="run: sudo bash ${T}/sn/firewall-setup.sh --p2p-committee sync"
+reset
+marker v0.17.0
+cp "$T/in/nc-before" "$NC"
+meta "P2P_COMMITTEE=on"
+rm -f "$T/fw.log"
+SNM_MODE=closed SNM_TRUSTED="$TRUSTED" drv resync
+check "allowlist: a new trusted nodes map, committee on: one sync" "0|$FW_SYNC" "$RC|$(fwlog)"
+rm -f "$T/fw.log"
+drv resync
+check "allowlist: a re-run that changes no map: no sync" "0|" "$RC|$(fwlog)"
+SNM_TRUSTED="$T/in/trusted-b.yaml" drv resync
+check "allowlist: another trusted nodes map: one sync" "0|$FW_SYNC" "$RC|$(fwlog)"
+rm -f "$T/fw.log"
+SNM_PEERS="$PEERS" drv resync
+check "allowlist: a new bootstrap peers map: one sync" "0|$FW_SYNC" "$RC|$(fwlog)"
+rm -f "$T/fw.log"
+SNM_FW_RC=2 SNM_TRUSTED="$TRUSTED" drv resync
+check "allowlist: a failed sync warns with the command, setup goes on" "0|$FW_SYNC|yes" \
+    "$RC|$(fwlog)|$(has "$OUT" "not synced with the new peers maps (firewall-setup.sh exit 2); ${FW_FIX}")"
+rm -f "$T/fw.log"
+sed 's/^P2P_COMMITTEE=on$/P2P_COMMITTEE=off/' "$META" > "$T/meta.off" && mv "$T/meta.off" "$META"
+SNM_TRUSTED="$T/in/trusted-b.yaml" drv resync
+check "allowlist: committee off: no sync" "0|" "$RC|$(fwlog)"
+printf 'P2P_COMMITTEE=on\nP2P_COMMITTEE=on\n' >> "$META"
+SNM_TRUSTED="$TRUSTED" drv resync
+check "allowlist: P2P_COMMITTEE twice: no sync, says why" "0||yes" \
+    "$RC|$(fwlog)|$(has "$OUT" "P2P_COMMITTEE is set more than once in .node-meta, so the P2P committee allowlist was not synced")"
+rm -f "$T/sn/firewall-setup.sh" "$T/fw.log"
+check "order: main resyncs right after it releases the lock that step_create_service held" \
+    "step_create_service setup_release_lock setup_committee_resync" \
+    "$(sed -n '/^main() {/,/^}/p' "$SN" | grep -E '^    [a-z_]+$' | grep -A2 -x '    step_create_service' | tr -d ' ' | tr '\n' ' ' | sed 's/ $//')"
 
 # -----------------------------------------------------------------------------
 # the library gate and --help

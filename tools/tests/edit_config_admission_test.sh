@@ -25,6 +25,10 @@
 #                  restart, a refusal puts every file back, and a node that does
 #                  not come back healthy has network-config, the map and
 #                  .node-meta rolled back byte for byte;
+#   the allowlist  with P2P_COMMITTEE on, an edit that changed the trusted
+#                  nodes map resyncs the P2P committee allowlist (its floor
+#                  holds the hubs) after the restart, and one that changed
+#                  nothing does not;
 #   the library    a lib/common.sh without the renderer is refused up front;
 #                  --help names both fields.
 #
@@ -604,6 +608,28 @@ drv menu-trusted
 check "menu: the rollback restart fails too: files put back, said so" "same yes" \
     "$(same) $(has "$OUT" "and again after the edit was put back")"
 DRV_IN=""
+
+# ---- the P2P committee allowlist follows the trusted nodes map -------------------
+# a firewall-setup.sh stub beside the copy logs its calls with the restarts
+cat > "$T/ec/firewall-setup.sh" <<'FWS'
+#!/bin/sh
+printf 'firewall-setup %s\n' "$*" >> "$ECA_DIR/calls.log"
+FWS
+fwcalls() { grep -E '^(systemctl restart|firewall-setup)' "$T/calls.log" | tr '\n' ';'; }
+FWSYNC="systemctl restart telcoin;firewall-setup --p2p-committee sync;"
+reset ADMISSION_MODE=closed P2P_COMMITTEE=on
+drv set "trusted_nodes=$T/in/t1.yaml"
+check "committee on, trusted_nodes=FILE: resynced after the restart" "0|$FWSYNC" "$RC|$(fwcalls)"
+drv set "trusted_nodes=$T/in/t2.yaml"
+check "committee on, another trusted nodes map: resynced after the restart" "0|$FWSYNC" "$RC|$(fwcalls)"
+drv set "trusted_nodes=$T/in/t2.yaml"
+check "committee on, the same map again: no restart, no resync" "0|" "$RC|$(fwcalls)"
+drv set trusted_nodes=none
+check "committee on, trusted_nodes=none: resynced after the restart" "0|$FWSYNC" "$RC|$(fwcalls)"
+reset ADMISSION_MODE=closed P2P_COMMITTEE=off
+drv set "trusted_nodes=$T/in/t1.yaml"
+check "committee off, trusted_nodes=FILE: no resync" "0|systemctl restart telcoin;" "$RC|$(fwcalls)"
+rm -f "$T/ec/firewall-setup.sh"
 
 # ---- the library and --help -----------------------------------------------------
 help="$(bash "$TN_TEST_REPO/edit-config.sh" --help 2>&1)"

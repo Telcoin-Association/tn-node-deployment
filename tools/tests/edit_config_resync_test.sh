@@ -14,11 +14,12 @@
 # firewall-setup.sh, which logs its arguments, whether the update lock is free,
 # whether fd 3 (the --json event channel) is open and how many bytes it read on
 # stdin, then exits FW_STUB_RC. Cases: which edits trigger the sync (node.env,
-# bootstrap-peers.yaml, no backup at all) and which do not (the launch file
-# alone, P2P_COMMITTEE off, missing or set twice); the update lock released
-# before the child runs; the child's exit codes; --json events on fd 3 with the
-# child's output kept off it; the sync only after a restart the node came back
-# from, after the host baseline, and before the done event of --set.
+# bootstrap-peers.yaml, trusted-nodes.yaml, no backup at all) and which do not
+# (the launch file alone, P2P_COMMITTEE off, missing or set twice); the update
+# lock released before the child runs; the child's exit codes; --json events on
+# fd 3 with the child's output kept off it; the sync only after a restart the
+# node came back from, after the host baseline, and before the done event of
+# --set.
 #
 # Maintainer tooling (not updater-tracked, no sidecar). bash 3.2 safe.
 # =============================================================================
@@ -53,6 +54,7 @@ FWS
 META="$T/fx/etc/telcoin/.node-meta"
 ENVF="$T/fx/etc/telcoin/node.env"
 PEERS="$T/fx/etc/telcoin/bootstrap-peers.yaml"
+TRUSTED="$T/fx/etc/telcoin/trusted-nodes.yaml"
 LAUNCH="$T/fx/usr/local/libexec/telcoin/tn-start"
 
 TN_ROOT_PREFIX="$T/fx"
@@ -116,6 +118,13 @@ check "node.env changed, on: no warning" no "$(has "$OUT" "WARN")"
 check "node.env changed, on: nothing on fd 3 in human mode" "" "$(cat "$T/json")"
 resync on "$PEERS"
 check "bootstrap-peers.yaml changed, on: one sync" "$SYNC" "$(fwlog)"
+resync on "$TRUSTED"
+check "trusted-nodes.yaml changed, on: one sync" "$SYNC" "$(fwlog)"
+resync on "$T/fx/var/lib/telcoin/network-config" "$TRUSTED"
+check "network-config and trusted-nodes.yaml changed (trusted_nodes=FILE), on: one sync" "$SYNC" "$(fwlog)"
+resync off "$TRUSTED"
+check "trusted-nodes.yaml changed, off: no sync, the lock still held" "| true" "$(fwlog)| $EDIT_LOCK_HELD"
+edit_unlock
 resync on
 check "no backup (the chain-config refresh), on: one sync" "$SYNC" "$(fwlog)"
 resync on "$LAUNCH"

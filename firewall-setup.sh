@@ -1285,33 +1285,61 @@ P2P_ALLOW_FROM=${list}"
 }
 
 # fw_allow_capture_floor -- have tn-p2p-allow-sync write FW_ALLOW_DIR/floor, the
-# addresses the allowlist never drops, from the peers the node dials at start:
-# <config dir>/bootstrap-peers.yaml when it exists, else the bootstrap servers of
-# the genesis committee.yaml in the data dir (setup-node copies it there). The
-# file must be a regular file, not a symlink. TN_P2P_ALLOW_BIN runs here through
-# fw_allow_run, outside the sync unit's sandbox (which keeps the tool out of
-# /etc/telcoin and the data dir). rc 0 captured; 1 no such file, or the data dir
-# cannot be resolved; else the tool's exit code (the floor it had stays); the
-# reason is on stderr.
+# addresses the allowlist never drops: the union of every one of these files
+# that exists, <config dir>/bootstrap-peers.yaml (the peers the node dials at
+# start), the genesis committee.yaml in the data dir (setup-node copies it
+# there) and <config dir>/trusted-nodes.yaml (the hubs, which TRUSTED_NODES_FILE
+# names). capture-floor takes them all and unites their addresses, so a partial
+# peers map no longer hides the committee file and a trusted hub stays when the
+# node stops listing it. A missing file is skipped; one that exists must be a
+# regular file, not a symlink. A floor with no address is written and warns
+# (fw_allow_floor_warn). TN_P2P_ALLOW_BIN runs here through fw_allow_run,
+# outside the sync unit's sandbox (which keeps the tool out of /etc/telcoin and
+# the data dir). rc 0 captured; 1 none of the files exists, one is not a regular
+# file, or the data dir cannot be resolved; else the tool's exit code (the floor
+# it had stays); the reason is on stderr.
 fw_allow_capture_floor() {
-    local src dd rc=0
-    src="$(tn_resolve_config_dir)/bootstrap-peers.yaml"
-    if [[ ! -e "$src" && ! -L "$src" ]]; then
-        if ! dd="$(tn_resolve_data_dir)"; then
-            print_error "The data dir cannot be resolved, so the genesis committee cannot be read and the P2P committee allowlist floor was not captured." >&2
-            return 1
-        fi
-        src="${dd}/genesis/committee.yaml"
-    fi
-    if [[ -L "$src" || ! -f "$src" ]]; then
-        print_error "${src#"${TN_ROOT_PREFIX:-}"} is missing or not a regular file, so the P2P committee allowlist floor was not captured." >&2
+    local cfg dd src list="" rc=0
+    local -a srcs=()
+    cfg="$(tn_resolve_config_dir)"
+    if ! dd="$(tn_resolve_data_dir)"; then
+        print_error "The data dir cannot be resolved, so the genesis committee cannot be read and the P2P committee allowlist floor was not captured." >&2
         return 1
     fi
-    fw_allow_run capture-floor "$src" || rc=$?
-    if [[ $rc -ne 0 ]]; then
-        print_error "tn-p2p-allow-sync capture-floor ${src#"${TN_ROOT_PREFIX:-}"} failed (exit ${rc}); the P2P committee allowlist keeps the floor it had." >&2
+    for src in "${cfg}/bootstrap-peers.yaml" "${dd}/genesis/committee.yaml" "${cfg}/trusted-nodes.yaml"; do
+        [[ -e "$src" || -L "$src" ]] || continue
+        if [[ -L "$src" || ! -f "$src" ]]; then
+            print_error "${src#"${TN_ROOT_PREFIX:-}"} is not a regular file, so the P2P committee allowlist floor was not captured." >&2
+            return 1
+        fi
+        srcs+=("$src")
+        list="${list:+${list} }${src#"${TN_ROOT_PREFIX:-}"}"
+    done
+    if [[ ${#srcs[@]} -eq 0 ]]; then
+        print_error "${dd#"${TN_ROOT_PREFIX:-}"}/genesis/committee.yaml is missing, and ${cfg#"${TN_ROOT_PREFIX:-}"} holds no bootstrap-peers.yaml or trusted-nodes.yaml, so the P2P committee allowlist floor was not captured." >&2
+        return 1
     fi
-    return $rc
+    fw_allow_run capture-floor "${srcs[@]}" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        print_error "tn-p2p-allow-sync capture-floor ${list} failed (exit ${rc}); the P2P committee allowlist keeps the floor it had." >&2
+        return $rc
+    fi
+    fw_allow_floor_warn "$cfg"
+    return 0
+}
+
+# fw_allow_floor_warn CONFIG_DIR -- after a capture, warn when FW_ALLOW_DIR/floor
+# holds no address, only the header line the tool writes for an empty floor (a
+# genesis committee.yaml may carry no multiaddr): a peer the node stops listing
+# then has nothing to keep it. A floor file that is missing, not a regular file
+# or unreadable is not judged. Never fails.
+fw_allow_floor_warn() {
+    local floor="${FW_ALLOW_DIR}/floor" cfg="${1#"${TN_ROOT_PREFIX:-}"}" rc=0
+    [[ -f "$floor" && ! -L "$floor" ]] || return 0
+    grep -q -v -e '^#' -e '^$' "$floor" 2>/dev/null || rc=$?
+    [[ $rc -eq 1 ]] || return 0
+    print_warn "The P2P committee allowlist floor holds no address: no /ip4 or /ip6 peer is listed in ${cfg}/bootstrap-peers.yaml, ${cfg}/trusted-nodes.yaml or the genesis committee.yaml. Nothing is protected if the node stops listing a peer: a committee member or trusted hub it leaves out is dropped on the second sync without it. Give the node a bootstrap peers map with the committee's addresses (sudo bash ${SCRIPT_DIR}/edit-config.sh --set bootstrap_peers=FILE) or a trusted nodes map (--set trusted_nodes=FILE)."
+    return 0
 }
 
 # -----------------------------------------------------------------------------
@@ -1990,12 +2018,13 @@ fw_committee_on() {
 }
 
 # fw_committee_sync [quiet] -- firewall-setup.sh --p2p-committee sync, and the
-# resync hook of every writer of RPC_PORT, the P2P ports, P2P_ALLOW_FROM or
-# bootstrap-peers.yaml. Under the update lock (fw_meta_lock; held already when
-# a hook calls it): the pinned binary (fw_allow_bin_ensure: installed when it is
-# missing or its --version differs; a failed install keeps the binary there
-# is), FW_ALLOW_DIR root 0700 again, its config rewritten and the floor captured
-# again, the units rewritten where their text differs (fw_allow_units_write)
+# resync hook of every writer of RPC_PORT, the P2P ports, P2P_ALLOW_FROM,
+# bootstrap-peers.yaml or trusted-nodes.yaml. Under the update lock
+# (fw_meta_lock; held already when a hook calls it): the pinned binary
+# (fw_allow_bin_ensure: installed when it is missing or its --version differs; a
+# failed install keeps the binary there is), FW_ALLOW_DIR root 0700 again, its
+# config rewritten and the floor captured again, the units rewritten where their
+# text differs (fw_allow_units_write)
 # and enabled, then `sync --wait 30`, whose exit 0 counts only with
 # result=applied or result=unchanged on its line (fw_allow_fresh). With quiet it
 # is a no-op while P2P_COMMITTEE is off and says only what failed. After an

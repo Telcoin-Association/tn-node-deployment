@@ -1056,9 +1056,10 @@ edit_baseline_refresh() {
 
 # edit_committee_resync -- after an edit the restarted node runs with: bring the
 # P2P committee allowlist in step with it when the edit changed one of its inputs
-# (node.env, which holds the P2P listener addresses, or bootstrap-peers.yaml) or
-# recorded no backup (the chain-config refresh, which replaces the genesis
-# committee.yaml its floor falls back on), and P2P_COMMITTEE is on in .node-meta.
+# (node.env, which holds the P2P listener addresses, or bootstrap-peers.yaml or
+# trusted-nodes.yaml, which feed its floor) or recorded no backup (the
+# chain-config refresh, which replaces the genesis committee.yaml that feeds the
+# floor too), and P2P_COMMITTEE is on in .node-meta.
 # The sync is firewall-setup.sh --p2p-committee sync, run once this run has
 # released the update lock, because that run takes the lock itself. A no-op while
 # P2P_COMMITTEE is off. A failure is a warning, before the done event, naming the
@@ -1068,7 +1069,7 @@ edit_committee_resync() {
     [[ ${#EDIT_BK_FILES[@]} -gt 0 ]] || hit=true
     for f in ${EDIT_BK_FILES[@]+"${EDIT_BK_FILES[@]}"}; do
         case "${f##*/}" in
-            node.env|bootstrap-peers.yaml) hit=true ;;
+            node.env|bootstrap-peers.yaml|trusted-nodes.yaml) hit=true ;;
         esac
     done
     [[ "$hit" == "true" ]] || return 0

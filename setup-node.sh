@@ -265,6 +265,7 @@ ADMISSION_MODE=""           # open | grace | closed; '' = no flag given
 TRUSTED_NODES_SRC=""        # --trusted-nodes FILE: the trusted hubs map to install ('' = none)
 NODE_EXTRA_FLAGS=""
 NODE_EXTRA_FLAGS_SPEC=""    # the runner spec prepare_node_extra_flags last checked
+SETUP_FLOOR_CHANGED=false   # this run changed bootstrap-peers.yaml or trusted-nodes.yaml (setup_committee_resync)
 NODE_FLAG_WARNINGS=()       # notes on the node flags, printed by node_flag_warnings
 DATA_DIR="$DEFAULT_DATA_DIR"
 CONFIG_DIR="$DEFAULT_CONFIG_DIR"
@@ -2465,7 +2466,7 @@ _setup_copied_configs_ok() {
 # --trusted-nodes <hubs>, so closed without a trusted nodes map on mainnet warns.
 prepare_node_extra_flags() {
     local spec flags="" peers="${CONFIG_DIR}/bootstrap-peers.yaml" path_re='^/[A-Za-z0-9._/+-]+$' w
-    local trusted="${CONFIG_DIR}/trusted-nodes.yaml"
+    local trusted="${CONFIG_DIR}/trusted-nodes.yaml" sums
     spec="$(node_runner_spec)"
     if [[ "$NODE_EXTRA_FLAGS_SPEC" == "$spec" ]]; then
         return 0
@@ -2515,6 +2516,7 @@ prepare_node_extra_flags() {
         flags="${flags:+${flags} }$(public_rpc_limit_flags)"
     fi
     # The release knows every flag in use; now the map itself.
+    sums="$(setup_map_sums "$peers" "$trusted")"
     if [[ -n "$BOOTSTRAP_PEERS_SRC" ]]; then
         install_bootstrap_peers "$spec" "$BOOTSTRAP_PEERS_SRC" "$peers"
         BOOTSTRAP_PEERS_SRC="$peers"
@@ -2522,6 +2524,9 @@ prepare_node_extra_flags() {
     if [[ -n "$TRUSTED_NODES_SRC" ]]; then
         install_trusted_nodes "$TRUSTED_NODES_SRC" "$trusted"
         TRUSTED_NODES_SRC="$trusted"
+    fi
+    if [[ "$(setup_map_sums "$peers" "$trusted")" != "$sums" ]]; then
+        SETUP_FLOOR_CHANGED=true
     fi
     NODE_EXTRA_FLAGS="$flags"
     write_node_meta "BOOTSTRAP_PEERS_FILE=${BOOTSTRAP_PEERS_SRC:+${peers}}" "STATE_EXPORT=${STATE_EXPORT:-off}" \
@@ -2667,6 +2672,48 @@ require_admission_release() {
         0) ;;
         1) admission_release_refused "$ver" ;;
         *) setup_warn "Could not tell whether $(node_release_label) is release ${MIN_ADMISSION_VERSION} or later, which --admission needs (an older release ignores the admission settings); writing them anyway." ;;
+    esac
+    return 0
+}
+
+# setup_map_sums FILE... -- one line per FILE: its sha256, or "-" when it is missing
+# or cannot be read, so prepare_node_extra_flags can tell whether the installs
+# changed the maps the P2P committee allowlist's floor is taken from.
+setup_map_sums() {
+    local f sum
+    for f in "$@"; do
+        sum="-"
+        if [[ -f "$f" ]]; then
+            sum="$(sha256sum < "$f" 2>/dev/null)" || sum="-"
+        fi
+        printf '%s\n' "${sum%% *}"
+    done
+}
+
+# setup_committee_resync -- after a run that changed bootstrap-peers.yaml or
+# trusted-nodes.yaml (SETUP_FLOOR_CHANGED), with P2P_COMMITTEE=on in .node-meta:
+# bring the P2P committee allowlist and its floor in step with the maps the node now
+# runs with, by firewall-setup.sh --p2p-committee sync, run once this run has
+# released the update lock, because that run takes the lock itself. Without a change
+# or with committee mode off it does nothing. A failure is a warning naming the
+# command to run. Never fails.
+setup_committee_resync() {
+    local mode rc=0 fix="sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee sync"
+    [[ "$SETUP_FLOOR_CHANGED" == "true" ]] || return 0
+    mode="$(meta_get P2P_COMMITTEE "${CONFIG_DIR}/.node-meta" 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        setup_warn "P2P_COMMITTEE is set more than once in .node-meta, so the P2P committee allowlist was not synced with the new peers maps; remove the extra lines, then run: ${fix}"
+        return 0
+    fi
+    [[ "$mode" == "on" ]] || return 0
+    setup_release_lock
+    print_step "Syncing the P2P committee allowlist with the new peers maps"
+    rc=0
+    bash "${SCRIPT_DIR}/firewall-setup.sh" --p2p-committee sync < /dev/null 3>&- || rc=$?
+    case "$rc" in
+        0) ;;
+        3) setup_warn "The P2P committee allowlist keeps its last-good set for now (the node may not answer yet after its restart); telcoin-p2p-allow-sync.timer syncs it again within 5 minutes." ;;
+        *) setup_warn "The P2P committee allowlist was not synced with the new peers maps (firewall-setup.sh exit ${rc}); run: ${fix}" ;;
     esac
     return 0
 }
@@ -3921,6 +3968,7 @@ main() {
     step_create_service
     # Public RPC and the add-ons run their own scripts, which take the lock themselves.
     setup_release_lock
+    setup_committee_resync
     step_public_rpc
     step_testnet_addons
     step_alerts

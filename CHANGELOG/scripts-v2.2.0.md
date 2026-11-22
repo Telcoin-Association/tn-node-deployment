@@ -216,6 +216,11 @@ Every other script, library and UI file keeps its version. The runbook for the g
   `off` now opens the P2P ports to every source behind the new-flow limit, whatever the list holds and whether or not the ports took only that list before committee mode.
   The list stays in `.node-meta` for the next `on`, and the new key `P2P_PER_SOURCE=off` keeps later `--enable` and `--reset` runs from applying it to `ufw` until `--enable --p2p-from <list>` (or `--p2p-anywhere`) removes the key.
   The undo of an unfinished `on` still puts the rules from before it back.
+- Fix for validators in P2P committee mode with trusted hubs.
+  The allowlist's floor, the addresses it never drops, came from one file: `/etc/telcoin/bootstrap-peers.yaml`, or the genesis `committee.yaml` when there was no peers map.
+  `trusted-nodes.yaml` was never part of it, so a hub the node stopped listing left the allowlist on the second sync without it, and a peers map that held only part of the committee replaced `committee.yaml` as the floor.
+  The floor is now the union of all three files, each one that exists.
+  A floor with no address (a validator with neither map and a `committee.yaml` without addresses) is written with a warning that names the two `edit-config.sh --set` commands that fill it; `on` still goes ahead.
 
 ### edit-config 2.2.2
 
@@ -239,6 +244,7 @@ Every other script, library and UI file keeps its version. The runbook for the g
   lock is free at every "Press Enter" prompt. The host baseline is made again whenever the helper
   wrote under the config directory, a reinstall that only corrects owners or modes included.
   Devnet still pulls; the copy, the chain-id guard and the restart path are unchanged.
+- With P2P committee mode on, an edit that changed the trusted nodes map (`--set trusted_nodes=`, or the menu) resyncs the allowlist once the node came back from its restart, as an edit of the bootstrap peers already did, so the floor holds the new hubs at once instead of after the next timer run.
 - `--set gateway_upstream=<ipv4[,ipv4...]>` is for a validator whose gateway runs on another
   host. It binds the RPC and the health listener to every interface and adds none of the
   public-RPC limit flags. `off` puts both binds back; the `--healthcheck` value from before is kept
@@ -309,6 +315,7 @@ Every other script, library and UI file keeps its version. The runbook for the g
   network. It still only warns, and a `--json` run logs its result as before.
 - `--help` names Ubuntu 26.04 as the recommended OS for mainnet (systemd 255 or later, so
   Ubuntu 24.04 or later).
+- With P2P committee mode on, a re-run that installed a changed bootstrap peers or trusted nodes map runs `firewall-setup.sh --p2p-committee sync` once the node is started and the update lock released; a failed sync is a warning naming that command.
 
 ### lib/common 2.2.5
 

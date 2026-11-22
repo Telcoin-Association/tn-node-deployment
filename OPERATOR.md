@@ -583,7 +583,11 @@ sudo bash ~/telcoin-node-scripts/edit-config.sh --set admission=closed
 
 A validator can narrow its P2P ports to the peers its own node lists: `firewall-setup.sh --p2p-committee on` loads the nftables table `inet tn_p2p_allow`, which drops every source to the P2P ports that is not on the list before `ufw` sees it.
 The list is every address of the node's admission snapshot (`tn_admissionSnapshot` on its local RPC), in the primary and every worker swarm: the committees, the validators the node tracks for a coming seat, and its trusted and bootstrap peers.
-The bootstrap floor (the addresses of `/etc/telcoin/bootstrap-peers.yaml`, or of the genesis `committee.yaml` when there is no peers file) and the P2P source list are always on it too.
+The floor and the P2P source list are always on it too.
+The floor is every address in `/etc/telcoin/bootstrap-peers.yaml`, in the genesis `committee.yaml` the data dir holds and in `/etc/telcoin/trusted-nodes.yaml` (the hubs of `--trusted-nodes`), taken from each of those files that exists.
+The tool drops a key on the second sync whose snapshot leaves it out, so a hub or committee member the node stops listing (after a restart with another `network-config`, say) stays on the list only through the floor: give a closed validator its hubs with `--trusted-nodes` and the committee with `--bootstrap-peers`.
+A genesis `committee.yaml` may carry no address at all, so a validator with neither map can have an empty floor, and `on` and every resync then say so: `The P2P committee allowlist floor holds no address: ... Nothing is protected if the node stops listing a peer: a committee member or trusted hub it leaves out is dropped on the second sync without it.`, with the `edit-config.sh --set bootstrap_peers=FILE` and `--set trusted_nodes=FILE` commands that fill it.
+The warning does not stop `on`.
 The signed tool `tn-p2p-allow-sync` builds the table and `telcoin-p2p-allow-sync.timer` keeps it in step every 5 minutes.
 The README's [P2P committee allowlist](README.md#p2p-committee-allowlist) is the reference: the verbs, the units, the state dir, the tool's pin and how to verify its release by hand.
 
@@ -639,8 +643,9 @@ A rising `tn_drop_p2p_unlisted` counter in `--p2p-committee status` while a comm
 
 **Day 2.**
 
-- The timer syncs every 5 minutes, and the scripts resync on their own after `--enable` and `--reset`, after an `edit-config.sh` edit of the listener addresses (`node.env`), the bootstrap peers or the chain configs once the node came back from its restart, after `14) Restart node`, and after `migrate-node-naming.sh`.
-- Run `sudo bash ~/telcoin-node-scripts/firewall-setup.sh --p2p-committee sync` yourself after a change those paths do not cover: a `setup-node.sh` re-run, a hand edit of `.node-meta`, `node.env` or the peers file, or an edit saved with "restart later" and restarted with `systemctl`.
+- The timer syncs every 5 minutes, and the scripts resync on their own after `--enable` and `--reset`, after an `edit-config.sh` edit of the listener addresses (`node.env`), the bootstrap peers, the trusted nodes or the chain configs once the node came back from its restart, after `14) Restart node`, after a `setup-node.sh` re-run that installed a changed bootstrap peers or trusted nodes map, and after `migrate-node-naming.sh`.
+  Each resync captures the floor again, so a hub added to the trusted nodes map is protected from that sync on.
+- Run `sudo bash ~/telcoin-node-scripts/firewall-setup.sh --p2p-committee sync` yourself after a change those paths do not cover: a `setup-node.sh` re-run that changed only other settings, a hand edit of `.node-meta`, `node.env` or one of the maps, or an edit saved with "restart later" and restarted with `systemctl`.
   `check-node.sh` warns about the drift until you do.
 - After `update-scripts.sh`, run the `--p2p-committee sync` it prints when it changed `firewall-setup.sh` or `lib/common.sh`: that rewrites the units and installs the tool the new scripts pin.
 - Right after a node restart the node's RPC may not answer yet, so a resync then often keeps the last-good set (`sync` exit 3) while it rewrites the config and the floor; the next timer run applies the snapshot.
@@ -685,8 +690,8 @@ Read the lines above the verdict: while the syncs fail the allowlist keeps its l
 
 **Known limitations.**
 
-- The floor trusts the genesis `committee.yaml` copy in the data dir on a node without `bootstrap-peers.yaml`: that copy is writable by the service user, so a compromised node process could add addresses to the floor.
-  Checking it against the network's chain-config pin would close this, and mainnet has no such pins yet; give a validator a `--bootstrap-peers` map, which lives root-owned in `/etc/telcoin`.
+- The floor trusts the genesis `committee.yaml` copy in the data dir: that copy is writable by the service user, so a compromised node process could add addresses to the floor.
+  Checking it against the network's chain-config pin would close this, and mainnet has no such pins yet; the two maps live root-owned in `/etc/telcoin`.
 - The counters `tn_accept_p2p_listed` and `tn_drop_p2p_unlisted` kept their values across reloads on the kernels tried so far; the Ubuntu runner kernels are confirmed by the first CI run of the VM test (`tools/tests/vm.d/P0-p2p-allow.sh`).
   The same first run confirms the sync unit's sandbox on systemd 255, and whether the boot unit could run with `ProtectKernelModules=` on (it is off for the first nftables load after boot).
 - The tool ships for x86_64 only until the node ships an aarch64 release, and how fast a release-key rotation must reach the pin is still to be agreed.
@@ -1136,7 +1141,7 @@ The edit is written before that wait.
 If the run is stopped before the restart is issued (Ctrl-C, SIGTERM or SIGHUP, or a Node Manager tab that is closed), it puts back every file it changed: `Stopped by SIGINT before the restart, so the edit was rolled back: every file it changed is as it was before this run.`
 Once the restart has been issued, the edit stays.
 On a host with the host baseline (section 4.13), the AIDE baseline is made again after a `--set` restart came back healthy, after a menu edit's restart came back active, after `14) Restart node` came back active (so an edit saved for later is folded in then), and after a passphrase action that went through.
-With P2P committee mode on (section 2.10), the same restarts of an edit that changed `node.env` or the bootstrap peers, of `13) Refresh chain configs` and of `14) Restart node` also resync the allowlist (`firewall-setup.sh --p2p-committee sync`); a sync that fails is a warning naming that command.
+With P2P committee mode on (section 2.10), the same restarts of an edit that changed `node.env`, the bootstrap peers or the trusted nodes, of `13) Refresh chain configs` and of `14) Restart node` also resync the allowlist (`firewall-setup.sh --p2p-committee sync`); a sync that fails is a warning naming that command.
 
 `13) Refresh chain configs` reads `NETWORK` from `.node-meta` and refuses unless the node's genesis and the new one declare the same chain ID.
 It copies the network's `genesis.yaml` and `committee.yaml` into `genesis/` and its `parameters.yaml` over the node's, so set `allow_private_forward_targets` again afterwards if you had changed it (item 10).
