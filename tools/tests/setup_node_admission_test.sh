@@ -236,6 +236,12 @@ chmod 0600 "$T/in/private.yaml"
 TRUSTED="$T/in/trusted.yaml"
 Z64=0000000000000000000000000000000000000000000000000000000000000000
 PEERS="$T/in/peers.yaml"
+# the genesis committee.yaml step_write_config copies into the data dir before
+# the render: here the one validator of the peers map above, so that map is the
+# whole committee
+mkdir -p "$DD/genesis"
+printf -- '---\nauthorities:\n  PeerBLSkey1:\n    protocol_key: PeerBLSkey1\n    execution_address: "0x0000000000000000000000000000000000000001"\nepoch: 0\nbootstrap_servers: {}\n' > "$T/in/committee1.yaml"
+cp "$T/in/committee1.yaml" "$DD/genesis/committee.yaml"
 # the network-config setup-node finds before the render: the advertised name
 printf 'hostname: "validator-1"\n' > "$T/in/nc-before"
 # what the render makes of it with the trusted nodes and the peers, mode closed
@@ -605,6 +611,114 @@ rm -f "$T/sn/firewall-setup.sh" "$T/fw.log"
 check "order: main resyncs right after it releases the lock that step_create_service held" \
     "step_create_service setup_release_lock setup_committee_resync" \
     "$(sed -n '/^main() {/,/^}/p' "$SN" | grep -E '^    [a-z_]+$' | grep -A2 -x '    step_create_service' | tr -d ' ' | tr '\n' ' ' | sed 's/ $//')"
+
+# -----------------------------------------------------------------------------
+# the genesis committee: committee_peers only from a map that lists all of it
+# -----------------------------------------------------------------------------
+# ten validators, as on mainnet; this node is GenesisVal0
+{
+    printf -- '---\nauthorities:\n'
+    for i in 0 1 2 3 4 5 6 7 8 9; do
+        printf '  GenesisVal%s:\n    protocol_key: GenesisVal%s\n    execution_address: "0x000000000000000000000000000000000000000%s"\n' "$i" "$i" "$i"
+    done
+    printf 'epoch: 0\nbootstrap_servers: {}\nnum_workers: 1\n'
+} > "$T/in/committee10.yaml"
+# peer KEY OCTET -- one bootstrap peers entry
+peer() {
+    printf '%s:\n  primary:\n    network_address: /ip4/198.51.100.%s/udp/49590/quic-v1/p2p/12D3KooWV%sP\n    network_key: 4XTTMv%sp\n  workers:\n    - network_address: /ip4/198.51.100.%s/udp/49594/quic-v1/p2p/12D3KooWV%sW\n      network_key: 4XTTMv%sw\n' \
+        "$1" "$2" "$2" "$2" "$2" "$2" "$2"
+}
+# peers FILE N... -- a map of GenesisVal<N> for each N given, then the hub
+peers() {
+    local f="$1" i
+    shift
+    : > "$f"
+    for i in "$@"; do
+        peer "GenesisVal${i}" "3${i}" >> "$f"
+    done
+    peer HubBLSkey1 40 >> "$f"
+    chmod 0644 "$f"
+}
+peers "$T/in/peers-all.yaml" 0 1 2 3 4 5 6 7 8 9
+peers "$T/in/peers-hubs.yaml"
+peers "$T/in/peers-nine.yaml" 0 1 2 3 4 6 7 8 9
+peers "$T/in/peers-noself.yaml" 1 2 3 4 5 6 7 8 9
+cp "$T/in/committee10.yaml" "$DD/genesis/committee.yaml"
+# what the render makes of nc-before with the trusted nodes, mode closed, and no
+# committee_peers
+sed '/^committee_peers:/,$d' "$T/in/nc-closed" > "$T/in/nc-closed-nopeers"
+CP_FLAGS="Node flags: --bootstrap-peers \"\$(cat ${CFG}/bootstrap-peers.yaml)\""
+CP_LEFT="so it is not written to network-config as committee_peers: a node whose committee_peers misses a genesis validator refuses to start while its chain is at epoch 0"
+# the whole committee and a hub: written as the map is, as before
+reset
+marker v0.17.0
+cp "$T/in/nc-before" "$NC"
+SNM_MODE=closed SNM_TRUSTED="$TRUSTED" SNM_PEERS="$T/in/peers-all.yaml" drv interactive
+check "committee: ten of ten and a hub, rendered with the map" "0 ${DD} closed ${CFG}/trusted-nodes.yaml ${CFG}/bootstrap-peers.yaml" \
+    "$RC $(logf "$T/render.log")"
+check "committee: ten of ten and a hub, network-config as before" \
+    "$(cat "$T/in/nc-closed-nopeers"; echo 'committee_peers:'; sed 's/^/  /' "$T/in/peers-all.yaml")" "$(cat "$NC")"
+check "committee: ten of ten and a hub, no warning" no "$(has "$OUT" "committee_peers misses")"
+# a hubs-only map, nine of ten, and the nine others without this node
+for c in "hubs 10 GenesisVal0…, GenesisVal1…, GenesisVal2… and 7 more" "nine 1 GenesisVal5…" "noself 1 GenesisVal0…"; do
+    m="${c%% *}"; c="${c#* }"
+    n="${c%% *}"; list="${c#* }"
+    reset
+    marker v0.17.0
+    cp "$T/in/nc-before" "$NC"
+    SNM_MODE=closed SNM_TRUSTED="$TRUSTED" SNM_PEERS="$T/in/peers-${m}.yaml" drv interactive
+    check "committee: ${m}, setup goes on and renders without committee_peers" \
+        "0 ${DD} closed ${CFG}/trusted-nodes.yaml none" "$RC $(logf "$T/render.log")"
+    check "committee: ${m}, network-config has no committee_peers" "$(cat "$T/in/nc-closed-nopeers")" "$(cat "$NC")"
+    check "committee: ${m}, the warning names the gap" yes \
+        "$(has "$OUT" "[WARN] ${CFG}/bootstrap-peers.yaml lacks ${n} of the 10 validators of the genesis committee in ${DD}/genesis/committee.yaml (${list}), ${CP_LEFT}")"
+    check "committee: ${m}, the map is installed, recorded and on the launch line" "same|BOOTSTRAP_PEERS_FILE=${CFG}/bootstrap-peers.yaml|yes" \
+        "$(cmp -s "$T/in/peers-${m}.yaml" "$CFG/bootstrap-peers.yaml" && echo same)|$(metakey BOOTSTRAP_PEERS_FILE)|$(has "$OUT" "$CP_FLAGS")"
+done
+# a re-run with no flags: the recorded map is read back and left out again
+cp "$NC" "$T/nc-noself"
+drv interactive
+check "committee: a re-run reads the map back and leaves it out again" "0 ${DD} closed ${CFG}/trusted-nodes.yaml none same yes" \
+    "$RC $(logf "$T/render.log") $(cmp -s "$T/nc-noself" "$NC" && echo same) $(has "$OUT" "lacks 1 of the 10 validators")"
+# a re-run that brings the whole committee writes it
+SNM_PEERS="$T/in/peers-all.yaml" drv interactive
+check "committee: a re-run with the whole committee writes committee_peers" "0 ${DD} closed ${CFG}/trusted-nodes.yaml ${CFG}/bootstrap-peers.yaml 1" \
+    "$RC $(logf "$T/render.log") $(grep -c '^committee_peers:' "$NC")"
+# keygen, then finalize: the warning is a log event of the finalize
+reset
+marker v0.17.0
+cp "$T/in/nc-before" "$NC"
+SNM_JSON=true SNM_PHASE=keygen SNM_MODE=closed SNM_TRUSTED="$TRUSTED" SNM_PEERS="$T/in/peers-hubs.yaml" drv keygen
+SNM_JSON=true SNM_PHASE=finalize drv finalize
+check "committee: a --json finalize warns in a log event and writes no committee_peers" "0 yes yes 0" \
+    "$RC $(has "$(logf "$T/events")" "\"msg\":\"WARNING: ${CFG}/bootstrap-peers.yaml lacks 10 of the 10 validators") $(has "$(logf "$T/events")" "\"msg\":\"admission: closed, trusted nodes ${CFG}/trusted-nodes.yaml, committee peers none\"") $(grep -c '^committee_peers' "$NC")"
+# the floor: the map left out of committee_peers still feeds the allowlist
+cat > "$T/sn/firewall-setup.sh" <<'FWS'
+#!/bin/sh
+printf 'firewall-setup %s floor-file=%s\n' "$*" "$(cat "$SNM_DIR/fx/etc/telcoin/bootstrap-peers.yaml" | wc -l | tr -d ' ')" >> "$SNM_DIR/fw.log"
+FWS
+reset
+marker v0.17.0
+cp "$T/in/nc-before" "$NC"
+meta "P2P_COMMITTEE=on"
+rm -f "$T/fw.log"
+SNM_MODE=closed SNM_TRUSTED="$TRUSTED" SNM_PEERS="$T/in/peers-hubs.yaml" drv resync
+check "committee: committee mode on, a hubs-only map: resynced with the installed map in place" \
+    "0|firewall-setup --p2p-committee sync floor-file=$(wc -l < "$T/in/peers-hubs.yaml" | tr -d ' ')|0" \
+    "$RC|$(logf "$T/fw.log")|$(grep -c '^committee_peers' "$NC")"
+rm -f "$T/sn/firewall-setup.sh" "$T/fw.log"
+# no committee file to check against: left out, with the reason
+rm -f "$DD/genesis/committee.yaml"
+reset
+marker v0.17.0
+cp "$T/in/nc-before" "$NC"
+SNM_MODE=closed SNM_TRUSTED="$TRUSTED" SNM_PEERS="$T/in/peers-all.yaml" drv interactive
+check "committee: no genesis committee.yaml, the map is left out and setup goes on" "0 ${DD} closed ${CFG}/trusted-nodes.yaml none yes" \
+    "$RC $(logf "$T/render.log") $(has "$OUT" "${DD}/genesis/committee.yaml cannot be read, so ${CFG}/bootstrap-peers.yaml was not checked against the genesis committee")"
+# every run copies the committee file (step_write_config) before the render
+check "order: step_write_config runs right before step_create_service in every run" "2 2" \
+    "$(grep -c '^    step_create_service$' "$SN") $(awk '/^    step_write_config$/ { w = NR } /^    step_create_service$/ && w && NR - w <= 2 { n++ } END { print n + 0 }' "$SN")"
+cp "$T/in/committee1.yaml" "$DD/genesis/committee.yaml"
 
 # -----------------------------------------------------------------------------
 # the library gate and --help

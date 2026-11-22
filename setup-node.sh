@@ -106,7 +106,11 @@
 #                            data dir's network-config (admission.mode Open, Grace or
 #                            Closed) with trusted_nodes from --trusted-nodes and
 #                            committee_peers from the --bootstrap-peers map (each left
-#                            out when its flag is). Closed admits only the previous,
+#                            out when its flag is). The map goes in only when it lists
+#                            every validator of the genesis committee, this node
+#                            included: one that lists fewer would stop the node at
+#                            epoch 0, so it is left out with a warning, and the node
+#                            still dials it. Closed admits only the previous,
 #                            current and next committees, the trusted nodes and the
 #                            bootstrap peers; Grace enforces nothing beyond Open and
 #                            differs only in the status the node reports. Needs a node
@@ -208,7 +212,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
         tn_docker_release_tag_for tn_release_stage tn_source_build tn_install_logrotate \
         tn_os_floor_check tn_docker_network_ok tn_release_tag_grammar tn_mainnet_enabled \
         tn_docker_pull_repo_ok tn_docker_pull_repos_for tn_docker_image_network_ok \
-        tn_network_config_render tn_node_supports_admission \
+        tn_network_config_render tn_node_supports_admission tn_committee_peers_check \
         tn_chain_configs_tag tn_chain_configs_dir tn_chain_configs_from_tag >/dev/null; then
     _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this setup-node.sh: run update-scripts.sh and try again."
     case " $* " in
@@ -2723,12 +2727,21 @@ install_trusted_nodes() {
 # nodes map under trusted_nodes, and the installed bootstrap peers map under
 # committee_peers; a map this run does not use is left out of the file. Runs after
 # prepare_node_extra_flags, which checked the release and installed both maps. No
-# admission mode: nothing is written, and network-config keeps what it holds.
+# admission mode: nothing is written, and network-config keeps what it holds. The
+# peers map goes in only when it lists every validator of the genesis committee.yaml,
+# which step_write_config has copied into the data dir by now
+# (tn_committee_peers_check): a node whose committee_peers misses one does not start
+# at epoch 0. A map that does not is left out with a warning and stays installed,
+# on the launch line and in the allowlist floor.
 setup_admission_config() {
-    local trusted=none committee=none rc=0
+    local trusted=none committee=none rc=0 msg=""
     [[ -n "$ADMISSION_MODE" ]] || return 0
     [[ -z "$TRUSTED_NODES_SRC" ]] || trusted="${CONFIG_DIR}/trusted-nodes.yaml"
     [[ -z "$BOOTSTRAP_PEERS_SRC" ]] || committee="${CONFIG_DIR}/bootstrap-peers.yaml"
+    if [[ "$committee" != none ]] && ! msg="$(tn_committee_peers_check "$DATA_DIR" "$committee")"; then
+        setup_warn "$msg"
+        committee=none
+    fi
     tn_network_config_render "$DATA_DIR" "$ADMISSION_MODE" "$trusted" "$committee" || rc=$?
     if [[ $rc -ne 0 ]]; then
         setup_fail "The admission settings were not written to ${DATA_DIR}/network-config (see the message above), so setup stops before the node is started."

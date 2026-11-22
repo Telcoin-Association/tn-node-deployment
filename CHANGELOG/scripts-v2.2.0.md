@@ -251,6 +251,8 @@ Every other script, library and UI file keeps its version. The runbook for the g
   wrote under the config directory, a reinstall that only corrects owners or modes included.
   Devnet still pulls; the copy, the chain-id guard and the restart path are unchanged.
 - With P2P committee mode on, an edit that changed the trusted nodes map (`--set trusted_nodes=`, or the menu) resyncs the allowlist once the node came back from its restart, as an edit of the bootstrap peers already did, so the floor holds the new hubs at once instead of after the next timer run.
+- Fix for the same `committee_peers` gap as in [setup-node 2.1.4](#setup-node-214): `--set admission=`, `--set trusted_nodes=` and `--set bootstrap_peers=` (and the menu items and the Node Manager UI path that reach them) write the bootstrap peers map as `committee_peers` only when it lists every validator of the genesis `committee.yaml`.
+  A map that lists fewer is installed and put on the start line as before, the edit goes on with a warning, and `network-config` gets no `committee_peers`, so the node starts instead of exiting at epoch 0.
 - `--set gateway_upstream=<ipv4[,ipv4...]>` is for a validator whose gateway runs on another
   host. It binds the RPC and the health listener to every interface and adds none of the
   public-RPC limit flags. `off` puts both binds back; the `--healthcheck` value from before is kept
@@ -322,6 +324,11 @@ Every other script, library and UI file keeps its version. The runbook for the g
 - `--help` names Ubuntu 26.04 as the recommended OS for mainnet (systemd 255 or later, so
   Ubuntu 24.04 or later).
 - With P2P committee mode on, every re-run that completes runs `firewall-setup.sh --p2p-committee sync` once the node is started and the update lock released, whether or not it changed the bootstrap peers or trusted nodes map (a run that installed one and then failed is caught up by the next); a failed sync is a warning naming that command.
+- Fix for validators set up with an admission mode and a bootstrap peers map that does not list the whole genesis committee.
+  Setup wrote that map into `network-config` as `committee_peers` without a word, and a node whose `committee_peers` misses a genesis validator exits within a second of every start while its chain is at epoch 0 (`Error: committee_peers: missing validator <key>`, in every admission mode): the first six hours on mainnet, and any time on a new data dir.
+  A map of the hubs alone, or of the other validators without this node, did exactly that.
+  Setup now checks the map against the validators of the data dir's genesis `committee.yaml` first and writes `committee_peers` only when every one of them, this node included, is a key of the map; keys beside them, such as hubs, are fine, and a complete map is written as before, byte for byte.
+  A map that lists fewer is left out of `committee_peers` with a warning naming how many validators are missing and the first three, and setup goes on: the map stays installed, on the start line (the node still dials it) and in the P2P committee allowlist's floor.
 
 ### lib/common 2.2.5
 
@@ -390,6 +397,9 @@ Every other script, library and UI file keeps its version. The runbook for the g
   holds both rules for each listed host (`tn_gateway_from_rules_ok`) and whether nobody else
   reaches the two ports (`tn_gateway_ports_private`).
 - Sources `lib/gateway.sh` at its end when the file is present, as it does `lib/alerts.sh`.
+- New `tn_committee_peers_check DATA_DIR MAP`: rc 0 when every validator under `authorities` in `DATA_DIR/genesis/committee.yaml` is a key of the peers map MAP (YAML or JSON), else rc 1 with one line that names the gap (a count and the first three keys) or why the check could not run.
+  It reads both files as the service user, since the committee file sits in the data dir that user writes.
+  setup-node and edit-config call it before every render of `committee_peers` and list it in their library checks.
 
 ### Node Manager UI 2.1.3
 

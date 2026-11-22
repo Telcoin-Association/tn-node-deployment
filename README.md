@@ -337,7 +337,7 @@ Each script walks through numbered steps:
 - Writes the P2P listener addresses to `/etc/telcoin/node.env` (root, mode 0644)
 - Sends the node's output to the journal (`--log-target journal`, the mainnet default, with a 4G journald cap) or to `/var/log/telcoin/telcoin.log` and `telcoin-error.log` (`--log-target file`, the default elsewhere, rotated by logrotate)
 - With a bootstrap peers map, the start script passes `--bootstrap-peers "$(cat /etc/telcoin/bootstrap-peers.yaml)"`, so the file is read at every start
-- With `--admission`, writes the admission mode, the installed trusted nodes map and, as `committee_peers`, the installed bootstrap peers map into the data directory's `network-config`, as the service user, before the node starts (see [Node admission settings](#node-admission-settings))
+- With `--admission`, writes the admission mode, the installed trusted nodes map and, as `committee_peers`, the installed bootstrap peers map when it lists every genesis validator into the data directory's `network-config`, as the service user, before the node starts (see [Node admission settings](#node-admission-settings))
 - With a public RPC domain, adds the public RPC limits to the node command (see [Public node tuning](#public-node-tuning))
 - Optionally starts the node immediately
 - Optionally enables auto-start on server reboot
@@ -1221,7 +1221,7 @@ Items 8 to 10 came with edit-config 1.3.0, and items 11 and 12 with edit-config 
 | `bootstrap_peers` | An absolute path to a peers map, or `none` to remove the flag and the installed file. See [Bootstrap peers](#bootstrap-peers) |
 | `state_export` | `off`; `unlimited` (`--enable-state-export`, every export kept, `v0.13.0-adiri` or later); or `N` from 1 to 999999 (`--state-export-keep N` as well, only the newest N kept, `v0.15.0-adiri` or later) |
 | `allow_private_forward_targets` | `true` or `false`: the `parameters.yaml` key that lets the node forward transactions to committee RPC endpoints on private addresses. `true` is refused on testnet (2017) and mainnet (731), and when the genesis chain ID cannot be read |
-| `admission` | `open`, `grace` or `closed` (the node's `Open`, `Grace` and `Closed` are taken too): the node's connection admission mode, written into `<data dir>/network-config` with the recorded trusted nodes map and, as `committee_peers`, the installed bootstrap peers map when the node command loads one. Needs node release 0.17.0 or later. See [Node admission settings](#node-admission-settings) |
+| `admission` | `open`, `grace` or `closed` (the node's `Open`, `Grace` and `Closed` are taken too): the node's connection admission mode, written into `<data dir>/network-config` with the recorded trusted nodes map and, as `committee_peers`, the installed bootstrap peers map when the node command loads one and it lists every genesis validator. Needs node release 0.17.0 or later. See [Node admission settings](#node-admission-settings) |
 | `trusted_nodes` | An absolute path to a trusted nodes map, checked and installed as `/etc/telcoin/trusted-nodes.yaml`, or `none` to remove the map and its `trusted_nodes` entry. A map needs an admission mode set first. See [Node admission settings](#node-admission-settings) |
 
 How an edit runs:
@@ -1287,7 +1287,7 @@ The scripts write the three together, as the service user, and replace the entri
   Grace enforces nothing beyond Open and differs only in the status the node reports, for a rollout towards Closed.
   A `snapshot_max_age_secs` the entry already holds is kept.
 - `trusted_nodes`: the trusted hubs, from the installed map `/etc/telcoin/trusted-nodes.yaml` (root, mode 0644), or left out.
-- `committee_peers`: the installed bootstrap peers map `/etc/telcoin/bootstrap-peers.yaml` when the node runs with one (see [Bootstrap peers](#bootstrap-peers)), or left out.
+- `committee_peers`: the installed bootstrap peers map `/etc/telcoin/bootstrap-peers.yaml` when the node runs with one (see [Bootstrap peers](#bootstrap-peers)) and it lists every validator of the genesis committee, or left out.
 
 Set them on a new node with `setup-node.sh --admission open|grace|closed`, with `--trusted-nodes FILE` for the hubs, or on a running one with `edit-config.sh --set admission=...` and `--set trusted_nodes=FILE|none` (menu items 11 and 12).
 Without `--admission`, and with no earlier choice recorded, setup leaves the admission entries of `network-config` alone on every network, mainnet validators included.
@@ -1319,7 +1319,10 @@ A trusted nodes map is keyed by each hub's BLS public key, as in its `node-info.
 `committee_peers` is the node's launch inventory.
 A node that starts during epoch 0 with a nonempty map refuses to start unless the map lists every committee member with its primary and the on-chain number of workers; later a gap is only logged.
 At any epoch, the node also refuses an entry with an empty address, or one whose `/p2p/` part names another peer than its network key.
-The scripts take the map from the bootstrap peers file, so at genesis that file must list the whole committee.
+The scripts take the map from the bootstrap peers file, and a new data dir starts at epoch 0 at any time, so they write it only when it lists every validator under `authorities` in the data dir's `genesis/committee.yaml`, this node included; keys beside them, such as hubs, are fine.
+Before every write (setup, and the `admission`, `trusted_nodes` and `bootstrap_peers` edits of `edit-config.sh`) `tn_committee_peers_check` compares the keys; a map that lists fewer, such as one of hubs alone or of the other validators without this node, is left out of `committee_peers` with a warning (`<map> lacks <n> of the <m> validators of the genesis committee in <file> (<the first three keys>), so it is not written to network-config as committee_peers: ...`), and the run goes on.
+The map stays installed and on the start line, so the node still dials it at start, and it stays in the floor of the [P2P committee allowlist](#p2p-committee-allowlist).
+The check compares keys only, not the number of workers in each entry.
 A `bootstrap_peers` edit on a node with an admission mode writes `network-config` again, so `committee_peers` follows the peers map.
 
 The node reads these entries from `MIN_ADMISSION_VERSION` (0.17.0, in `lib/common.sh`) on.
@@ -1960,7 +1963,7 @@ Interactive setup prompts for everything. The public RPC flags (`--rpc-domain` t
 | `--bootstrap-peers <file>` | Peers the node dials at start, replacing the genesis bootstrap servers. `v0.15.0-adiri` or later. See [Bootstrap peers](#bootstrap-peers) |
 | `--enable-state-export` | Export each epoch's final execution state under `<datadir>/consensus-db/state_exports/epoch-N/`. `v0.13.0-adiri` or later. Each export is a full copy of the state, and without `--state-export-keep` none is ever deleted, so setup warns about the disk |
 | `--state-export-keep <n>` | Keep only the newest n exports, 1 to 999999; 2 or more keeps the previous export while the next one is written. Turns `--enable-state-export` on as well, and says so. `v0.15.0-adiri` or later |
-| `--admission open\|grace\|closed` | The node's connection admission mode, written into the data directory's `network-config` with `trusted_nodes` from `--trusted-nodes` and `committee_peers` from the `--bootstrap-peers` map. Node release 0.17.0 or later (`MIN_ADMISSION_VERSION`); setup stops on an older one. Without it, and with no earlier choice recorded, setup leaves the admission settings alone. See [Node admission settings](#node-admission-settings) |
+| `--admission open\|grace\|closed` | The node's connection admission mode, written into the data directory's `network-config` with `trusted_nodes` from `--trusted-nodes` and `committee_peers` from the `--bootstrap-peers` map when that map lists every genesis validator. Node release 0.17.0 or later (`MIN_ADMISSION_VERSION`); setup stops on an older one. Without it, and with no earlier choice recorded, setup leaves the admission settings alone. See [Node admission settings](#node-admission-settings) |
 | `--trusted-nodes <file>` | The trusted hubs map, with `--admission` or over a recorded mode, installed world-readable as `/etc/telcoin/trusted-nodes.yaml` and written into `network-config` under `trusted_nodes`. At most 64 KiB, `chmod 644` |
 | `-h`, `--help` | Print the usage and exit. With `--json` the usage goes to stderr and stdout gets one `done` event |
 | `--json --phase=keygen\|finalize` | Non-interactive setup in two phases: `keygen` generates the keys (back them up before the next phase), `finalize` writes the config and starts the node. Pass the same flags to both; finalize refuses flags that differ from what keygen recorded, except a Docker image (below). When finalize's flags leave them out, it reads back what keygen recorded in `.node-meta`: the install method, the Docker image or binary, the bootstrap peers and state export. On a Docker install finalize holds the recorded image to the same pull rule and build-feature check as keygen's preflight before it writes the config or the unit or starts the container, and does not pull it: a refusal ends `Refusing the image <image>: ... No container was started; to replace it, run finalize again with ...` and names the way out for the network: `--release-tag <tag>` on mainnet, `--docker-image <repository>@sha256:<digest>` or `--release-tag <tag>` on testnet, `--docker-image` on devnet. Finalize's `--release-tag`, or a `--docker-image` that names another image than the recorded one, replaces it (not both flags together): the new image goes through keygen's steps (the pull rule, a release tag resolved by its signed release and, on mainnet, the digest rule; the release a digest belongs to and the release floor; the pull by digest and its digest check; the build-feature check), and only then is `.node-meta` written, in order: the old `RELEASE_TAG` removed, `DOCKER_IMAGE` and `DOCKER_IMAGE_DIGEST` written, the new `RELEASE_TAG` last when a release names the image. Every other input check runs first, so a refused input pulls nothing, and a refusal anywhere leaves `.node-meta` unchanged. On mainnet the override takes `--release-tag` only. The install method, the data directory and the binary path cannot be replaced at finalize. The passphrase comes from `--passphrase-stdin` or `TN_BLS_PASSPHRASE`. Both phases refuse to run once a node unit exists |
@@ -2143,6 +2146,7 @@ With no repository checkout and no pinned files, menu 13 runs setup's checks for
 Declined or failed, it prints a manual `sudo git clone --branch <tag> ...` line and the three raw-file URLs; it no longer tells you to re-run `setup-node.sh`.
 After `Nothing to refresh: ...` a line points to `14) Restart node`, and a network this release pins nothing for (mainnet today) is refused before any prompt: `This script release pins no mainnet chain configs yet, so there is nothing to install. Chain configs unchanged.`
 The update lock is free at every "Press Enter", a git worktree checkout is read, and the AIDE baseline is made again whenever the refresh wrote under `/etc/telcoin/chain-configs/`, a reinstall that only corrects owner or modes included.
+The `admission`, `trusted_nodes` and `bootstrap_peers` edits write the bootstrap peers map as `committee_peers` only when it lists every validator of the genesis `committee.yaml`, as setup-node v2.1.4 does; a map that lists fewer is installed as before and left out of `committee_peers` with a warning, so the node starts at epoch 0.
 Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
 
 ### lib/common.sh v2.2.5 — chain-config helpers after verification
@@ -2156,6 +2160,8 @@ Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
 ### setup-node v2.1.4 — "were refused", each directory once, a manual hint that names the tag
 A refused chain-config step reads `The <network> chain configs were refused (see above); nothing was copied.` instead of "not the pinned ones", which was wrong for a refused checkout.
 When the files cannot be found, the error lists each directory once, and the hint says where the files are at the tag and names `--genesis-dir <dir>`.
+Fix for validators set up with `--admission` and a `--bootstrap-peers` map that does not list the whole genesis committee (a map of hubs alone, or of the other validators without this node): setup wrote it as `committee_peers`, and the node then exited within a second of every start during epoch 0 (`Error: committee_peers: missing validator <key>`).
+Setup now writes `committee_peers` only from a map that lists every validator of the genesis `committee.yaml`; any other map is left out of it with a warning naming the gap, and stays installed, dialed and in the allowlist floor.
 Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
 
 ### update-node v2.1.2 — comment only: no git pull runs there

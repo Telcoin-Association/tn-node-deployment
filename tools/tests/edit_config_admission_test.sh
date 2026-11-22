@@ -258,7 +258,14 @@ hub() {
 { printf -- '---\n# hubs for the closed validator\n'; hub "$K1" 10; } > "$T/in/t1.yaml"
 { hub "$K1" 10; printf '\n'; hub "$K2" 11; } > "$T/in/t2.yaml"
 printf '%s:\n  primary:\n    network_address: /ip4/198.51.100.21/udp/49590/quic-v1/p2p/12D3KooWPeer1P\n    network_key: 4XTTMpeer1p\n  workers:\n    - network_address: /ip4/198.51.100.21/udp/49594/quic-v1/p2p/12D3KooWPeer1W\n      network_key: 4XTTMpeer1w\n' "$K2" > "$T/in/peers.yaml"
+# a peers map of the hub K1 alone
+printf '%s:\n  primary:\n    network_address: /ip4/203.0.113.10/udp/49590/quic-v1/p2p/12D3KooWHub10P\n    network_key: 4XTTMhub10p\n  workers:\n    - network_address: /ip4/203.0.113.10/udp/49594/quic-v1/p2p/12D3KooWHub10W\n      network_key: 4XTTMhub10w\n' "$K1" > "$T/in/peers-hub.yaml"
+cat "$T/in/peers.yaml" "$T/in/peers-hub.yaml" > "$T/in/peers-both.yaml"
 chmod 0644 "$T/in/"*.yaml
+# the genesis committee.yaml in the data dir: one validator, K2, the key of
+# peers.yaml, so that map is the whole committee
+mkdir -p "$DD/genesis"
+printf -- '---\nauthorities:\n  %s:\n    protocol_key: %s\n    execution_address: "0x0000000000000000000000000000000000000002"\nepoch: 0\nbootstrap_servers: {}\n' "$K2" "$K2" > "$DD/genesis/committee.yaml"
 
 # ---- admission ------------------------------------------------------------------
 reset
@@ -629,7 +636,48 @@ check "committee on, trusted_nodes=none: resynced after the restart" "0|$FWSYNC"
 reset ADMISSION_MODE=closed P2P_COMMITTEE=off
 drv set "trusted_nodes=$T/in/t1.yaml"
 check "committee off, trusted_nodes=FILE: no resync" "0|systemctl restart telcoin;" "$RC|$(fwcalls)"
+# a peers map that misses a genesis validator stays out of committee_peers but
+# is installed, so the resync captures it into the floor
+reset ADMISSION_MODE=closed P2P_COMMITTEE=on
+launch peers
+cp "$T/in/peers.yaml" "$PEERS"
+drv set "bootstrap_peers=$T/in/peers-hub.yaml"
+check "committee on, bootstrap_peers=<hub only>: installed, no committee_peers, resynced after the restart" "0|same|0|$FWSYNC" \
+    "$RC|$(cmp -s "$T/in/peers-hub.yaml" "$PEERS" && echo same)|$(grep -c '^committee_peers' "$NC")|$(fwcalls)"
 rm -f "$T/ec/firewall-setup.sh"
+
+# ---- committee_peers only from a map that lists the whole genesis committee ------
+CP_GAP="$PEERS lacks 1 of the 1 validators of the genesis committee in $DD/genesis/committee.yaml (${K2:0:16}…), so it is not written to network-config as committee_peers: a node whose committee_peers misses a genesis validator refuses to start while its chain is at epoch 0"
+reset ADMISSION_MODE=closed
+launch peers
+cp "$T/in/peers.yaml" "$PEERS"
+drv set "bootstrap_peers=$T/in/peers-hub.yaml"
+check "bootstrap_peers=<hub only> with a mode: rc 0, rendered without committee_peers" "0 yes 0" \
+    "$RC $(has "$(calls)" "render $DD closed none none") $(grep -c '^committee_peers' "$NC")"
+check "bootstrap_peers=<hub only> with a mode: the warning names the gap" yes "$(has "$OUT" "$CP_GAP")"
+check "bootstrap_peers=<hub only> with a mode: the map installed and on the launch line" "same yes" \
+    "$(cmp -s "$T/in/peers-hub.yaml" "$PEERS" && echo same) $(has "$(cat "$LAUNCH")" "--bootstrap-peers \"\$(cat $PEERS)\"")"
+check "bootstrap_peers=<hub only> with a mode: the node is restarted on it" yes "$(has "$(calls)" "systemctl restart telcoin")"
+export ECA_JSON=true
+drv set admission=grace
+check "admission=grace over a map with a gap: written without committee_peers, the warning as an event" "0 yes 0 yes" \
+    "$RC $(has "$(calls)" "render $DD grace none none") $(grep -c '^committee_peers' "$NC") $(has "$(logf "$T/events")" "{\"event\":\"warn\",\"msg\":\"${CP_GAP}")"
+unset ECA_JSON
+drv set "bootstrap_peers=$T/in/peers-both.yaml"
+check "bootstrap_peers=<the committee and a hub>: committee_peers is the map, no warning" \
+    "0|$(echo 'committee_peers:'; sed 's/^/  /' "$T/in/peers-both.yaml")|no" \
+    "$RC|$(sed -n '/^committee_peers:/,$p' "$NC")|$(has "$OUT" "lacks")"
+# set trusted_nodes renders committee_peers too, and checks it the same way
+cp "$T/in/peers-hub.yaml" "$PEERS"
+drv set "trusted_nodes=$T/in/t1.yaml"
+check "trusted_nodes=FILE over a map with a gap: rendered without committee_peers, warned" "0 yes 0 yes" \
+    "$RC $(has "$(calls)" "render $DD grace $DEST none") $(grep -c '^committee_peers' "$NC") $(has "$OUT" "$CP_GAP")"
+# no committee file to check against: left out, with the reason
+mv "$DD/genesis/committee.yaml" "$T/committee.saved"
+drv set "bootstrap_peers=$T/in/peers-both.yaml"
+check "no genesis committee.yaml: rc 0, left out, says why" "0 yes 0 yes" \
+    "$RC $(has "$(calls)" "render $DD grace $DEST none") $(grep -c '^committee_peers' "$NC") $(has "$OUT" "$DD/genesis/committee.yaml cannot be read, so $PEERS was not checked against the genesis committee")"
+mv "$T/committee.saved" "$DD/genesis/committee.yaml"
 
 # ---- the library and --help -----------------------------------------------------
 help="$(bash "$TN_TEST_REPO/edit-config.sh" --help 2>&1)"

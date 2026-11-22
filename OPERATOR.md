@@ -434,6 +434,8 @@ The node treats these peers as discovery hints only: it does not keep them conne
 - It must be a regular file of at most 64 KiB that other users can read (`chmod 644`). The map does not stay private: setup installs it world-readable as `/etc/telcoin/bootstrap-peers.yaml`, and its check passes the map on the node binary's command line. A file its group or other users cannot read is refused, with the `chmod` to run.
 - Setup checks the map with the release's own parser and stops with the parser's reason if a key or value is wrong.
 - The start script passes `--bootstrap-peers "$(cat /etc/telcoin/bootstrap-peers.yaml)"`, so the node reads the file again at every start. An edit to that file takes effect at the next restart without any check; `edit-config.sh` checks a new map before it installs it.
+- With an admission mode (section 2.9) the map is also written into `network-config` as `committee_peers`, but only when it lists every validator of the genesis committee, this node included.
+  A map that lists fewer is installed and dialed as usual and left out of `committee_peers`, with a warning.
 
 `--enable-state-export` (`v0.13.0-adiri` or later) writes each epoch's final execution state under `<data dir>/consensus-db/state_exports/epoch-N/`.
 Every export is a full copy of the state and none is deleted, so the disk fills over time.
@@ -492,7 +494,8 @@ The node's own description is `crates/network-libp2p/src/peers/admission.md` in 
 
 Mainnet validators are expected to run `--admission closed --trusted-nodes <hubs>`.
 On mainnet, mode closed without a trusted nodes map warns, at setup and in `edit-config.sh`: `Admission closed without --trusted-nodes: the node admits only the previous, current and next committees and the bootstrap peers. Mainnet validators are expected to run --admission closed --trusted-nodes <hubs>.`
-The hubs and the bootstrap peers are the only peers outside the committees a closed node takes, so give it both.
+Outside the committees, a closed node takes only its trusted hubs and its bootstrap peers.
+Put the hubs in the trusted nodes file; the bootstrap peers file must list every validator of the genesis committee, this node included, and may list hubs beside them, because with an admission mode it is also written into `network-config` as `committee_peers` (below), and only when it lists the whole committee.
 
 ```bash
 sudo bash ~/telcoin-node-scripts/setup-node.sh --admission closed --trusted-nodes ./hubs.yaml --bootstrap-peers ./peers.yaml
@@ -523,8 +526,14 @@ The node wants the worker ids `0` up to its own number of workers less one in ev
 - When a peer rotates its network key, a Closed node denies the new key until the peer's new record resolves; switching to Grace for the rotation, or putting the new binding in this file, avoids the wait, because a configured hub wins over a cached record.
 
 **`committee_peers`.**
-The scripts write the installed bootstrap peers map (`/etc/telcoin/bootstrap-peers.yaml`, section 2.7) into `network-config` as `committee_peers`, the node's launch inventory, and leave the entry out when the node runs without one.
-A node that starts during epoch 0 with a nonempty `committee_peers` stops unless it lists every member of the committee, each with its primary and the on-chain number of workers; after epoch 0 a gap is only logged and discovery covers it.
+The scripts write the installed bootstrap peers map (`/etc/telcoin/bootstrap-peers.yaml`, section 2.7) into `network-config` as `committee_peers`, the node's launch inventory, when it lists every validator of the genesis committee (the keys under `authorities` in `<data dir>/genesis/committee.yaml`), this node included; keys beside them, a hub's say, do no harm.
+They leave the entry out when the node runs without a map.
+A node that starts during epoch 0 with a nonempty `committee_peers` stops unless it lists every member of the committee, each with its primary and the on-chain number of workers (`Error: committee_peers: missing validator <key>`, within a second of the start, in every admission mode); after epoch 0 a gap is only logged and discovery covers it, but a new data dir starts at epoch 0 whenever it is made.
+So setup and the `edit-config.sh` edits of `admission`, `trusted_nodes` and `bootstrap_peers` check the map against that `committee.yaml` before they write `network-config`, and leave `committee_peers` out when a validator is missing, with a warning that starts `<map> lacks <n> of the <m> validators of the genesis committee in <committee.yaml> (<the first three keys>), so it is not written to network-config as committee_peers`.
+The run goes on: the map stays installed and on the start line, so the node still dials it at start and finds the other validators through peer discovery, and the P2P committee allowlist keeps it in its floor (section 2.10).
+To have it written, add the missing validators and install the map again with `edit-config.sh --set bootstrap_peers=FILE`.
+Setup copies `committee.yaml` into the data dir in "Step 6 of 8", before it writes `network-config` in "Step 7 of 8", so the check always has the file; when it cannot read it, the map is left out the same way.
+The check compares BLS keys only; the number of workers in each entry is still the node's to check.
 At any epoch the node also stops on an entry with an empty address, or one whose `/p2p/` part names another peer than its network key.
 A `bootstrap_peers` edit on a node with an admission mode writes `network-config` again, so `committee_peers` follows the map.
 
@@ -569,7 +578,7 @@ sudo bash ~/telcoin-node-scripts/edit-config.sh --set admission=closed
 **Known limitations.**
 
 - `MIN_ADMISSION_VERSION` (0.17.0) is a placeholder until the node team names the first release that reads the entries; `setup-node.sh --help` and `edit-config.sh --help` repeat it.
-- `committee_peers` comes from the bootstrap peers map, which is the right source only when that map lists the committee; at genesis it must list all of it (above).
+- `committee_peers` comes from the bootstrap peers map and is written only when that map lists the whole genesis committee (above); a map that lists fewer keeps the node starting but leaves it without a launch inventory.
 - Setup checks a `--trusted-nodes` file as it checks a peers map, and the library only that it starts with a map; the shape check runs in `edit-config.sh` alone, which takes block YAML only (a JSON or flow-style map that setup takes is refused there).
   A node-side check of the file would replace both.
 - When the release cannot be told, `--admission` and the two edits warn and write anyway rather than stop.
@@ -1136,10 +1145,10 @@ When the value is already in place, nothing is written and the node is not resta
 | `metrics` | `<IPv4>:<port>` adds or changes `--metrics`; `off` removes it. |
 | `verbosity` | `-v`, `-vv`, `-vvv`, `-vvvv` or `-vvvvv`. |
 | `docker_image` | A release tag (on testnet a release candidate too) or `<repository>@sha256:<digest>` of the network's package, `ghcr.io/telcoin-association/tn-mainnet` or `ghcr.io/telcoin-association/tn-testnet` (on testnet also the legacy `us-docker.pkg.dev/telcoin-network/tn-public/adiri`), Docker installs only. The image is pulled by digest first, the digest is checked after the pull, and the image's build features are checked against the network before the change is made (`refusing <image>: it is not a <network> image (see above); the image is not changed`). A release older than the network's oldest supported one is refused. On mainnet the change is refused until a mainnet release can be verified (section 1.5); after that a digest alone is taken only when `.node-meta` records it as the image of a mainnet release. |
-| `bootstrap_peers` | An absolute path to a peers map, checked as at setup (section 2.7) and installed as `/etc/telcoin/bootstrap-peers.yaml`, or `none` to remove the flag and the file. Needs `v0.15.0-adiri` or later and a start script (section 4.8). |
+| `bootstrap_peers` | An absolute path to a peers map, checked as at setup (section 2.7) and installed as `/etc/telcoin/bootstrap-peers.yaml`, or `none` to remove the flag and the file. With an admission mode it is also written as `committee_peers` when it lists every genesis validator (section 2.9). Needs `v0.15.0-adiri` or later and a start script (section 4.8). |
 | `state_export` | `off`, `unlimited` (every export kept; `v0.13.0-adiri` or later) or a number of epochs to keep, 1 to 999999 (`v0.15.0-adiri` or later). |
 | `allow_private_forward_targets` | `true` or `false`. `true` lets the node forward transactions to committee RPC endpoints on private addresses. `true` is refused on testnet and mainnet, so it is for private networks such as a devnet; `false` is accepted everywhere. |
-| `admission` | `open`, `grace` or `closed`: the admission mode, written into `network-config` with the recorded trusted nodes map and, as `committee_peers`, the installed bootstrap peers map. Needs node release 0.17.0 or later (section 2.9). |
+| `admission` | `open`, `grace` or `closed`: the admission mode, written into `network-config` with the recorded trusted nodes map and, as `committee_peers`, the installed bootstrap peers map when it lists every genesis validator. Needs node release 0.17.0 or later (section 2.9). |
 | `trusted_nodes` | An absolute path to a trusted nodes map, shape-checked and installed as `/etc/telcoin/trusted-nodes.yaml`, or `none` to remove it. Needs an admission mode first (section 2.9). |
 | `gateway_upstream` | `<IPv4>[,<IPv4>...]` or `off`. The list binds the RPC and the health check to every interface (`--http.addr 0.0.0.0`, `--healthcheck 0.0.0.0:43174`) for worker gateways on those hosts, and is refused unless `ufw` already admits them (`firewall-setup.sh --enable --gateway-from`) and keeps every other address out of both ports; `off` puts both back. A stopped node (inactive or failed) stays stopped; a node that is starting, stopping or waiting for its automatic restart is refused. Section 4.15. |
 
@@ -2722,6 +2731,8 @@ Start with `sudo bash ~/telcoin-node-scripts/check-node.sh` and `journalctl -u t
 | `--bootstrap-peers needs telcoin-network v0.15.0-adiri or later, and ... does not have it.` (setup), or `the installed release has no --bootstrap-peers; update the node first` (edit-config) | The node release lacks the flag. The same messages name `--enable-state-export` (`v0.13.0-adiri`) and `--state-export-keep` (`v0.15.0-adiri`). | Pick a newer release, update the node (section 4.2), or leave the flag out. |
 | `<file> is mode 600: other users cannot read it. ... Run chmod 644 <file> first.` | Setup and `edit-config.sh` take only a peers file that other users can read, because the installed copy is world-readable. | `chmod 644 <file>`, then run it again. |
 | `the node rejects <file> as a --bootstrap-peers map (...)` | A key is not a BLS public key, or a value is not the `primary` and `workers` entries of that node's `node-info.yaml`. | Fix the map (section 2.7). |
+| `[WARN] /etc/telcoin/bootstrap-peers.yaml lacks <n> of the <m> validators of the genesis committee in .../genesis/committee.yaml (...), so it is not written to network-config as committee_peers: ...` | With an admission mode, the bootstrap peers map does not list every genesis validator (a map of hubs only, or of the other validators without this node). The node would not start during epoch 0 with it as `committee_peers`, so it was left out; the node still dials the map. | Nothing stops. To have it written, add the validators the warning names, this node included, and run `edit-config.sh --set bootstrap_peers=FILE` (section 2.9). |
+| `Error: committee_peers: missing validator <key>` in `journalctl -u telcoin`, the node stopping within a second of each start | `network-config` holds a `committee_peers` map without that genesis validator, written by hand or by scripts older than this check, and the node's chain is at epoch 0. | Run `edit-config.sh --set bootstrap_peers=FILE` again (it leaves an incomplete map out), or add the validator to the map (section 2.9). |
 | `bootstrap_peers needs a start wrapper: ...`, or `... move it to the current unit and start script first: sudo ./edit-config.sh --migrate-credential (nothing was changed)` | A node that starts straight from its systemd unit, holds the passphrase in the unit, or uses the old TPM method. | `sudo bash ~/telcoin-node-scripts/edit-config.sh --migrate-credential` (section 4.8). |
 | `committee of <n>: <d> member(s) down; stopping this node makes ... Refused: ...`, or `could not count the committee members that are down (...)` | The committee quorum check refused the stop or restart (section 4.11). | Wait until the other members are back. For a restart the fleet coordinator has planned, run again with `--allow-quorum-risk` or `TN_ALLOW_QUORUM_RISK=1`. On mainnet, record `VALIDATOR_ADDRESS` in `.node-meta` so an unstaked node can go ahead when the committee cannot be read. |
 | `... still has the old file ownership layout and must be installed fresh; it is not migrated in place.` | A mainnet host set up by older scripts. | Install it fresh on Ubuntu 26.04 or 24.04 (section 4.9). |

@@ -314,10 +314,14 @@ Rules for any code that touches them:
   Do not drop the backup or bypass the verify for an admission edit.
 - `.node-meta` keys: `ADMISSION_MODE` (lower case, empty for none) and `TRUSTED_NODES_FILE` (the installed path, or empty); every admission edit records both (`edit_admission_record`; a value already in place is left alone), and setup reads them back on a finalize and on an interactive re-run.
   An edit whose only change is `.node-meta` keeps it without a restart (`edit_only_meta_changed`).
-- `committee_peers` is the installed bootstrap peers map, when the node command loads one.
+- `committee_peers` is the installed bootstrap peers map, when the node command loads one and the map names every validator of the data dir's genesis `committee.yaml` (its `authorities` keys), the node's own included.
+  A node whose nonempty `committee_peers` misses one exits at start while its chain is at epoch 0, in every admission mode, and a new data dir is always at epoch 0, so the two render points, `setup_admission_config` and `edit_admission_render`, ask `tn_committee_peers_check` first and pass `none` with a warning when it fails; a new render point does the same.
+  A map left out stays installed, on the launch line and in the allowlist floor (`fw_allow_capture_floor` reads the file, never `network-config`), and the run does not fail.
+  Extra keys (hubs) are fine, as the node accepts them; the check compares keys, not worker counts.
+  It reads both files as the service user, because the committee file is in the data dir; setup copies that file in `step_write_config`, which runs before `step_create_service` on every path.
   Anything that changes that map on a node with a recorded mode renders `network-config` again, as `set_bootstrap_peers` does through `edit_admission_follow_peers`.
 - Mainnet closed without a trusted nodes map warns (`edit_admission_closed_warn` and setup's twin), it does not refuse.
-- setup-node and edit-config list `tn_network_config_render` and `tn_node_supports_admission` in their `tn_require_fns` checks.
+- setup-node and edit-config list `tn_network_config_render`, `tn_node_supports_admission` and `tn_committee_peers_check` in their `tn_require_fns` checks.
 - Not wired yet: the UI helper's and `ui/server.py`'s `--set` allowlists, check-node, remove-node's listing and update-node's floor check do not know the settings.
 
 ## P2P committee allowlist
@@ -1283,7 +1287,8 @@ line.
   The test trusts the throwaway key through `TN_RELEASE_KEYS_DIR` with `--release-dir`, so `lib/release-keys` is never touched.
   The key does not expire; the cases on its real signature skip without a working real `gpg` (`REAL_GPG`), and every other case re-signs copies of the files with `signing.sh` keys and runs in all three environments.
   Every file is as the dry run wrote it, and all of them are refreshed together from a new dry run (`gateway-pin.d/README`).
-- The node admission settings have `network_config_test.sh` (the renderer), `setup_node_admission_test.sh` and `edit_config_admission_test.sh`.
+- The node admission settings have `network_config_test.sh` (the renderer, and `tn_committee_peers_check` against the testnet `committee.yaml` of `genesis.d/`), `setup_node_admission_test.sh` and `edit_config_admission_test.sh`.
+  The last two put a genesis `committee.yaml` in the fixture data dir whose validators are the keys of their complete peers map, and cover the maps left out of `committee_peers` (hubs only, nine of ten, the others without this node, no committee file) next to the complete one, which renders as before.
 - The hardware check has `hardware_check_test.sh`: the output for the testnet validators' machine
   on both networks, the 350 GB boundary, the logical-CPU fallback and the order of the calls in
   `step_preflight`. The UI's twin is `hardware_profile` in `ui/server.py`, and

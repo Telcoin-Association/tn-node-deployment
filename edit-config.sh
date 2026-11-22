@@ -98,13 +98,16 @@
 #                                     (admission.mode Open, Grace or Closed)
 #                                     with the trusted nodes below and the
 #                                     installed bootstrap peers map as
-#                                     committee_peers. Closed admits only the
-#                                     previous, current and next committees,
-#                                     the trusted nodes and the bootstrap
-#                                     peers; Grace enforces nothing beyond Open
-#                                     and differs only in the status the node
-#                                     reports. Needs node release 0.17.0 or
-#                                     later.
+#                                     committee_peers when it lists every
+#                                     genesis validator (one that lists fewer
+#                                     would stop the node at epoch 0, so it is
+#                                     left out with a warning). Closed admits
+#                                     only the previous, current and next
+#                                     committees, the trusted nodes and the
+#                                     bootstrap peers; Grace enforces nothing
+#                                     beyond Open and differs only in the
+#                                     status the node reports. Needs node
+#                                     release 0.17.0 or later.
 #   trusted_nodes=<path>|none         the trusted hubs, with an admission mode
 #                                     set: an absolute path to a YAML map keyed
 #                                     by BLS public key, each entry the hub's
@@ -163,7 +166,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
         tn_restore_backup tn_migrate_credential _tn_cred_switch _tn_multiaddr_udp_port \
         tn_launch_runner tn_keytool_has tn_keytool _tn_cred_plain_ok _tn_passfile_trim_safe \
         tn_docker_resolve_ref tn_docker_network_ok _tn_guard_network tn_docker_image_network_ok \
-        tn_network_config_render tn_node_supports_admission tn_gateway_from_rules_ok \
+        tn_network_config_render tn_node_supports_admission tn_committee_peers_check tn_gateway_from_rules_ok \
         tn_chain_configs_tag tn_chain_configs_dir tn_chain_configs_from_tag \
         _tn_chain_configs_clone tn_chain_config_pin _tn_chain_configs_dest_ok \
         _tn_chain_configs_clone_target _tn_chain_configs_in_place >/dev/null; then
@@ -1688,11 +1691,14 @@ edit_admission_release_ok() {
 # edit_admission_render MODE TRUSTED -- write the admission settings into
 # network-config with tn_network_config_render (run as the service user): MODE,
 # TRUSTED (the installed trusted nodes map, or none) and, as committee_peers, the
-# installed bootstrap peers map when the node command loads one, else none. The
+# installed bootstrap peers map when the node command loads one and it lists every
+# validator of the data dir's genesis committee.yaml (tn_committee_peers_check: a
+# node whose committee_peers misses one does not start at epoch 0), else none; a
+# map left out is warned about and stays installed and on the launch line. The
 # file is recorded with edit_backup first. The renderer leaves the file as it was
 # when it refuses or fails, and its reason becomes the edit's error.
 edit_admission_render() {
-    local mode="$1" trusted="$2" committee=none dd nc out line reason="" rc=0
+    local mode="$1" trusted="$2" committee=none dd nc out line reason="" rc=0 msg=""
     dd="$(detect_data_dir)" || dd=""
     dd="${dd%/}"
     if [[ -z "$dd" || ! -d "$dd" ]]; then
@@ -1702,6 +1708,10 @@ edit_admission_render() {
     nc="${dd}/network-config"
     if tn_launch_flag_get "$TARGET_LAUNCH_FILE" --bootstrap-peers >/dev/null 2>&1; then
         committee="$(tn_resolve_config_dir)/bootstrap-peers.yaml"
+    fi
+    if [[ "$committee" != none ]] && ! msg="$(tn_committee_peers_check "$dd" "$committee")"; then
+        edit_warn "$msg"
+        committee=none
     fi
     edit_backup "$nc" || return 1
     out="$(tn_network_config_render "$dd" "$mode" "$trusted" "$committee" 2>&1)" || rc=$?
@@ -1755,7 +1765,8 @@ edit_admission_record() {
 
 # edit_admission_follow_peers -- after a bootstrap_peers edit, with an admission
 # mode recorded: write network-config again (edit_admission_render), so
-# committee_peers holds the map the node command now loads, or nothing. Without
+# committee_peers holds the map the node command now loads, or nothing (also when
+# that map does not list the whole genesis committee). Without
 # a mode nothing is written. A record that cannot be used refuses the edit,
 # since network-config would keep the old committee peers.
 edit_admission_follow_peers() {

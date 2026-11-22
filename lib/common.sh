@@ -3113,6 +3113,115 @@ tn_network_config_render() {
     print_ok "Admission settings written to ${nc} (mode ${mode})"
 }
 
+# tn_committee_peers_check DATA_DIR MAP -- whether the peers map MAP (the installed
+# bootstrap-peers.yaml) may go into DATA_DIR/network-config as committee_peers: only
+# when every validator of the genesis committee, DATA_DIR/genesis/committee.yaml, is a
+# key of MAP, this node's own key included. A node whose committee_peers is not empty
+# and misses one refuses to start while its chain is at epoch 0 ("committee_peers:
+# missing validator <key>"), in every admission mode, and a new data dir always
+# starts at epoch 0; a key outside the committee, a hub's, does not stop it. Both
+# files are read as the service user (tn_as_service_user), because the committee
+# file sits in the data dir that user writes. A key of MAP is a run of letters and
+# digits followed by ":", after a closing quote if any, outside a "#" comment, so
+# block YAML, flow YAML and JSON maps are all read; the validators are the keys one
+# level under the committee file's top-level "authorities:" entry.
+#   rc 0  MAP holds every validator; prints nothing
+#   rc 1  MAP misses at least one, the committee file cannot be read or names no
+#         validator, or the check could not run: one line on stdout says which,
+#         that MAP is left out of committee_peers but stays installed and in use,
+#         and how to have it written
+tn_committee_peers_check() {
+    local dd="${1:-}" map="${2:-}" cf prog out rc=0 nmiss="" ntotal="" k1="" k2="" k3=""
+    local k list="" why
+    cf="${dd}/genesis/committee.yaml"
+    # The awk text holds no single quote. exit 3: the committee file cannot be
+    # read, 4: it names no validator, 5: MAP cannot be read, 1: the gaps, as
+    # "MISSING TOTAL KEY KEY KEY" (the first three).
+    # shellcheck disable=SC2016
+    prog='
+        BEGIN {
+            bom = "\357\273\277"
+            q = "[\"\047]"
+            # every character listed: in a UTF-8 locale a range matches more
+            an = "[0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz]"
+            cf = ARGV[1]
+            mf = ARGV[2]
+            auth = 0
+            base = -1
+            m = 0
+            ln = 0
+            while ((rc = (getline s < cf)) > 0) {
+                if (++ln == 1 && index(s, bom) == 1) s = substr(s, length(bom) + 1)
+                sub(/\r$/, "", s)
+                if (s ~ /^[ \t]*(#|$)/) continue
+                if (s !~ /^[ \t]/) {
+                    auth = (s ~ /^authorities[ \t]*:[ \t]*(#.*)?$/)
+                    continue
+                }
+                if (!auth) continue
+                match(s, /^[ \t]+/)
+                if (base < 0) base = RLENGTH
+                if (RLENGTH != base) continue
+                k = substr(s, RLENGTH + 1)
+                sub(/[ \t]*:.*$/, "", k)
+                gsub(q, "", k)
+                if (k ~ ("^" an "+$") && !(k in want)) {
+                    want[k] = 1
+                    order[++m] = k
+                }
+            }
+            if (rc < 0) exit 3
+            close(cf)
+            if (m == 0) exit 4
+            ln = 0
+            while ((rc = (getline s < mf)) > 0) {
+                if (++ln == 1 && index(s, bom) == 1) s = substr(s, length(bom) + 1)
+                sub(/\r$/, "", s)
+                sub(/(^|[ \t])#.*/, "", s)
+                while (match(s, an "+" q "?[ \t]*:")) {
+                    k = substr(s, RSTART, RLENGTH)
+                    sub(q "?[ \t]*:$", "", k)
+                    have[k] = 1
+                    s = substr(s, RSTART + RLENGTH)
+                }
+            }
+            if (rc < 0) exit 5
+            close(mf)
+            n = 0
+            for (i = 1; i <= m; i++)
+                if (!(order[i] in have)) miss[++n] = order[i]
+            if (n == 0) exit 0
+            printf("%d %d", n, m)
+            for (i = 1; i <= n && i <= 3; i++) printf(" %s", miss[i])
+            printf("\n")
+            exit 1
+        }'
+    out="$(tn_as_service_user awk "$prog" "$cf" "$map" 2>/dev/null)" || rc=$?
+    case "$rc" in
+        0) return 0 ;;
+        1)
+            read -r nmiss ntotal k1 k2 k3 <<< "$out"
+            if [[ "$nmiss" =~ ^[0123456789]+$ && "$ntotal" =~ ^[0123456789]+$ ]]; then
+                for k in "$k1" "$k2" "$k3"; do
+                    [[ -n "$k" ]] || continue
+                    list="${list:+${list}, }${k:0:16}…"
+                done
+                if [[ "$nmiss" -gt 3 ]]; then
+                    list="${list} and $((nmiss - 3)) more"
+                fi
+                why="${map} lacks ${nmiss} of the ${ntotal} validators of the genesis committee in ${cf} (${list}), so it is not written to network-config as committee_peers"
+            else
+                why="${map} could not be checked against the genesis committee in ${cf}, so it is not written to network-config as committee_peers"
+            fi
+            ;;
+        3) why="${cf} cannot be read, so ${map} was not checked against the genesis committee and is not written to network-config as committee_peers" ;;
+        4) why="${cf} names no validator under authorities, so ${map} was not checked against the genesis committee and is not written to network-config as committee_peers" ;;
+        *) why="${map} could not be checked against the genesis committee in ${cf}, so it is not written to network-config as committee_peers" ;;
+    esac
+    printf '%s: a node whose committee_peers misses a genesis validator refuses to start while its chain is at epoch 0, where every new data dir starts. The map stays installed and in use: the node still dials its peers at start, keeps its trusted hubs and finds the other validators through peer discovery, and the P2P committee allowlist keeps the map in its floor. To have it written as committee_peers, list every genesis validator in it (this node too, when it is one; hubs may stay beside them) and install it again with edit-config.sh --set bootstrap_peers=FILE.\n' "$why"
+    return 1
+}
+
 # Record the ref of the source binary that was just installed, in a marker next
 # to the binary (<install_dir>/telcoin-network.version). The UI reads this to show
 # the version of the RUNNING binary instead of `git describe` of the source

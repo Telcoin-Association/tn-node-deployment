@@ -633,6 +633,115 @@ rc=0; tn_network_config_render "$T/isdir/data" closed none none >/dev/null 2>&1 
 check_rc "network-config a directory refused" 1 "$rc"
 check "network-config a directory: nothing inside" "" "$(ls -A "$T/isdir/data/network-config")"
 
+# ---- committee_peers against the genesis committee -----------------------------
+echo "== tn_committee_peers_check: the map against the genesis committee.yaml"
+# The testnet committee.yaml at the pinned tag: five validators under
+# authorities, and under bootstrap_servers the peers map of all five, which is
+# a complete committee_peers map once it is taken out two spaces.
+GC="$TN_TEST_DIR/genesis.d/testnet/committee.yaml"
+CD="$T/cp/data"
+CI="$T/cp/in"
+mkdir -p "$CD/genesis" "$CI"
+cp -- "$GC" "$CD/genesis/committee.yaml"
+V1=pDmpE29YEhr93MPVPCGkWx3BsCcow4oExmxv5viJz2GTjsaXwc3YwKxE1CFdVuTVSudsFDutFSVmtgF98Abs56JZPfGQs6GzbqXDFkGA1eZx2edkwfP2Q6eRLo8coLhvTNj
+V2=rZdhyVGJAtz7kyFtFARWVVcw5DB3o9E4GvPN6zuKfUhUBGFRvEK2PgEV44CJt9wu9GMyssFQBFXRknrenuhJixo9KCADrZzHdtcvAwAYDmcLc7Ugh9epGc5LRZC5TK2hnYA
+V3=24JaKrebALhvhXxsAabjd5ZK22k1W4zKwGepKD5pcobQwBkZyiruYyhRM3hkLap8Ssc4qUdcRUJSrs2389hUoV7G83HKYrmkz2pTzCJiQURV5vtkrh8gFRKBQWKFTWLWah9s
+V4=26L1XwWTr6bBNnxJmDJXJgTqMAyD4ExkqwPYYJqDD3gob3jzejypQoewqRmqb9D2Yudk7zjcPqaTzFcEtXhrYXUtNx2ZYeLKC8V77LL2J136Hvw8eCGXpadGAbymThMhWYAa
+V5=26L3gmkBzxAxEwvVuDrxEmKf2XwYGnYj1EQSiZSX3PBAvRa6Z5tegfmDAGHTsBwdtjFuAd7ayQEemE1AUE5ajSSK8wn3uz1MY5vjbGdeh3RoUv1TKLfbNTTULq9qdtaSTHhL
+HUB=oEqGCU31thhSDTVHtpgtRnfGFYgLYx8iEeksqmu6ACWBdQyNkaj949UJ2e6ZVcrLJfF1hcAiu7hBkhYWuMcefx4UhfMDWZLUZZGxoW4pxe37WCDSt5RrKgHSNjGZXV6oPaY
+sed -n '/^bootstrap_servers:/,$p' "$GC" | sed '1d; s/^  //' > "$CI/full.yaml"
+# cp_entry KEY OCTET: one peers map entry
+cp_entry() {
+    printf '%s:\n  primary:\n    network_address: /ip4/203.0.113.%s/udp/49590/quic-v1/p2p/12D3KooWP%s\n    network_key: 4XTTMp%s\n  workers:\n    - network_address: /ip4/203.0.113.%s/udp/49594/quic-v1/p2p/12D3KooWW%s\n      network_key: 4XTTMw%s\n' \
+        "$1" "$2" "$2" "$2" "$2" "$2" "$2"
+}
+# cp_drop KEY FILE: FILE without the entry of KEY
+cp_drop() { awk -v k="$1" '/^[^ \t]/ { skip = (index($0, k ":") == 1) } !skip' "$2"; }
+# cp_has TEXT PART: yes when TEXT holds PART
+cp_has() { case "$1" in *"$2"*) echo yes ;; *) echo no ;; esac; }
+# cpc MAP: the check of MAP against the committee in $CD; sets RC and OUT
+cpc() {
+    RC=0
+    : > "$TN_NC_CALLS"
+    OUT="$(tn_committee_peers_check "$CD" "$1")" || RC=$?
+}
+CP_TAIL="a node whose committee_peers misses a genesis validator refuses to start while its chain is at epoch 0, where every new data dir starts. The map stays installed and in use: the node still dials its peers at start, keeps its trusted hubs and finds the other validators through peer discovery, and the P2P committee allowlist keeps the map in its floor. To have it written as committee_peers, list every genesis validator in it (this node too, when it is one; hubs may stay beside them) and install it again with edit-config.sh --set bootstrap_peers=FILE."
+CP_IN="validators of the genesis committee in $CD/genesis/committee.yaml"
+cpc "$CI/full.yaml"
+check "committee check: the whole committee passes, silently" "0|" "$RC|$OUT"
+check_has "committee check: read as the service user" \
+    "setpriv --reuid 991 --regid 991 --clear-groups --no-new-privs -- awk, passphrase absent" "$(cat "$TN_NC_CALLS")"
+{ cat "$CI/full.yaml"; cp_entry "$HUB" 20; } > "$CI/full-hub.yaml"
+cpc "$CI/full-hub.yaml"
+check "committee check: a hub beside the committee passes" "0|" "$RC|$OUT"
+cp_entry "$HUB" 20 > "$CI/hubs.yaml"
+cpc "$CI/hubs.yaml"
+check "committee check: a hubs-only map fails, with the count and the first three keys" \
+    "1|$CI/hubs.yaml lacks 5 of the 5 ${CP_IN} (${V1:0:16}…, ${V2:0:16}…, ${V3:0:16}… and 2 more), so it is not written to network-config as committee_peers: ${CP_TAIL}" \
+    "$RC|$OUT"
+cp_drop "$V5" "$CI/full-hub.yaml" > "$CI/four.yaml"
+cpc "$CI/four.yaml"
+check "committee check: four of five fails, naming the one left out" "1 yes" \
+    "$RC $(cp_has "$OUT" "$CI/four.yaml lacks 1 of the 5 ${CP_IN} (${V5:0:16}…), so it is not written")"
+cp_drop "$V1" "$CI/full.yaml" > "$CI/noself.yaml"
+cpc "$CI/noself.yaml"
+check "committee check: the other validators without this node's own key fail" "1 yes" \
+    "$RC $(cp_has "$OUT" "lacks 1 of the 5 ${CP_IN} (${V1:0:16}…)")"
+# what counts as a key: JSON, quotes, a comment, a value, CRLF and a byte order mark
+{
+    printf '{'
+    for k in "$V1" "$V2" "$V3" "$V4"; do
+        printf '"%s": {"primary": {"network_address": "/ip4/192.0.2.1/udp/1/quic-v1", "network_key": "k"}, "workers": []}, ' "$k"
+    done
+    printf '"%s": {"primary": {"network_address": "/ip4/192.0.2.1/udp/1/quic-v1", "network_key": "k"}, "workers": []}}\n' "$V5"
+} > "$CI/full.json"
+cpc "$CI/full.json"
+check "committee check: a JSON map on one line passes" "0|" "$RC|$OUT"
+sed "s/\"${V3}\": /\"x${V3}\": /" "$CI/full.json" > "$CI/four.json"
+cpc "$CI/four.json"
+check "committee check: a JSON map with one key changed fails" "1 yes" "$RC $(cp_has "$OUT" "lacks 1 of the 5 ${CP_IN} (${V3:0:16}…)")"
+sed "s/^${V2}:/'${V2}' :/; s/^${V3}:/\"${V3}\":/" "$CI/full.yaml" > "$CI/quoted.yaml"
+cpc "$CI/quoted.yaml"
+check "committee check: quoted keys count" "0|" "$RC|$OUT"
+sed "s/^${V2}:/# ${V2}:/" "$CI/full.yaml" > "$CI/commented.yaml"
+cpc "$CI/commented.yaml"
+check "committee check: a key in a comment does not count" "1 yes" "$RC $(cp_has "$OUT" "lacks 1 of the 5 ${CP_IN} (${V2:0:16}…)")"
+{
+    cp_drop "$V2" "$CI/full.yaml"
+    printf '%s:\n  primary:\n    network_address: /ip4/192.0.2.1/udp/1/quic-v1\n    network_key: %s\n  workers: [{network_address: x, network_key: %s}]\n' "$HUB" "$V2" "$V2"
+} > "$CI/value.yaml"
+cpc "$CI/value.yaml"
+check "committee check: a key that is only a value does not count" "1 yes" "$RC $(cp_has "$OUT" "lacks 1 of the 5 ${CP_IN} (${V2:0:16}…)")"
+awk -v bom="$(printf '\357\273\277')" 'NR == 1 { $0 = bom $0 } { printf "%s\r\n", $0 }' "$CI/full.yaml" > "$CI/crlf.yaml"
+cpc "$CI/crlf.yaml"
+check "committee check: a byte order mark and CRLF line ends hide no key" "0|" "$RC|$OUT"
+# the committee file: only the keys one level under authorities are validators
+{
+    printf -- '---\nepoch: 0\nauthorities:\n  "%s":\n    protocol_key: x\n  %s:   # the second\n    protocol_key: y\nbootstrap_servers:\n' "$V1" "$V2"
+    cp_entry "$V3" 30 | sed 's/^/  /'
+} > "$CD/genesis/committee.yaml"
+{ cp_entry "$V1" 31; cp_entry "$V2" 32; } > "$CI/two.yaml"
+cpc "$CI/two.yaml"
+check "committee check: a key under bootstrap_servers alone is no validator" "0|" "$RC|$OUT"
+printf -- '---\nepoch: 0\nauthorities: {}\nbootstrap_servers: {}\n' > "$CD/genesis/committee.yaml"
+cpc "$CI/two.yaml"
+check "committee check: a committee file with no validator fails" \
+    "1|$CD/genesis/committee.yaml names no validator under authorities, so $CI/two.yaml was not checked against the genesis committee and is not written to network-config as committee_peers: ${CP_TAIL}" \
+    "$RC|$OUT"
+rm -f "$CD/genesis/committee.yaml"
+cpc "$CI/two.yaml"
+check "committee check: no committee file fails" \
+    "1|$CD/genesis/committee.yaml cannot be read, so $CI/two.yaml was not checked against the genesis committee and is not written to network-config as committee_peers: ${CP_TAIL}" \
+    "$RC|$OUT"
+cp -- "$GC" "$CD/genesis/committee.yaml"
+cpc "$CI/absent.yaml"
+check "committee check: a map that cannot be read fails" "1 yes" \
+    "$RC $(cp_has "$OUT" "$CI/absent.yaml could not be checked against the genesis committee in $CD/genesis/committee.yaml, so it is not written")"
+SERVICE_USER=nosuchuser
+cpc "$CI/full.yaml"
+check "committee check: no service user to read as fails" "1 yes" "$RC $(cp_has "$OUT" "could not be checked against the genesis committee")"
+SERVICE_USER=telcoin
+
 # ---- a real service account ----------------------------------------------------
 echo "== a real service account owns the data dir"
 if [[ "$REAL" == yes ]]; then
