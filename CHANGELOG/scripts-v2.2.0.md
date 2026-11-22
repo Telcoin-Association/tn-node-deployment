@@ -216,6 +216,9 @@ Every other script, library and UI file keeps its version. The runbook for the g
   `off` now opens the P2P ports to every source behind the new-flow limit, whatever the list holds and whether or not the ports took only that list before committee mode.
   The list stays in `.node-meta` for the next `on`, and the new key `P2P_PER_SOURCE=off` keeps later `--enable` and `--reset` runs from applying it to `ufw` until `--enable --p2p-from <list>` (or `--p2p-anywhere`) removes the key.
   The undo of an unfinished `on` still puts the rules from before it back.
+  `off` also runs when `P2P_ALLOW_FROM` is not usable (an invalid entry, or the key set twice), and warns instead of refusing.
+  It adds the open rule of every P2P port before it deletes any per-source rule, carries on past a failed `ufw` call and names what is left, and it deletes the table even when another process holds the tool's lock.
+  An `off` that did not finish is no longer undone by the next `--enable`, `--reset`, `sync` or `on`, which reinstalled the allowlist without a word: they and `--p2p-committee status` now say that it did not finish, and a rerun of `off` finishes it.
 - Fix for validators in P2P committee mode with trusted hubs.
   The allowlist's floor, the addresses it never drops, came from one file: `/etc/telcoin/bootstrap-peers.yaml`, or the genesis `committee.yaml` when there was no peers map.
   `trusted-nodes.yaml` was never part of it, so a hub the node stopped listing left the allowlist on the second sync without it, and a peers map that held only part of the committee replaced `committee.yaml` as the floor.
