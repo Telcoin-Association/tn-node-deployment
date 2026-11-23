@@ -9,6 +9,11 @@ private address, so the validator stays off the public internet. Six existing sc
 exists yet: devnet takes one by digest, and testnet and mainnet refuse the enable until a scripts
 release pins the image of a signed release.
 
+This is also the script release for telcoin-network `v0.18.0-adiri`. `0.18.0` is a one-way floor:
+the execution database moves from MDBX to tn-lmdb on the release's first start (see
+[update-node 2.1.3](#update-node-213)). The exception for the unsigned `v0.17.0-adiri` is removed
+(see [lib/common 2.2.6](#libcommon-226)).
+
 One fix reaches every operator, gateway or not: `firewall-setup.sh` now compares the sources of
 `--ssh-from` and `--p2p-from` the way `ufw` stores them. Re-entering a source in another spelling
 used to delete its rule (see [firewall-setup 2.2.0](#firewall-setup-220)).
@@ -19,19 +24,19 @@ whose testnet `committee.yaml` stopped matching the pinned sha256 on 2026-11-14,
 Docker, signed-release and existing-binary installs have failed since then, at step 4 of 8, before
 any key is made. Setup and edit-config's menu 13
 now read the three files from the tag this release pins, `v0.16.0-adiri`, and never from a branch
-(see [lib/common 2.2.5](#libcommon-225)). Before a host takes this release, a testnet install on
+(see [lib/common 2.2.6](#libcommon-226)). Before a host takes this release, a testnet install on
 `scripts-v2.1.0` works with `--genesis-dir <dir>`, where `<dir>` holds the three files of
 `chain-configs/testnet` at `v0.16.0-adiri`.
 
 The hardware check compared every host with the mainnet figures, so it warned "below minimum" on
 the machines the testnet validators run on. It now compares the host with the tiers of the
 network chosen, and the testnet tiers follow those validators (see
-[lib/common 2.2.5](#libcommon-225)); the Node Manager UI's setup preflight does the same for the
+[lib/common 2.2.6](#libcommon-226)); the Node Manager UI's setup preflight does the same for the
 wizard's network. The check still only warns. The AWS one-click stack's `Validator` preset moves
 to `c7i.2xlarge`, and its data volume defaults to 500 GiB at 15,000 IOPS.
 
 The mainnet chain id is 731 (`0x2db`), as on telcoin-network main since #1716; it was 487, which
-upstream devnet genesis files use now (see [lib/common 2.2.5](#libcommon-225)). Mainnet has not
+upstream devnet genesis files use now (see [lib/common 2.2.6](#libcommon-226)). Mainnet has not
 launched and stays switched off, so no running node changes.
 
 The release keys change, for every operator. grantkee's RSA key, the only key of
@@ -52,9 +57,9 @@ systemd 255).
 | install-caddy, check-node | 2.2.1 |
 | edit-config | 2.2.2 |
 | update-scripts | 2.2.0 |
-| update-node | 2.1.2 |
+| update-node | 2.1.3 |
 | setup-node | 2.1.4 |
-| lib/common (`COMMON_VERSION`) | 2.2.5 |
+| lib/common (`COMMON_VERSION`) | 2.2.6 |
 | telcoin-ui (`UI_VERSION`) | 2.1.3 |
 | Release keys (`lib/release-keys/*.asc`) | grantkee `95A38484E1CBD31D773F6AF928FD56AD2F9FAE47` (replaces `4E36D35A4AB61B589861D01AC7173F2377CA7573`), MavenRain `32F886ADE9C3A88218E4B67CA0A69159FC76DBFD` (new) |
 | `tn-p2p-allow-sync` (pinned in lib/common) | v0.1.2 (was v0.1.1) |
@@ -220,7 +225,7 @@ Every other script, library and UI file keeps its version. The runbook for the g
   installs, the pull moved the checkout to the branch's tip, and the copy was then refused because
   that branch no longer matches the pins.
   On a network with a pinned tag the menu now installs the pinned files through
-  `tn_chain_configs_from_tag` (see [lib/common 2.2.5](#libcommon-225)) and copies them from
+  `tn_chain_configs_from_tag` (see [lib/common 2.2.6](#libcommon-226)) and copies them from
   `/etc/telcoin/chain-configs/<network>/`; it runs no pull and no submodule command. The menu
   label reads "(pinned genesis/committee/parameters)".
 - When the node's data dir already holds the pinned files (hashed as the service user), the menu
@@ -283,10 +288,23 @@ Every other script, library and UI file keeps its version. The runbook for the g
   command. It never runs it: the unit is rendered from `gateway.meta`, and new copies take effect
   only once `--refresh` renders it again.
 
-### update-node 2.1.2
+### update-node 2.1.3
 
-- Comments only, no change in behaviour: the chain-id comments name 731 for mainnet, and the
-  comment on the update lock no longer names a `git pull`, since none runs in update-node.
+- `v0.18.0-adiri` is one way: `STORAGE_MIGRATION_FLOOR_TESTNET` is `0.16.0 0.17.0 0.18.0`. Its
+  first start copies `db/mdbx.dat` into `db/tn-lmdb.dat`, checks the copy, and deletes the MDBX
+  files; `v0.17.0-adiri` refuses the result at `db/database.version`. An update across 0.18.0
+  warns, asks about a snapshot, waits up to 600 seconds and never rolls back on its own; `--check`
+  reports `"storage_migration":true`; a downgrade below 0.18.0 is refused with
+  `"storage_downgrade":true`.
+- The disk warning before a one-way update still measures `consensus-db/epochs` only. For this
+  release, check by hand that the data dir's filesystem has the free space upstream asks for
+  (the live pages of `db/mdbx.dat` plus a quarter plus 1 GiB): with less, the node refuses to
+  start, nothing is migrated, and update-node still does not roll back.
+- Upstream does not support any way back once a node has started `v0.18.0-adiri`, a snapshot
+  restore included; the undo line update-node prints after a failed one-way check does not apply
+  to this release. Fix forward.
+- Comments: the chain-id comments name 731 for mainnet, and the comment on the update lock no
+  longer names a `git pull`, since none runs in update-node.
 
 ### setup-node 2.1.4
 
@@ -305,8 +323,12 @@ Every other script, library and UI file keeps its version. The runbook for the g
 - `--help` names Ubuntu 26.04 as the recommended OS for mainnet (systemd 255 or later, so
   Ubuntu 24.04 or later).
 
-### lib/common 2.2.5
+### lib/common 2.2.6
 
+- The unsigned-release exception for `v0.17.0-adiri` (`TN_UNSIGNED_RELEASE_TAG`,
+  `tn_release_unsigned_ok`) is removed. A Docker update to that tag asks for a signed release
+  first and, on testnet, falls back to the registry's digest with a warning; a source build of it
+  warns that the tag is not verified, as for any unsigned testnet tag.
 - Fix for every new testnet install: the chain configs come from the telcoin-network tag this
   release pins (`TESTNET_CHAIN_CONFIGS_TAG`, `v0.16.0-adiri`), never from a branch.
   `ensure_chain_configs_available` cloned the default branch, or pulled an existing checkout, and
@@ -455,9 +477,16 @@ Every other script, library and UI file keeps its version. The runbook for the g
 | `Nothing to refresh: the node's data dir already holds the <network> chain configs this script release pins (<tag>), ...` (menu 13) | Nothing; use `14) Restart node` if the node was not restarted after those files were copied. |
 | `Clone the repository at <tag> into <dir> now?` (menu 13) | No checkout and no pinned files. Answer yes, or follow the manual clone command and the raw-file URLs it prints. |
 | `This script release pins no <network> chain configs yet, so there is nothing to install. Chain configs unchanged.` (menu 13) | Mainnet today: its chain configs come with a signed scripts release. |
+| `One-way update: v0.18.0-adiri migrates ...` | Expected. Check free disk first; there is no way back once the node has started it (see [update-node 2.1.3](#update-node-213)). |
+| `Release v0.17.0-adiri has no signed image digest to read; using the digest the registry serves for <repo>:v0.17.0-adiri (testnet only).` | Expected: the exception for that tag is gone. |
+| `Tag v0.17.0-adiri is not verified (...); building it anyway because this is testnet.` | Expected: the exception for that tag is gone. |
 
 ## Left open
 
+- update-node's one-way messages and its disk check were written for the consensus store; for
+  `v0.18.0-adiri` they say "consensus store" and measure `consensus-db/epochs`, not
+  `db/mdbx.dat`, and the undo line offers a snapshot restore that upstream does not support for
+  this release.
 - telcoin-network main still lists the RSA key (`.github/maintainer-gpg-keys/grantkee.asc`). From
   this release on the scripts accept a node release only when a tn-release-signing key signed it,
   so the first telcoin-network release must be signed with one.

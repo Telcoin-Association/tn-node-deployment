@@ -7,6 +7,16 @@ For recent entries (v1.1.40 onwards), see the Changelog section of README.md.
 
 ## Unreleased
 
+### Node release v0.18.0-adiri, November 2026 -- lib/common 2.2.6, update-node 2.1.3
+Part of `scripts-v2.2.0`; see [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+The scripts take telcoin-network `v0.18.0-adiri`. `v0.18.0-adiri` moves the execution database
+from MDBX to tn-lmdb on its first start, one way: `STORAGE_MIGRATION_FLOOR_TESTNET` lists
+`0.16.0 0.17.0 0.18.0`, so update-node treats an update to it as one-way (the warning, the
+snapshot question, the 600-second check, no automatic rollback) and refuses a downgrade from it.
+The exception that let the unsigned `v0.17.0-adiri` through without a signed release
+(`TN_UNSIGNED_RELEASE_TAG`, `tn_release_unsigned_ok`) is gone; that tag now takes the same
+testnet path as any tag without a signed release, with a warning.
+
 ### Partner guide 1.13 and node requirements one-pagers 1.3, November 2026 -- hardware requirements per network, chain configs at the pinned tag, mainnet chain id 731
 The partner guide (`docs/partner/mno-node-guide/`, version 1.13) and the testnet and mainnet node
 requirements one-pagers (version 1.3, November 2026) carry the hardware requirements per network.
