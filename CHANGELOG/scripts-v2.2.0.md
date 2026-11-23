@@ -19,19 +19,23 @@ whose testnet `committee.yaml` stopped matching the pinned sha256 on 2026-11-14,
 Docker, signed-release and existing-binary installs have failed since then, at step 4 of 8, before
 any key is made. Setup and edit-config's menu 13
 now read the three files from the tag this release pins, `v0.16.0-adiri`, and never from a branch
-(see [lib/common 2.2.5](#libcommon-225)). Before a host takes this release, a testnet install on
+(see [lib/common 2.2.6](#libcommon-226)). Before a host takes this release, a testnet install on
 `scripts-v2.1.0` works with `--genesis-dir <dir>`, where `<dir>` holds the three files of
-`chain-configs/testnet` at `v0.16.0-adiri`.
+`chain-configs/testnet` at `v0.16.0-adiri`. The same release also prepares the tag's move to a
+telcoin-network release that keeps the testnet bootstrap servers in their own file,
+`bootstrap_servers.yaml`, instead of in `committee.yaml`: once a later scripts release pins that
+file, a new testnet node given no `--bootstrap-peers` map gets it as its map (see
+[setup-node 2.1.5](#setup-node-215)). While the tag is `v0.16.0-adiri` nothing changes.
 
 The hardware check compared every host with the mainnet figures, so it warned "below minimum" on
 the machines the testnet validators run on. It now compares the host with the tiers of the
 network chosen, and the testnet tiers follow those validators (see
-[lib/common 2.2.5](#libcommon-225)); the Node Manager UI's setup preflight does the same for the
+[lib/common 2.2.6](#libcommon-226)); the Node Manager UI's setup preflight does the same for the
 wizard's network. The check still only warns. The AWS one-click stack's `Validator` preset moves
 to `c7i.2xlarge`, and its data volume defaults to 500 GiB at 15,000 IOPS.
 
 The mainnet chain id is 731 (`0x2db`), as on telcoin-network main since #1716; it was 487, which
-upstream devnet genesis files use now (see [lib/common 2.2.5](#libcommon-225)). Mainnet has not
+upstream devnet genesis files use now (see [lib/common 2.2.6](#libcommon-226)). Mainnet has not
 launched and stays switched off, so no running node changes.
 
 The release keys change, for every operator. grantkee's RSA key, the only key of
@@ -53,8 +57,8 @@ systemd 255).
 | edit-config | 2.2.2 |
 | update-scripts | 2.2.0 |
 | update-node | 2.1.2 |
-| setup-node | 2.1.4 |
-| lib/common (`COMMON_VERSION`) | 2.2.5 |
+| setup-node | 2.1.5 |
+| lib/common (`COMMON_VERSION`) | 2.2.6 |
 | telcoin-ui (`UI_VERSION`) | 2.1.3 |
 | Release keys (`lib/release-keys/*.asc`) | grantkee `95A38484E1CBD31D773F6AF928FD56AD2F9FAE47` (replaces `4E36D35A4AB61B589861D01AC7173F2377CA7573`), MavenRain `32F886ADE9C3A88218E4B67CA0A69159FC76DBFD` (new) |
 | `tn-p2p-allow-sync` (pinned in lib/common) | v0.1.2 (was v0.1.1) |
@@ -220,7 +224,7 @@ Every other script, library and UI file keeps its version. The runbook for the g
   installs, the pull moved the checkout to the branch's tip, and the copy was then refused because
   that branch no longer matches the pins.
   On a network with a pinned tag the menu now installs the pinned files through
-  `tn_chain_configs_from_tag` (see [lib/common 2.2.5](#libcommon-225)) and copies them from
+  `tn_chain_configs_from_tag` (see [lib/common 2.2.6](#libcommon-226)) and copies them from
   `/etc/telcoin/chain-configs/<network>/`; it runs no pull and no submodule command. The menu
   label reads "(pinned genesis/committee/parameters)".
 - When the node's data dir already holds the pinned files (hashed as the service user), the menu
@@ -288,8 +292,26 @@ Every other script, library and UI file keeps its version. The runbook for the g
 - Comments only, no change in behaviour: the chain-id comments name 731 for mainnet, and the
   comment on the update lock no longer names a `git pull`, since none runs in update-node.
 
-### setup-node 2.1.4
+### setup-node 2.1.5
 
+- A node given no bootstrap peers map gets the network's pinned bootstrap servers. From
+  telcoin-network #1848 on, a tag keeps the testnet bootstrap servers in
+  `chain-configs/testnet/bootstrap_servers.yaml` and its `committee.yaml` has
+  `bootstrap_servers: {}`; the node reads that file only when started with `--chain`, and these
+  scripts start it without, so a node set up from such a tag would dial no one. When
+  `lib/common.sh` pins the file (`TESTNET_BOOTSTRAP_SERVERS_SHA256`, empty in this release),
+  setup checks the copy beside the chain configs it copies (`/etc/telcoin/chain-configs/testnet/`
+  or `--genesis-dir`) against the pin, and installs it as `/etc/telcoin/bootstrap-peers.yaml`
+  through the `--bootstrap-peers` path: the release's parser checks it, `.node-meta` records it
+  as `BOOTSTRAP_PEERS_FILE`, and the start script passes `--bootstrap-peers "$(cat
+  /etc/telcoin/bootstrap-peers.yaml)"`. Setup says `Bootstrap peers: the testnet bootstrap
+  servers at <tag> (no --bootstrap-peers given)`. A missing or changed file, one other users
+  cannot read or one the release rejects stops setup before the chain configs are copied.
+  `--bootstrap-peers`, or a map the host recorded, wins: with a pin, an interactive re-run reads
+  the recorded map back with or without an admission mode. With an admission mode the default
+  map becomes `committee_peers`, as an operator's map does. Mainnet gets no default.
+- With the pin empty, as in this release, nothing changes: no default, no new message, and an
+  interactive re-run reads a recorded map back only with an admission mode, as before.
 - On a network with a pinned chain-config tag, setup searches
   `/etc/telcoin/chain-configs/<network>/` right after `--genesis-dir`, ahead of the repository
   checkout, whose default branch can carry files that no longer match the pins. Each directory is
@@ -305,8 +327,18 @@ Every other script, library and UI file keeps its version. The runbook for the g
 - `--help` names Ubuntu 26.04 as the recommended OS for mainnet (systemd 255 or later, so
   Ubuntu 24.04 or later).
 
-### lib/common 2.2.5
+### lib/common 2.2.6
 
+- `TESTNET_BOOTSTRAP_SERVERS_SHA256` sits beside the chain-config pins and is empty while
+  `TESTNET_CHAIN_CONFIGS_TAG` (`v0.16.0-adiri`) keeps the bootstrap servers in `committee.yaml`.
+  It says what the tag carries: with a pin, `tn_chain_configs_from_tag` reads, checks and
+  installs `chain-configs/testnet/bootstrap_servers.yaml` with the three other files and refuses
+  a tag without it or a changed one; without a pin, it refuses a tag that carries the file
+  (`<tag> carries chain-configs/testnet/bootstrap_servers.yaml, but these scripts pin no sha256
+  for it; nothing was installed.`). To list the tag for that check, each fetch runs one more
+  read-only `git ls-tree`. Mainnet has no such pin and its file, a placeholder set until the
+  genesis ceremony, is never read. New helpers: `tn_bootstrap_servers_pin`,
+  `tn_bootstrap_servers_check`.
 - Fix for every new testnet install: the chain configs come from the telcoin-network tag this
   release pins (`TESTNET_CHAIN_CONFIGS_TAG`, `v0.16.0-adiri`), never from a branch.
   `ensure_chain_configs_available` cloned the default branch, or pulled an existing checkout, and
