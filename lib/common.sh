@@ -7250,13 +7250,24 @@ tn_host_baseline_status() {
 # TESTNET_CHAIN_CONFIGS_TAG (the release
 # network-gated: testnet release history of the chain configs; no endpoint
 # DEFAULT_DOCKER_IMAGE runs; the three files are the same since v0.15.0-adiri).
+# A pin may list several hashes, space-separated, and any of them passes
+# (tn_chain_config_pin_ok); the first is the file at the tag, which setup and
+# edit-config's menu 13 install. TESTNET_COMMITTEE_SHA256 lists two files that
+# name the same five validators:
+# network-gated: testnet release history of committee.yaml; no endpoint
+# the one at v0.16.0-adiri, which names the five bootstrap servers, and the one
+# network-gated: testnet release history of committee.yaml; no endpoint
+# at v0.18.0-adiri, whose bootstrap_servers is {} (telcoin-network #1848 moved
+# the servers, unchanged, into the binary). A node these scripts start has no
+# --chain, so it dials the servers its data dir's committee.yaml names: new
+# installs keep the file at the tag.
 # Mainnet: the tag and the hashes are empty until the genesis ceremony
 # publishes the files and a signed script release carries both; while the tag
 # is empty nothing is fetched, and while any hash is empty a mainnet install or
 # refresh refuses (tn_chain_configs_check). Devnet has neither.
 readonly TESTNET_CHAIN_CONFIGS_TAG="v0.16.0-adiri"  # network-gated: testnet constant: the tag of the testnet chain-config pins
 readonly TESTNET_GENESIS_SHA256="670c94e3816686bd4da5aedbfa994d4f362452eaf2552b2757f05226608188c2"
-readonly TESTNET_COMMITTEE_SHA256="009b6d7b568f7d04734b657080d55621eed70f68ecefe1284dd8cdd0f42f15ce"
+readonly TESTNET_COMMITTEE_SHA256="009b6d7b568f7d04734b657080d55621eed70f68ecefe1284dd8cdd0f42f15ce 886f016b6ce8970f3019ec8f48c0847cf113950b6dc7a7d950e3be4aac50cd1f"
 readonly TESTNET_PARAMETERS_SHA256="7c6a44712faef1dc47dbc5b4f21f62d1eeabf1f0d54d2cb600ad6c65d4eda091"
 readonly MAINNET_CHAIN_CONFIGS_TAG=""
 readonly MAINNET_GENESIS_SHA256=""
@@ -7264,8 +7275,8 @@ readonly MAINNET_COMMITTEE_SHA256=""
 readonly MAINNET_PARAMETERS_SHA256=""
 
 # tn_chain_config_pin NETWORK FILE -- the pinned sha256 of FILE (genesis.yaml,
-# committee.yaml or parameters.yaml) for NETWORK; prints nothing when there is
-# none.
+# committee.yaml or parameters.yaml) for NETWORK: one hash, or several
+# space-separated, each accepted; prints nothing when there is none.
 tn_chain_config_pin() {
     case "${1:-}:${2:-}" in
         testnet:genesis.yaml)    printf '%s\n' "$TESTNET_GENESIS_SHA256" ;;
@@ -7278,11 +7289,24 @@ tn_chain_config_pin() {
     return 0
 }
 
+# tn_chain_config_pin_ok NETWORK FILE SHA256 -- rc 0 when SHA256 is one of the
+# hashes NETWORK pins for FILE (tn_chain_config_pin); rc 1 otherwise, also for
+# an empty SHA256 and for a FILE with no pin.
+tn_chain_config_pin_ok() {
+    local want
+    want="$(tn_chain_config_pin "${1:-}" "${2:-}")"
+    [[ -n "$want" && -n "${3:-}" && "${3}" != *" "* ]] || return 1
+    case " ${want} " in
+        *" ${3} "*) return 0 ;;
+    esac
+    return 1
+}
+
 # tn_chain_configs_check DIR NETWORK [progress-fn] [NAME-PREFIX [NAME-SUFFIX]]
 # -- compare DIR/genesis.yaml, committee.yaml and parameters.yaml with
 # NETWORK's pins, before anything copies them. Each must be a regular file (not
-# a symlink) with the pinned sha256; a mismatch names the expected and the
-# actual value. The messages name each file DIR/<file>, or
+# a symlink) with a pinned sha256 (tn_chain_config_pin_ok); a mismatch names
+# every accepted value and the actual one. The messages name each file DIR/<file>, or
 # NAME-PREFIX<file>NAME-SUFFIX when NAME-PREFIX is given (DIR a staging
 # directory that is gone when the operator reads them). devnet has no pins (a
 # warning, rc 0). rc 0 all three match, 1 refused: a mismatch, a missing file,
@@ -7319,8 +7343,8 @@ tn_chain_configs_check() {
         fi
         got="$(sha256sum < "${dir}/${f}" 2>/dev/null)" || got=""
         got="${got%% *}"
-        if [[ "$got" != "$want" ]]; then
-            _tn_guard_say warn "${name}: sha256 ${got:-unreadable}, expected ${want} (${net})." "$fn"
+        if ! tn_chain_config_pin_ok "$net" "$f" "$got"; then
+            _tn_guard_say warn "${name}: sha256 ${got:-unreadable}, expected ${want// / or } (${net})." "$fn"
             bad=1
         fi
     done
@@ -8409,8 +8433,8 @@ _tn_release_fetch() {
             _tn_release_cleanup "$stg"
             return 1
         fi
-        if [[ "$got" != "$want" ]]; then
-            _tn_c4_say warn "Release ${tag}: ${cc}/${f} has sha256 ${got}, but these scripts pin ${want}. Update the scripts (update-scripts.sh) before using this release." "$fn"
+        if ! tn_chain_config_pin_ok "$net" "$f" "$got"; then
+            _tn_c4_say warn "Release ${tag}: ${cc}/${f} has sha256 ${got}, but these scripts pin ${want// / or }. Update the scripts (update-scripts.sh) before using this release." "$fn"
             _tn_release_cleanup "$stg"
             return 1
         fi

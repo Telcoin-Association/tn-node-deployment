@@ -131,6 +131,13 @@ a pull to the testnet or mainnet path; devnet, which has no pins, still pulls.
 
 - `TESTNET_CHAIN_CONFIGS_TAG`, the three `TESTNET_*_SHA256` pins and the files in
   `tools/tests/genesis.d/testnet/` move together, in one change.
+- A pin may list several hashes, space-separated; any of them passes
+  (`tn_chain_config_pin_ok`), and the first is the file at the tag. `TESTNET_COMMITTEE_SHA256`
+  lists the `committee.yaml` of `v0.16.0-adiri`, which names the five bootstrap servers, and the
+  one of `v0.18.0-adiri`, which lists none (they moved into the binary). The tag stays
+  `v0.16.0-adiri`: a node these scripts start has no `--chain` and dials only the bootstrap
+  servers its data dir's `committee.yaml` names. Compare a hash with a pin through
+  `tn_chain_config_pin_ok`, never with `==`.
 - Mainnet has neither a tag nor pins until the genesis ceremony, so a mainnet install stops at the
   chain-config check and menu 13 refuses mainnet before any prompt (see "The mainnet switch").
 - Menu 13 asks the library's own checks and clone (`_tn_chain_configs_dest_ok`,
@@ -1232,8 +1239,9 @@ line.
   `vm.d/P0-p2p-allow.sh` installs the pinned `tn-p2p-allow-sync` release from GitHub and drives the P2P committee allowlist on the runner's systemd and kernel; it reports SKIP while `lib/common.sh` pins no tarball sha256 or the release cannot be downloaded.
 - `tools/tests/genesis.d/testnet/` holds `genesis.yaml`, `committee.yaml` and
   `parameters.yaml` from telcoin-network at the pinned tag (`TESTNET_CHAIN_CONFIGS_TAG`),
-  unchanged. `genesis_hash_test.sh` checks them against the `TESTNET_*_SHA256` pins in
-  `lib/common.sh`; refresh the files, the pins and the tag together.
+  unchanged. `genesis_hash_test.sh` checks them against the first hash of each
+  `TESTNET_*_SHA256` pin in `lib/common.sh`, and derives the `v0.18.0-adiri` `committee.yaml`
+  from the fixture for the second committee hash; refresh the files, the pins and the tag together.
   `chain_configs_tag_test.sh` drives `tn_chain_configs_from_tag` and
   `ensure_chain_configs_available` with real git against a local bare origin whose tag holds
   these files while its `main` carries another `committee.yaml`, the shape of the 2026-11-14

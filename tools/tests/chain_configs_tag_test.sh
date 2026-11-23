@@ -398,7 +398,7 @@ check "mismatch: every git child over https, fd 9 closed, no GIT_DIR; the read-o
     "fetch $(genv fetch)|rev-parse $(genv rev-parse)|cat-file $(genv cat-file)"
 MAIN_COMMITTEE_SHA="$(sha256sum < "$W/chain-configs/testnet/committee.yaml")"
 check "mismatch: the line names the file at the tag" \
-    "warn|chain-configs/testnet/committee.yaml at ${TAG}: sha256 ${MAIN_COMMITTEE_SHA%% *}, expected ${TESTNET_COMMITTEE_SHA256} (testnet)." \
+    "warn|chain-configs/testnet/committee.yaml at ${TAG}: sha256 ${MAIN_COMMITTEE_SHA%% *}, expected ${TESTNET_COMMITTEE_SHA256// / or } (testnet)." \
     "$(grep -F 'committee.yaml' <<< "$PFL")"
 check_lacks "mismatch: no staging path in the warnings" "$T/stg" "$PFL"
 check "mismatch: the staging directory is tag.<pid>.* (the sweep after a kill finds it)" yes \
@@ -425,6 +425,11 @@ LT0="$(ref_of "$L" "refs/tags/${TAG}")"
 ft "$L" testnet pf
 check "local tag elsewhere, origin right: rc 0, the pinned files" "0 yes" "$FT_RC $(installed)"
 check "a stale committee.yaml next to two good files: replaced" yes "$(cmp -s "$FX/committee.yaml" "$D/committee.yaml" && echo yes || echo no)"
+# The tag stays v0.16.0-adiri when the pins take v0.18.0-adiri's committee.yaml too:
+# an install gets the file that names the five bootstrap servers (ten multiaddrs).
+check "install: committee.yaml is the file at the tag, with the bootstrap servers" \
+    "009b6d7b568f7d04734b657080d55621eed70f68ecefe1284dd8cdd0f42f15ce 10" \
+    "$(sha256sum < "$D/committee.yaml" | cut -d' ' -f1) $(grep -c '/quic-v1/p2p/' "$D/committee.yaml")"
 check "local tag elsewhere: not moved" "$C_MAIN $C_MAIN" "$LT0 $(ref_of "$L" "refs/tags/${TAG}")"
 check "install: the messages" \
     "step|Fetching ${TAG} from origin for the chain configs...

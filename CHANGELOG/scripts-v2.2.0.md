@@ -9,8 +9,13 @@ private address, so the validator stays off the public internet. Six existing sc
 exists yet: devnet takes one by digest, and testnet and mainnet refuse the enable until a scripts
 release pins the image of a signed release.
 
-This is also the script release for telcoin-network `v0.18.0-adiri`. `0.18.0` is a one-way floor:
-the execution database moves from MDBX to tn-lmdb on the release's first start (see
+This is also the script release for telcoin-network `v0.18.0-adiri`. The scripts before it refuse
+that release: `scripts-v2.1.0` cannot check its signature (the RSA key is gone, see
+[The release keys](#the-release-keys)), and the chain-config pin did not match its
+`committee.yaml`, whose bootstrap servers moved into the binary. The committee pin now accepts
+that file beside the earlier one, and new testnet installs keep the earlier one, which names the
+bootstrap servers (see [lib/common 2.2.6](#libcommon-226)). `0.18.0` is a one-way floor: the
+execution database moves from MDBX to tn-lmdb on the release's first start (see
 [update-node 2.1.3](#update-node-213)). The exception for the unsigned `v0.17.0-adiri` is removed
 (see [lib/common 2.2.6](#libcommon-226)).
 
@@ -26,7 +31,9 @@ any key is made. Setup and edit-config's menu 13
 now read the three files from the tag this release pins, `v0.16.0-adiri`, and never from a branch
 (see [lib/common 2.2.6](#libcommon-226)). Before a host takes this release, a testnet install on
 `scripts-v2.1.0` works with `--genesis-dir <dir>`, where `<dir>` holds the three files of
-`chain-configs/testnet` at `v0.16.0-adiri`.
+`chain-configs/testnet` at `v0.16.0-adiri`. The tag stays `v0.16.0-adiri` with `v0.18.0-adiri` out:
+a node these scripts start reads its bootstrap servers from its `committee.yaml`, and the file of
+`v0.18.0-adiri` lists none.
 
 The hardware check compared every host with the mainnet figures, so it warned "below minimum" on
 the machines the testnet validators run on. It now compares the host with the tiers of the
@@ -55,10 +62,10 @@ systemd 255).
 | lib/gateway (`GATEWAY_VERSION`) | 2.2.0 (new) |
 | firewall-setup, remove-node | 2.2.0 |
 | install-caddy, check-node | 2.2.1 |
-| edit-config | 2.2.2 |
+| edit-config | 2.2.3 |
 | update-scripts | 2.2.0 |
 | update-node | 2.1.3 |
-| setup-node | 2.1.4 |
+| setup-node | 2.1.5 |
 | lib/common (`COMMON_VERSION`) | 2.2.6 |
 | telcoin-ui (`UI_VERSION`) | 2.1.3 |
 | Release keys (`lib/release-keys/*.asc`) | grantkee `95A38484E1CBD31D773F6AF928FD56AD2F9FAE47` (replaces `4E36D35A4AB61B589861D01AC7173F2377CA7573`), MavenRain `32F886ADE9C3A88218E4B67CA0A69159FC76DBFD` (new) |
@@ -217,7 +224,10 @@ Every other script, library and UI file keeps its version. The runbook for the g
   rule. Such a host keeps its SSH source list in the gateway's meta file, so a replaced list has
   its old sources removed and a plain `--enable` applies it again.
 
-### edit-config 2.2.2
+### edit-config 2.2.3
+
+- Menu 13 tests the three files in the node's data dir with `tn_chain_config_pin_ok`, so a data
+  dir that holds either accepted testnet `committee.yaml` gets "Nothing to refresh", as before.
 
 - Menu 13, "Refresh chain configs", ran `git pull` in the repository checkout and copied
   `chain-configs/<network>` from it. On a source install, whose checkout is detached at a release
@@ -306,8 +316,11 @@ Every other script, library and UI file keeps its version. The runbook for the g
 - Comments: the chain-id comments name 731 for mainnet, and the comment on the update lock no
   longer names a `git pull`, since none runs in update-node.
 
-### setup-node 2.1.4
+### setup-node 2.1.5
 
+- The check after the copy (`_setup_copied_configs_ok`) takes the same hashes as the check before
+  it (`tn_chain_config_pin_ok`); an exact comparison with the committee list would have removed
+  every copy.
 - On a network with a pinned chain-config tag, setup searches
   `/etc/telcoin/chain-configs/<network>/` right after `--genesis-dir`, ahead of the repository
   checkout, whose default branch can carry files that no longer match the pins. Each directory is
@@ -325,6 +338,19 @@ Every other script, library and UI file keeps its version. The runbook for the g
 
 ### lib/common 2.2.6
 
+- The testnet `committee.yaml` pin accepts the file of `v0.18.0-adiri`: `TESTNET_COMMITTEE_SHA256`
+  lists `009b6d7b…f15ce`, the file through `v0.17.0-adiri`, and `886f016b…50cd1f`, the one in
+  `v0.18.0-adiri`. Only `committee.yaml` changed there: `bootstrap_servers` is `{}`
+  (telcoin-network #1848 moved the five servers, unchanged, into the binary); the validators,
+  their keys and addresses, `genesis.yaml` and `parameters.yaml` are the same. A release whose
+  `SHA256SUMS` gives `committee.yaml` either hash passes; any other hash is refused, and the
+  message names both. The new `tn_chain_config_pin_ok NETWORK FILE SHA256` tests a hash against
+  a pin; `tn_chain_configs_check` and the release check use it.
+- `TESTNET_CHAIN_CONFIGS_TAG` stays `v0.16.0-adiri`, so setup and menu 13 keep installing the
+  `committee.yaml` that names the five bootstrap servers. A node these scripts start has no
+  `--chain`, and without it the node dials only the servers its data dir's `committee.yaml`
+  names: a new node set up from the `v0.18.0-adiri` file would dial no one. Running nodes keep the
+  `committee.yaml` in their data dir; update-node never touches it.
 - The unsigned-release exception for `v0.17.0-adiri` (`TN_UNSIGNED_RELEASE_TAG`,
   `tn_release_unsigned_ok`) is removed. A Docker update to that tag asks for a signed release
   first and, on testnet, falls back to the registry's digest with a warning; a source build of it
@@ -477,12 +503,18 @@ Every other script, library and UI file keeps its version. The runbook for the g
 | `Nothing to refresh: the node's data dir already holds the <network> chain configs this script release pins (<tag>), ...` (menu 13) | Nothing; use `14) Restart node` if the node was not restarted after those files were copied. |
 | `Clone the repository at <tag> into <dir> now?` (menu 13) | No checkout and no pinned files. Answer yes, or follow the manual clone command and the raw-file URLs it prints. |
 | `This script release pins no <network> chain configs yet, so there is nothing to install. Chain configs unchanged.` (menu 13) | Mainnet today: its chain configs come with a signed scripts release. |
+| `Release v0.18.0-adiri: SHA256SUMS is not verified: no good signature by a key in lib/release-keys ...`, on `scripts-v2.1.0` | Re-run the installer once (see [The release keys](#the-release-keys)). |
+| `Release <tag>: chain-configs/testnet/committee.yaml has sha256 <x>, but these scripts pin 009b6d7b... or 886f016b...` | The release does not carry a testnet `committee.yaml` this script release accepts; report it. |
 | `One-way update: v0.18.0-adiri migrates ...` | Expected. Check free disk first; there is no way back once the node has started it (see [update-node 2.1.3](#update-node-213)). |
 | `Release v0.17.0-adiri has no signed image digest to read; using the digest the registry serves for <repo>:v0.17.0-adiri (testnet only).` | Expected: the exception for that tag is gone. |
 | `Tag v0.17.0-adiri is not verified (...); building it anyway because this is testnet.` | Expected: the exception for that tag is gone. |
 
 ## Left open
 
+- `DEFAULT_DOCKER_IMAGE`, the testnet fallback image, is still `v0.16.0-adiri`.
+- When a later release needs the chain configs at a newer tag, new testnet installs need the
+  bootstrap servers from somewhere other than `committee.yaml` (`--bootstrap-peers`, or `--chain`),
+  because the files at `v0.18.0-adiri` and later list none.
 - update-node's one-way messages and its disk check were written for the consensus store; for
   `v0.18.0-adiri` they say "consensus store" and measure `consensus-db/epochs`, not
   `db/mdbx.dat`, and the undo line offers a snapshot restore that upstream does not support for
