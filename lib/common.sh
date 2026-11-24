@@ -79,7 +79,7 @@ readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 # network-gated: the comment names the testnet fleet; 9101 is the default on every network
 readonly DEFAULT_METRICS_PORT="9101"   # node loopback Prometheus endpoint (matches the adiri fleet)
-readonly COMMON_VERSION="2.2.6"
+readonly COMMON_VERSION="2.2.7"
 
 # The operator runbook, for any message that should point operators at it.
 readonly TN_OPERATOR_GUIDE_URL="https://github.com/Telcoin-Association/tn-node-deployment/blob/main/OPERATOR.md"
@@ -1643,18 +1643,11 @@ readonly TN_RELEASES_API_URL="https://api.github.com/repos/Telcoin-Association/t
 # DEFAULT_DOCKER_IMAGE, each with a warning on stderr. Mainnet never falls back.
 # rc 1 and nothing on stdout for devnet (it has no releases: its images are
 # named by digest), a network without a repository, or when nothing can be
-# resolved. When the newest release is TN_UNSIGNED_RELEASE_TAG on testnet
-# (tn_release_unsigned_ok), its image is tn_docker_image_for_tag's, the digest
-# the registry serves, never DEFAULT_DOCKER_IMAGE: rc 1 when no registry answers.
+# resolved.
 latest_docker_image() {
     local net="${1:-${NETWORK:-testnet}}" repo tag best="" digest img why rc=0
     tn_docker_repo_for "$net" >/dev/null || return 1
     if tag="$(tn_release_newest_tag "$net")"; then
-        # network-gated: unsigned-release exception, testnet only; removed with v0.17.1-adiri
-        if tn_release_unsigned_ok "$net" "$tag"; then
-            tn_docker_image_for_tag "$net" "$tag" || return 1
-            return 0
-        fi
         img="$(tn_fetch_release_image "$tag" "$net")" || rc=$?
         if [[ $rc -eq 0 ]]; then
             printf '%s\n' "$img"
@@ -1820,24 +1813,6 @@ tn_release_tag_final() {
     [[ "${1:-}" != "devnet" ]] || return 1
     tn_release_tag_ok "${1:-}" "${2:-}" || return 1
     [[ "${2:-}" != *-rc[0-9]* ]]
-}
-
-# The unsigned-release exception. TN_UNSIGNED_RELEASE_TAG is the last testnet
-# release cut without the signed pipeline: an annotated tag and a registry image,
-# with no GitHub release, so no signed SHA256SUMS, IMAGE_DIGEST or tarball.
-# network-gated: testnet only (tn_release_unsigned_ok); the exception is removed with v0.17.1-adiri, which is signed
-readonly TN_UNSIGNED_RELEASE_TAG="v0.17.0-adiri"  # network-gated: testnet tag, taken by tn_release_unsigned_ok on testnet only
-
-# tn_release_unsigned_ok NETWORK TAG -- rc 0 only when NETWORK is testnet and TAG
-# is exactly TN_UNSIGNED_RELEASE_TAG; rc 1 for every other tag and on mainnet and
-# devnet. For that release a source build (tn_source_checkout_tag) takes the
-# unsigned tag with a log line instead of the warning, and still refuses a bad
-# signature; its image (tn_docker_image_for_tag, and latest_docker_image when it
-# is the newest release) is the digest the registry serves, and no signed release
-# is asked for. A release install (tn_release_stage) has no exception: no tarball
-# is published.
-tn_release_unsigned_ok() {
-    [[ "${1:-}" == "testnet" && "${2:-}" == "$TN_UNSIGNED_RELEASE_TAG" ]]
 }
 
 # tn_release_tag_grammar -- the release tag forms, for messages.
@@ -7276,13 +7251,24 @@ tn_host_baseline_status() {
 # TESTNET_CHAIN_CONFIGS_TAG (the release
 # network-gated: testnet release history of the chain configs; no endpoint
 # DEFAULT_DOCKER_IMAGE runs; the three files are the same since v0.15.0-adiri).
+# A pin may list several hashes, space-separated, and any of them passes
+# (tn_chain_config_pin_ok); the first is the file at the tag, which setup and
+# edit-config's menu 13 install. TESTNET_COMMITTEE_SHA256 lists two files that
+# name the same five validators:
+# network-gated: testnet release history of committee.yaml; no endpoint
+# the one at v0.16.0-adiri, which names the five bootstrap servers, and the one
+# network-gated: testnet release history of committee.yaml; no endpoint
+# at v0.18.0-adiri, whose bootstrap_servers is {} (telcoin-network #1848 moved
+# the servers, unchanged, into the binary). A node these scripts start has no
+# --chain, so it dials the servers its data dir's committee.yaml names: new
+# installs keep the file at the tag.
 # Mainnet: the tag and the hashes are empty until the genesis ceremony
 # publishes the files and a signed script release carries both; while the tag
 # is empty nothing is fetched, and while any hash is empty a mainnet install or
 # refresh refuses (tn_chain_configs_check). Devnet has neither.
 readonly TESTNET_CHAIN_CONFIGS_TAG="v0.16.0-adiri"  # network-gated: testnet constant: the tag of the testnet chain-config pins
 readonly TESTNET_GENESIS_SHA256="670c94e3816686bd4da5aedbfa994d4f362452eaf2552b2757f05226608188c2"
-readonly TESTNET_COMMITTEE_SHA256="009b6d7b568f7d04734b657080d55621eed70f68ecefe1284dd8cdd0f42f15ce"
+readonly TESTNET_COMMITTEE_SHA256="009b6d7b568f7d04734b657080d55621eed70f68ecefe1284dd8cdd0f42f15ce 886f016b6ce8970f3019ec8f48c0847cf113950b6dc7a7d950e3be4aac50cd1f"
 readonly TESTNET_PARAMETERS_SHA256="7c6a44712faef1dc47dbc5b4f21f62d1eeabf1f0d54d2cb600ad6c65d4eda091"
 readonly MAINNET_CHAIN_CONFIGS_TAG=""
 readonly MAINNET_GENESIS_SHA256=""
@@ -7305,8 +7291,8 @@ readonly MAINNET_PARAMETERS_SHA256=""
 readonly TESTNET_BOOTSTRAP_SERVERS_SHA256=""
 
 # tn_chain_config_pin NETWORK FILE -- the pinned sha256 of FILE (genesis.yaml,
-# committee.yaml or parameters.yaml) for NETWORK; prints nothing when there is
-# none.
+# committee.yaml or parameters.yaml) for NETWORK: one hash, or several
+# space-separated, each accepted; prints nothing when there is none.
 tn_chain_config_pin() {
     case "${1:-}:${2:-}" in
         testnet:genesis.yaml)    printf '%s\n' "$TESTNET_GENESIS_SHA256" ;;
@@ -7317,6 +7303,19 @@ tn_chain_config_pin() {
         mainnet:parameters.yaml) printf '%s\n' "$MAINNET_PARAMETERS_SHA256" ;;
     esac
     return 0
+}
+
+# tn_chain_config_pin_ok NETWORK FILE SHA256 -- rc 0 when SHA256 is one of the
+# hashes NETWORK pins for FILE (tn_chain_config_pin); rc 1 otherwise, also for
+# an empty SHA256 and for a FILE with no pin.
+tn_chain_config_pin_ok() {
+    local want
+    want="$(tn_chain_config_pin "${1:-}" "${2:-}")"
+    [[ -n "$want" && -n "${3:-}" && "${3}" != *" "* ]] || return 1
+    case " ${want} " in
+        *" ${3} "*) return 0 ;;
+    esac
+    return 1
 }
 
 # tn_bootstrap_servers_pin NETWORK -- the pinned sha256 of bootstrap_servers.yaml
@@ -7370,8 +7369,8 @@ _tn_chain_configs_files() {
 # tn_chain_configs_check DIR NETWORK [progress-fn] [NAME-PREFIX [NAME-SUFFIX]]
 # -- compare DIR/genesis.yaml, committee.yaml and parameters.yaml with
 # NETWORK's pins, before anything copies them. Each must be a regular file (not
-# a symlink) with the pinned sha256; a mismatch names the expected and the
-# actual value. The messages name each file DIR/<file>, or
+# a symlink) with a pinned sha256 (tn_chain_config_pin_ok); a mismatch names
+# every accepted value and the actual one. The messages name each file DIR/<file>, or
 # NAME-PREFIX<file>NAME-SUFFIX when NAME-PREFIX is given (DIR a staging
 # directory that is gone when the operator reads them). devnet has no pins (a
 # warning, rc 0). rc 0 all three match, 1 refused: a mismatch, a missing file,
@@ -7408,8 +7407,8 @@ tn_chain_configs_check() {
         fi
         got="$(sha256sum < "${dir}/${f}" 2>/dev/null)" || got=""
         got="${got%% *}"
-        if [[ "$got" != "$want" ]]; then
-            _tn_guard_say warn "${name}: sha256 ${got:-unreadable}, expected ${want} (${net})." "$fn"
+        if ! tn_chain_config_pin_ok "$net" "$f" "$got"; then
+            _tn_guard_say warn "${name}: sha256 ${got:-unreadable}, expected ${want// / or } (${net})." "$fn"
             bad=1
         fi
     done
@@ -8517,8 +8516,8 @@ _tn_release_fetch() {
             _tn_release_cleanup "$stg"
             return 1
         fi
-        if [[ "$got" != "$want" ]]; then
-            _tn_c4_say warn "Release ${tag}: ${cc}/${f} has sha256 ${got}, but these scripts pin ${want}. Update the scripts (update-scripts.sh) before using this release." "$fn"
+        if ! tn_chain_config_pin_ok "$net" "$f" "$got"; then
+            _tn_c4_say warn "Release ${tag}: ${cc}/${f} has sha256 ${got}, but these scripts pin ${want// / or }. Update the scripts (update-scripts.sh) before using this release." "$fn"
             _tn_release_cleanup "$stg"
             return 1
         fi
@@ -8962,10 +8961,7 @@ _tn_release_keys_present() {
 # network-gated: legacy testnet tag; this fallback runs on testnet only
 # (v0.16.0-adiri); the newest-release pick (latest_docker_image) never takes it.
 # A release whose files fail verification is never replaced by the registry's
-# answer. TN_UNSIGNED_RELEASE_TAG on testnet (tn_release_unsigned_ok) has no
-# signed files, so for it no signed release is asked for: the registry's digest
-# is read from the same two repositories, with a log line instead of the
-# warning. Devnet has no signed releases, so a devnet tag is refused (rc 1)
+# answer. Devnet has no signed releases, so a devnet tag is refused (rc 1)
 # before anything is downloaded: devnet images are named by digest. rc 1
 # refused or not resolvable, 3 TAG is not a NETWORK release tag.
 tn_docker_image_for_tag() {
@@ -8979,10 +8975,7 @@ tn_docker_image_for_tag() {
         _tn_c4_say warn "Devnet has no signed releases, so ${tag} names no image: give the devnet image by digest, ${repo}@sha256:<digest>." "$fn"
         return 1
     fi
-    # network-gated: unsigned-release exception, testnet only; removed with v0.17.1-adiri
-    if tn_release_unsigned_ok "$net" "$tag"; then
-        _tn_c4_say log "Release ${tag} is the last unsigned testnet release and has no signed files; using the digest the registry serves for ${tag}." "$fn"
-    elif _tn_release_keys_present; then
+    if _tn_release_keys_present; then
         img="$(tn_fetch_release_image "$tag" "$net" "" "$fn")" || rc=$?
         if [[ $rc -eq 0 ]]; then
             printf '%s\n' "$img"
@@ -9268,8 +9261,7 @@ _tn_tag_sig_check() {
 # and compared with a local tag of the same name, which is never moved: a
 # difference refuses ("re-pointed upstream"). The tag's signature is checked
 # against lib/release-keys (_tn_tag_sig_check): a bad one refuses everywhere;
-# one that cannot be checked refuses on mainnet and warns on testnet (for
-# TN_UNSIGNED_RELEASE_TAG, tn_release_unsigned_ok, a log line says so). A tree
+# one that cannot be checked refuses on mainnet and warns on testnet. A tree
 # with local changes or untracked files refuses unless ALLOW_DIRTY is true
 # (testnet only), which discards them (reset --hard, clean -ffd). rc 0 checked
 # out, 1 refused (nothing moved), 2 failed, 3 TAG is not a NETWORK release tag
@@ -9339,12 +9331,7 @@ tn_source_checkout_tag() {
                 _tn_c4_say warn "Tag ${tag} cannot be verified: ${why}. A ${net} source build needs a tag signed by a release key; nothing was checked out." "$fn"
                 return 1
             fi
-            # network-gated: unsigned-release exception, testnet only; removed with v0.17.1-adiri
-            if tn_release_unsigned_ok "$net" "$tag"; then
-                _tn_c4_say log "Tag ${tag} is the last unsigned testnet release; building it without a release signature (${why})." "$fn"
-            else
-                _tn_c4_say warn "Tag ${tag} is not verified (${why}); building it anyway because this is testnet." "$fn"
-            fi
+            _tn_c4_say warn "Tag ${tag} is not verified (${why}); building it anyway because this is testnet." "$fn"
             ;;
     esac
     st="$(git -C "$dir" status --porcelain --untracked-files=all 2>/dev/null)" || {

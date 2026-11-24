@@ -212,7 +212,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
         tn_os_floor_check tn_docker_network_ok tn_release_tag_grammar tn_mainnet_enabled \
         tn_docker_pull_repo_ok tn_docker_pull_repos_for tn_docker_image_network_ok \
         tn_network_config_render tn_node_supports_admission \
-        tn_chain_configs_tag tn_chain_configs_dir tn_chain_configs_from_tag \
+        tn_chain_configs_tag tn_chain_configs_dir tn_chain_configs_from_tag tn_chain_config_pin_ok \
         tn_bootstrap_servers_pin tn_bootstrap_servers_check >/dev/null; then
     _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this setup-node.sh: run update-scripts.sh and try again."
     case " $* " in
@@ -223,7 +223,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
 fi
 unset _tn_old
 
-readonly SCRIPT_VERSION="2.1.5"
+readonly SCRIPT_VERSION="2.1.6"
 readonly SERVICE_NAME="telcoin"
 # The node's role is decided on-chain from committee membership, and the dashboard's
 # validator view follows the on-chain stake status (ConsensusRegistry getValidator).
@@ -2445,11 +2445,10 @@ step_write_config() {
 # (GENESIS_DIR/genesis.yaml, GENESIS_DIR/committee.yaml, DATA_DIR/parameters.yaml)
 # still carry the NETWORK pins.
 _setup_copied_configs_ok() {
-    local f got want
+    local f got
     for f in "${1}/genesis.yaml" "${1}/committee.yaml" "${DATA_DIR}/parameters.yaml"; do
-        want="$(tn_chain_config_pin "$NETWORK" "${f##*/}")"
         got="$(sha256sum < "$f" 2>/dev/null)" || return 1
-        [[ -n "$want" && "${got%% *}" == "$want" ]] || return 1
+        tn_chain_config_pin_ok "$NETWORK" "${f##*/}" "${got%% *}" || return 1
     done
     return 0
 }

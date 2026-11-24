@@ -29,10 +29,11 @@
 # ONE-WAY UPDATES: when the node runs a release older than a storage migration
 # floor and the target is that release or newer (or a branch or a commit), APPLY
 # cannot be undone by swapping the binary or image back. On testnet the floors
-# are v0.16.0 (epoch packs v1 -> v2) and v0.17.0 (the consensus database moves
-# from MDBX to tndb). The new release migrates the consensus store in the data
-# dir on its first start, and older releases cannot open it afterwards (or, past
-# v0.17.0, open it with empty consensus tables). Snapshot the data dir first.
+# are v0.16.0 (epoch packs v1 -> v2), v0.17.0 (the consensus database moves
+# from MDBX to tndb) and v0.18.0 (the execution database moves from MDBX to
+# tn-lmdb). The new release migrates its store in the data dir on its first
+# start, and older releases cannot open it afterwards (or, past v0.17.0, open it
+# with empty consensus tables). Snapshot the data dir first.
 # APPLY says so (and warns when free disk is under twice the largest
 # consensus-db/epochs/epoch-N), asks you to confirm, and waits up to 600 seconds
 # for the node to answer. If that check fails, APPLY does not roll back: the
@@ -112,7 +113,7 @@ unset _tn_old
 # point of the two-phase design. Restore the intended semantics.
 set +e
 
-readonly SCRIPT_VERSION="2.1.2"
+readonly SCRIPT_VERSION="2.1.3"
 # GAR_TAGS_URL is provided by lib/common.sh (sourced above). Re-declaring it
 # readonly here threw "GAR_TAGS_URL: readonly variable" to stderr, which the UI
 # surfaced as "update checks aren't available on this host".
@@ -136,15 +137,17 @@ readonly VERIFY_TIMEOUT_EXPLICIT
 # The releases that migrate the consensus store one way on their first start,
 # per network, oldest first and space-separated; an older release cannot open
 # the data dir one of them has migrated. Add a network's release here when one
-# migrates. Testnet: v0.16.0 (epoch packs v1 -> v2) and v0.17.0 (the consensus
+# migrates. Testnet: v0.16.0 (epoch packs v1 -> v2), v0.17.0 (the consensus
 # database moves from MDBX to tndb and the MDBX files are deleted; v0.16.0 would
-# start on it with empty consensus tables). Mainnet and devnet: none (empty), as
+# start on it with empty consensus tables) and v0.18.0 (the execution database
+# moves from MDBX to tn-lmdb; v0.17.0 refuses it at db/database.version).
+# Mainnet and devnet: none (empty), as
 # MIN_SOURCE_VERSION_MAINNET is for the source floor: their version lines start
 # below v0.16.0 and no release of theirs migrates one way yet (a mainnet node
 # starts on the storage its first release ships), so no update there is one way
 # and no downgrade is refused for the storage reason. Read through
 # storage_migration_floor.
-readonly STORAGE_MIGRATION_FLOOR_TESTNET="0.16.0 0.17.0"
+readonly STORAGE_MIGRATION_FLOOR_TESTNET="0.16.0 0.17.0 0.18.0"
 readonly STORAGE_MIGRATION_FLOOR_MAINNET=""
 readonly STORAGE_MIGRATION_FLOOR_DEVNET=""
 # Health window for such an update: the first start migrates before it answers.
@@ -942,15 +945,18 @@ observer_strip_needed() {
 }
 
 # =============================================================================
-# ONE-WAY STORAGE MIGRATION (testnet v0.16.0 and v0.17.0)
+# ONE-WAY STORAGE MIGRATION (testnet v0.16.0, v0.17.0 and v0.18.0)
 #
 # The first start of v0.16.0 or later migrates the consensus store
 # (<data_dir>/consensus-db/epochs, epoch packs v1 -> v2) and older releases
 # cannot open it afterwards. The first start of v0.17.0 or later moves the
 # consensus database from MDBX into tndb (<data_dir>/consensus-db/tndb) and
 # deletes the MDBX files, so v0.16.0 would start with empty consensus tables.
+# The first start of v0.18.0 or later moves the execution database from MDBX
+# into tn-lmdb (<data_dir>/db/mdbx.dat into <data_dir>/db/tn-lmdb.dat) and
+# deletes the MDBX files; v0.17.0 refuses it at db/database.version.
 # Swapping the binary or image back is then no rollback, so an update across
-# either line warns first, waits longer for the first start, and never rolls
+# any of these lines warns first, waits longer for the first start, and never rolls
 # back on its own: only a data dir snapshot taken before the update can undo it.
 # Once the new release has started, the unit, the start script and node.env stay
 # as the apply wrote them: a failed check keeps them

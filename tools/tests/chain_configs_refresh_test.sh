@@ -170,9 +170,10 @@ SRC="${TN_ROOT_PREFIX}${TN_SOURCE_DIR}"
 PIN="$(tn_chain_configs_dir testnet)"
 cp "$FX"/*.yaml "$T/diverged/"
 printf '# changed on the default branch\n' >> "$T/diverged/committee.yaml"
-PINNED="$(tn_chain_config_pin testnet genesis.yaml)
-$(tn_chain_config_pin testnet committee.yaml)
-$(tn_chain_config_pin testnet parameters.yaml)"
+# The files menu 13 installs: the first pinned hash of each, the file at the tag.
+PINNED="$(tn_chain_config_pin testnet genesis.yaml | cut -d' ' -f1)
+$(tn_chain_config_pin testnet committee.yaml | cut -d' ' -f1)
+$(tn_chain_config_pin testnet parameters.yaml | cut -d' ' -f1)"
 ASK="asked: Refresh chain configs for telcoin?"
 ASK_CLONE="asked: Clone the repository at ${TAG} into ${SRC} now?"
 APPLY="systemctl daemon-reload

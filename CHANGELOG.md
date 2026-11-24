@@ -7,6 +7,26 @@ For recent entries (v1.1.40 onwards), see the Changelog section of README.md.
 
 ## Unreleased
 
+### Node release v0.18.0-adiri, November 2026 -- lib/common 2.2.7, update-node 2.1.3, setup-node 2.1.6, edit-config 2.2.3
+Part of `scripts-v2.2.0`; see [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+The scripts take telcoin-network `v0.18.0-adiri`. Its testnet `committee.yaml` lists no bootstrap
+servers (`bootstrap_servers: {}`), because telcoin-network #1848 moved them into the binary;
+`genesis.yaml`, `parameters.yaml`, the five validators and their addresses are unchanged.
+`TESTNET_COMMITTEE_SHA256` now lists two accepted hashes, `009b6d7b…f15ce` (the file through
+`v0.17.0-adiri`) and `886f016b…50cd1f` (`v0.18.0-adiri`'s), so a Docker or signed-release install
+of `v0.18.0-adiri` passes the chain-config check that refused it. `TESTNET_CHAIN_CONFIGS_TAG`
+stays `v0.16.0-adiri`: a node these scripts start has no `--chain` and dials the bootstrap
+servers its data dir's `committee.yaml` names, so new testnet installs keep the file that names
+them. setup-node and edit-config's menu 13 check the copied files with the same list
+(`tn_chain_config_pin_ok`). A running node keeps its own `committee.yaml`; update-node never
+touches it. `v0.18.0-adiri` moves the execution database
+from MDBX to tn-lmdb on its first start, one way: `STORAGE_MIGRATION_FLOOR_TESTNET` lists
+`0.16.0 0.17.0 0.18.0`, so update-node treats an update to it as one-way (the warning, the
+snapshot question, the 600-second check, no automatic rollback) and refuses a downgrade from it.
+The exception that let the unsigned `v0.17.0-adiri` through without a signed release
+(`TN_UNSIGNED_RELEASE_TAG`, `tn_release_unsigned_ok`) is gone; that tag now takes the same
+testnet path as any tag without a signed release, with a warning.
+
 ### Bootstrap servers from the pinned tag, November 2026 -- lib/common 2.2.6, setup-node 2.1.5
 Part of `scripts-v2.2.0`; see [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
 telcoin-network #1848 moved the testnet bootstrap servers out of `committee.yaml` into
