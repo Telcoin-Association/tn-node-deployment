@@ -79,7 +79,7 @@ readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 # network-gated: the comment names the testnet fleet; 9101 is the default on every network
 readonly DEFAULT_METRICS_PORT="9101"   # node loopback Prometheus endpoint (matches the adiri fleet)
-readonly COMMON_VERSION="2.2.5"
+readonly COMMON_VERSION="2.2.6"
 
 # The operator runbook, for any message that should point operators at it.
 readonly TN_OPERATOR_GUIDE_URL="https://github.com/Telcoin-Association/tn-node-deployment/blob/main/OPERATOR.md"
@@ -3406,7 +3406,8 @@ ensure_chain_configs_available() {
         dir="$TN_GENESIS_DIR"
     elif [[ -n "$tag" ]]; then
         dir="$(tn_chain_configs_dir "$net")"
-        if [[ ! -e "${source_dir}/.git" ]] && ! tn_chain_configs_check "$dir" "$net" 2>/dev/null; then
+        if [[ ! -e "${source_dir}/.git" ]] \
+            && ! { tn_chain_configs_check "$dir" "$net" && tn_bootstrap_servers_check "$dir" "$net"; } 2>/dev/null; then
             _tn_chain_configs_dest_ok "$dir" "$fn" || return $?
             _tn_chain_configs_clone_target "$source_dir" "$fn" || return 1
             _tn_chain_configs_consent "$source_dir" || return 0
@@ -7287,6 +7288,21 @@ readonly MAINNET_CHAIN_CONFIGS_TAG=""
 readonly MAINNET_GENESIS_SHA256=""
 readonly MAINNET_COMMITTEE_SHA256=""
 readonly MAINNET_PARAMETERS_SHA256=""
+# The testnet bootstrap servers: chain-configs/testnet/bootstrap_servers.yaml at
+# TESTNET_CHAIN_CONFIGS_TAG. telcoin-network #1848 moved the servers out of
+# committee.yaml (which keeps "bootstrap_servers: {}") into that file, which the
+# node reads only when started with --chain; these scripts start it without, so
+# a new install with no --bootstrap-peers map gets the file as its map
+# (setup-node's setup_default_bootstrap_peers). Empty while the tag carries no
+# network-gated: testnet tag history; the pin below is read on testnet only
+# such file, as v0.16.0-adiri does (its committee.yaml still names the servers):
+# then nothing is read and nothing changes. The pin says what the tag carries:
+# a tag with the file and no pin, or a pin and a tag without the file, refuses
+# the install. Moving the tag past #1848 sets it in the same change, from
+#   git show <tag>:chain-configs/testnet/bootstrap_servers.yaml | sha256sum
+# Mainnet has no such pin and its file is never read: until the genesis
+# ceremony it holds a placeholder set, not the servers of the network.
+readonly TESTNET_BOOTSTRAP_SERVERS_SHA256=""
 
 # tn_chain_config_pin NETWORK FILE -- the pinned sha256 of FILE (genesis.yaml,
 # committee.yaml or parameters.yaml) for NETWORK; prints nothing when there is
@@ -7300,6 +7316,54 @@ tn_chain_config_pin() {
         mainnet:committee.yaml)  printf '%s\n' "$MAINNET_COMMITTEE_SHA256" ;;
         mainnet:parameters.yaml) printf '%s\n' "$MAINNET_PARAMETERS_SHA256" ;;
     esac
+    return 0
+}
+
+# tn_bootstrap_servers_pin NETWORK -- the pinned sha256 of bootstrap_servers.yaml
+# at NETWORK's chain-config tag (TESTNET_BOOTSTRAP_SERVERS_SHA256). rc 0 on
+# testnet, printing the pin, or nothing while the tag carries no such file; rc 1
+# on any other network, whose bootstrap_servers.yaml is never read (mainnet's
+# holds a placeholder set until the genesis ceremony).
+tn_bootstrap_servers_pin() {
+    case "${1:-}" in
+        testnet) [[ -z "$TESTNET_BOOTSTRAP_SERVERS_SHA256" ]] || printf '%s\n' "$TESTNET_BOOTSTRAP_SERVERS_SHA256" ;;
+        *) return 1 ;;
+    esac
+    return 0
+}
+
+# tn_bootstrap_servers_check DIR NETWORK [progress-fn] [NAME-PREFIX [NAME-SUFFIX]]
+# -- compare DIR/bootstrap_servers.yaml with NETWORK's pin (tn_bootstrap_servers_pin)
+# the way tn_chain_configs_check compares the other three, with the same messages
+# and naming. rc 0 when NETWORK pins none (nothing to check) or the file is a
+# regular file (not a symlink) with the pinned sha256; rc 1 otherwise.
+tn_bootstrap_servers_check() {
+    local dir="${1:-}" net="${2:-}" fn="${3:-}" pre="${1:-}/" suf="" f=bootstrap_servers.yaml want got
+    if [[ $# -ge 4 ]]; then
+        pre="$4"
+        suf="${5:-}"
+    fi
+    want="$(tn_bootstrap_servers_pin "$net")" || return 0
+    [[ -n "$want" ]] || return 0
+    if [[ -L "${dir}/${f}" || ! -f "${dir}/${f}" ]]; then
+        _tn_guard_say warn "${pre}${f}${suf} is missing or not a regular file." "$fn"
+        return 1
+    fi
+    got="$(sha256sum < "${dir}/${f}" 2>/dev/null)" || got=""
+    got="${got%% *}"
+    if [[ "$got" != "$want" ]]; then
+        _tn_guard_say warn "${pre}${f}${suf}: sha256 ${got:-unreadable}, expected ${want} (${net})." "$fn"
+        return 1
+    fi
+    return 0
+}
+
+# _tn_chain_configs_files NETWORK -- the files of NETWORK's pinned chain-config
+# set, one name a line: genesis.yaml, committee.yaml and parameters.yaml, then
+# bootstrap_servers.yaml when NETWORK pins one (tn_bootstrap_servers_pin).
+_tn_chain_configs_files() {
+    printf '%s\n' genesis.yaml committee.yaml parameters.yaml
+    [[ -z "$(tn_bootstrap_servers_pin "${1:-}" 2>/dev/null)" ]] || printf '%s\n' bootstrap_servers.yaml
     return 0
 }
 
@@ -7398,16 +7462,21 @@ tn_chain_configs_dir() {
 # (_tn_root_layout_dir), each file root 0644 (tn_write_root_file), then the
 # destination is checked again. HEAD, the index, the working tree and the
 # submodules of DIR are never touched (no checkout, pull, reset or submodule
-# command). Messages go through _tn_guard_say. rc 0 the pinned files are in
-# place; 1 refused: NETWORK has no tag, the destination or its parent is a
-# symlink or not a directory, DIR is a symlink, owned by another account or
-# not readable by git, or the files do not match the pins (the destination is
-# untouched); 2 failed: an entry in the destination is in the way, DIR is not a
+# command). Messages go through _tn_guard_say. A network that pins a
+# bootstrap_servers.yaml (tn_bootstrap_servers_pin) has it as a fourth file of
+# the set (_tn_chain_configs_files), read, checked (tn_bootstrap_servers_check)
+# and installed with the three; on testnet with no such pin, a tag that carries
+# chain-configs/testnet/bootstrap_servers.yaml is refused. rc 0 the pinned
+# files are in place; 1 refused: NETWORK has no tag, the destination or its
+# parent is a symlink or not a directory, DIR is a symlink, owned by another
+# account or not readable by git, the files do not match the pins, or the tag
+# carries a bootstrap_servers.yaml these scripts pin no sha256 for (the
+# destination is untouched); 2 failed: an entry in the destination is in the way, DIR is not a
 # git checkout, the tag is neither on origin nor in the checkout, a file is
 # missing at the tag or cannot be read (a partial clone's blob is not fetched
 # for it), or the install failed.
 tn_chain_configs_from_tag() {
-    local dir="${1:-}" net="${2:-}" fn="${3:-}" tag dest ref="" stage f rc=0 out="" why="" grc fetched=0
+    local dir="${1:-}" net="${2:-}" fn="${3:-}" tag dest ref="" stage f rc=0 out="" why="" grc fetched=0 bpin bad
     while [[ "$dir" == */ && "$dir" != / ]]; do dir="${dir%/}"; done
     tag="$(tn_chain_configs_tag "$net")"
     if [[ -z "$tag" ]]; then
@@ -7416,7 +7485,7 @@ tn_chain_configs_from_tag() {
     fi
     dest="$(tn_chain_configs_dir "$net")"
     _tn_chain_configs_dest_ok "$dest" "$fn" || return $?
-    if tn_chain_configs_check "$dest" "$net" 2>/dev/null; then
+    if tn_chain_configs_check "$dest" "$net" 2>/dev/null && tn_bootstrap_servers_check "$dest" "$net" 2>/dev/null; then
         _tn_guard_say log "The pinned ${net} chain configs are already in ${dest}." "$fn"
         _tn_chain_configs_in_place "$dest" && return 0
         # The right files with another owner or mode: they are installed again
@@ -7464,7 +7533,7 @@ tn_chain_configs_from_tag() {
         _tn_guard_say warn "Could not make a staging directory for the ${net} chain configs." "$fn"
         return 2
     fi
-    for f in genesis.yaml committee.yaml parameters.yaml; do
+    for f in $(_tn_chain_configs_files "$net"); do
         if [[ -n "$ref" ]]; then
             if ! out="$(_tn_chain_configs_git "$dir" cat-file blob "${ref}:chain-configs/${net}/${f}" 2>&1 > "${stage}/${f}")"; then
                 # A path the tag's tree lists but git cannot read (a partial
@@ -7484,8 +7553,18 @@ tn_chain_configs_from_tag() {
             break
         fi
     done
+    # A tag that keeps its bootstrap servers in a file no pin covers: its
+    # committee.yaml names none, so a node set up from it would dial no one.
+    if [[ $rc -eq 0 && -n "$ref" ]] && bpin="$(tn_bootstrap_servers_pin "$net" 2>/dev/null)" && [[ -z "$bpin" ]] \
+        && [[ -n "$(_tn_chain_configs_git "$dir" ls-tree --name-only "$ref" -- "chain-configs/${net}/bootstrap_servers.yaml" 2>/dev/null)" ]]; then
+        _tn_guard_say warn "${tag} carries chain-configs/${net}/bootstrap_servers.yaml, but these scripts pin no sha256 for it; nothing was installed." "$fn"
+        rc=1
+    fi
     if [[ $rc -eq 0 && -n "$ref" ]]; then
-        if ! tn_chain_configs_check "$stage" "$net" "$fn" "chain-configs/${net}/" " at ${tag}"; then
+        bad=0
+        tn_chain_configs_check "$stage" "$net" "$fn" "chain-configs/${net}/" " at ${tag}" || bad=1
+        tn_bootstrap_servers_check "$stage" "$net" "$fn" "chain-configs/${net}/" " at ${tag}" || bad=1
+        if [[ $bad -ne 0 ]]; then
             _tn_guard_say warn "The ${net} chain configs at ${tag} do not match the pins; nothing was installed." "$fn"
             rc=1
         elif ! _tn_chain_configs_install "$stage" "$dest" "$net" "$fn"; then
@@ -7495,7 +7574,8 @@ tn_chain_configs_from_tag() {
             _tn_guard_say log "Installed the ${net} chain configs from ${tag} into ${dest}." "$fn"
         fi
     elif [[ $rc -eq 0 ]]; then
-        if ! tn_chain_configs_check "$stage" "$net" "$fn" "${dest}/"; then
+        if ! tn_chain_configs_check "$stage" "$net" "$fn" "${dest}/" \
+            || ! tn_bootstrap_servers_check "$stage" "$net" "$fn" "${dest}/"; then
             _tn_guard_say warn "The ${net} chain configs in ${dest} changed while they were read; nothing was installed." "$fn"
             rc=1
         elif ! _tn_chain_configs_install "$stage" "$dest" "$net" "$fn"; then
@@ -7510,27 +7590,29 @@ tn_chain_configs_from_tag() {
 }
 
 # _tn_chain_configs_install STAGE DEST NETWORK [progress-fn] -- install the
-# three chain configs in STAGE (already checked against NETWORK's pins) as
-# DEST/<file>, root 0644 through tn_write_root_file fed from the staged file;
-# DEST and its parent are made root:root 0755 first. DEST is checked against
-# the pins again afterwards. rc 0, non-zero when a directory, a write or that
-# check failed (a write that failed leaves its file as it was).
+# chain configs in STAGE (NETWORK's set, _tn_chain_configs_files, already
+# checked against NETWORK's pins) as DEST/<file>, root 0644 through
+# tn_write_root_file fed from the staged file; DEST and its parent are made
+# root:root 0755 first. DEST is checked against the pins again afterwards. rc 0,
+# non-zero when a directory, a write or that check failed (a write that failed
+# leaves its file as it was).
 _tn_chain_configs_install() {
     local stage="${1:-}" dest="${2:-}" net="${3:-}" fn="${4:-}" f
     _tn_root_layout_dir "${dest%/*}" root 0755 || return 1
     _tn_root_layout_dir "$dest" root 0755 || return 1
-    for f in genesis.yaml committee.yaml parameters.yaml; do
+    for f in $(_tn_chain_configs_files "$net"); do
         tn_write_root_file "${dest}/${f}" 0644 < "${stage}/${f}" || return 1
     done
-    tn_chain_configs_check "$dest" "$net" "$fn"
+    tn_chain_configs_check "$dest" "$net" "$fn" && tn_bootstrap_servers_check "$dest" "$net" "$fn"
 }
 
 # _tn_chain_configs_dest_ok DEST [progress-fn] -- rc 0 when the chain configs
 # can be installed as DEST/<file>: DEST and its parent are real directories or
-# absent, and each of genesis.yaml, committee.yaml and parameters.yaml is a
+# absent, and each file of the network's set (_tn_chain_configs_files; DEST is
+# tn_chain_configs_dir NETWORK, so its last component names the network) is a
 # regular file or absent. Checked before anything is fetched or written, so a
 # refusal leaves DEST as it was. rc 1: DEST or its parent is a symlink or not a
-# directory (nothing is installed or read through it); rc 2: one of the three
+# directory (nothing is installed or read through it); rc 2: one of those
 # names is a symlink, a directory or another entry no install can replace. The
 # warning names the entry and asks for it to be removed.
 _tn_chain_configs_dest_ok() {
@@ -7541,7 +7623,7 @@ _tn_chain_configs_dest_ok() {
             return 1
         fi
     done
-    for f in genesis.yaml committee.yaml parameters.yaml; do
+    for f in $(_tn_chain_configs_files "${dest##*/}"); do
         p="${dest}/${f}"
         if [[ -L "$p" ]] || { [[ -e "$p" ]] && [[ ! -f "$p" ]]; }; then
             _tn_guard_say warn "${p} is a symlink or not a regular file; nothing was installed. Remove it and run again." "$fn"
@@ -7553,8 +7635,9 @@ _tn_chain_configs_dest_ok() {
 
 # _tn_chain_configs_in_place DEST -- rc 0 when DEST looks the way
 # _tn_chain_configs_install leaves it: DEST and its parent real directories with
-# mode 0755, the three files regular with mode 0644, all owned by the account
-# running this (root on a host; a fixture's own account elsewhere). The
+# mode 0755, the files of the network's set (_tn_chain_configs_files, the
+# network the last component of DEST) regular with mode 0644, all owned by the
+# account running this (root on a host; a fixture's own account elsewhere). The
 # contents are tn_chain_configs_check's job. Reads only.
 _tn_chain_configs_in_place() {
     local dest="${1:-}" me p f st
@@ -7564,7 +7647,7 @@ _tn_chain_configs_in_place() {
         st="$(stat -c '%u %a' -- "$p" 2>/dev/null)" || return 1
         [[ "$st" == "${me} 755" ]] || return 1
     done
-    for f in genesis.yaml committee.yaml parameters.yaml; do
+    for f in $(_tn_chain_configs_files "${dest##*/}"); do
         p="${dest}/${f}"
         [[ -f "$p" && ! -L "$p" ]] || return 1
         st="$(stat -c '%u %a' -- "$p" 2>/dev/null)" || return 1

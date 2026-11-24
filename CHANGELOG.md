@@ -7,6 +7,19 @@ For recent entries (v1.1.40 onwards), see the Changelog section of README.md.
 
 ## Unreleased
 
+### Bootstrap servers from the pinned tag, November 2026 -- lib/common 2.2.6, setup-node 2.1.5
+Part of `scripts-v2.2.0`; see [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+telcoin-network #1848 moved the testnet bootstrap servers out of `committee.yaml` into
+`chain-configs/testnet/bootstrap_servers.yaml`, which the node reads only when started with
+`--chain`; these scripts start it without. `TESTNET_BOOTSTRAP_SERVERS_SHA256` pins that file and is
+empty while `TESTNET_CHAIN_CONFIGS_TAG` stays `v0.16.0-adiri`, whose `committee.yaml` still names
+the servers, so nothing changes in this release. Once a later release moves the tag and sets the
+pin, setup reads the file with the other chain configs, checks it, and installs it as
+`/etc/telcoin/bootstrap-peers.yaml` for a new testnet node given no `--bootstrap-peers` map; the
+start script passes it as it passes an operator's map. A tag that carries the file while no hash is
+pinned, a changed file, or one the release rejects, is refused. `--bootstrap-peers` and a map the
+host recorded win. Mainnet has no pin and gets no default.
+
 ### Partner guide 1.13 and node requirements one-pagers 1.3, November 2026 -- hardware requirements per network, chain configs at the pinned tag, mainnet chain id 731
 The partner guide (`docs/partner/mno-node-guide/`, version 1.13) and the testnet and mainnet node
 requirements one-pagers (version 1.3, November 2026) carry the hardware requirements per network.

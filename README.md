@@ -1267,6 +1267,7 @@ Give it to a new node with `setup-node.sh --bootstrap-peers FILE`, or to a runni
 - The map is installed as `/etc/telcoin/bootstrap-peers.yaml` (root, mode 644) through a temporary file and a rename, so an existing map is replaced only once the new one has passed. The start script passes `--bootstrap-peers "$(cat /etc/telcoin/bootstrap-peers.yaml)"`, which reads the file at every start. A hand edit of that file takes effect at the next restart, unchecked, and if the file goes missing or empty the node will not start.
 - `.node-meta` records the installed path as `BOOTSTRAP_PEERS_FILE`. `bootstrap_peers=none` removes the flag and the file.
 - A node started straight from its systemd unit is refused, because systemd cannot run the `$(cat ...)`. Convert it first with `edit-config.sh --migrate-credential` (next section).
+- Without `--bootstrap-peers`, a node dials the bootstrap servers of its genesis `committee.yaml`. telcoin-network #1848 moved the testnet servers into `chain-configs/testnet/bootstrap_servers.yaml`, which a node started as these scripts start it (without `--chain`) does not read. Once a scripts release pins a tag that carries that file (`TESTNET_BOOTSTRAP_SERVERS_SHA256` in `lib/common.sh`, empty while the tag is `v0.16.0-adiri`), setup checks the file against the pin and installs it as the map of a testnet node given none, by the rules above; a map you give, or one the host recorded, wins. Mainnet has no such default.
 
 ### Node admission settings
 
@@ -2116,6 +2117,16 @@ prints the exact fix command.
 > **Versioning note (from v1.1.48 onwards):** each script bumps `SCRIPT_VERSION`
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
+
+### setup-node v2.1.5 — a node given no peers map gets the pinned bootstrap servers
+When `lib/common.sh` pins a `bootstrap_servers.yaml` for the network, setup checks the copy beside the chain configs it copies against the pin and installs it as `/etc/telcoin/bootstrap-peers.yaml`, as it installs a `--bootstrap-peers` map; the start script passes it.
+A missing or changed file, or one the release rejects, stops setup before the copy. `--bootstrap-peers`, or a map the host recorded, wins.
+No pin is set in this release, so nothing changes yet. See [Bootstrap peers](#bootstrap-peers).
+Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+
+### lib/common.sh v2.2.6 — bootstrap_servers.yaml joins the pinned testnet chain configs
+`TESTNET_BOOTSTRAP_SERVERS_SHA256`, empty while the tag is `v0.16.0-adiri`, says whether the tag carries `chain-configs/testnet/bootstrap_servers.yaml`. With a pin the file is read, checked and installed with the three other chain configs; without one, a tag that carries it is refused. Each fetch runs one more read-only `git ls-tree`. Mainnet's file is never read.
+Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
 
 ### install-caddy v2.2.1 — the mainnet gate names the chain it found and checks the public RPC's chain
 With no `NETWORK` in `.node-meta` and a genesis on neither mainnet nor testnet, such as a devnet genesis on chain 487 now that the mainnet id is 731, the gate refused with "no readable genesis chain id" although it had read the id.
