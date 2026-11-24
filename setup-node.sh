@@ -92,7 +92,10 @@
 #                            with the release's own parser and installs it, world-readable,
 #                            as /etc/telcoin/bootstrap-peers.yaml; the start wrapper passes
 #                            --bootstrap-peers "$(cat /etc/telcoin/bootstrap-peers.yaml)",
-#                            so the file is read again at every start.
+#                            so the file is read again at every start. Without it, on a
+#                            network whose pinned chain-config tag keeps the bootstrap
+#                            servers in bootstrap_servers.yaml (a pinned sha256 in
+#                            lib/common.sh), that file is checked and installed instead.
 #   --enable-state-export    Export each epoch's final execution state under
 # network-gated: release named in the testnet tag form; require_node_flag asks the release on any network
 #                            <datadir>/consensus-db/state_exports/epoch-N/ (v0.13.0-adiri
@@ -209,7 +212,8 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
         tn_os_floor_check tn_docker_network_ok tn_release_tag_grammar tn_mainnet_enabled \
         tn_docker_pull_repo_ok tn_docker_pull_repos_for tn_docker_image_network_ok \
         tn_network_config_render tn_node_supports_admission \
-        tn_chain_configs_tag tn_chain_configs_dir tn_chain_configs_from_tag tn_chain_config_pin_ok >/dev/null; then
+        tn_chain_configs_tag tn_chain_configs_dir tn_chain_configs_from_tag tn_chain_config_pin_ok \
+        tn_bootstrap_servers_pin tn_bootstrap_servers_check >/dev/null; then
     _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this setup-node.sh: run update-scripts.sh and try again."
     case " $* " in
         *" --json "*) printf '{"event":"error","msg":"%s"}\n{"event":"done","ok":false,"msg":"%s"}\n' "$_tn_old" "$_tn_old" ;;
@@ -2402,6 +2406,9 @@ step_write_config() {
         print_info "  https://github.com/Telcoin-Association/telcoin-network/tree/${tag:-main}/chain-configs/${chain_subdir}/"
         print_info "Copy the three raw files, readable by ${SERVICE_USER}, into ${CONFIG_DIR}/chain-configs/${chain_subdir}/,"
         print_info "or run setup again with --genesis-dir <dir>, any directory that holds them."
+        if [[ -z "$BOOTSTRAP_PEERS_SRC" && -n "$(tn_bootstrap_servers_pin "$NETWORK" 2>/dev/null)" ]]; then
+            print_info "Without --bootstrap-peers, copy bootstrap_servers.yaml from there too: it holds the node's bootstrap servers."
+        fi
         echo ""
         if json_mode; then
             setup_fail "Chain config files missing and cannot prompt in non-interactive mode."
@@ -2413,6 +2420,7 @@ step_write_config() {
     # The pinned hashes, before anything is copied.
     tn_chain_configs_check "$found" "$NETWORK" setup_progress \
         || setup_fail "The chain configs in ${found} do not match the ${NETWORK} pins (see above); nothing was copied."
+    setup_default_bootstrap_peers "$found"
     # The service user copies them, so it reads only what it may read: a
     # chain-config directory it cannot read stops setup here.
     if ! tn_as_service_user cp -- "${found}/genesis.yaml" "${genesis_dir}/genesis.yaml" \
@@ -2445,6 +2453,36 @@ _setup_copied_configs_ok() {
     return 0
 }
 
+# setup_default_bootstrap_peers DIR -- the bootstrap peers of a node given no map of its
+# own. From telcoin-network #1848 on, a tag keeps the bootstrap servers in
+# chain-configs/<network>/bootstrap_servers.yaml and its committee.yaml names none, so a
+# node these scripts start (without --chain) from that committee.yaml would dial no one.
+# When the network pins that file (tn_bootstrap_servers_pin) and the run has no map (no
+# --bootstrap-peers; prepare_node_extra_flags has read a recorded one back),
+# DIR/bootstrap_servers.yaml, beside the chain configs this run copies, must carry the pin
+# and pass peers_file_ok, and becomes the run's map: NODE_EXTRA_FLAGS_SPEC is cleared, so
+# prepare_node_extra_flags in step_create_service asks the release for the flag, checks
+# the map with its parser, installs it as CONFIG_DIR/bootstrap-peers.yaml and records it,
+# as it does an operator's map, and the start wrapper passes it. A file that is missing,
+# changed or refused stops setup before anything is copied. No pin (mainnet, devnet, and
+# testnet while its tag keeps the servers in committee.yaml): nothing happens.
+setup_default_bootstrap_peers() {
+    local dir="$1" pin tag msg=""
+    [[ -z "$BOOTSTRAP_PEERS_SRC" ]] || return 0
+    pin="$(tn_bootstrap_servers_pin "$NETWORK" 2>/dev/null)" || return 0
+    [[ -n "$pin" ]] || return 0
+    tag="$(tn_chain_configs_tag "$NETWORK")"
+    if ! tn_bootstrap_servers_check "$dir" "$NETWORK" setup_progress; then
+        setup_fail "The ${NETWORK} chain configs at ${tag} keep the bootstrap servers in bootstrap_servers.yaml, not in committee.yaml, and ${dir} has no pinned copy of it (see above). Put chain-configs/${NETWORK}/bootstrap_servers.yaml of ${tag} there, or pass --bootstrap-peers FILE; nothing was copied."
+    fi
+    msg="$(peers_file_ok "${dir}/bootstrap_servers.yaml")" \
+        || setup_fail "The ${NETWORK} bootstrap servers: ${msg}; nothing was copied."
+    BOOTSTRAP_PEERS_SRC="${dir}/bootstrap_servers.yaml"
+    NODE_EXTRA_FLAGS_SPEC=""
+    print_ok "Bootstrap peers: the ${NETWORK} bootstrap servers at ${tag} (no --bootstrap-peers given)"
+    return 0
+}
+
 # Build NODE_EXTRA_FLAGS, the node flags for the launch line, and record the choices in
 
 # .node-meta (BOOTSTRAP_PEERS_FILE, STATE_EXPORT). Each flag in use must be listed by the
@@ -2471,6 +2509,13 @@ prepare_node_extra_flags() {
     fi
     node_flag_warnings
     json_mode || admission_read_back
+    # Where setup_default_bootstrap_peers has a default to give (the network pins a
+    # bootstrap_servers.yaml), an interactive run over an earlier install keeps the
+    # peers map it recorded, with an admission mode or without: the host's own map
+    # wins over the default.
+    if ! json_mode && [[ -n "$(tn_bootstrap_servers_pin "$NETWORK" 2>/dev/null)" ]]; then
+        peers_read_back
+    fi
     if [[ -n "$ADMISSION_MODE" ]]; then
         require_admission_release
     fi

@@ -326,8 +326,8 @@ checkout
 nopin
 refresh
 check_rc "stale: rc 0" 0 "$RC"
-check "stale: git fetches the tag and reads three blobs, nothing else" \
-    "fetch rev-parse cat-file cat-file cat-file" "$(verbs)"
+check "stale: git fetches the tag, reads three blobs and lists bootstrap_servers.yaml, nothing else" \
+    "fetch rev-parse cat-file cat-file cat-file ls-tree" "$(verbs)"
 check "stale: no pull, no submodule, nothing that moves the checkout" "" "$(moving)"
 check_has "stale: the helper reads the checkout" \
     "-C $SRC fetch --quiet --no-tags origin +refs/tags/${TAG}:refs/tn-remote-tags/${TAG}" "$(argv)"
@@ -435,7 +435,7 @@ nopin
 refresh
 check_rc "worktree: rc 0" 0 "$RC"
 check "worktree: no clone question, no clone; the helper reads the tag from it" \
-    "no|fetch rev-parse cat-file cat-file cat-file" "$(has "$(ev)" "asked: Clone")|$(verbs)"
+    "no|fetch rev-parse cat-file cat-file cat-file ls-tree" "$(has "$(ev)" "asked: Clone")|$(verbs)"
 check "worktree: the pinned files installed and copied, the baseline, the restart path" "${PINNED}|${PINNED}|${ASK}
 lock
 baseline
@@ -628,7 +628,7 @@ check "clone accepted: the clone at the tag into the source dir, without submodu
     "clone --quiet --branch ${TAG} -- ${TN_REPO} ${SRC}" "$(sed -n 1p "$REC/git.argv")"
 check "clone accepted: over https only" "https" "$(cat "$REC/clone.gap" 2>/dev/null)"
 check "clone accepted: then the tag fetched and read from the clone" \
-    "clone fetch rev-parse cat-file cat-file cat-file" "$(verbs)"
+    "clone fetch rev-parse cat-file cat-file cat-file ls-tree" "$(verbs)"
 check "clone accepted: asked with the lock free, locked for the clone, then the restart path" "${ASK}
 ${ASK_CLONE}
 lock

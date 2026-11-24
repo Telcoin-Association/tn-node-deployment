@@ -253,7 +253,7 @@ sums() { (cd "$1" 2>/dev/null && sha256sum genesis.yaml committee.yaml parameter
 
 fresh
 check_rc "from_tag: the pinned tag is fetched and read" 0 "$(ft "$SRC" testnet)"
-check "from_tag: git runs fetch, one ref check and three blob reads" "fetch rev-parse cat-file cat-file cat-file" "$(verbs)"
+check "from_tag: git runs fetch, one ref check, three blob reads and the bootstrap_servers.yaml listing" "fetch rev-parse cat-file cat-file cat-file ls-tree" "$(verbs)"
 check "from_tag: the fetch allows https only" "fetch https" "$(cat "$REC/git.proto")"
 check_has "from_tag: the tag is fetched into refs/tn-remote-tags" \
     "-C $SRC fetch --quiet --no-tags origin +refs/tags/${TAG}:refs/tn-remote-tags/${TAG}" "$(argv)"
@@ -429,7 +429,7 @@ check "entry in the way: the message" \
 # A git worktree checkout (.git is a file) is read like any checkout (V-FIX-S-08).
 fresh; mkdir -p "$T/wt"; printf 'gitdir: %s/.git/worktrees/wt\n' "$SRC" > "$T/wt/.git"
 check_rc "worktree: a checkout whose .git is a file is read" 0 "$(ft "$T/wt" testnet)"
-check "worktree: fetch and read through git -C" "fetch rev-parse cat-file cat-file cat-file|$(sums "$FX")" \
+check "worktree: fetch and read through git -C" "fetch rev-parse cat-file cat-file cat-file ls-tree|$(sums "$FX")" \
     "$(verbs)|$(sums "$DEST")"
 
 # The staging directory is tag.<pid>.XXXXXX under the release staging directory,
@@ -500,7 +500,7 @@ check "ensure: the clone is https, at the tag, without submodules" \
     "clone --quiet --branch ${TAG} -- ${TN_REPO} ${SRC}" "$(argv)"
 fresh; CONFIRM=yes
 check_rc "ensure: no checkout, clone accepted" 0 "$(en testnet)"
-check "ensure: clone, then fetch and read" "clone fetch rev-parse cat-file cat-file cat-file" "$(verbs)"
+check "ensure: clone, then fetch and read" "clone fetch rev-parse cat-file cat-file cat-file ls-tree" "$(verbs)"
 check "ensure: the clone and the fetch allow https only" "clone https
 fetch https" "$(cat "$REC/git.proto")"
 check "ensure: cloned, the pinned files installed" "$(sums "$FX")" "$(sums "$DEST")"
@@ -554,12 +554,12 @@ check_rc "ensure devnet: a non-empty source directory without .git: rc 1, no pro
 rm -rf "${SRC:?}"; mkdir -p "$SRC"
 fresh; CONFIRM=yes
 check_rc "ensure: an empty source directory is cloned into" 0 "$(en testnet)"
-check "ensure: empty source directory: asked, cloned, read" "asked|clone fetch rev-parse cat-file cat-file cat-file" \
+check "ensure: empty source directory: asked, cloned, read" "asked|clone fetch rev-parse cat-file cat-file cat-file ls-tree" \
     "$(cat "$REC/confirm")|$(verbs)"
 rm -rf "${SRC:?}"; mkdir -p "$SRC"; printf 'gitdir: %s/.git/worktrees/src\n' "$T/src.keep" > "$SRC/.git"
 fresh; CONFIRM=yes
 check_rc "ensure: a worktree checkout (.git a file) is read, not cloned" 0 "$(en testnet)"
-check "ensure: worktree: no prompt, fetch and read" "|fetch rev-parse cat-file cat-file cat-file" \
+check "ensure: worktree: no prompt, fetch and read" "|fetch rev-parse cat-file cat-file cat-file ls-tree" \
     "$(cat "$REC/confirm")|$(verbs)"
 # An entry in the way of the install is refused before the question (V-FIX-S-04).
 rm -rf "${SRC:?}"

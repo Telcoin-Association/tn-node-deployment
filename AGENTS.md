@@ -131,6 +131,13 @@ a pull to the testnet or mainnet path; devnet, which has no pins, still pulls.
 
 - `TESTNET_CHAIN_CONFIGS_TAG`, the three `TESTNET_*_SHA256` pins and the files in
   `tools/tests/genesis.d/testnet/` move together, in one change.
+- `TESTNET_BOOTSTRAP_SERVERS_SHA256` moves with them. It is empty while the tag keeps the bootstrap
+  servers in `committee.yaml` (`v0.16.0-adiri` does) and is the sha256 of
+  `chain-configs/testnet/bootstrap_servers.yaml` at a tag from telcoin-network #1848 on, which
+  keeps them in that file; a tag that carries the file with no pin, or a pin with a tag that does
+  not, is refused. With a pin, setup gives the file to a node that has no peers map
+  (`setup_default_bootstrap_peers`), because the scripts start the node without `--chain`, the only
+  way the node reads it. Mainnet has no such pin until its file holds the real servers.
 - A pin may list several hashes, space-separated; any of them passes
   (`tn_chain_config_pin_ok`), and the first is the file at the tag. `TESTNET_COMMITTEE_SHA256`
   lists the `committee.yaml` of `v0.16.0-adiri`, which names the five bootstrap servers, and the
@@ -1247,6 +1254,9 @@ line.
   these files while its `main` carries another `committee.yaml`, the shape of the 2026-11-14
   break; its git cases need git, so they skip in the `bash:3.2` image.
   `chain_configs_refresh_test.sh` covers edit-config's menu 13 (`refresh_chain_configs`).
+  `bootstrap_servers_test.sh` covers `TESTNET_BOOTSTRAP_SERVERS_SHA256`: the fetch and setup with
+  the empty pin as shipped, then with a pin (`tn_bootstrap_servers_pin` replaced) the file read,
+  installed and given to a node with no peers map, and each refusal.
 - `tools/tests/perl-interp.d/` holds the perl lint's fixtures, and `tools/tests/signing.sh`
   the OpenPGP release-signing helpers of `updater_manifest_test.sh`, `install_test.sh`,
   `release_scripts_test.sh`, `cut_release_test.sh`, `p2p_allow_install_test.sh` and `gateway_pin_test.sh`: `newkey NAME [EXPIRY|--expired|--revoked]`,
