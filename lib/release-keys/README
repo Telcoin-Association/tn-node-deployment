@@ -53,7 +53,7 @@ tarball against its SHA256SUMS line and the sha256 lib/common.sh pins.
 Script releases
 ---------------
 
-The same maintainer key signs node releases and script releases: these keys
+The same maintainer keys sign node releases and script releases: these keys
 sign the script releases of this repository too, from scripts-v2.1.0, the
 first signed one. A release's MANIFEST.asc holds detached OpenPGP signatures
 over its MANIFEST, and
@@ -95,10 +95,11 @@ Shipped keys
     handle      primary key fingerprint                    expires      added
     grantkee    95A38484E1CBD31D773F6AF928FD56AD2F9FAE47   2028-11-16   2026-11-17
     MavenRain   32F886ADE9C3A88218E4B67CA0A69159FC76DBFD   2028-11-10   2026-11-17
+    sstanfield  9D72ECBEE3AA983FA8671DA511423DE08DDE052C   2028-11-19   2026-11-24
 
-Both are ed25519 primary keys that sign, each on its holder's YubiKey; their
-subkeys are not used here. The table in KEYS.md of tn-release-signing lists
-the same fingerprints. grantkee.asc held grantkee's RSA-2048 key
+All three are ed25519 primary keys that sign, each on its holder's YubiKey;
+their subkeys are not used here. The table in KEYS.md of tn-release-signing
+lists the same fingerprints. grantkee.asc held grantkee's RSA-2048 key
 4E36D35A4AB61B589861D01AC7173F2377CA7573 up to scripts-v2.1.0; that key was
 replaced by the ed25519 one and removed from tn-release-signing, and it signs
 nothing these scripts accept from scripts-v2.2.0 on.
@@ -110,8 +111,8 @@ the old expiry date: from that date gpgv reports EXPKEYSIG for every release
 signed with the key, and the scripts refuse those releases, script releases
 included. Only a script release that verifies against the copy a host already
 has can renew it, so a host that misses the window re-runs the installer,
-whose embedded keys are the renewed ones. grantkee.asc expires 2028-11-16 and
-MavenRain.asc 2028-11-10.
+whose embedded keys are the renewed ones. grantkee.asc expires 2028-11-16,
+MavenRain.asc 2028-11-10 and sstanfield.asc 2028-11-19.
 
 Adding or removing a key
 ------------------------

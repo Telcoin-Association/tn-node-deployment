@@ -294,6 +294,7 @@ declare -a SCRIPTS=(
     "lib/release-keys/README:lib/release-keys/README:NONE"
     "lib/release-keys/grantkee.asc:lib/release-keys/grantkee.asc:NONE"
     "lib/release-keys/MavenRain.asc:lib/release-keys/MavenRain.asc:NONE"
+    "lib/release-keys/sstanfield.asc:lib/release-keys/sstanfield.asc:NONE"
 )
 
 # The web UI is shipped as a bundle gated on ui/server.py's UI_VERSION. When that
