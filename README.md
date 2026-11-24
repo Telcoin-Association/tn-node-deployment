@@ -2124,17 +2124,17 @@ prints the exact fix command.
 Before the update, check that the data dir's filesystem has free space for the live pages of `db/mdbx.dat` plus a quarter plus 1 GiB: the node refuses to start with less, and update-node does not roll that back. Upstream does not support going back once a node has started v0.18.0-adiri, not even from a snapshot: fix forward.
 Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
 
-### lib/common.sh v2.2.6 — v0.18.0-adiri's committee.yaml is accepted; the v0.17.0-adiri exception is gone
+### lib/common.sh v2.2.7 — v0.18.0-adiri's committee.yaml is accepted; the v0.17.0-adiri exception is gone
 `TESTNET_COMMITTEE_SHA256` lists two accepted hashes: `009b6d7b568f7d04734b657080d55621eed70f68ecefe1284dd8cdd0f42f15ce`, the file through `v0.17.0-adiri`, and `886f016b6ce8970f3019ec8f48c0847cf113950b6dc7a7d950e3be4aac50cd1f`, the one in `v0.18.0-adiri`, which lists no bootstrap servers (telcoin-network #1848 moved them into the binary); the validators are unchanged. Docker and signed-release installs of `v0.18.0-adiri` pass the chain-config check, and the new `tn_chain_config_pin_ok` tests a hash against the list. `TESTNET_CHAIN_CONFIGS_TAG` stays `v0.16.0-adiri`, so new testnet installs keep the `committee.yaml` that names the bootstrap servers: a node these scripts start has no `--chain` and dials only the servers that file names. A running node keeps its own copy.
 `TN_UNSIGNED_RELEASE_TAG` and `tn_release_unsigned_ok` are removed: `v0.17.0-adiri` is resolved like any testnet tag without a signed release, with a warning.
 Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
 
-### setup-node v2.1.5 — the copied chain configs are checked against every accepted hash
-The check after the copy (`_setup_copied_configs_ok`) uses `tn_chain_config_pin_ok`, like the check before it, so a `--genesis-dir` the first check takes is not removed by the second. It needs lib/common.sh 2.2.6 or later.
+### setup-node v2.1.6 — the copied chain configs are checked against every accepted hash
+The check after the copy (`_setup_copied_configs_ok`) uses `tn_chain_config_pin_ok`, like the check before it, so a `--genesis-dir` the first check takes is not removed by the second. It needs lib/common.sh 2.2.7 or later.
 Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
 
 ### edit-config v2.2.3 — menu 13 compares the data dir with every accepted hash
-"Refresh chain configs" tests the three files in the node's data dir with `tn_chain_config_pin_ok`, so a data dir that holds a pinned file still gets "Nothing to refresh" now that the testnet committee pin lists two hashes. It needs lib/common.sh 2.2.6 or later.
+"Refresh chain configs" tests the three files in the node's data dir with `tn_chain_config_pin_ok`, so a data dir that holds a pinned file still gets "Nothing to refresh" now that the testnet committee pin lists two hashes. It needs lib/common.sh 2.2.7 or later.
 Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
 
 ### setup-node v2.1.5 — a node given no peers map gets the pinned bootstrap servers

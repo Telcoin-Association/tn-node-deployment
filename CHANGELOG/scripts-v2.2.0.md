@@ -14,10 +14,10 @@ that release: `scripts-v2.1.0` cannot check its signature (the RSA key is gone, 
 [The release keys](#the-release-keys)), and the chain-config pin did not match its
 `committee.yaml`, whose bootstrap servers moved into the binary. The committee pin now accepts
 that file beside the earlier one, and new testnet installs keep the earlier one, which names the
-bootstrap servers (see [lib/common 2.2.6](#libcommon-226)). `0.18.0` is a one-way floor: the
+bootstrap servers (see [lib/common 2.2.7](#libcommon-227)). `0.18.0` is a one-way floor: the
 execution database moves from MDBX to tn-lmdb on the release's first start (see
 [update-node 2.1.3](#update-node-213)). The exception for the unsigned `v0.17.0-adiri` is removed
-(see [lib/common 2.2.6](#libcommon-226)).
+(see [lib/common 2.2.7](#libcommon-227)).
 
 One fix reaches every operator, gateway or not: `firewall-setup.sh` now compares the sources of
 `--ssh-from` and `--p2p-from` the way `ufw` stores them. Re-entering a source in another spelling
@@ -29,7 +29,7 @@ whose testnet `committee.yaml` stopped matching the pinned sha256 on 2026-11-14,
 Docker, signed-release and existing-binary installs have failed since then, at step 4 of 8, before
 any key is made. Setup and edit-config's menu 13
 now read the three files from the tag this release pins, `v0.16.0-adiri`, and never from a branch
-(see [lib/common 2.2.6](#libcommon-226)). Before a host takes this release, a testnet install on
+(see [lib/common 2.2.7](#libcommon-227)). Before a host takes this release, a testnet install on
 `scripts-v2.1.0` works with `--genesis-dir <dir>`, where `<dir>` holds the three files of
 `chain-configs/testnet` at `v0.16.0-adiri`. The tag stays `v0.16.0-adiri` with `v0.18.0-adiri` out:
 a node these scripts start reads its bootstrap servers from its `committee.yaml`, and the file of
@@ -37,17 +37,17 @@ a node these scripts start reads its bootstrap servers from its `committee.yaml`
 telcoin-network release that keeps the testnet bootstrap servers in their own file,
 `bootstrap_servers.yaml`, instead of in `committee.yaml`: once a later scripts release pins that
 file, a new testnet node given no `--bootstrap-peers` map gets it as its map (see
-[setup-node 2.1.5](#setup-node-215)). While the tag is `v0.16.0-adiri` nothing changes.
+[setup-node 2.1.6](#setup-node-216)). While the tag is `v0.16.0-adiri` nothing changes.
 
 The hardware check compared every host with the mainnet figures, so it warned "below minimum" on
 the machines the testnet validators run on. It now compares the host with the tiers of the
 network chosen, and the testnet tiers follow those validators (see
-[lib/common 2.2.6](#libcommon-226)); the Node Manager UI's setup preflight does the same for the
+[lib/common 2.2.7](#libcommon-227)); the Node Manager UI's setup preflight does the same for the
 wizard's network. The check still only warns. The AWS one-click stack's `Validator` preset moves
 to `c7i.2xlarge`, and its data volume defaults to 500 GiB at 15,000 IOPS.
 
 The mainnet chain id is 731 (`0x2db`), as on telcoin-network main since #1716; it was 487, which
-upstream devnet genesis files use now (see [lib/common 2.2.6](#libcommon-226)). Mainnet has not
+upstream devnet genesis files use now (see [lib/common 2.2.7](#libcommon-227)). Mainnet has not
 launched and stays switched off, so no running node changes.
 
 The release keys change, for every operator. grantkee's RSA key, the only key of
@@ -69,8 +69,8 @@ systemd 255).
 | edit-config | 2.2.3 |
 | update-scripts | 2.2.0 |
 | update-node | 2.1.3 |
-| setup-node | 2.1.5 |
-| lib/common (`COMMON_VERSION`) | 2.2.6 |
+| setup-node | 2.1.6 |
+| lib/common (`COMMON_VERSION`) | 2.2.7 |
 | telcoin-ui (`UI_VERSION`) | 2.1.3 |
 | Release keys (`lib/release-keys/*.asc`) | grantkee `95A38484E1CBD31D773F6AF928FD56AD2F9FAE47` (replaces `4E36D35A4AB61B589861D01AC7173F2377CA7573`), MavenRain `32F886ADE9C3A88218E4B67CA0A69159FC76DBFD` (new) |
 | `tn-p2p-allow-sync` (pinned in lib/common) | v0.1.2 (was v0.1.1) |
@@ -239,7 +239,7 @@ Every other script, library and UI file keeps its version. The runbook for the g
   installs, the pull moved the checkout to the branch's tip, and the copy was then refused because
   that branch no longer matches the pins.
   On a network with a pinned tag the menu now installs the pinned files through
-  `tn_chain_configs_from_tag` (see [lib/common 2.2.6](#libcommon-226)) and copies them from
+  `tn_chain_configs_from_tag` (see [lib/common 2.2.7](#libcommon-227)) and copies them from
   `/etc/telcoin/chain-configs/<network>/`; it runs no pull and no submodule command. The menu
   label reads "(pinned genesis/committee/parameters)".
 - When the node's data dir already holds the pinned files (hashed as the service user), the menu
@@ -320,7 +320,7 @@ Every other script, library and UI file keeps its version. The runbook for the g
 - Comments: the chain-id comments name 731 for mainnet, and the comment on the update lock no
   longer names a `git pull`, since none runs in update-node.
 
-### setup-node 2.1.5
+### setup-node 2.1.6
 
 - The check after the copy (`_setup_copied_configs_ok`) takes the same hashes as the check before
   it (`tn_chain_config_pin_ok`); an exact comparison with the committee list would have removed
@@ -358,7 +358,7 @@ Every other script, library and UI file keeps its version. The runbook for the g
 - `--help` names Ubuntu 26.04 as the recommended OS for mainnet (systemd 255 or later, so
   Ubuntu 24.04 or later).
 
-### lib/common 2.2.6
+### lib/common 2.2.7
 
 - The testnet `committee.yaml` pin accepts the file of `v0.18.0-adiri`: `TESTNET_COMMITTEE_SHA256`
   lists `009b6d7b…f15ce`, the file through `v0.17.0-adiri`, and `886f016b…50cd1f`, the one in

@@ -7,7 +7,7 @@ For recent entries (v1.1.40 onwards), see the Changelog section of README.md.
 
 ## Unreleased
 
-### Node release v0.18.0-adiri, November 2026 -- lib/common 2.2.6, update-node 2.1.3, setup-node 2.1.5, edit-config 2.2.3
+### Node release v0.18.0-adiri, November 2026 -- lib/common 2.2.7, update-node 2.1.3, setup-node 2.1.6, edit-config 2.2.3
 Part of `scripts-v2.2.0`; see [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
 The scripts take telcoin-network `v0.18.0-adiri`. Its testnet `committee.yaml` lists no bootstrap
 servers (`bootstrap_servers: {}`), because telcoin-network #1848 moved them into the binary;
