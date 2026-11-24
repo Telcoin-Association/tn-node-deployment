@@ -304,6 +304,24 @@ ARGS_SH_NONE="--listen-addr 0.0.0.0:8655 --probe-addr 127.0.0.1:8656 --metrics 1
 ARGS_SA_CADDY="--listen-addr 127.0.0.1:8655 --probe-addr 127.0.0.1:8656 --metrics 127.0.0.1:9655 --upstream-rpc-url http://10.0.0.12:8545 --upstream-readiness-url http://10.0.0.12:43174/health/workers --worker-id 0 --redirect-queries ${RQ} --trusted-proxies 127.0.0.1/32"
 
 # =============================================================================
+# library: the pins this scripts release ships
+# =============================================================================
+for sp_nw in testnet:TESTNET mainnet:MAINNET; do
+    sp_net="${sp_nw%%:*}"
+    sp_pin_var="GW_${sp_nw#*:}_IMAGE_PIN" sp_rel_var="GW_${sp_nw#*:}_PIN_RELEASE"
+    sp_pin="${!sp_pin_var}" sp_rel="${!sp_rel_var}"
+    check "shipped pins: the ${sp_net} pin and its release are set together or not at all" yes \
+        "$([[ -z "$sp_pin" && -z "$sp_rel" || -n "$sp_pin" && -n "$sp_rel" ]] && echo yes || echo no)"
+    if [[ -n "$sp_pin" || -n "$sp_rel" ]]; then
+        rc=0; _gw_pin_ok "$sp_net" "$sp_pin" "$sp_rel" || rc=$?
+        check_rc "shipped pins: the ${sp_net} pin and its release pass _gw_pin_ok" 0 "$rc" || printf '      %s\n' "$GW_ERR"
+    fi
+done
+# The cases below start with no pin on either network and set the pins they need.
+GW_TESTNET_IMAGE_PIN="" GW_TESTNET_PIN_RELEASE=""
+GW_MAINNET_IMAGE_PIN="" GW_MAINNET_PIN_RELEASE=""
+
+# =============================================================================
 # library: the argument line and the unit text
 # =============================================================================
 host "$NODE"
