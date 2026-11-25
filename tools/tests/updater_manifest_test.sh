@@ -411,10 +411,33 @@ check "expired release key: the reinstall hint, once" "1 1" "$(ri_hint_count)"
 publish_signed key1 kexp
 refused "expired release key beside a good one"
 says "expired release key beside a good one" "which has expired"
+check "expired release key beside a good one: the reinstall hint, once" "1 1" "$(ri_hint_count)"
 publish_signed krev
 refused "revoked release key"
 says "revoked release key" "(it is signed by release key $(fpr_of krev | cut -c25-40), which has been revoked)"
-check "revoked release key: the reinstall hint, once" "1 1" "$(ri_hint_count)"
+check "revoked release key: no reinstall hint (the installer verifies with the same key and refuses too)" "0 0" "$(ri_hint_count)"
+# Verdicts the signing helpers cannot make (an expired signature, an ERRSIG
+# other than a missing key) come from a gpgv stand-in first on PATH. Neither is
+# a problem of the key set on this host, so neither gets the hint.
+gpgv_says() {   # gpgv_says LINE -- the stand-in reports one signature with status LINE
+    mkdir -p "$T/gpgv-stub"
+    printf '#!/bin/sh\necho "[GNUPG:] NEWSIG"\necho "[GNUPG:] %s"\nexit 2\n' "$1" > "$T/gpgv-stub/gpgv"
+    chmod +x "$T/gpgv-stub/gpgv"
+}
+SAVED_PATH="$PATH"
+PATH="$T/gpgv-stub:$PATH"
+publish_signed key1
+gpgv_says "EXPSIG ${FPR1:24} fake"
+refused "expired signature"
+says "expired signature" "(the signature by key ${FPR1:24} has expired)"
+check "expired signature: no reinstall hint (the installer checks the same signature)" "0 0" "$(ri_hint_count)"
+publish_signed key1
+gpgv_says "ERRSIG ${FPR1:24} 22 10 00 1793750400 4 ${FPR1}"
+refused "signature gpgv cannot check"
+says "signature gpgv cannot check" "(gpgv could not check the signature by key ${FPR1:24} (error 4))"
+check "signature gpgv cannot check: no reinstall hint (not a missing key)" "0 0" "$(ri_hint_count)"
+PATH="$SAVED_PATH"
+rm -rf "$T/gpgv-stub"
 publish_signed key1 key3
 run_updater y
 check_rc "two release keys: exits 0" 0 "$RC"
@@ -500,6 +523,7 @@ publish "$R2" scripts-v1.1.0
 run_updater y
 check_rc "bootstrap: exits 0" 0 "$RC"
 says "bootstrap" "First signed release on this host: fetching the release keys through their published checksums (one time only)."
+check_has "bootstrap: names the key that signed" "  [OK]  Release manifest signed by release key ${FPR1}" "$(plain "$OUT")"
 check "bootstrap: release key installed" "$(_h "$R2/lib/release-keys/key1.asc")" "$(_h "$INST/lib/release-keys/key1.asc" 2>/dev/null)"
 check "bootstrap: release recorded" "$(_h "$R2/MANIFEST")" "$(_h "$INST/MANIFEST" 2>/dev/null)"
 check "bootstrap: no staging dir left" "" "$(cd "$INST" && find . -name '.tn-update.*')"
@@ -542,6 +566,7 @@ BF="$SRC/bootforeign"; cp -R "$R2" "$BF"; sign "$BF" key2
 publish "$BF" scripts-v1.1.0
 refused "bootstrap: signed by another key"
 says "bootstrap: signed by another key" "no release key in lib/release-keys made a good signature"
+check "bootstrap: signed by another key: no reinstall hint (the installer embeds the same keys)" "0 0" "$(ri_hint_count)"
 
 install_release "$R1"
 rm -f "$INST"/lib/release-keys/*.asc

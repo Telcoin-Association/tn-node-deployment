@@ -642,11 +642,13 @@ check_boot_keys() {
 # good signatures over MANIFEST by at least TN_SIG_THRESHOLD of the release
 # keys in KEYDIR/*.asc (see RELEASE SIGNATURES). Prints the fingerprints that
 # signed unless the 4th argument is quiet. When it refuses because no release
-# key made a good signature (NOSIG) or the signing key has expired (EXPKEYSIG)
-# or been revoked (REVKEYSIG), the key set on this host is the problem, so it
-# prints reinstall_hint after the error, unless the 5th argument is nohint (the
-# caller prints the hint itself). A signature that does not match MANIFEST
-# (BADSIG: a file was changed), EXPSIG and ERRSIG get no hint.
+# key made a good signature (NOSIG) or the signing key has expired (EXPKEYSIG),
+# the key set on this host may be older than the installer's, so it prints
+# reinstall_hint after the error, unless the 5th argument is nohint (the caller
+# prints the hint itself, or KEYDIR holds the release's own keys, which its
+# installer embeds too). A revoked signing key (REVKEYSIG) gets no hint: the
+# installer verifies with the same key and refuses too. A signature that does
+# not match MANIFEST (BADSIG: a file was changed), EXPSIG and ERRSIG get none.
 verify_manifest() {
     local kr verdict err rc=0
     if ! command -v gpgv >/dev/null 2>&1; then
@@ -666,7 +668,7 @@ verify_manifest() {
         print_error "The release manifest is not signed by a Telcoin release key ($(tn_sig_reason "$verdict")); nothing was changed."
         if [[ "${5:-}" != "nohint" ]]; then
             case "${verdict%% *}" in
-                NOSIG|EXPKEYSIG|REVKEYSIG) reinstall_hint ;;
+                NOSIG|EXPKEYSIG) reinstall_hint ;;
             esac
         fi
         return 1
@@ -1006,7 +1008,7 @@ warn_expired() {
 }
 
 run_update() {
-    local keys choice i ui_changed=false alerts_changed=false gateway_changed=false svc
+    local keys nohint="" choice i ui_changed=false alerts_changed=false gateway_changed=false svc
 
     print_info "Checking for a signed script release..."
     print_info "Repository: ${TN_REPO_RAW}"
@@ -1040,9 +1042,12 @@ run_update() {
         fi
         bootstrap_keys "$RELEASE_TAG" || exit 1
         keys="$BOOT_KEYS"
+        # The release's own keys, which its installer embeds too: re-installing
+        # cannot get past a refusal, so no reinstall hint.
+        nohint=nohint
     fi
 
-    verify_manifest "${STAGE}/MANIFEST" "${STAGE}/${TN_SIG_FILE}" "$keys" || exit 1
+    verify_manifest "${STAGE}/MANIFEST" "${STAGE}/${TN_SIG_FILE}" "$keys" "" "$nohint" || exit 1
     parse_manifest "${STAGE}/MANIFEST" || exit 1
     if [[ "$M_RELEASE" != "$RELEASE_TAG" ]]; then
         print_error "The manifest is for ${M_RELEASE}, but RELEASE names ${RELEASE_TAG}: refusing; nothing was changed."
