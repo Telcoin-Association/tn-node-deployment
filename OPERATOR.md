@@ -1802,6 +1802,7 @@ A batch that mixes submissions with other calls goes whole to the query endpoint
 What it is not.
 It has no TLS, no WebSocket and no authentication of its own.
 It limits each client IP address to 100 requests a second and 32 open connections.
+It keeps 300 submissions a second (burst 600) for single `eth_sendRawTransaction` calls out of its global bucket of 3000 requests a second, so a flood of queries cannot starve submissions; `--rate-limit-submissions N` changes that number and `0` turns the reservation off.
 It never stops, starts or restarts the node, and `setup-gateway.sh` never edits the node's launch file, `.node-meta` or a firewall rule.
 It runs on testnet, from the image this scripts release pins, and on devnets; mainnet refuses it until a scripts release pins a mainnet image (see Images below).
 
@@ -1820,6 +1821,7 @@ And a front with `--front`:
 The gateway has two more listeners, on `127.0.0.1` only: the probe listener on 8656 (`/health`, `/ready`, `/ready/any`) and the metrics listener on 9655.
 `--listen-port`, `--probe-port` and `--metrics-port` change the three; they must differ from each other and, on a node host, from the node's RPC and health ports.
 `--redirect-queries` takes `http(s)://host[:port][/path]` with a hostname or an IPv4 address, and is refused when it points at the worker's RPC or readiness port, or at one of the gateway's own ports on this host, because the gateway refuses to start with such a URL.
+`--rate-limit-submissions N` takes a whole number of submissions a second, `0` to `999999`; the default is 300.
 
 Images.
 The gateway runs from a Docker image given by digest, `<repository>@sha256:<64 lowercase hex>`; a tag is refused.
@@ -2100,6 +2102,11 @@ With `--front none` the gateway trusts no proxy unless you give `--trusted-proxi
 An upstream RPC node, wallet backend or relay that forwards many users' transactions through the gateway is one client: 100 requests a second and 32 connections for all of them.
 A batch of K calls costs K requests.
 After a `429` the gateway closes the connection, so the client has to reconnect.
+The gateway also has one global bucket of 3000 requests a second for all clients together.
+Out of it the gateway keeps a reservation for single `eth_sendRawTransaction` calls: 300 a second with a burst of 600, so a flood of queries that empties the global bucket still lets submissions through, and a submission over the reservation gets a `429` while queries still pass.
+With N gateways in front of one worker, the worker receives up to N times 300 submission requests a second.
+To change it, run `setup-gateway.sh --enable` again with the full set of options and `--rate-limit-submissions N`; `0` turns the reservation off.
+A gateway that scripts-v2.2.0 enabled gets the reservation on its next `setup-gateway.sh --refresh`; until then `--status` says the unit differs from `gateway.meta`.
 
 The files:
 
@@ -2127,7 +2134,7 @@ Troubleshooting.
 | The same, and `check-node.sh` says the node's launch line has no `--healthcheck` | The node serves no health endpoint. | Add `--healthcheck 43174` to the node command (step 1 of the same-host steps). |
 | The same, standalone | The validator's health check or RPC listens on `127.0.0.1`, or `ufw` does not admit the gateway host. | On the validator: `check-node.sh`, then the `firewall-setup.sh --gateway-from` and `edit-config.sh --set gateway_upstream` steps. |
 | Reads get `502` (`-32001`) or `504` (`-32002`) while submissions work | The query endpoint is down or unreachable from the gateway host. | Check the `--redirect-queries` URL from the gateway host; change it with `setup-gateway.sh --enable` and the full set of options. |
-| `429` (`-32006`) | A client went over 100 requests a second, or behind a load balancer every client looks like the balancer. | Spread the load, or with `--front none` give the balancer's range with `--trusted-proxies`. |
+| `429` (`-32006`) | A client went over 100 requests a second, or behind a load balancer every client looks like the balancer. Submissions alone get it when they went over the reservation (300 a second by default) while queries still pass. | Spread the load, or with `--front none` give the balancer's range with `--trusted-proxies`. For submissions alone, raise `--rate-limit-submissions` with `setup-gateway.sh --enable`. |
 | A `tn_*` call gets `403` (`-32011`, `method not allowed through this gateway`) | The gateway runs without a query endpoint. A gateway these scripts install always has one and sends `tn_*` calls there. | Check that `telcoin-gateway.service` is the unit these scripts wrote (`setup-gateway.sh --status`, issue lines). |
 | `405` | A `GET` or a WebSocket upgrade. | Send JSON-RPC as `POST`; the gateway has no WebSocket. |
 | `413` | The request body is too large. | Send smaller requests. |

@@ -2256,6 +2256,17 @@ mainnet) are unchanged. Full release note:
 Ubuntu 26.04 LTS is the recommended OS; 24.04 stays supported. `--help` says so for mainnet,
 which still needs systemd 255 or later.
 
+### setup-gateway v2.3.0 -- the worker gateway's submission reservation is on
+`setup-gateway.sh` 2.3.0, with `lib/gateway.sh` 2.3.0, gains `--rate-limit-submissions N`: the
+submissions a second the gateway keeps for single `eth_sendRawTransaction` calls out of its global
+bucket, so a flood of queries cannot starve them. The default is 300 (burst 600); `0` turns the
+reservation off. The value lives in `gateway.meta` as `RATE_LIMIT_SUBMISSIONS`. A `gateway.meta`
+from scripts-v2.2.0 has no such line: it loads with the default, `--status` says the unit differs,
+and `--refresh` writes the key and the flag with one restart. `--rate-limit-submissions` joins
+`GW_REQUIRED_FLAGS`, so an image whose `--help` lacks it is refused: the testnet pin
+`v0.18.0-adiri` has it, and a mainnet pin must be a release that has it. The default is not
+load-tested (issue #83).
+
 ### setup-gateway v2.2.0 — the worker gateway, a public JSON-RPC front for transaction submissions (new)
 `setup-gateway.sh` 2.2.0, with `lib/gateway.sh` 2.2.0 (`GATEWAY_VERSION`), is new. It runs
 telcoin-network's worker gateway as `telcoin-gateway.service`: a transaction submission goes to

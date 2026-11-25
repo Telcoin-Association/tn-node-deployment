@@ -7,6 +7,17 @@ For recent entries (v1.1.40 onwards), see the Changelog section of README.md.
 
 ## Unreleased
 
+### Worker gateway submission reservation on, November 2026 -- setup-gateway 2.3.0, lib/gateway 2.3.0
+Not yet in a scripts release.
+`setup-gateway.sh --rate-limit-submissions N` sets the submissions a second the worker gateway
+keeps for single `eth_sendRawTransaction` calls out of its global bucket of 3000 requests a
+second; the default is 300 (burst 600), and `0` turns the reservation off. The gateway binary
+ships with it off, so every gateway these scripts installed shared one bucket between queries and
+submissions (Telcoin-Association/telcoin-network#1902 and #1625; this repository's #83).
+`gateway.meta` gains `RATE_LIMIT_SUBMISSIONS`; a file from scripts-v2.2.0 loads with the default
+and `--refresh` writes the key and the flag. `--rate-limit-submissions` joins `GW_REQUIRED_FLAGS`,
+so a pin must be a release whose `--help` lists it: the testnet pin `v0.18.0-adiri` does.
+
 ### Testnet worker-gateway pin, a third release key and the updater's installer hint, November 2026 -- lib/gateway 2.2.0, update-scripts 2.2.0
 Part of `scripts-v2.2.0`; see [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
 `lib/gateway.sh` pins the testnet worker-gateway image: `GW_TESTNET_IMAGE_PIN` is
