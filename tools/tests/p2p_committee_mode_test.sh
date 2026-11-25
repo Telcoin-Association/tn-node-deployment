@@ -38,9 +38,15 @@
 # result=unchanged failing on and sync, the host baseline after an install or
 # upgrade on every return, TN_BLS_PASSPHRASE kept from the tool, the mode of a
 # lock off creates, the status report, off (the
-# kill switch: user.rules and the limit files byte-identical to before on, with
-# and without a static list, the binary, units and state dir gone, no tool
-# call, under flock -w 30), on refusals that change nothing (no snapshot, no
+# kill switch: user.rules and the limit files byte-identical to before on
+# without a static list, and with one the open rules and the limit of a host
+# without a list, P2P_ALLOW_FROM kept and set aside by P2P_PER_SOURCE=off until
+# --enable --p2p-from, the binary, units and state dir gone, no tool call,
+# under flock -w 30; a stored list it cannot use only warns, every open rule
+# goes in before any per-source rule goes and a failed ufw call is carried past
+# and named, the table goes without a lock it cannot take, and an unfinished
+# off is never undone by --enable, --reset, sync or on), on refusals that
+# change nothing (no snapshot, no
 # node, ufw inactive, no /usr/sbin/nft with an nft on PATH, no nft on PATH, no
 # flock, an older library, a refused install), the reason texts (the
 # rpc-method-missing line byte for byte, the four reasons the report warns of at
@@ -443,6 +449,51 @@ TN_P2P_STUB_RC_SYNC=3 run fw_committee_on
 check_rc "on while on: stale resync rc 0" 0 "$RC"
 check "on while on: one plain sync" "--state-dir ${D} capture-floor ${R}/etc/telcoin/bootstrap-peers.yaml
 --state-dir ${D} sync --wait 30" "$(reclog)"
+# a resync whose floor would lose an address it has keeps the saved floor (no
+# capture into the state dir), names the address and --accept-floor-shrink, and
+# still rewrites the units and syncs with that floor: rc 4, quiet or not, and 4
+# over a stale or busy sync; on while on is rc 0. With that flag (FW_FLOOR_SHRINK)
+# the capture goes through, and so does one whose floor only grows
+printf '# floor 1\n192.0.2.50\n198.18.0.77\n' > "$D/floor"
+rm -f "$REC.log" "$SYNCU"
+TN_P2P_STUB_FLOOR="# floor 1
+192.0.2.50" run fw_committee_sync
+check_rc "sync, the floor would shrink: rc 4" 4 "$RC"
+check_in "sync, the floor would shrink: the address named, the sync goes on" "so it keeps 198.18.0.77: none of the files it is taken from (/etc/telcoin/bootstrap-peers.yaml) holds them now. The sync goes on with the floor it had, so they stay allowed" "$OUT"
+check_in "sync, the floor would shrink: the flag named" "firewall-setup.sh --p2p-committee sync --accept-floor-shrink" "$OUT"
+check_lacks "sync, the floor would shrink: never says the inputs were not written" "inputs could not be written" "$OUT"
+check "sync, the floor would shrink: no capture into the state dir, one sync, the floor kept, the unit rewritten" "0|1|192.0.2.50 198.18.0.77|yes" \
+    "$(reclog | grep -c -- "^--state-dir ${D} capture-floor")|$(reclog | grep -c -- "^--state-dir ${D} sync --wait 30$")|$(grep -v '^#' "$D/floor" | tr '\n' ' ' | sed 's/ $//')|$([[ -e "$SYNCU" ]] && echo yes || echo no)"
+check_in "sync, the floor would shrink: the sync's own line" "P2P committee allowlist applied: epoch 42" "$OUT"
+TN_P2P_STUB_FLOOR="# floor 1
+192.0.2.50" run fw_committee_sync quiet
+check "sync quiet, the floor would shrink: rc 4, still said" "4|yes" "$RC|$(grep -qF 'so it keeps 198.18.0.77' <<< "$OUT" && echo yes || echo no)"
+TN_P2P_STUB_RC_SYNC=3 TN_P2P_STUB_OUT_SYNC="result=stale reason=rpc-unreachable epoch=42 v4=10 v6=2 static=0 floor=1 keys=7 dns_skipped=0 unparsed=0" \
+    TN_P2P_STUB_FLOOR="# floor 1
+192.0.2.50" run fw_committee_sync
+check_rc "sync, the floor would shrink, stale: rc 4" 4 "$RC"
+TN_P2P_STUB_RC_SYNC=2 TN_P2P_STUB_FLOOR="# floor 1
+192.0.2.50" run fw_committee_sync
+check_rc "sync, the floor would shrink, the sync fails: rc 2" 2 "$RC"
+rm -f "$REC.log"
+TN_P2P_STUB_FLOOR="# floor 1
+192.0.2.50" run fw_committee_on
+check "on while on, the floor would shrink: rc 0, one sync, the floor kept" "0|1|192.0.2.50 198.18.0.77" \
+    "$RC|$(reclog | grep -c -- "^--state-dir ${D} sync --wait 30$")|$(grep -v '^#' "$D/floor" | tr '\n' ' ' | sed 's/ $//')"
+rm -f "$REC.log"
+FW_FLOOR_SHRINK=true TN_P2P_STUB_FLOOR="# floor 1
+192.0.2.50" run fw_committee_sync
+check_rc "sync --accept-floor-shrink: rc 0" 0 "$RC"
+check "sync --accept-floor-shrink: one capture, one sync, the smaller floor" "--state-dir ${D} capture-floor ${R}/etc/telcoin/bootstrap-peers.yaml
+--state-dir ${D} sync --wait 30|192.0.2.50" "$(reclog)|$(grep -v '^#' "$D/floor")"
+rm -f "$REC.log"
+TN_P2P_STUB_FLOOR="# floor 1
+192.0.2.50
+198.18.0.77" run fw_committee_sync
+check_rc "sync, the floor grows: rc 0" 0 "$RC"
+check "sync, the floor grows: captured, then one sync" "--state-dir ${D} capture-floor ${R}/etc/telcoin/bootstrap-peers.yaml
+--state-dir ${D} sync --wait 30" "$(reclog | sed 1d)"
+rm -f "$D/floor"
 
 # --- status report --------------------------------------------------------------------
 printf 'STATUS_VERSION=1\nRESULT=applied\nEPOCH=42\nALLOWED_V4=10\nALLOWED_V6=2\nKEYS=7\nFLOOR=1\nSTALE_SINCE=\nSTALE_REASON=\n' > "$D/status"
@@ -548,7 +599,12 @@ check_in "off again: nothing to do" "off already" "$OUT"
 rm -f "$FLOCK_HELD"
 check "lock probe: a held lock is seen" "held --version" "$(cat "$LOCK_REC")"
 
-# --- on/off with a static list: byte-identical restore ----------------------------------
+# --- on/off with a static list: off opens P2P to every source ---------------------------
+# The host took only the list on P2P before committee mode; the kill switch must
+# not cut off the committee peers the allowlist admitted, so it ends where a
+# host without a list starts: open rules and the new-flow limit.
+fixture
+open_before="$(snap)"
 fixture "P2P_ALLOW_FROM=203.0.113.0/24"
 fw_p2p_allow > /dev/null 2>&1; fw_p2p_limit_sync telcoin.service > /dev/null 2>&1; FW_P2P_LOADED=false
 before="$(snap)"
@@ -563,9 +619,137 @@ allow 49590/udp
 allow 49594/udp" "$(cat "$R/etc/ufw/user.rules")"
 check_lacks "on (list): no ufw delete" "delete" "$(cat "$UFW_LOG")"
 simulate_apply
+: > "$UFW_LOG"
 run fw_committee_off
 check_rc "off (list): rc 0" 0 "$RC"
-check "off (list): user.rules and limit files as before on" "$before" "$(snap)"
+check "off (list): open rules and the limit, as a host without a list" "$open_before" "$(snap)"
+check "off (list): every open rule goes in before any per-source rule goes" "allow 49590/udp
+allow 49594/udp
+delete allow from 203.0.113.0/24 to any port 49590 proto udp
+delete allow from 203.0.113.0/24 to any port 49594 proto udp" "$(cat "$UFW_LOG")"
+check_has "off (list): P2P_ALLOW_FROM kept" "P2P_ALLOW_FROM=203.0.113.0/24" "$(cat "$META")"
+check_has "off (list): P2P_PER_SOURCE=off recorded" "P2P_PER_SOURCE=off" "$(cat "$META")"
+check_in "off (list): says P2P is open to every source" "UDP 49590 and 49594 are open to every source" "$OUT"
+check_in "off (list): names the command that applies the list again" "--enable --p2p-from 203.0.113.0/24" "$OUT"
+check "off (list): the P2P source list of later runs is empty" "" "$(fw_sources p2p)"
+FW_P2P_FROM="198.51.100.0/24"
+check "off (list): a --p2p-from list still counts" "198.51.100.0/24" "$(fw_sources p2p)"
+FW_P2P_FROM=""
+
+# --- off without a list: no P2P_PER_SOURCE ----------------------------------------------
+fixture
+run fw_committee_on
+simulate_apply
+run fw_committee_off
+check_rc "off (no list): rc 0" 0 "$RC"
+check_lacks "off (no list): no P2P_PER_SOURCE" "P2P_PER_SOURCE" "$(cat "$META")"
+check_in "off (no list): says P2P is open to every source" "UDP 49590 and 49594 are open to every source" "$OUT"
+check_in "off (no list): names the command for a list" "--enable --p2p-from <list>" "$OUT"
+
+# --- on with a static list, a step after the sync fails: the per-source rules come back -
+# The undo of an unfinished on is not the kill switch: P2P goes back to the list.
+fixture "P2P_ALLOW_FROM=203.0.113.0/24"
+fw_p2p_allow > /dev/null 2>&1; fw_p2p_limit_sync telcoin.service > /dev/null 2>&1; FW_P2P_LOADED=false
+before="$(snap)"
+WRITE_FAIL="$SYNCU" run fw_committee_on
+check_rc "on (list) undone: rc 2" 2 "$RC"
+check "on (list) undone: user.rules and limit files as before" "$before" "$(snap)"
+check_lacks "on (list) undone: no P2P_PER_SOURCE" "P2P_PER_SOURCE" "$(cat "$META")"
+
+# --- off with a static list, .node-meta not writable: open now, P2P_COMMITTEE stays on --
+fixture
+open_before="$(snap)"
+fixture "P2P_ALLOW_FROM=203.0.113.0/24"
+fw_p2p_allow > /dev/null 2>&1; fw_p2p_limit_sync telcoin.service > /dev/null 2>&1; FW_P2P_LOADED=false
+run fw_committee_on
+simulate_apply
+WRITE_FAIL="$META" run fw_committee_off
+check_rc "off (list, meta write fails): rc 3" 3 "$RC"
+check_in "off (list, meta write fails): says P2P_PER_SOURCE=off was not written" "P2P_PER_SOURCE=off could not be written" "$OUT"
+check "off (list, meta write fails): P2P open all the same" "$open_before" "$(snap)"
+check_has "off (list, meta write fails): P2P_COMMITTEE stays on" "P2P_COMMITTEE=on" "$(cat "$META")"
+run fw_committee_off
+check_rc "off (list, meta write fails): the rerun finishes, rc 0" 0 "$RC"
+check_has "off (list, meta write fails): the rerun records P2P_PER_SOURCE=off" "P2P_PER_SOURCE=off" "$(cat "$META")"
+check_has "off (list, meta write fails): the rerun records P2P_COMMITTEE=off" "P2P_COMMITTEE=off" "$(cat "$META")"
+
+# --- off with a stored list it cannot use: P2P opens all the same -----------------------
+# off applies no list, so neither an invalid entry nor the key set twice may
+# stop it; the stored value stays as it is, and a warning says so.
+fixture
+open_before="$(snap)"
+fixture "P2P_ALLOW_FROM=203.0.113.0/24"
+fw_p2p_allow > /dev/null 2>&1; fw_p2p_limit_sync telcoin.service > /dev/null 2>&1; FW_P2P_LOADED=false
+run fw_committee_on
+simulate_apply
+meta_set P2P_ALLOW_FROM "203.0.113.0/24,10.0.0.0300" > /dev/null 2>&1
+FW_P2P_LOADED=false
+run fw_committee_off
+check_rc "off (invalid list): rc 0" 0 "$RC"
+check "off (invalid list): open rules and the limit, as a host without a list" "$open_before" "$(snap)"
+check_lacks "off (invalid list): table gone" "tn_p2p_allow" "$(nft list tables)"
+check_has "off (invalid list): P2P_COMMITTEE=off" "P2P_COMMITTEE=off" "$(cat "$META")"
+check_has "off (invalid list): the stored value stays as it was" "P2P_ALLOW_FROM=203.0.113.0/24,10.0.0.0300" "$(cat "$META")"
+check_in "off (invalid list): warns that the list is not usable" "P2P_ALLOW_FROM in .node-meta is not usable" "$OUT"
+check_lacks "off (invalid list): never offers the bad list as the way back" "--p2p-from 203.0.113.0/24,10.0.0.0300" "$OUT"
+fixture "P2P_ALLOW_FROM=203.0.113.0/24"
+fw_p2p_allow > /dev/null 2>&1; fw_p2p_limit_sync telcoin.service > /dev/null 2>&1; FW_P2P_LOADED=false
+run fw_committee_on
+simulate_apply
+printf 'P2P_ALLOW_FROM=203.0.113.0/24\n' >> "$META"
+FW_P2P_LOADED=false
+run fw_committee_off
+check_rc "off (list set twice): rc 0" 0 "$RC"
+check "off (list set twice): open rules in, per-source rules left" "allow 22/tcp
+allow from 203.0.113.0/24 to any port 49590 proto udp
+allow from 203.0.113.0/24 to any port 49594 proto udp
+allow 49590/udp
+allow 49594/udp" "$(cat "$R/etc/ufw/user.rules")"
+check_lacks "off (list set twice): table gone" "tn_p2p_allow" "$(nft list tables)"
+check "off (list set twice): the limit is back" "yes" "$([[ -e "$R/etc/telcoin/p2p-limit.nft" ]] && echo yes || echo no)"
+check_has "off (list set twice): P2P_COMMITTEE=off" "P2P_COMMITTEE=off" "$(cat "$META")"
+check "off (list set twice): both lines stay" "2" "$(grep -c '^P2P_ALLOW_FROM=' "$META")"
+check_in "off (list set twice): warns that the list is not usable" "P2P_ALLOW_FROM in .node-meta is not usable" "$OUT"
+
+# --- off: a failed ufw call does not stop the other P2P rules -----------------------------
+# A ufw shim in front of the stub refuses the one call UFW_REFUSE names. The open
+# rules were removed by hand, so the ports depend on off adding them.
+mkdir -p "$T/ufwshim"
+cat > "$T/ufwshim/ufw" <<'STUB'
+#!/bin/sh
+[ "$*" = "${UFW_REFUSE:-}" ] && exit 1
+exec "$UFW_STUB" "$@"
+STUB
+chmod +x "$T/ufwshim/ufw"
+export UFW_STUB="$T/bin/ufw"
+fixture "P2P_ALLOW_FROM=203.0.113.0/24"
+fw_p2p_allow > /dev/null 2>&1; fw_p2p_limit_sync telcoin.service > /dev/null 2>&1; FW_P2P_LOADED=false
+run fw_committee_on
+simulate_apply
+ufw delete allow 49590/udp > /dev/null; ufw delete allow 49594/udp > /dev/null; : > "$UFW_LOG"
+UFW_REFUSE="delete allow from 203.0.113.0/24 to any port 49590 proto udp" PATH="$T/ufwshim:$PATH" run fw_committee_off
+check_rc "off (a per-source delete fails): rc 3" 3 "$RC"
+check "off (a per-source delete fails): both open rules first" "allow 49590/udp
+allow 49594/udp" "$(sed -n 1,2p "$UFW_LOG")"
+check_has "off (a per-source delete fails): 49590 open" "allow 49590/udp" "$(cat "$R/etc/ufw/user.rules")"
+check_has "off (a per-source delete fails): 49594 open" "allow 49594/udp" "$(cat "$R/etc/ufw/user.rules")"
+check_lacks "off (a per-source delete fails): the next delete still ran" "allow from 203.0.113.0/24 to any port 49594 proto udp" "$(cat "$R/etc/ufw/user.rules")"
+check_lacks "off (a per-source delete fails): table gone" "tn_p2p_allow" "$(nft list tables)"
+check_has "off (a per-source delete fails): P2P_COMMITTEE=off" "P2P_COMMITTEE=off" "$(cat "$META")"
+check_in "off (a per-source delete fails): names the rule left and its delete" "Delete them with: sudo ufw delete allow from 203.0.113.0/24 to any port 49590 proto udp" "$OUT"
+fixture "P2P_ALLOW_FROM=203.0.113.0/24"
+fw_p2p_allow > /dev/null 2>&1; fw_p2p_limit_sync telcoin.service > /dev/null 2>&1; FW_P2P_LOADED=false
+run fw_committee_on
+simulate_apply
+ufw delete allow 49590/udp > /dev/null; ufw delete allow 49594/udp > /dev/null; : > "$UFW_LOG"
+UFW_REFUSE="allow 49590/udp" PATH="$T/ufwshim:$PATH" run fw_committee_off
+check_rc "off (an open rule fails): rc 3" 3 "$RC"
+check_has "off (an open rule fails): the next port still opened" "allow 49594/udp" "$(cat "$R/etc/ufw/user.rules")"
+check_has "off (an open rule fails): its per-source rule kept" "allow from 203.0.113.0/24 to any port 49590 proto udp" "$(cat "$R/etc/ufw/user.rules")"
+check_lacks "off (an open rule fails): the opened port's per-source rule gone" "allow from 203.0.113.0/24 to any port 49594 proto udp" "$(cat "$R/etc/ufw/user.rules")"
+check_lacks "off (an open rule fails): table gone, it only ever drops" "tn_p2p_allow" "$(nft list tables)"
+check_in "off (an open rule fails): names the port and the command" "ufw allow failed for UDP 49590" "$OUT"
+check_in "off (an open rule fails): the command that adds it" "--enable" "$OUT"
 
 # --- on refusals: nothing changed -------------------------------------------------------
 fixture
@@ -678,7 +862,9 @@ TN_P2P_STUB_RC_SYNC=2 run fw_committee_on
 check_rc "on: sync error rc 2" 2 "$RC"
 check "on: sync error, state dir gone" "no" "$([[ -e "$D" ]] && echo yes || echo no)"
 
-# --- off: lock not free -> partial, state stays ------------------------------------------
+# --- off: lock not free -> partial, the table goes all the same --------------------------
+# The units are stopped first, so the table is deleted without the lock; the
+# state dir stays for the rerun, and nothing reinstalls the allowlist meanwhile.
 fixture
 run fw_committee_on
 simulate_apply
@@ -686,9 +872,17 @@ FLOCK_RC=1 run fw_committee_off
 check_rc "off: lock busy rc 3" 3 "$RC"
 check "off: lock busy, state dir stays" "yes" "$([[ -d "$D" ]] && echo yes || echo no)"
 check_has "off: lock busy, P2P_COMMITTEE stays on" "P2P_COMMITTEE=on" "$(cat "$META")"
-check_has "off: lock busy, table stays" "table inet tn_p2p_allow" "$(nft list tables)"
+check_lacks "off: lock busy, table deleted without the lock" "tn_p2p_allow" "$(nft list tables)"
+check_in "off: lock busy, says the table went without the lock" "so table inet tn_p2p_allow was deleted without the lock and /var/lib/telcoin-p2p-allow was left in place" "$OUT"
+check_in "off: lock busy, names the rerun" "--p2p-committee off" "$OUT"
+run fw_committee_report
+check_in "off: lock busy, the status names the rerun of off" "a --p2p-committee off did not finish (the allowlist timer is gone; the table is gone" "$OUT"
+run fw_committee_sync quiet
+check "off: lock busy, a later quiet sync installs nothing" "no" "$([[ -e "$TIMERU" || -e "$TN_P2P_ALLOW_BIN" ]] && echo yes || echo no)"
+check_lacks "off: lock busy, a later quiet sync loads no table" "tn_p2p_allow" "$(nft list tables)"
 run fw_committee_off
 check_rc "off: rerun rc 0" 0 "$RC"
+check "off: rerun, state dir gone" "no" "$([[ -e "$D" ]] && echo yes || echo no)"
 
 # --- an in-flight on or off is finished by fw_allow_on_exit -----------------------------
 fixture
@@ -711,6 +905,19 @@ RC=0; fw_allow_on_exit 130 > "$T/out" 2>&1 || RC=$?
 check_in "on_exit (off): said" "the removal was finished" "$(cat "$T/out")"
 check_has "on_exit (off): P2P_COMMITTEE=off" "P2P_COMMITTEE=off" "$(cat "$META")"
 check "on_exit (off): state dir gone" "no" "$([[ -e "$D" ]] && echo yes || echo no)"
+# an unfinished off on a host with a static list ends open, as off does
+fixture
+open_before="$(snap)"
+fixture "P2P_ALLOW_FROM=203.0.113.0/24"
+fw_p2p_allow > /dev/null 2>&1; fw_p2p_limit_sync telcoin.service > /dev/null 2>&1; FW_P2P_LOADED=false
+run fw_committee_on
+simulate_apply
+FW_P2P_LOADED=false
+FW_ALLOW_INFLIGHT=off
+RC=0; fw_allow_on_exit 130 > "$T/out" 2>&1 || RC=$?
+check_in "on_exit (off, list): said" "the removal was finished" "$(cat "$T/out")"
+check "on_exit (off, list): open rules and the limit" "$open_before" "$(snap)"
+check_has "on_exit (off, list): P2P_PER_SOURCE=off recorded" "P2P_PER_SOURCE=off" "$(cat "$META")"
 
 # --- the sync unit hides a data dir elsewhere -------------------------------------------
 check_has "sync text: data dir elsewhere hidden" "InaccessiblePaths=/etc/telcoin -/var/lib/telcoin -/data/tn" "$(fw_allow_unit_sync_text telcoin.service /data/tn/)"
@@ -860,9 +1067,9 @@ run fw_committee_off
 # --- off opens only a missing or regular lock --------------------------------------------
 # A FIFO at the lock would block the open for good, a directory would print a raw
 # shell error (and end a POSIX-mode shell), a symlink is never followed: each is
-# refused, said, and the table and the state dir stay. A hang is cut off after
-# 10 seconds.
-LOCK_OPEN_FW="/var/lib/telcoin-p2p-allow/lock cannot be opened, so the P2P committee allowlist was left in place."
+# refused and said; the table is deleted without the lock and the state dir
+# stays. A hang is cut off after 10 seconds.
+LOCK_OPEN_FW="/var/lib/telcoin-p2p-allow/lock cannot be opened, so table inet tn_p2p_allow was deleted without the lock and /var/lib/telcoin-p2p-allow was left in place."
 for kind in fifo dir dir-posix symlink; do
     fixture; run fw_committee_on; simulate_apply
     rm -f "$D/lock"
@@ -884,8 +1091,8 @@ for kind in fifo dir dir-posix symlink; do
     check_in "off, ${kind} lock: said" "$LOCK_OPEN_FW" "$OUT"
     check_lacks "off, ${kind} lock: no raw shell error" "Is a directory" "$OUT"
     check "off, ${kind} lock: no lock taken" "" "$(flocks)"
-    check "off, ${kind} lock: the table and the state dir stay" "yes yes" \
-        "$([[ -s "$R/.nft.allow" ]] && echo yes || echo no) $([[ -d "$D" ]] && echo yes || echo no)"
+    check "off, ${kind} lock: the table goes, the state dir stays" "no yes" \
+        "$(grep -qx 'table inet tn_p2p_allow' <<< "$(nft list tables)" && echo yes || echo no) $([[ -d "$D" ]] && echo yes || echo no)"
     check "off, ${kind} lock: nothing made through a symlink" "no" "$([[ -e "$T/lock-target" ]] && echo yes || echo no)"
     rm -rf "$D/lock"
     run fw_committee_off
@@ -987,9 +1194,10 @@ drun --p2p-committee off
 check_rc "dispatch off again: rc 0" 0 "$RC"
 
 # --- dispatch: kill switch with a static list -----------------------------------------
+fixture
+open_before="$(snap)"
 fixture "P2P_ALLOW_FROM=203.0.113.0/24"
 fw_p2p_allow > /dev/null 2>&1; fw_p2p_limit_sync telcoin.service > /dev/null 2>&1; FW_P2P_LOADED=false
-before="$(snap)"
 drun --p2p-committee on
 check_rc "dispatch on (list): rc 0" 0 "$RC"
 check "dispatch on (list): open rules added, per-source rules kept" "allow 22/tcp
@@ -1002,9 +1210,20 @@ simulate_apply
 rm -f "$REC.log"
 drun --p2p-committee off
 check_rc "dispatch off (list): rc 0" 0 "$RC"
-check "dispatch off (list): user.rules and limit files byte-identical to before on" "$before" "$(snap)"
+check "dispatch off (list): open rules and the limit, as a host without a list" "$open_before" "$(snap)"
 check "dispatch off (list): never runs the tool" "" "$(reclog)"
 check "dispatch off (list): binary, state dir and units gone" "no" "$(yn allow_present)"
+check_has "dispatch off (list): P2P_ALLOW_FROM kept" "P2P_ALLOW_FROM=203.0.113.0/24" "$(cat "$META")"
+check_in "dispatch off (list): says P2P is open to every source" "UDP 49590 and 49594 are open to every source" "$OUT"
+check_in "dispatch off (list): names the command that applies the list again" "--enable --p2p-from 203.0.113.0/24" "$OUT"
+# on again: the kept list is a static entry of the allowlist once more
+drun --p2p-committee on
+check_rc "dispatch on again (list set aside): rc 0" 0 "$RC"
+check_has "dispatch on again (list set aside): static list in config" "P2P_ALLOW_FROM=203.0.113.0/24" "$(cat "$D/config")"
+simulate_apply
+drun --p2p-committee off
+check_rc "dispatch off again (list set aside): rc 0" 0 "$RC"
+check "dispatch off again (list set aside): open rules and the limit" "$open_before" "$(snap)"
 
 # --- --enable, --reset and --json with committee mode on -------------------------------
 fixture
@@ -1036,6 +1255,32 @@ check_has "enable --p2p-from (committee on): config takes the new list" "P2P_ALL
 check_lacks "enable --p2p-from (committee on): no per-source ufw rule" "198.51.100.7" "$(cat "$R/etc/ufw/user.rules")"
 check_has "enable --p2p-from (committee on): open rule kept" "allow 49590/udp" "$(cat "$R/etc/ufw/user.rules")"
 check "enable --p2p-from (committee on): limit stays off" "no" "$(yn limit_present)"
+# a floor shrink pending (an address of the saved floor no file holds now): the
+# NAT-peer remedy still finishes its resync, with the saved floor, and says so;
+# so does --p2p-committee sync, which exits 4
+printf '# floor 1\n192.0.2.50\n198.18.0.77\n' > "$D/floor"
+rm -f "$REC.log" "$SYNCU"
+TN_P2P_STUB_FLOOR="# floor 1
+192.0.2.50" drun --enable --ssh-anywhere --p2p-from 198.51.100.9
+check_rc "enable --p2p-from, a shrink pending: rc 0" 0 "$RC"
+check_has "enable --p2p-from, a shrink pending: config takes the new list" "P2P_ALLOW_FROM=198.51.100.9" "$(cat "$D/config")"
+check "enable --p2p-from, a shrink pending: no capture into the state dir, one sync, the floor kept, the unit rewritten" \
+    "0|1|192.0.2.50 198.18.0.77|yes" \
+    "$(reclog | grep -c -- "^--state-dir ${D} capture-floor")|$(reclog | grep -c -- "^--state-dir ${D} sync --wait 30$")|$(grep -v '^#' "$D/floor" | tr '\n' ' ' | sed 's/ $//')|$(yn test -e "$SYNCU")"
+check_lacks "enable --p2p-from, a shrink pending: never says the inputs were not written" "inputs could not be written" "$OUT"
+check_in "enable --p2p-from, a shrink pending: the floor kept, the sync goes on" "so it keeps 198.18.0.77: none of the files it is taken from (/etc/telcoin/bootstrap-peers.yaml) holds them now. The sync goes on with the floor it had" "$OUT"
+check_in "enable --p2p-from, a shrink pending: names --accept-floor-shrink" "--p2p-committee sync --accept-floor-shrink" "$OUT"
+rm -f "$REC.log"
+TN_P2P_STUB_FLOOR="# floor 1
+192.0.2.50" drun --p2p-committee sync
+check_rc "sync, a shrink pending: rc 4" 4 "$RC"
+check "sync, a shrink pending: one sync, the floor kept" "1|192.0.2.50 198.18.0.77" \
+    "$(reclog | grep -c -- "^--state-dir ${D} sync --wait 30$")|$(grep -v '^#' "$D/floor" | tr '\n' ' ' | sed 's/ $//')"
+rm -f "$REC.log"
+TN_P2P_STUB_FLOOR="# floor 1
+192.0.2.50" drun --p2p-committee sync --accept-floor-shrink
+check "sync --accept-floor-shrink: rc 0, the smaller floor" "0|192.0.2.50" "$RC|$(grep -v '^#' "$D/floor")"
+drun --enable --ssh-anywhere --p2p-from 198.51.100.7
 rm -f "$REC.log"
 drun --json --enable --ssh-anywhere
 check_rc "json enable (committee on): rc 0" 0 "$RC"
@@ -1045,11 +1290,103 @@ drun --json --port 49590/udp on
 check_rc "json port on (committee on, list): rc 0" 0 "$RC"
 check_in "json port on (committee on, list): done ok" '"ok":true' "$OUT"
 check_in "json status (committee on): limit reason committee" '"reason":"committee"' "$(bash "$T/fw/driver.sh" --json --status 2>/dev/null)"
+# The list was given while committee mode was on (a peer behind NAT); the kill
+# switch still leaves P2P open to every source, and every later run keeps it so.
 drun --p2p-committee off
 check_rc "off (list): rc 0" 0 "$RC"
+check "off (list given in committee mode): open P2P rules only" "allow 22/tcp
+allow 49590/udp
+allow 49594/udp" "$(cat "$R/etc/ufw/user.rules")"
+check "off (list given in committee mode): the limit is back" "yes" "$(yn limit_present)"
+drun --json --port 49590/udp on
+check_rc "json port on (after off, list set aside): rc 0" 0 "$RC"
+check_in "json status (after off): limit active" '"p2p_new_flow_limit":{"active":true' "$(bash "$T/fw/driver.sh" --json --status 2>/dev/null)"
+check_in "json status (after off): the P2P rows want anywhere" '"label":"Node P2P (primary)","source":"anywhere"' "$(bash "$T/fw/driver.sh" --json --status 2>/dev/null)"
+drun --p2p-committee status
+check_in "status (after off): says the list feeds only the allowlist" "P2P_ALLOW_FROM (198.51.100.7) feeds only the allowlist" "$OUT"
+: > "$UFW_LOG"
+drun --enable --ssh-anywhere
+check_rc "enable (after off, list set aside): rc 0" 0 "$RC"
+check "enable (after off, list set aside): P2P stays open" "allow 22/tcp
+allow 49590/udp
+allow 49594/udp" "$(cat "$R/etc/ufw/user.rules")"
+check_lacks "enable (after off, list set aside): no P2P rule deleted" "delete allow 4959" "$(cat "$UFW_LOG")"
+drun --reset --ssh-anywhere
+check "reset (after off, list set aside): P2P stays open" "allow 22/tcp
+allow 49590/udp
+allow 49594/udp" "$(cat "$R/etc/ufw/user.rules")"
+check_has "reset (after off, list set aside): P2P_PER_SOURCE=off stays" "P2P_PER_SOURCE=off" "$(cat "$META")"
+drun --enable --ssh-anywhere --p2p-from 198.51.100.7
+check_rc "enable --p2p-from (after off): rc 0" 0 "$RC"
+check "enable --p2p-from (after off): the list applied to ufw again" "allow 22/tcp
+allow from 198.51.100.7 to any port 49590 proto udp
+allow from 198.51.100.7 to any port 49594 proto udp" "$(cat "$R/etc/ufw/user.rules")"
+check_lacks "enable --p2p-from (after off): P2P_PER_SOURCE removed" "P2P_PER_SOURCE" "$(cat "$META")"
 drun --json --port 49590/udp on
 check_rc "json port on (committee off, list): refused" 1 "$RC"
 check_in "json port on (committee off, list): says why" "limited to P2P_ALLOW_FROM" "$OUT"
+
+# --- dispatch: an off that did not finish is never undone by a later run ----------------
+# off was killed right after the table delete: the units are gone, the state dir
+# and the binary stay, P2P_PER_SOURCE=off is written and P2P_COMMITTEE is still
+# on. --enable, --reset, sync, on and the status must leave the allowlist off and
+# name the rerun of off, which finishes it.
+partial_off() {
+    drun --p2p-committee on
+    simulate_apply
+    meta_set P2P_PER_SOURCE off > /dev/null 2>&1
+    FW_P2P_SRCS=(); FW_P2P_LOADED=true; fw_p2p_open > /dev/null 2>&1; fw_allow_units_remove; nft delete table inet tn_p2p_allow
+    : > "$INSTALLS"; rm -f "$REC.log"
+}
+fixture "P2P_ALLOW_FROM=203.0.113.0/24"
+fw_p2p_allow > /dev/null 2>&1; fw_p2p_limit_sync telcoin.service > /dev/null 2>&1; FW_P2P_LOADED=false
+partial_off
+for args in "--enable --ssh-anywhere" "--reset --ssh-anywhere" "--p2p-committee sync" "--p2p-committee on"; do
+    # shellcheck disable=SC2086
+    drun $args
+    check "partial off, then ${args}: no unit written again" "no" "$(yn test -e "$BOOTU" -o -e "$SYNCU" -o -e "$TIMERU")"
+    check_lacks "partial off, then ${args}: no table loaded again" "tn_p2p_allow" "$(nft list tables)"
+    check "partial off, then ${args}: no tool call, no install" "" "$(reclog)$(cat "$INSTALLS")"
+    check_in "partial off, then ${args}: says the off did not finish" "a --p2p-committee off did not finish" "$OUT"
+    check_in "partial off, then ${args}: names the rerun of off" "--p2p-committee off" "$OUT"
+    check_has "partial off, then ${args}: P2P stays open" "allow 49590/udp" "$(cat "$R/etc/ufw/user.rules")"
+done
+check_rc "partial off, then on: refused" 1 "$RC"
+drun --p2p-committee sync
+check_rc "partial off, then sync: refused, rc 5" 5 "$RC"
+drun --p2p-committee status
+check_in "partial off, status: says the off did not finish" "a --p2p-committee off did not finish (the allowlist timer is gone; the table is gone" "$OUT"
+check_lacks "partial off, status: never names sync" "--p2p-committee sync" "$OUT"
+# the table still loaded, and nft unable to list the tables: never "gone"
+nft -f - <<< "$ALLOW_PROG" > /dev/null 2>&1
+drun --p2p-committee status
+check_in "partial off, table loaded, status: says it is loaded" "the allowlist timer is gone; table inet tn_p2p_allow is still loaded" "$OUT"
+NFT_LIST_FAIL=1 drun --p2p-committee status
+check_in "partial off, nft cannot list, status: not checked" "the allowlist timer is gone; nft could not list the tables, so whether table inet tn_p2p_allow is still loaded was not checked" "$OUT"
+check_lacks "partial off, nft cannot list, status: never says gone" "the table is gone" "$OUT"
+nft delete table inet tn_p2p_allow > /dev/null 2>&1
+drun --p2p-committee off
+check_rc "partial off, a second off: rc 0" 0 "$RC"
+check_has "partial off, a second off: P2P_COMMITTEE=off" "P2P_COMMITTEE=off" "$(cat "$META")"
+check "partial off, a second off: binary and state dir gone" "no" "$(yn allow_present)"
+# .node-meta was not writable during off: everything is removed but
+# P2P_COMMITTEE stays on and P2P_PER_SOURCE=off is missing.
+fixture "P2P_ALLOW_FROM=203.0.113.0/24"
+fw_p2p_allow > /dev/null 2>&1; fw_p2p_limit_sync telcoin.service > /dev/null 2>&1; FW_P2P_LOADED=false
+drun --p2p-committee on
+simulate_apply
+WRITE_FAIL="$META" drun --p2p-committee off
+check_rc "off, meta not writable: rc 3" 3 "$RC"
+: > "$INSTALLS"; rm -f "$REC.log"
+drun --enable --ssh-anywhere
+check "off, meta not writable, then --enable: no tool installed again" "no" "$(yn allow_present)"
+check_lacks "off, meta not writable, then --enable: no table" "tn_p2p_allow" "$(nft list tables)"
+check "off, meta not writable, then --enable: no install" "" "$(cat "$INSTALLS")"
+check_has "off, meta not writable, then --enable: P2P stays open" "allow 49594/udp" "$(cat "$R/etc/ufw/user.rules")"
+check_in "off, meta not writable, then --enable: names the rerun of off" "a --p2p-committee off did not finish" "$OUT"
+drun --p2p-committee off
+check_rc "off, meta not writable, a second off: rc 0" 0 "$RC"
+check_has "off, meta not writable, a second off: P2P_COMMITTEE=off" "P2P_COMMITTEE=off" "$(cat "$META")"
 
 # --- dispatch: refusals change nothing -----------------------------------------------
 fixture
@@ -1121,6 +1458,8 @@ FW_SSH_ANYWHERE=false
 check_rc "preflight (committee on): rc 0" 0 "$RC"
 check "preflight (committee on): FW_COMMITTEE_ACTIVE" "true" "$FW_COMMITTEE_ACTIVE"
 FW_COMMITTEE_ACTIVE=false
+# the units on writes before P2P_COMMITTEE=on (without them it is an unfinished off)
+: > "$TIMERU"
 run view_status < /dev/null
 check_in "status screen: the committee report" "P2P committee allowlist: on" "$OUT"
 fixture

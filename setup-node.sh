@@ -79,6 +79,12 @@
 # checked, it is checked and pulled as keygen's would be, and recorded in .node-meta
 # before the config, the unit and the container. On mainnet a new image is named by
 # --release-tag only (a digest alone is taken only for a release this node recorded).
+# On mainnet an existing binary must be a mainnet build: its --version prints one empty
+# "Build Features:" line. While this release does not offer mainnet, the one mainnet
+# run it takes is the key generation ahead of genesis: --json --phase=keygen --network
+# mainnet --install-method existing --binary-path <binary> --address <validator Safe>.
+# It gets no chain configs and starts nothing; send node-info.yaml from the data dir,
+# never node-keys/ or the passphrase, and finalize once the mainnet release is out.
 #
 # NODE FLAGS (optional). Setup asks the installed release whether it knows each flag
 # given, and stops when it does not.
@@ -88,9 +94,12 @@
 #                            a YAML or JSON map keyed by BLS public key; each entry is a
 #                            node's primary and workers, as under p2p_info in its
 #                            node-info.yaml. At most 64 KiB, and readable by other users
-#                            (chmod 644): the map does not stay private. Setup checks it
-#                            with the release's own parser and installs it, world-readable,
-#                            as /etc/telcoin/bootstrap-peers.yaml; the start wrapper passes
+#                            (chmod 644): the map does not stay private. Every
+#                            network_address is an IP address (/ip4 or /ip6, UDP, QUIC
+#                            v1): the node does not resolve DNS names. Setup checks the
+#                            map with the release's own parser and installs it,
+#                            world-readable, as /etc/telcoin/bootstrap-peers.yaml; the
+#                            start wrapper passes
 #                            --bootstrap-peers "$(cat /etc/telcoin/bootstrap-peers.yaml)",
 #                            so the file is read again at every start. Without it, on a
 #                            network whose pinned chain-config tag keeps the bootstrap
@@ -109,7 +118,12 @@
 #                            data dir's network-config (admission.mode Open, Grace or
 #                            Closed) with trusted_nodes from --trusted-nodes and
 #                            committee_peers from the --bootstrap-peers map (each left
-#                            out when its flag is). Closed admits only the previous,
+#                            out when its flag is). The map goes in only when it lists
+#                            every validator of the genesis committee, this node
+#                            included, and its entry for this node holds the network
+#                            keys of node-info.yaml: the node would stop at start on
+#                            another map, so that is left out with a warning, and the
+#                            node still dials it. Closed admits only the previous,
 #                            current and next committees, the trusted nodes and the
 #                            bootstrap peers; Grace enforces nothing beyond Open and
 #                            differs only in the status the node reports. Needs a node
@@ -125,7 +139,11 @@
 #                            entry the node's primary {network_address, network_key}
 #                            and its workers by id ({<id>: {network_address,
 #                            network_key}}). At most 64 KiB, and readable by other users
-#                            (chmod 644). Setup installs it, world-readable, as
+#                            (chmod 644). Every network_address is an IP address (/ip4
+#                            or /ip6, UDP, QUIC v1): the node does not resolve DNS names.
+#                            Setup checks the map's shape before anything is written (an
+#                            entry pasted from a node-info.yaml, whose workers are a
+#                            list, is refused), installs it, world-readable, as
 #                            /etc/telcoin/trusted-nodes.yaml and writes it into
 #                            network-config under trusted_nodes.
 # In a --json finalize run, a flag left out is read back from what keygen recorded in
@@ -210,8 +228,10 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
         tn_committee_down_guard tn_service_user_ok tn_service_user_can_run tn_host_baseline_install \
         tn_docker_release_tag_for tn_release_stage tn_source_build tn_install_logrotate \
         tn_os_floor_check tn_docker_network_ok tn_release_tag_grammar tn_mainnet_enabled \
+        tn_mainnet_keygen_enabled tn_release_version_ok tn_keys_network_ok \
         tn_docker_pull_repo_ok tn_docker_pull_repos_for tn_docker_image_network_ok \
-        tn_network_config_render tn_node_supports_admission \
+        tn_network_config_render tn_node_supports_admission tn_committee_peers_check \
+        tn_trusted_nodes_shape_ok tn_map_addr_check tn_trusted_nodes_node_check tn_local_worker_count \
         tn_chain_configs_tag tn_chain_configs_dir tn_chain_configs_from_tag tn_chain_config_pin_ok \
         tn_bootstrap_servers_pin tn_bootstrap_servers_check >/dev/null; then
     _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this setup-node.sh: run update-scripts.sh and try again."
@@ -223,7 +243,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
 fi
 unset _tn_old
 
-readonly SCRIPT_VERSION="2.1.6"
+readonly SCRIPT_VERSION="2.1.7"
 readonly SERVICE_NAME="telcoin"
 # The node's role is decided on-chain from committee membership, and the dashboard's
 # validator view follows the on-chain stake status (ConsensusRegistry getValidator).
@@ -447,6 +467,8 @@ step_preflight() {
     echo ""
     print_step "Selecting network..."
     json_mode || select_network
+    # A --json run asked this before the lock (run_json_mode).
+    json_mode || setup_keys_network_check
     # After the network is chosen: check_internet probes that network's own RPC, and
     # check_hardware compares the host with that network's tiers.
     check_internet
@@ -600,6 +622,7 @@ setup_store_passphrase() {
         else
             meta_unset CREDENTIAL_PCRS "$meta" || setup_fail "Could not remove CREDENTIAL_PCRS from ${meta}."
         fi
+        SETUP_PASS_STORED=true
         print_ok "Passphrase stored as an encrypted credential (root, mode 600): ${cred}"
         return 0
     fi
@@ -610,8 +633,120 @@ setup_store_passphrase() {
     write_node_meta "PASSPHRASE_METHOD=stdin"
     meta_unset CREDENTIAL_KEY "$meta" || setup_fail "Could not remove CREDENTIAL_KEY from ${meta}."
     meta_unset CREDENTIAL_PCRS "$meta" || setup_fail "Could not remove CREDENTIAL_PCRS from ${meta}."
+    SETUP_PASS_STORED=true
     print_ok "Passphrase stored for LoadCredential (root, mode 600): ${plain}"
     return 0
+}
+
+# HUP, INT and TERM between setup_hold_signals and setup_release_signals are held: the
+# trap notes the signal, the keytool call and the steps around it finish, and
+# setup_release_signals puts back main's traps and then stops setup with that signal's
+# status, as main's trap would have. step_generate_keys holds them from storing the
+# passphrase until the new keys are checked, so a signal cannot leave keys without it.
+SETUP_PASS_STORED=false
+SETUP_HELD_SIGNAL=""
+setup_hold_signals() {
+    SETUP_HELD_SIGNAL=""
+    trap 'SETUP_HELD_SIGNAL=TERM; SETUP_SIGNAL=TERM' TERM
+    trap 'SETUP_HELD_SIGNAL=INT; SETUP_SIGNAL=INT' INT
+    trap 'SETUP_HELD_SIGNAL=HUP; SETUP_SIGNAL=HUP' HUP
+}
+setup_release_signals() {
+    trap 'SETUP_SIGNAL=TERM; exit 143' TERM
+    trap 'SETUP_SIGNAL=INT; exit 130' INT
+    trap 'SETUP_SIGNAL=HUP; exit 129' HUP
+    case "$SETUP_HELD_SIGNAL" in
+        TERM) SETUP_SIGNAL=TERM; exit 143 ;;
+        INT) SETUP_SIGNAL=INT; exit 130 ;;
+        HUP) SETUP_SIGNAL=HUP; exit 129 ;;
+    esac
+    return 0
+}
+
+# setup_keygen_undo -- a keygen whose new keys are not usable takes back what it made:
+# node-keys/ and node-info.yaml (removed by the service user, whose files they are) and
+# the passphrase setup_store_passphrase stored for them, with its .node-meta record, so
+# the host is as before the keytool ran and keygen can run again. Never fails.
+setup_keygen_undo() {
+    local k
+    tn_as_service_user rm -rf -- "${DATA_DIR}/node-keys" "${DATA_DIR}/node-info.yaml" || true
+    _tn_shred "${CONFIG_DIR}/bls-passphrase.cred"
+    _tn_shred "${CONFIG_DIR}/bls-passphrase"
+    for k in PASSPHRASE_METHOD CREDENTIAL_KEY CREDENTIAL_PCRS; do
+        meta_unset "$k" "${CONFIG_DIR}/.node-meta" 2>/dev/null || true
+    done
+    SETUP_PASS_STORED=false
+    return 0
+}
+
+# setup_keys_found DATA_DIR -- what an earlier keygen left in DATA_DIR and what the
+# operator does with it, as one or more sentences on stdout: the key (node-keys/bls.kw),
+# node-info.yaml and the passphrase stored the way .node-meta's PASSPHRASE_METHOD says.
+# All three: nothing to generate. The key and node-info.yaml without the passphrase (a
+# run stopped between the two, by an older release or by KILL or a power loss): the
+# keys open only with the passphrase typed for that run, so store it if it is still at
+# hand, else remove them, generate again and send the new node-info.yaml. Anything
+# else: the keytool did not finish and its keys were never reported, so remove them.
+setup_keys_found() {
+    local dd="$1" meta="${CONFIG_DIR}/.node-meta" pm="" key="" pass=no
+    pm="$(meta_get PASSPHRASE_METHOD "$meta" 2>/dev/null)" || pm=""
+    case "$pm" in
+        credential) [[ -f "${CONFIG_DIR}/bls-passphrase.cred" ]] && pass=yes ;;
+        stdin|loadcredential) [[ -f "${CONFIG_DIR}/bls-passphrase" ]] && pass=yes ;;
+    esac
+    if [[ ! -f "${dd}/node-keys/bls.kw" || ! -f "${dd}/node-info.yaml" ]]; then
+        printf 'An earlier keygen did not finish: it left no complete key set (node-keys/bls.kw and %s), and keys it did not finish were never reported. Remove %s and %s (sudo rm -rf), then run keygen again.' \
+            "${dd}/node-info.yaml" "${dd}/node-keys" "${dd}/node-info.yaml"
+        return 0
+    fi
+    if [[ "$pass" == "yes" ]]; then
+        printf 'An earlier keygen left the keys, %s and the stored passphrase (PASSPHRASE_METHOD=%s), all in place: there is nothing to generate. Use that node-info.yaml, and finalize this host when its release is out.' "${dd}/node-info.yaml" "$pm"
+        return 0
+    fi
+    key="$(meta_get CREDENTIAL_KEY "$meta" 2>/dev/null)" || key=""
+    printf 'An earlier keygen left the keys and %s but no stored passphrase (no PASSPHRASE_METHOD, or its file is missing): it stopped before it stored the passphrase, and the keys open only with the passphrase typed for that run. If you still have it, store it as OPERATOR.md section 2.12 shows (systemd-creds encrypt --name=bls-passphrase --with-key=%s - %s, then PASSPHRASE_METHOD=credential and CREDENTIAL_KEY=%s in %s). Otherwise remove %s and %s (sudo rm -rf), run keygen again, and send the new node-info.yaml in place of any you sent.' \
+        "${dd}/node-info.yaml" "${key:-host+tpm2}" "${CONFIG_DIR}/bls-passphrase.cred" "${key:-host+tpm2}" "$meta" "${dd}/node-keys" "${dd}/node-info.yaml"
+}
+
+# setup_keygen_keys_refuse -- a --json keygen over a DATA_DIR that holds node-keys/
+# stops here, before anything is written, saying what it found against this run:
+# keys recorded for another network (NETWORK in .node-meta) are not this run's; a
+# node-info.yaml no execution_address (0x and 40 hex digits) can be read from (empty,
+# cut short, damaged, or a symbolic link, which is not read) is not a file to send,
+# and only a new keygen makes one (prepare-stake.sh --rotate-address reads that
+# address first); a node-info.yaml whose execution_address is not --address is not
+# the file to send for that address (its proof of possession is signed for the other
+# one), with the documented ways out; else what setup_keys_found says (the same
+# address and network, or no network recorded: all in place, no stored passphrase,
+# or an unfinished keygen). run_json_mode asks before the lock and step_generate_keys
+# again under it. No node-keys/: returns 0.
+setup_keygen_keys_refuse() {
+    local dd="$DATA_DIR" meta="${CONFIG_DIR}/.node-meta" info="${DATA_DIR}/node-info.yaml"
+    local lead rec="" have="" want="" out
+    [[ -e "${dd}/node-keys" || -L "${dd}/node-keys" ]] || return 0
+    lead="node-keys already exist at ${dd}/node-keys -- refusing to overwrite in non-interactive mode; nothing on this host was changed."
+    rec="$(meta_get NETWORK "$meta" 2>/dev/null)" || rec=""
+    if [[ -n "$rec" && "$rec" != "$NETWORK" ]]; then
+        setup_fail "${lead} They are recorded for ${rec} (NETWORK=${rec} in ${meta}) and this run is for ${NETWORK}, so they are not this run's keys and their node-info.yaml is not to be sent for it. Generate the ${NETWORK} keys on another host, or, if the ${rec} keys here are no longer wanted, remove ${dd}/node-keys and ${info} (sudo rm -rf) and run keygen again."
+    fi
+    if [[ -f "$info" && ! -L "$info" ]]; then
+        have="$(tn_node_info_field "$info" execution_address 2>/dev/null)" || have=""
+        [[ "$have" =~ ^0[xX][0-9a-fA-F]{40}$ ]] || have=""
+    fi
+    if [[ -z "$have" ]] && [[ -f "$info" || -L "$info" ]]; then
+        setup_fail "${lead} ${info} holds no execution address that can be read (it is empty, cut short or damaged, or a symbolic link, which is not read), so it is not a file to send, and prepare-stake.sh --rotate-address (OPERATOR.md 6.6) cannot sign it again, since it reads that address from it. Start over: remove ${dd}/node-keys and ${info} (sudo rm -rf), run keygen again with --address ${VALIDATOR_ADDRESS}, and send the new node-info.yaml in place of any you sent."
+    fi
+    want="$(printf '%s' "$VALIDATOR_ADDRESS" | tr 'ABCDEFX' 'abcdefx')"
+    if [[ -n "$have" && -n "$want" && "$(printf '%s' "$have" | tr 'ABCDEFX' 'abcdefx')" != "$want" ]]; then
+        out="${lead} ${info} is for the execution address ${have}, and this run asks for ${VALIDATOR_ADDRESS}: its proof of possession is signed for ${have}, so it is not the file to send for ${VALIDATOR_ADDRESS}."
+        if setup_mainnet_keygen_only; then
+            out="${out} Before genesis there is no mainnet chain for prepare-stake.sh --rotate-address (OPERATOR.md 6.6) to check, so start over: remove ${dd}/node-keys and ${info} (sudo rm -rf), run keygen again with --address ${VALIDATOR_ADDRESS}, and send the new node-info.yaml in place of any you sent."
+        else
+            out="${out} Before these keys stake, sudo bash ${SCRIPT_DIR}/prepare-stake.sh --rotate-address ${VALIDATOR_ADDRESS} signs it for that address with the same keys (OPERATOR.md 6.6); or remove ${dd}/node-keys and ${info} (sudo rm -rf) and run keygen again with that address."
+        fi
+        setup_fail "$out"
+    fi
+    setup_fail "${lead} $(setup_keys_found "$dd")"
 }
 
 # Kept keys keep their stored passphrase: an encrypted credential stays as it is; a
@@ -1162,6 +1297,36 @@ _preflight_existing() {
     if ! verify_binary "$BINARY_PATH"; then
         setup_fail "Cannot verify binary at ${BINARY_PATH}."
     fi
+    if [[ "$NETWORK" == "mainnet" ]]; then
+        check_binary_mainnet
+    fi
+}
+
+# Stop setup unless the node binary at BINARY_PATH is a mainnet build, judged as a
+# mainnet release binary is (tn_release_version_ok on its --version, no version
+# wanted): exactly one "Build Features:" line, and it is empty. A testnet or a test
+# build is refused before it makes keys or .node-meta names it. The binary runs only
+# once it passed _tn_root_binary_ok (setup runs it as root), and its --version gets
+# 30 seconds where coreutils timeout exists.
+check_binary_mainnet() {
+    local v="" why="" rc=0
+    if ! _tn_root_binary_ok "$BINARY_PATH"; then
+        setup_fail "refusing ${BINARY_PATH}: the node binary must be a root-owned file, not group- or other-writable, in root-owned directories."
+    fi
+    if command -v timeout >/dev/null 2>&1; then
+        v="$(timeout -k 5 30 "$BINARY_PATH" --version 2>&1)" || rc=$?
+    else
+        v="$("$BINARY_PATH" --version 2>&1)" || rc=$?
+    fi
+    case "$rc" in
+        0) ;;
+        124|137) setup_fail "Refusing the node binary at ${BINARY_PATH}: its --version did not finish within 30 seconds, so whether it is a mainnet build cannot be told. The binary was stopped and not used." ;;
+        *) setup_fail "Refusing the node binary at ${BINARY_PATH}: its --version did not run, so whether it is a mainnet build cannot be told. The binary was not used." ;;
+    esac
+    why="$(tn_release_version_ok "$v" mainnet "" 2>&1 >/dev/null)" && return 0
+    why="${why##*\[WARN\]}"
+    why="${why#"${RESET:-}"}"
+    setup_fail "Refusing the node binary at ${BINARY_PATH}: it is not a mainnet build (${why# }). A mainnet node runs telcoin-network built with no build features (cargo build -p telcoin-network --bin telcoin-network --release --locked). The binary was not used."
 }
 
 # 0 when BINARY_PATH can go into the start wrapper: an absolute path of letters, digits
@@ -1541,18 +1706,27 @@ node_flag_warnings() {
 # group and other users can read too. The map reaches the node as one command-line
 # argument, and Linux allows 128 KiB for one. The read bits matter because the map does
 # not stay private anyway: the installed copy is 0644, and the parse check passes the map
-# on the command line of the node binary, where other local users can see it. Otherwise
-# 1, with the reason on stdout.
+# on the command line of the node binary, where other local users can see it. Every
+# network_address in it must be one the node can dial (tn_map_addr_check: an IP
+# address, UDP, QUIC v1); the node's parser, asked later, accepts a DNS name the node
+# never resolves. Otherwise 1, with the reason on stdout.
 peers_file_ok() {
-    _setup_map_file_ok "$1" peers "the installed copy is world-readable (0644) and the check passes the map on the command line of the node binary, where other users can see it"
+    _setup_map_file_ok "$1" peers "the installed copy is world-readable (0644) and the check passes the map on the command line of the node binary, where other users can see it" || return 1
+    tn_map_addr_check "$1"
 }
 
-# 0 when FILE can hold a trusted nodes map, by the rules of a peers map: the map never
-# reaches a command line, but it does not stay private either (the installed copy is
-# 0644, so the service user can read it), and a list of hubs never comes near 64 KiB.
-# Otherwise 1, with the reason on stdout.
+# 0 when FILE can hold a trusted nodes map: a file by the rules of a peers map (the map
+# never reaches a command line, but it does not stay private either: the installed copy
+# is 0644, so the service user can read it; and a list of hubs never comes near 64 KiB),
+# in the shape the node reads (tn_trusted_nodes_shape_ok, the check edit-config runs
+# too, addresses included, with the worker ids of the workers DATA_DIR's node runs).
+# The node has no check flag for this map and stops at start on one it cannot read, so
+# this runs before anything is written: in the preflight, on a recorded map read back
+# and just before the install, where the node binary reads it too
+# (install_trusted_nodes). Otherwise 1, with the reason on stdout.
 trusted_nodes_file_ok() {
-    _setup_map_file_ok "$1" "trusted nodes" "the installed copy is world-readable (0644)"
+    _setup_map_file_ok "$1" "trusted nodes" "the installed copy is world-readable (0644)" || return 1
+    tn_trusted_nodes_shape_ok "$1" "$(tn_local_worker_count "${DATA_DIR:-}")"
 }
 
 # _setup_map_file_ok FILE KIND WHY -- the checks of peers_file_ok and
@@ -2129,10 +2303,14 @@ step_create_infrastructure() {
     # its flags leave them out (and stops when a flag differs). step_create_service
     # later adds the full metadata.
     # OWNERSHIP_LAYOUT=2: this layout is the root-owned one, so nothing is migrated.
+    # NETWORK goes in before any key exists: it is the network the keys are for, and
+    # a later run for another network is refused over mainnet keys
+    # (setup_keys_network_check).
     write_node_meta \
         "HOST_SERVICE_USER=${SERVICE_USER}" \
         "HOST_SERVICE_GROUP=${SERVICE_GROUP}" \
         "INSTALL_METHOD=${INSTALL_METHOD:-binary}" \
+        "NETWORK=${NETWORK}" \
         "DATA_DIR=${DATA_DIR}" \
         "OWNERSHIP_LAYOUT=2"
     write_node_meta_runner
@@ -2151,8 +2329,14 @@ step_create_infrastructure() {
     # cannot be used); rc 2: the clone, the fetch or the install failed. The helper's
     # warning names the cause (a --json log event before this error), so the rc-1 line
     # stays true for every refusal.
+    # Mainnet keys ahead of genesis (setup_mainnet_keygen_only): there are no mainnet
+    # chain configs to get, and keygen does not read them.
     local cc_rc=0
-    ensure_chain_configs_available "$NETWORK" setup_progress || cc_rc=$?
+    if setup_mainnet_keygen_only; then
+        setup_progress info "Mainnet chain configs are not published before genesis: keygen goes on without them. Finalize needs them, and runs only from the script release that pins them."
+    else
+        ensure_chain_configs_available "$NETWORK" setup_progress || cc_rc=$?
+    fi
     case "$cc_rc" in
         0) ;;
         1) setup_fail "The ${NETWORK} chain configs were refused (see above); nothing was copied." ;;
@@ -2179,7 +2363,7 @@ step_generate_keys() {
 
     if [[ -d "${DATA_DIR}/node-keys" ]]; then
         if json_mode; then
-            setup_fail "node-keys already exist at ${DATA_DIR}/node-keys -- refusing to overwrite in non-interactive mode"
+            setup_keygen_keys_refuse
         fi
         print_warn "Key files already exist in ${DATA_DIR}/node-keys/"
         if ! confirm "Overwrite existing keys?"; then
@@ -2314,7 +2498,21 @@ step_generate_keys() {
     # writes the passphrase to keytool's standard input (--bls-passphrase-source stdin;
     # docker run -i for an image), so it is in no command line and no environment.
     # TN_KEYTOOL_PASS is a plain shell variable for this one call, never exported.
-    local keytool_rc=0
+    # New keys get their stored passphrase first (the encrypted credential, or the root
+    # 0600 file on testnet and devnet: setup_store_passphrase), so keys never exist
+    # without it, and HUP, INT and TERM are held from there until the keys are checked:
+    # a keygen that fails, or whose keytool a signal stopped, takes back what the keytool
+    # wrote and the stored passphrase (setup_keygen_undo) before setup stops. Over keys
+    # that already exist (an interactive overwrite, which the keytool refuses) the
+    # passphrase is stored after the keytool, as before, so the one of the kept keys stays.
+    local keytool_rc=0 fresh=true
+    if [[ -e "${DATA_DIR}/node-keys" || -L "${DATA_DIR}/node-keys" ]]; then
+        fresh=false
+    fi
+    setup_hold_signals
+    if [[ "$fresh" == "true" ]]; then
+        setup_store_passphrase
+    fi
     TN_KEYTOOL_PASS="$TN_SETUP_PASS"
     tn_keytool "$(node_runner_spec)" "$DATA_DIR" generate validator \
         --address "$VALIDATOR_ADDRESS" \
@@ -2323,27 +2521,54 @@ step_generate_keys() {
         ${rpc_args[@]+"${rpc_args[@]}"} || keytool_rc=$?
     unset TN_KEYTOOL_PASS
     if [[ "$keytool_rc" -ne 0 ]]; then
+        if [[ "$fresh" == "true" ]]; then
+            setup_keygen_undo
+            setup_fail "Key generation failed (keytool rc ${keytool_rc}); what it wrote and the stored passphrase were removed, so keygen can run again."
+        fi
         setup_fail "Key generation failed (keytool rc ${keytool_rc})."
     fi
     # The key must be the wrapped one: bls.kw present, no cleartext bls.key. Otherwise
     # the new keys directory goes (removed by the service user, whose directory it is).
     if [[ ! -f "${DATA_DIR}/node-keys/bls.kw" || -e "${DATA_DIR}/node-keys/bls.key" || -L "${DATA_DIR}/node-keys/bls.key" ]]; then
         tn_as_service_user rm -rf -- "${DATA_DIR}/node-keys" || true
+        [[ "$fresh" != "true" ]] || setup_keygen_undo
         setup_fail "Key generation did not leave an encrypted BLS key (node-keys/bls.kw without node-keys/bls.key); the new keys directory was removed."
+    fi
+    if [[ "$fresh" == "true" && ! -f "${DATA_DIR}/node-info.yaml" ]]; then
+        setup_keygen_undo
+        setup_fail "Key generation left no ${DATA_DIR}/node-info.yaml; the new keys and the stored passphrase were removed, so keygen can run again."
     fi
     print_ok "Node keys generated in: ${DATA_DIR}/node-keys/"
 
     # The passphrase the unit loads: the encrypted credential (encrypted from a pipe, no
     # plaintext file) or the root 0600 file (setup_store_passphrase).
-    setup_store_passphrase
+    if [[ "$fresh" != "true" ]]; then
+        setup_store_passphrase
+    fi
+    setup_release_signals
 
     TN_SETUP_PASS=""
 
-    display_node_info "$DATA_DIR" "$VALIDATOR_ADDRESS"
+    # A genesis validator (setup_mainnet_keygen_only) is registered by the genesis, not
+    # by staking: it is shown its node-info.yaml, and json_phase_keygen says what it does
+    # next (setup_mainnet_keygen_next), never display_node_info's onboarding and staking
+    # steps or its stake read from the network RPC.
+    if setup_mainnet_keygen_only; then
+        print_step "Node Identity Information"
+        echo "  Your node-info.yaml has been generated at:"
+        echo "    ${DATA_DIR}/node-info.yaml"
+        print_sep
+        cat "${DATA_DIR}/node-info.yaml"
+        print_sep
+    else
+        display_node_info "$DATA_DIR" "$VALIDATOR_ADDRESS"
+    fi
 
     echo ""
     print_warn "BACK UP YOUR KEYS NOW."
-    print_info "If ${DATA_DIR}/node-keys/ is lost, you must re-register with the Association."
+    if ! setup_mainnet_keygen_only; then
+        print_info "If ${DATA_DIR}/node-keys/ is lost, you must re-register with the Association."
+    fi
     echo ""
     # JSON mode: the UI enforces the "BACKED UP" gate between keygen and finalize,
     # so no blocking prompt here.
@@ -2564,7 +2789,7 @@ prepare_node_extra_flags() {
         BOOTSTRAP_PEERS_SRC="$peers"
     fi
     if [[ -n "$TRUSTED_NODES_SRC" ]]; then
-        install_trusted_nodes "$TRUSTED_NODES_SRC" "$trusted"
+        install_trusted_nodes "$spec" "$TRUSTED_NODES_SRC" "$trusted"
         TRUSTED_NODES_SRC="$trusted"
     fi
     NODE_EXTRA_FLAGS="$flags"
@@ -2715,14 +2940,57 @@ require_admission_release() {
     return 0
 }
 
+# setup_committee_resync -- at the end of every run that got as far as
+# step_create_service, with P2P_COMMITTEE=on in .node-meta: bring the P2P committee
+# allowlist and its floor in step with what the node now runs with (the bootstrap
+# peers and trusted nodes maps, the genesis committee.yaml, node.env), by
+# firewall-setup.sh --p2p-committee sync, run once this run has released the update
+# lock, because that run takes the lock itself. It runs whether or not this run
+# changed a file: an earlier run may have installed a map and failed before its own
+# resync, and a sync with nothing new is a no-op. With committee mode off it does
+# nothing. A failure is a warning naming the command to run: --accept-floor-shrink
+# when the sync kept the saved floor (exit 4), the rerun of off when an off did
+# not finish (exit 5), else the sync. Never fails.
+setup_committee_resync() {
+    local mode rc=0 fix="sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee sync"
+    mode="$(meta_get P2P_COMMITTEE "${CONFIG_DIR}/.node-meta" 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        setup_warn "P2P_COMMITTEE is set more than once in .node-meta, so the P2P committee allowlist was not synced with this setup; remove the extra lines, then run: ${fix}"
+        return 0
+    fi
+    [[ "$mode" == "on" ]] || return 0
+    setup_release_lock
+    print_step "Syncing the P2P committee allowlist with the node's settings"
+    rc=0
+    bash "${SCRIPT_DIR}/firewall-setup.sh" --p2p-committee sync < /dev/null 3>&- || rc=$?
+    case "$rc" in
+        0) ;;
+        3) setup_warn "The P2P committee allowlist keeps its last-good set for now (the node may not answer yet after its restart); telcoin-p2p-allow-sync.timer syncs it again within 5 minutes." ;;
+        4) setup_warn "The P2P committee allowlist floor keeps addresses that the bootstrap peers map, the trusted nodes map and the genesis committee.yaml no longer hold (firewall-setup.sh exit 4, which names them), so they stay allowed; if they were taken out on purpose, drop them with: ${fix} --accept-floor-shrink" ;;
+        5) setup_warn "The P2P committee allowlist was not synced with the node's settings: a --p2p-committee off did not finish (firewall-setup.sh exit 5); finish it with: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee off" ;;
+        *) setup_warn "The P2P committee allowlist was not synced with the node's settings (firewall-setup.sh exit ${rc}); run: ${fix}" ;;
+    esac
+    return 0
+}
+
 # Install the trusted nodes map SRC as DEST, root-owned 0644, with tn_write_root_file
 # (a temp file beside DEST, then one rename), so the service user can read it when
 # setup_admission_config writes it into network-config. SRC is checked again just
-# before it is read. SRC that is DEST already (a re-run, or a finalize that read
-# keygen's record back) stays as it is.
+# before it is read, and then by the release of runner SPEC
+# (tn_trusted_nodes_node_check): this is the first point of a run with a node binary
+# or image, and it comes before network-config is written and before a running node
+# is restarted. A map the release rejects stops setup with the node's reason; a check
+# that cannot run warns, and the map is installed unchecked. SRC that is DEST already
+# (a re-run, or a finalize that read keygen's record back) stays as it is.
 install_trusted_nodes() {
-    local src="$1" dest="$2" msg=""
+    local spec="$1" src="$2" dest="$3" msg="" rc=0
     msg="$(trusted_nodes_file_ok "$src")" || setup_fail "--trusted-nodes: ${msg}."
+    msg="$(tn_trusted_nodes_node_check "$spec" "$src")" || rc=$?
+    case "$rc" in
+        0) ;;
+        1) setup_fail "--trusted-nodes: $(node_release_label) does not read ${src} (${msg}; the line and column count in that file). Each network_key and network_address (its IP address and /p2p peer id) must be the hub's own, as in its node-info.yaml, and no field may appear twice." ;;
+        *) setup_warn "Could not check the trusted nodes map in ${src} with $(node_release_label) (${msg}); installing it unchecked." ;;
+    esac
     if [[ "$src" == "$dest" ]]; then
         return 0
     fi
@@ -2738,12 +3006,21 @@ install_trusted_nodes() {
 # nodes map under trusted_nodes, and the installed bootstrap peers map under
 # committee_peers; a map this run does not use is left out of the file. Runs after
 # prepare_node_extra_flags, which checked the release and installed both maps. No
-# admission mode: nothing is written, and network-config keeps what it holds.
+# admission mode: nothing is written, and network-config keeps what it holds. The
+# peers map goes in only when it lists every validator of the genesis committee.yaml,
+# which step_write_config has copied into the data dir by now
+# (tn_committee_peers_check): a node whose committee_peers misses one does not start
+# at epoch 0. A map that does not is left out with a warning and stays installed,
+# on the launch line and in the allowlist floor.
 setup_admission_config() {
-    local trusted=none committee=none rc=0
+    local trusted=none committee=none rc=0 msg=""
     [[ -n "$ADMISSION_MODE" ]] || return 0
     [[ -z "$TRUSTED_NODES_SRC" ]] || trusted="${CONFIG_DIR}/trusted-nodes.yaml"
     [[ -z "$BOOTSTRAP_PEERS_SRC" ]] || committee="${CONFIG_DIR}/bootstrap-peers.yaml"
+    if [[ "$committee" != none ]] && ! msg="$(tn_committee_peers_check "$DATA_DIR" "$committee")"; then
+        setup_warn "$msg"
+        committee=none
+    fi
     tn_network_config_render "$DATA_DIR" "$ADMISSION_MODE" "$trusted" "$committee" || rc=$?
     if [[ $rc -ne 0 ]]; then
         setup_fail "The admission settings were not written to ${DATA_DIR}/network-config (see the message above), so setup stops before the node is started."
@@ -3424,15 +3701,62 @@ json_on_exit() {
     return "$rc"
 }
 
+# setup_mainnet_keygen_only -- rc 0 when this run is the one mainnet path a release
+# that does not offer mainnet yet still takes: --json --phase=keygen --network mainnet
+# with tn_mainnet_enabled saying no and tn_mainnet_keygen_enabled saying yes. It runs
+# the node binary the operator names (--install-method existing --binary-path, a
+# mainnet build: check_binary_mainnet), generates the keys and the proof of
+# possession for the --address it is given, skips the chain configs (none exist
+# before genesis) and stops. Finalize stays refused until mainnet is enabled.
+setup_mainnet_keygen_only() {
+    json_mode && [[ "$JSON_PHASE" == "keygen" && "$JSON_NETWORK_INPUT" == "mainnet" ]] \
+        && ! tn_mainnet_enabled && tn_mainnet_keygen_enabled
+}
+
+# setup_keys_network_check -- stop setup when the keys on this host were generated for
+# mainnet and this run is for another network (tn_keys_network_ok on the NETWORK that
+# step_create_infrastructure records before it makes keys). A finalize or a keygen asks
+# it as soon as it runs as root, before anything on the host changes; an interactive
+# install, once the network is chosen. A --json run without --network is a testnet run.
+setup_keys_network_check() {
+    local why="" rc=0
+    why="$(tn_keys_network_ok "$NETWORK" "${CONFIG_DIR}/.node-meta" 2>&1 >/dev/null)" || rc=$?
+    [[ $rc -ne 0 ]] || return 0
+    if json_mode; then
+        [[ "$NETWORK" != "testnet" ]] || why="${why} A --json run without --network is a testnet run."
+        why="${why} Nothing on this host was changed."
+    fi
+    setup_fail "$why"
+}
+
+# setup_mainnet_keygen_next INFO -- what the operator does with the keys a
+# setup_mainnet_keygen_only run made: send INFO (node-info.yaml), never the keys or
+# the passphrase, and finalize once the mainnet release and genesis are out. On
+# stderr and, in --json mode, as log events.
+setup_mainnet_keygen_next() {
+    local line
+    for line in \
+        "Send ${1} to the genesis ceremony: it is public and holds this node's public keys, its addresses, the execution address ${VALIDATOR_ADDRESS} and the proof of possession signed for it." \
+        "Never send or copy anywhere ${DATA_DIR}/node-keys/ (bls.kw is the BLS private key) or the BLS passphrase. Back both up offline now: the genesis registers this identity, and losing either one loses it." \
+        "Mainnet is not finalized here. Once the mainnet release and genesis are published, update these scripts to the release that enables mainnet and run setup-node.sh --json --phase=finalize on this host; it uses these keys as they are."; do
+        print_info "$line"
+        if json_mode; then
+            json_event log "$line"
+        fi
+    done
+    return 0
+}
+
 json_set_network() {
     case "${1:-testnet}" in
         testnet|adiri)  # network-gated: adiri is read as testnet
             NETWORK="testnet"; CHAIN_ID="$TESTNET_CHAIN_ID"; CHAIN_NAME="$TESTNET_CHAIN_NAME"
             RPC_URL="${TESTNET_RPC_URL:-}"; EXPLORER_URL="${TESTNET_EXPLORER:-}" ;;
         mainnet)
-            # Refused while this release does not offer mainnet (tn_mainnet_enabled);
+            # Refused while this release does not offer mainnet (tn_mainnet_enabled),
+            # except for the key generation ahead of it (setup_mainnet_keygen_only);
             # run_json_mode calls this first, before anything touches the box.
-            tn_mainnet_enabled \
+            tn_mainnet_enabled || setup_mainnet_keygen_only \
                 || setup_fail "Mainnet is not enabled in this script release (lib/common.sh TN_MAINNET_ENABLED); nothing on this host was changed."
             NETWORK="mainnet"; CHAIN_ID="$MAINNET_CHAIN_ID"; CHAIN_NAME="$MAINNET_CHAIN_NAME"
             RPC_URL="${MAINNET_RPC_URL:-}"; EXPLORER_URL="${MAINNET_EXPLORER:-}" ;;
@@ -3465,9 +3789,18 @@ json_phase_keygen() {
     json_event step "Generating node keys"
     step_generate_keys
 
-    local info="${DATA_DIR}/node-info.yaml" info_content=""
+    local info="${DATA_DIR}/node-info.yaml" info_content="" done_msg="keys generated -- BACK THEM UP before finalizing"
+    # Success, and the file to send, only with the key, node-info.yaml and the stored
+    # passphrase all in place.
+    if [[ ! -f "${DATA_DIR}/node-keys/bls.kw" || ! -f "$info" || "$SETUP_PASS_STORED" != "true" ]]; then
+        setup_fail "Keygen did not leave the key, ${info} and the stored passphrase all in place, so it does not report success. $(setup_keys_found "$DATA_DIR")"
+    fi
     [[ -f "$info" ]] && info_content="$(json_escape "$(cat "$info")")"
-    json_done "{\"event\":\"done\",\"ok\":true,\"phase\":\"keygen\",\"node_type\":\"observer\",\"node_info_path\":\"$(json_escape "$info")\",\"keys_dir\":\"$(json_escape "${DATA_DIR}/node-keys")\",\"node_info\":\"${info_content}\",\"msg\":\"keys generated -- BACK THEM UP before finalizing\"}"
+    if setup_mainnet_keygen_only; then
+        setup_mainnet_keygen_next "$info"
+        done_msg="mainnet keys generated -- BACK THEM UP; send ${info} only, never the keys or the passphrase; finalize once the mainnet release and genesis are published"
+    fi
+    json_done "{\"event\":\"done\",\"ok\":true,\"phase\":\"keygen\",\"node_type\":\"observer\",\"node_info_path\":\"$(json_escape "$info")\",\"keys_dir\":\"$(json_escape "${DATA_DIR}/node-keys")\",\"node_info\":\"${info_content}\",\"msg\":\"$(json_escape "$done_msg")\"}"
 }
 
 # finalize_same_as_keygen FLAG VALUE RECORDED -- stop when a finalize flag and the
@@ -3499,11 +3832,22 @@ finalize_install_inputs() {
     setup_meta_read pm PASSPHRASE_METHOD "$meta"
     [[ "$pm" == "loadcredential" ]] && pm=stdin
     PASSPHRASE_METHOD="${pm:-$PASSPHRASE_METHOD}"
+    local why=""
     case "$PASSPHRASE_METHOD" in
-        credential) [[ -f "${CONFIG_DIR}/bls-passphrase.cred" ]] || setup_fail "PASSPHRASE_METHOD=credential but ${CONFIG_DIR}/bls-passphrase.cred is missing: run --phase=keygen first." ;;
-        stdin) [[ -f "${CONFIG_DIR}/bls-passphrase" ]] || setup_fail "PASSPHRASE_METHOD=stdin but ${CONFIG_DIR}/bls-passphrase is missing: run --phase=keygen first." ;;
-        *) setup_fail "No stored BLS passphrase recorded in ${meta} (PASSPHRASE_METHOD): run --phase=keygen first." ;;
+        credential) [[ -f "${CONFIG_DIR}/bls-passphrase.cred" ]] || why="PASSPHRASE_METHOD=credential but ${CONFIG_DIR}/bls-passphrase.cred is missing" ;;
+        stdin) [[ -f "${CONFIG_DIR}/bls-passphrase" ]] || why="PASSPHRASE_METHOD=stdin but ${CONFIG_DIR}/bls-passphrase is missing" ;;
+        *) why="No stored BLS passphrase recorded in ${meta} (PASSPHRASE_METHOD)" ;;
     esac
+    # Over keys an earlier keygen left, say what it left and the way out
+    # (setup_keys_found): another keygen would refuse them.
+    if [[ -n "$why" ]]; then
+        setup_meta_read rec DATA_DIR "$meta"
+        rec="${rec:-$DATA_DIR}"
+        if [[ -e "${rec}/node-keys" ]]; then
+            setup_fail "${why}. $(setup_keys_found "$rec")"
+        fi
+        setup_fail "${why}: run --phase=keygen first."
+    fi
     setup_meta_read rec INSTALL_METHOD "$meta"
     finalize_same_as_keygen install-method "$INSTALL_METHOD" "$rec"
     INSTALL_METHOD="${INSTALL_METHOD:-$rec}"
@@ -3683,6 +4027,20 @@ json_check_install_flags() {
         ""|source|release|docker|existing) ;;
         *) setup_fail "unknown --install-method ${INSTALL_METHOD} (expected source, release, docker or existing)" ;;
     esac
+    # Mainnet keys ahead of mainnet (setup_mainnet_keygen_only): no mainnet release,
+    # image or source tag can be verified before genesis, so the node binary is the
+    # operator's own, named by path, and a mainnet build (check_binary_mainnet, which
+    # run_json_mode calls once every other input passed).
+    if setup_mainnet_keygen_only; then
+        local why="--install-method ${INSTALL_METHOD} cannot install a mainnet node yet"
+        case "$INSTALL_METHOD" in
+            "") why="--install-method is missing" ;;
+            existing) why="--install-method existing needs --binary-path PATH here" ;;
+        esac
+        if [[ "$INSTALL_METHOD" != "existing" || -z "$BINARY_PATH" ]]; then
+            setup_fail "${why}: before genesis no mainnet release, image or source tag can be verified. Generate the mainnet keys with --phase=keygen --install-method existing --binary-path <a telcoin-network binary built with no build features>; the rest of a mainnet install waits for the script release that enables mainnet (lib/common.sh TN_MAINNET_ENABLED). Nothing on this host was changed."
+        fi
+    fi
     if [[ "$JSON_PHASE" == "keygen" && -z "$INSTALL_METHOD" ]]; then
         setup_fail "--install-method is missing (expected source, release, docker or existing)"
     fi
@@ -3759,6 +4117,9 @@ json_check_keygen_inputs() {
     if [[ -z "$VALIDATOR_ADDRESS" ]]; then
         setup_fail "--address is missing: keygen needs the node's execution address (0x followed by 40 hex digits)."
     fi
+    if [[ "$VALIDATOR_ADDRESS" =~ ^0[xX]0{40}$ ]]; then
+        setup_fail "--address is the zero address: the proof of possession is signed over the node's execution address, which receives its rewards; give that address."
+    fi
     for pair in --external-primary:PRIMARY_MULTIADDR --external-worker:WORKER_MULTIADDR \
                 --listener-primary:PRIMARY_LISTENER_MULTIADDR --listener-worker:WORKER_LISTENER_MULTIADDR; do
         flag="${pair%%:*}"
@@ -3789,10 +4150,21 @@ run_json_mode() {
     json_set_network "$JSON_NETWORK_INPUT"
     json_check_install_flags
     json_check_keygen_inputs
+    # The operator's own binary runs (--version) only once every other input passed,
+    # and only after its ownership and mode check.
+    if setup_mainnet_keygen_only; then
+        check_binary_mainnet
+    fi
     json_require_root
+    setup_keys_network_check
     # An installed node is refused before the lock, whose layout migration would
     # otherwise change an older install first; the phase checks again under the lock.
     json_refuse_installed "$JSON_PHASE"
+    # So are a keygen's existing keys, which step_generate_keys would refuse only
+    # after step_create_infrastructure rewrote .node-meta (NETWORK among it).
+    if [[ "$JSON_PHASE" == "keygen" ]]; then
+        setup_keygen_keys_refuse
+    fi
     setup_take_lock
     export TN_ASSUME_YES=true   # non-interactive: auto-accept confirms (no stdin)
     case "$JSON_PHASE" in
@@ -3965,6 +4337,7 @@ main() {
     step_create_service
     # Public RPC and the add-ons run their own scripts, which take the lock themselves.
     setup_release_lock
+    setup_committee_resync
     step_public_rpc
     step_testnet_addons
     step_alerts

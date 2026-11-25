@@ -195,14 +195,22 @@ check_has "json_set_network mainnet, enabled: the mainnet values" "set: mainnet|
 
 # The whole script: --network mainnet stops at the gate, before the install
 # flags are even read (the launch copy goes on to ask for --install-method).
+# The keygen is the one exception (TN_MAINNET_KEYGEN_ENABLED, mainnet_keygen_test.sh):
+# it passes the gate and stops at its install method, naming the way that works.
 rm -rf "$T/fx-setup"
 mkdir -p "$T/fx-setup"
-OUT="$(TN_ROOT_PREFIX="$T/fx-setup" "$BASH" "$T/off/setup-node-run.sh" --json --phase=keygen --network mainnet </dev/null 2>/dev/null)"
+OUT="$(TN_ROOT_PREFIX="$T/fx-setup" "$BASH" "$T/off/setup-node-run.sh" --json --phase=finalize --network mainnet </dev/null 2>/dev/null)"
 RC=$?
 check_rc "setup-node --json --network mainnet, disabled: rc 1" 1 "$RC"
 check "setup-node --json --network mainnet, disabled: ends with the refusal" \
     "{\"event\":\"done\",\"ok\":false,\"msg\":\"${MAINNET_OFF}\"}" "$(printf '%s\n' "$OUT" | tail -n 1)"
 check "setup-node --json --network mainnet, disabled: nothing written" "" "$(find "$T/fx-setup" -mindepth 1 2>/dev/null)"
+OUT="$(TN_ROOT_PREFIX="$T/fx-setup" "$BASH" "$T/off/setup-node-run.sh" --json --phase=keygen --network mainnet </dev/null 2>/dev/null)"
+RC=$?
+check_rc "setup-node --json keygen on mainnet, disabled: rc 1" 1 "$RC"
+check "setup-node --json keygen on mainnet, disabled: refused at the install method, naming the keygen way" yes \
+    "$(has "$(printf '%s\n' "$OUT" | tail -n 1)" "\"msg\":\"--install-method is missing: before genesis no mainnet release, image or source tag can be verified. Generate the mainnet keys with --phase=keygen --install-method existing --binary-path")"
+check "setup-node --json keygen on mainnet, disabled: nothing written" "" "$(find "$T/fx-setup" -mindepth 1 2>/dev/null)"
 OUT="$(TN_ROOT_PREFIX="$T/fx-setup" "$BASH" "$T/on/setup-node-run.sh" --json --phase=keygen --network mainnet </dev/null 2>/dev/null)"
 check "setup-node --json --network mainnet, enabled: past the gate" \
     "{\"event\":\"done\",\"ok\":false,\"msg\":\"--install-method is missing (expected source, release, docker or existing)\"}" \

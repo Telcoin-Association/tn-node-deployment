@@ -44,6 +44,52 @@ tn_mainnet_enabled() {
     [[ "$TN_MAINNET_ENABLED" == "1" ]]
 }
 
+# While TN_MAINNET_ENABLED is 0, this opens one mainnet path and nothing else:
+# setup-node --json --phase=keygen --network mainnet with the operator's own node
+# binary (--install-method existing --binary-path), so validators can generate
+# their keys and proofs of possession before the mainnet genesis, its chain
+# configs or a signed mainnet release exist. That run needs no chain configs and
+# never starts the node. Finalize, a full install, the gateway and the Node
+# Manager UI stay refused by TN_MAINNET_ENABLED; at 0 this keygen is refused too.
+readonly TN_MAINNET_KEYGEN_ENABLED=1
+
+# tn_mainnet_keygen_enabled -- rc 0 when this script release offers mainnet key
+# generation ahead of mainnet (TN_MAINNET_KEYGEN_ENABLED is 1), rc 1 otherwise.
+tn_mainnet_keygen_enabled() {
+    [[ "$TN_MAINNET_KEYGEN_ENABLED" == "1" ]]
+}
+
+# tn_keys_network_ok WANTED [META] -- rc 0 when a node may be set up for WANTED from
+# the keys on this host, judged by the network .node-meta records for them (NETWORK
+# in META, default node_meta_path; setup-node writes it before it makes keys): none
+# recorded (a host keyed by an older release, which recorded it only at finalize),
+# a network other than mainnet, or WANTED itself. rc 1 when the host is recorded for
+# mainnet and WANTED is another network, rc 2 when NETWORK is set more than once;
+# the reason goes to stderr, and it names the record, not the keys, since a mainnet
+# keygen that failed or was stopped keeps the record without keys. Mainnet BLS keys
+# never sign on another network. Reads META only.
+tn_keys_network_ok() {
+    local want="${1:-}" meta="${2:-}" rec="" rc=0
+    if [[ -z "$meta" ]]; then
+        meta="$(node_meta_path 2>/dev/null)" || return 0
+    fi
+    rec="$(meta_get NETWORK "$meta" 2>/dev/null)" || rc=$?
+    case "$rc" in
+        0) ;;
+        1) return 0 ;;
+        *)
+            printf 'NETWORK is set more than once in %s, so the network of the keys on this host cannot be told; remove the extra lines and run again.\n' "$meta" >&2
+            return 2
+            ;;
+    esac
+    if [[ "$rec" != "mainnet" || "$want" == "mainnet" ]]; then
+        return 0
+    fi
+    printf 'This host is recorded for mainnet (NETWORK=mainnet in %s, written before keygen makes mainnet keys), and a mainnet BLS key must never be used on another network, so a %s node is refused here. Set up the %s node on another host; this one runs mainnet only.\n' \
+        "$meta" "${want:-(none)}" "${want:-other}" >&2
+    return 1
+}
+
 readonly DEVNET_CHAIN_ID="32285"
 readonly DEVNET_CHAIN_NAME="devnet"
 # Devnet now has a global load balancer in front of all five nodes, so it has a
@@ -79,7 +125,7 @@ readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 # network-gated: the comment names the testnet fleet; 9101 is the default on every network
 readonly DEFAULT_METRICS_PORT="9101"   # node loopback Prometheus endpoint (matches the adiri fleet)
-readonly COMMON_VERSION="2.2.7"
+readonly COMMON_VERSION="2.2.8"
 
 # The operator runbook, for any message that should point operators at it.
 readonly TN_OPERATOR_GUIDE_URL="https://github.com/Telcoin-Association/tn-node-deployment/blob/main/OPERATOR.md"
@@ -3086,6 +3132,697 @@ tn_network_config_render() {
             ;;
     esac
     print_ok "Admission settings written to ${nc} (mode ${mode})"
+}
+
+# tn_committee_peers_check DATA_DIR MAP -- whether the peers map MAP (the installed
+# bootstrap-peers.yaml) may go into DATA_DIR/network-config as committee_peers: only
+# when every validator of the genesis committee, DATA_DIR/genesis/committee.yaml, is a
+# key of MAP, this node's own key included, no key is listed twice at MAP's first
+# level, and MAP's entry for this node, when it has one, names the network keys of
+# DATA_DIR/node-info.yaml. A node whose committee_peers is not empty and misses one refuses to start while its chain is at epoch 0
+# ("committee_peers: missing validator <key>"), in every admission mode, and a new
+# data dir always starts at epoch 0; a key outside the committee, a hub's, does not
+# stop it. A node whose own entry there names another primary network_key, or another
+# network_key for a worker it runs, refuses to start at every epoch ("network key
+# does not match node configuration"). One whose committee_peers names a key twice
+# cannot read network-config and refuses to start at every epoch ("bad yaml data"),
+# although the node takes the same map on its launch line (the last entry for the
+# key wins). The files are read as the service user (tn_as_service_user), because
+# they sit in the data dir that user writes. MAP is read
+# as YAML in block or flow style, JSON included, and its keys are those of its
+# top-level map, as the node reads them: a key indented under another entry, inside a
+# flow value or inside a quoted value is none. Anchors, tags, block scalars, explicit
+# keys and scalars over several lines are not read, and fail the check. The
+# validators are the keys one level under the committee file's top-level
+# "authorities:" entry. A data dir without node-info.yaml (keygen writes it before
+# any render) has no own entry to compare.
+#   rc 0  MAP holds every validator and this node's own keys; prints nothing
+#   rc 1  MAP misses at least one, lists a key twice, its entry for this node names
+#         other network keys, a file cannot be read, the committee file names no
+#         validator, or the check could not run: one line on stdout says which, that MAP is left out of
+#         committee_peers but stays installed and in use, and how to have it written
+tn_committee_peers_check() {
+    local dd="${1:-}" map="${2:-}" cf ni nf prog out rc=0 nmiss="" ntotal="" k1="" k2="" k3=""
+    local k list="" why tail=""
+    cf="${dd}/genesis/committee.yaml"
+    ni="${dd}/node-info.yaml"
+    nf="$ni"
+    [[ -e "$ni" ]] || nf=-
+    # The awk text holds no single quote. exit 3: the committee file cannot be
+    # read, 4: it names no validator, 5: MAP cannot be read, 6: node-info.yaml
+    # cannot be read, 7: MAP holds YAML the reader does not read (its line on
+    # stdout), 9: MAP lists a key twice at its first level (the key on stdout), 1:
+    # the gaps, as "MISSING TOTAL KEY KEY KEY" (the first three), 8: the entry of
+    # this node names other network keys (its key on stdout).
+    # shellcheck disable=SC2016
+    prog='
+        function die() { bad = 1; return "" }
+        # The YAML reader. Frame i of the stack is a map (T[i] "m") or a list
+        # ("s"), in flow style (F[i] 1) or in block style at column C[i]; K[i] is
+        # its key or item number now, and P[i] what it waits for. Block: 1 the
+        # value of K[i] on the lines below, 2 a value given. Flow map: 0 a key,
+        # 1 a ":", 2 a value, 3 a "," or the end; flow list: 0 an item, 1 a ",".
+        function push(t, f, c) {
+            d++; T[d] = t; F[d] = f; C[d] = c; P[d] = 0
+            K[d] = (t == "s") ? (f ? 0 : -1) : ""
+        }
+        # a key of the top-level map: MAP lists it; the first one it lists twice
+        # is kept in dup
+        function top(k) {
+            if (!rdmap || d != 1) return
+            if ((k in have) && dup == "") dup = k
+            have[k] = 1
+        }
+        # a scalar at the path K[1], K[2] ...: node-info.yaml keeps it; in MAP the
+        # network keys of the entry of this node are compared with it
+        function val(v,    p, i) {
+            if (!rdmap) {
+                p = K[1]
+                for (i = 2; i <= d; i++) p = p SUBSEP K[i]
+                ni[p] = v
+                return
+            }
+            if (own == "" || K[1] != own) return
+            if (d == 3 && K[3] == "network_key") {
+                if (K[2] == "primary") { sp = 1; if (v != np) wrong = 1 }
+                if (K[2] == "worker") { s0 = 1; if ((0 in nw) && v != nw[0]) wrong = 1 }
+            }
+            if (d == 4 && K[2] == "workers" && K[4] == "network_key") {
+                if (K[3] == 0) s0 = 1
+                if ((K[3] in nw) && v != nw[K[3]]) wrong = 1
+            }
+        }
+        # ys(t, fl): the scalar t starts with, without its quotes; YR gets what
+        # follows it. A plain one ends at a " #" comment and, in a flow (fl 1), at
+        # a flow indicator or a ":" before a blank or one. A quote left open fails.
+        function ys(t, fl,    c, j, n, v) {
+            c = substr(t, 1, 1)
+            n = length(t)
+            if (c == "\"" || c == sq) {
+                for (j = 2; j <= n; j++) {
+                    v = substr(t, j, 1)
+                    if (c == "\"" && v == "\\") { j++; continue }
+                    if (v != c) continue
+                    if (c == sq && substr(t, j + 1, 1) == sq) { j++; continue }
+                    YR = substr(t, j + 1)
+                    return substr(t, 2, j - 2)
+                }
+                YR = ""
+                return die()
+            }
+            for (j = 1; j <= n; j++) {
+                v = substr(t, j, 1)
+                if (v == "#" && j > 1 && index(" \t", substr(t, j - 1, 1))) break
+                if (fl && index(",[]{}", v)) break
+                if (fl && v == ":" && (j == n || index(" \t,[]{}", substr(t, j + 1, 1)))) break
+            }
+            YR = substr(t, j)
+            v = substr(t, 1, j - 1)
+            sub(/[ \t]+$/, "", v)
+            return v
+        }
+        # kv(c): whether block line text c is a "key:" pair; KK the key, KV what
+        # follows the ":"
+        function kv(c,    k) {
+            k = substr(c, 1, 1)
+            if (k == "\"" || k == sq) {
+                k = ys(c, 1)
+                if (bad || !match(YR, /^[ \t]*:([ \t]|$)/)) return 0
+                KK = k
+                KV = substr(YR, RLENGTH + 1)
+                return 1
+            }
+            if (index("-?:,[]{}#&*!|>%@`", k) || !match(c, /:([ \t]|$)/)) return 0
+            KK = substr(c, 1, RSTART - 1)
+            sub(/[ \t]+$/, "", KK)
+            KV = substr(c, RSTART + RLENGTH)
+            return 1
+        }
+        # fl(t): the flow collections open on top of the stack, read through t;
+        # returns what follows once they are all closed
+        function fl(t,    c, v) {
+            while (!bad && d > 0 && F[d]) {
+                sub(/^[ \t]+/, "", t)
+                c = substr(t, 1, 1)
+                if (c == "" || c == "#") return ""
+                t = substr(t, 2)
+                if (c == "{" || c == "[") {
+                    if (T[d] == "m" && P[d] != 2) return die()
+                    if (T[d] == "s" && P[d] != 0) return die()
+                    P[d] = (T[d] == "m") ? 3 : 1
+                    push((c == "{") ? "m" : "s", 1, 0)
+                } else if (c == "}" || c == "]") {
+                    if ((c == "}") != (T[d] == "m")) return die()
+                    d--
+                } else if (c == ",") {
+                    if (P[d] == 0) return die()
+                    if (T[d] == "s") K[d]++
+                    P[d] = 0
+                } else if (c == ":") {
+                    if (T[d] != "m" || P[d] != 1) return die()
+                    P[d] = 2
+                    top(K[d])
+                } else if (index("&*!|>%@`?", c)) {
+                    return die()
+                } else {
+                    v = ys(c t, 1)
+                    t = YR
+                    if (bad) return ""
+                    if (T[d] == "s" && P[d] == 0) { P[d] = 1; val(v) }
+                    else if (T[d] == "m" && P[d] == 0) { K[d] = v; P[d] = 1 }
+                    else if (T[d] == "m" && P[d] == 2) { P[d] = 3; val(v) }
+                    else return die()
+                }
+            }
+            return t
+        }
+        # value(v): what follows "key:" or "- " on a block line, for frame d
+        function value(v,    c) {
+            sub(/^[ \t]+/, "", v)
+            c = substr(v, 1, 1)
+            if (c == "" || c == "#") { P[d] = 1; return "" }
+            P[d] = 2
+            if (c == "{" || c == "[") {
+                push((c == "{") ? "m" : "s", 1, 0)
+                return fl(substr(v, 2))
+            }
+            if (index("&*!|>%@`?,]}", c)) return die()
+            c = ys(v, 0)
+            if (!bad) val(c)
+            return YR
+        }
+        function pair(c) {
+            if (!kv(c)) return die()
+            K[d] = KK
+            top(KK)
+            return value(KV)
+        }
+        # item(c, n): a "- " line of the block list on frame d, at column n
+        function item(c, n,    r) {
+            K[d]++
+            r = substr(c, 2)
+            n++
+            while (r ~ /^[ \t]/) { r = substr(r, 2); n++ }
+            if (r ~ /^-([ \t]|$)/) { P[d] = 2; push("s", 0, n); return item(r, n) }
+            if (kv(r)) { P[d] = 2; push("m", 0, n); return pair(r) }
+            if (bad) return ""
+            return value(r)
+        }
+        # bl(s): a line in block context: close the frames it is not in, then
+        # read it in the one it is in
+        function bl(s,    n, c) {
+            match(s, /^ */)
+            n = RLENGTH
+            c = substr(s, n + 1)
+            if (substr(c, 1, 1) == "\t") return die()
+            while (d > 0) {
+                if (n > C[d]) {
+                    if (P[d] == 1) break
+                    return die()
+                }
+                if (n == C[d] && P[d] == 1 && T[d] == "m" && c ~ /^-([ \t]|$)/) break
+                if (n == C[d] && (T[d] == "m" || c ~ /^-([ \t]|$)/)) { P[d] = 0; break }
+                d--
+            }
+            if (d == 0) {
+                if (seen || n > 0) return die()
+                seen = 1
+                if (substr(c, 1, 1) == "{") { push("m", 1, 0); return fl(substr(c, 2)) }
+                push("m", 0, 0)
+                return pair(c)
+            }
+            if (P[d] == 1) {
+                P[d] = 2
+                if (c ~ /^-([ \t]|$)/) { push("s", 0, n); return item(c, n) }
+                if (kv(c)) { push("m", 0, n); return pair(c) }
+                if (bad) return ""
+                return value(c)
+            }
+            if (T[d] == "s") return item(c, n)
+            return pair(c)
+        }
+        # rd(f): read file f into the reader; returns what getline last did, and
+        # sets bad (and bln, the line) when f holds YAML it does not read
+        function rd(f,    s, rc, ln, r, ended) {
+            d = 0; seen = 0; bad = 0; ln = 0; ended = 0
+            while ((rc = (getline s < f)) > 0) {
+                if (++ln == 1 && index(s, bom) == 1) s = substr(s, length(bom) + 1)
+                sub(/\r$/, "", s)
+                if (s ~ /^(---|[.][.][.])([ \t]|$)/) {
+                    if ((d > 0 && F[d]) || s !~ /^(---|[.][.][.])[ \t]*(#.*)?$/) die()
+                    else if (seen) ended = 1
+                } else if (s !~ /^[ \t]*(#|$)/) {
+                    if (ended) die()
+                    else {
+                        if (d > 0 && F[d]) r = fl(s)
+                        else r = bl(s)
+                        if (!bad && r !~ /^[ \t]*(#.*)?$/) die()
+                    }
+                }
+                if (bad) break
+            }
+            if (rc >= 0 && !bad && d > 0 && F[d]) die()
+            bln = ln
+            close(f)
+            return rc
+        }
+        BEGIN {
+            bom = "\357\273\277"
+            q = "[\"\047]"
+            sq = "\047"
+            # every character listed: in a UTF-8 locale a range matches more
+            an = "[0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz]"
+            cf = ARGV[1]
+            mf = ARGV[2]
+            nf = ARGV[3]
+            auth = 0
+            base = -1
+            m = 0
+            ln = 0
+            while ((rc = (getline s < cf)) > 0) {
+                if (++ln == 1 && index(s, bom) == 1) s = substr(s, length(bom) + 1)
+                sub(/\r$/, "", s)
+                if (s ~ /^[ \t]*(#|$)/) continue
+                if (s !~ /^[ \t]/) {
+                    auth = (s ~ /^authorities[ \t]*:[ \t]*(#.*)?$/)
+                    continue
+                }
+                if (!auth) continue
+                match(s, /^[ \t]+/)
+                if (base < 0) base = RLENGTH
+                if (RLENGTH != base) continue
+                k = substr(s, RLENGTH + 1)
+                sub(/[ \t]*:.*$/, "", k)
+                gsub(q, "", k)
+                if (k ~ ("^" an "+$") && !(k in want)) {
+                    want[k] = 1
+                    order[++m] = k
+                }
+            }
+            if (rc < 0) exit 3
+            close(cf)
+            if (m == 0) exit 4
+            # this node: its BLS key and the network keys of its primary and of
+            # each worker it runs (a list, or the single worker of old files)
+            own = ""
+            if (nf != "-") {
+                if (rd(nf) < 0 || bad) exit 6
+                own = ni["bls_public_key"]
+                np = ni["p2p_info" SUBSEP "primary" SUBSEP "network_key"]
+                for (i = 0; ("p2p_info" SUBSEP "workers" SUBSEP i SUBSEP "network_key") in ni; i++)
+                    nw[i] = ni["p2p_info" SUBSEP "workers" SUBSEP i SUBSEP "network_key"]
+                if (!(0 in nw) && (("p2p_info" SUBSEP "worker" SUBSEP "network_key") in ni))
+                    nw[0] = ni["p2p_info" SUBSEP "worker" SUBSEP "network_key"]
+            }
+            rdmap = 1
+            dup = ""
+            if (rd(mf) < 0) exit 5
+            if (bad) { print bln; exit 7 }
+            if (dup != "") { print dup; exit 9 }
+            n = 0
+            for (i = 1; i <= m; i++)
+                if (!(order[i] in have)) miss[++n] = order[i]
+            if (n > 0) {
+                printf("%d %d", n, m)
+                for (i = 1; i <= n && i <= 3; i++) printf(" %s", miss[i])
+                printf("\n")
+                exit 1
+            }
+            # the entry of this node: its primary key, and worker 0 at least,
+            # read and equal to the node, and no other worker it runs different
+            if (own != "" && (own in have) && (wrong || !sp || ((0 in nw) && !s0))) {
+                print own
+                exit 8
+            }
+            exit 0
+        }'
+    out="$(tn_as_service_user awk "$prog" "$cf" "$map" "$nf" 2>/dev/null)" || rc=$?
+    case "$rc" in
+        0) return 0 ;;
+        1)
+            read -r nmiss ntotal k1 k2 k3 <<< "$out"
+            if [[ "$nmiss" =~ ^[0123456789]+$ && "$ntotal" =~ ^[0123456789]+$ ]]; then
+                for k in "$k1" "$k2" "$k3"; do
+                    [[ -n "$k" ]] || continue
+                    list="${list:+${list}, }${k:0:16}…"
+                done
+                if [[ "$nmiss" -gt 3 ]]; then
+                    list="${list} and $((nmiss - 3)) more"
+                fi
+                why="${map} lacks ${nmiss} of the ${ntotal} validators of the genesis committee in ${cf} (${list}), so it is not written to network-config as committee_peers"
+            else
+                why="${map} could not be checked against the genesis committee in ${cf}, so it is not written to network-config as committee_peers"
+            fi
+            ;;
+        3) why="${cf} cannot be read, so ${map} was not checked against the genesis committee and is not written to network-config as committee_peers" ;;
+        4) why="${cf} names no validator under authorities, so ${map} was not checked against the genesis committee and is not written to network-config as committee_peers" ;;
+        6) why="${ni} cannot be read, so ${map} was not checked against this node's own network keys and is not written to network-config as committee_peers" ;;
+        7)
+            [[ "$out" =~ ^[0123456789]+$ ]] || out="?"
+            why="${map} holds YAML this check does not read at line ${out} (an anchor, a tag, a block scalar, an explicit key or a value over several lines), so it is not written to network-config as committee_peers"
+            ;;
+        9)
+            why="${map} lists ${out:0:16}… more than once at its first level, so it is not written to network-config as committee_peers"
+            tail="a node whose committee_peers names a key twice cannot read its network-config and refuses to start, at every epoch, while the map on its launch line keeps the last entry for that key. The map stays installed and in use: the node still dials its peers at start, keeps its trusted hubs and finds the other validators through peer discovery, and the P2P committee allowlist keeps the map in its floor. To have it written as committee_peers, keep one entry per key (check that the one kept has that validator's addresses) and install it again with edit-config.sh --set bootstrap_peers=FILE."
+            ;;
+        8)
+            why="${map} has an entry for this node, ${out:0:16}…, whose network keys are not this node's own (the primary and worker network_key in ${ni}), so it is not written to network-config as committee_peers"
+            tail="a node whose committee_peers entry for itself names other network keys than its node-info.yaml refuses to start, at every epoch. The map stays installed and in use: the node still dials its peers at start, keeps its trusted hubs and finds the other validators through peer discovery, and the P2P committee allowlist keeps the map in its floor. To have it written as committee_peers, give that entry the network keys of ${ni} (keys made again after the map was shared leave it stale) and install it again with edit-config.sh --set bootstrap_peers=FILE."
+            ;;
+        *) why="${map} could not be checked against the genesis committee in ${cf}, so it is not written to network-config as committee_peers" ;;
+    esac
+    printf '%s: %s\n' "$why" "${tail:-a node whose committee_peers misses a genesis validator refuses to start while its chain is at epoch 0, where every new data dir starts. The map stays installed and in use: the node still dials its peers at start, keeps its trusted hubs and finds the other validators through peer discovery, and the P2P committee allowlist keeps the map in its floor. To have it written as committee_peers, list every genesis validator in it (this node too, when it is one; hubs may stay beside them) and install it again with edit-config.sh --set bootstrap_peers=FILE.}"
+    return 1
+}
+
+# tn_trusted_nodes_shape_ok FILE [WORKERS] -- rc 0 when FILE has the shape of the
+# node's trusted nodes map in block YAML: top-level keys that are BLS public keys
+# (base58 of the 96-byte key, 131 or 132 characters, as node-info.yaml writes
+# them), each named once and holding primary and workers and nothing else (the
+# node refuses unknown fields there; a field name may be quoted). primary has a
+# network_address and a network_key that are not empty; workers holds the worker
+# ids 0 to WORKERS-1 and no others (WORKERS, default 1, is how many workers this
+# node runs, tn_local_worker_count: the node stops at start on any other set), each
+# id a plain number named once and a block with a network_address and a
+# network_key of its own. So an entry copied whole from a node-info.yaml, whose
+# workers are a list, is refused. Every network_address is one the node can
+# dial (tn_map_addr_check). Comments, blank lines and a leading "---" may
+# appear, and a byte order mark and CRLF line ends are read past, as the
+# renderer drops them. The node has no check flag for this map, so setup-node and
+# edit-config run this, then tn_trusted_nodes_node_check, before they install
+# one; a map that passes both and is still wrong stops the node at start.
+# Otherwise rc 1, with the reason on stdout.
+tn_trusted_nodes_shape_ok() {
+    local out rc=0 nwk="${2:-1}"
+    [[ "$nwk" =~ ^[1-9][0-9]{0,4}$ ]] || nwk=1
+    # the awk text holds no single quote; sq carries one
+    out="$(awk -v sq="'" -v nwk="$nwk" '
+        function short(k) { return (length(k) > 16) ? substr(k, 1, 16) "..." : k }
+        function fail(msg) { reason = msg; failed = 1; exit }
+        # what the current worker still lacks once it ends
+        function wlacks() {
+            if (wid == "") return ""
+            if (!waddr) return "worker " wid " of " short(key) " has no network_address"
+            if (!wnkey) return "worker " wid " of " short(key) " has no network_key"
+            return ""
+        }
+        # what the current entry still lacks once it ends
+        function lacks() {
+            if (key == "") return ""
+            w = wlacks()
+            if (w != "") return w
+            if (!prim) return "the entry " short(key) " has no primary"
+            if (!addr) return "the primary of " short(key) " has no network_address"
+            if (!nkey) return "the primary of " short(key) " has no network_key"
+            if (!work) return "the entry " short(key) " has no workers"
+            if (!nw) return "the workers of " short(key) " name no worker id"
+            if (nw < nwk) return "the workers of " short(key) " name " nw " of the " nwk " workers this node runs: each entry holds " wl
+            return ""
+        }
+        # whether the value after the first colon is something other than null
+        function has_value(s) {
+            sub(/^[^:]*:[ \t]*/, "", s)
+            sub(/[ \t]+#.*$/, "", s)
+            sub(/[ \t]+$/, "", s)
+            return !(s == "" || s == "~" || s == "null" || s == "\"\"" || s == sq sq)
+        }
+        BEGIN {
+            bom = "\357\273\277"
+            nwk += 0
+            wl = (nwk == 1) ? "worker 0 alone" : "workers 0 to " (nwk - 1)
+        }
+        {
+            s = $0
+            # read as tn_network_config_render reads the map: a byte order mark and
+            # CRLF line ends, which a file saved on Windows may carry, are not in it
+            if (NR == 1 && index(s, bom) == 1) s = substr(s, length(bom) + 1)
+            sub(/\r$/, "", s)
+            if (s ~ /^[ \t]*$/ || s ~ /^[ \t]*#/) next
+            if (s ~ /^(---|[.][.][.])[ \t]*$/) {
+                if (seen) ended = 1
+                next
+            }
+            if (ended) fail("line " NR " starts a second YAML document; the file holds one map")
+            seen = 1
+            if (s ~ /^ *\t/) fail("line " NR " is indented with a tab; YAML indents with spaces")
+            match(s, /^ */)
+            ind = RLENGTH
+            # a quoted field name ("primary":) is the same field to the node
+            if (ind > 0 && match(s, "^ *[\"" sq "][a-z_]+[\"" sq "]"))
+                s = substr(s, 1, ind) substr(s, ind + 2, RLENGTH - ind - 2) substr(s, RLENGTH + 1)
+            if (ind == 0) {
+                m = lacks()
+                if (m != "") fail(m)
+                k = s
+                sub(/[ \t]+#.*$/, "", k)
+                sub(/[ \t]+$/, "", k)
+                if (k !~ /:$/) fail("line " NR " is not a BLS public key and a colon, with the entry indented below it")
+                k = substr(k, 1, length(k) - 1)
+                q = substr(k, 1, 1)
+                if ((q == "\"" || q == sq) && length(k) > 2 && substr(k, length(k), 1) == q)
+                    k = substr(k, 2, length(k) - 2)
+                if (k !~ /^[1-9A-HJ-NP-Za-km-z]+$/)
+                    fail("line " NR ": " short(k) " is not a BLS public key (base58, as in node-info.yaml)")
+                if (length(k) < 131 || length(k) > 132)
+                    fail("line " NR ": " short(k) " is not a BLS public key: it is " length(k) " characters long, and a key is 131 or 132 (96 bytes in base58, as in node-info.yaml)")
+                if (k in keys) fail("line " NR ": the BLS key " short(k) " is in the map twice")
+                keys[k] = 1
+                n++
+                key = k
+                fld = 0; pfld = 0; prim = 0; addr = 0; nkey = 0; work = 0; inprim = 0
+                inwork = 0; wfld = 0; nw = 0; wid = ""; split("", wids)
+                next
+            }
+            if (key == "") fail("line " NR " is indented, but no BLS public key comes before it")
+            if (fld == 0) fld = ind
+            if (ind < fld) fail("line " NR " is indented less than the lines above it in the entry " short(key))
+            if (ind == fld) {
+                m = wlacks()
+                if (m != "") fail(m)
+                wid = ""
+                c = substr(s, ind + 1)
+                f = c
+                sub(/[ \t]*:.*$/, "", f)
+                inprim = 0
+                inwork = 0
+                if (f == "primary") {
+                    if (prim) fail("line " NR ": the entry " short(key) " has primary twice")
+                    if (c !~ /^primary:[ \t]*(#.*)?$/)
+                        fail("line " NR ": write primary as a block, with network_address and network_key on their own lines below it")
+                    prim = 1
+                    inprim = 1
+                    pfld = 0
+                } else if (f == "workers") {
+                    if (work) fail("line " NR ": the entry " short(key) " has workers twice")
+                    if (c !~ /^workers:[ \t]*(#.*)?$/)
+                        fail("line " NR ": write workers as a block: each worker id on its own line below it, holding network_address and network_key")
+                    work = 1
+                    inwork = 1
+                } else {
+                    fail("line " NR ": " short(f) " is not a field of a trusted node; an entry holds primary and workers")
+                }
+                next
+            }
+            if (inprim) {
+                if (pfld == 0) pfld = ind
+                if (ind == pfld) {
+                    c = substr(s, ind + 1)
+                    if (c ~ /^network_address[ \t]*:/) {
+                        if (!has_value(c)) fail("line " NR ": the network_address of " short(key) " is empty")
+                        addr = 1
+                    } else if (c ~ /^network_key[ \t]*:/) {
+                        if (!has_value(c)) fail("line " NR ": the network_key of " short(key) " is empty")
+                        nkey = 1
+                    }
+                }
+            } else if (inwork) {
+                if (wfld == 0) wfld = ind
+                if (ind < wfld) fail("line " NR " is indented less than the worker ids above it in the entry " short(key))
+                if (ind == wfld) {
+                    m = wlacks()
+                    if (m != "") fail(m)
+                    c = substr(s, ind + 1)
+                    id = c
+                    sub(/[ \t]*:.*$/, "", id)
+                    if (id !~ /^(0|[1-9][0-9]*)$/)
+                        fail("line " NR ": " short(id) " is not a worker id; the workers of " short(key) " are keyed by plain numbers from 0, as 0, 1, 2")
+                    if (id + 0 >= nwk)
+                        fail("line " NR ": worker " id " of " short(key) " is not one this node runs: it runs " nwk " worker" (nwk == 1 ? "" : "s") ", so each entry holds " wl " (the node stops at start on any other worker id)")
+                    if (c !~ /^[0-9]+[ \t]*:[ \t]*(#.*)?$/)
+                        fail("line " NR ": write worker " id " of " short(key) " as a block, with network_address and network_key on their own lines below it")
+                    if ((id + 0) in wids) fail("line " NR ": the entry " short(key) " has worker " id " twice")
+                    wids[id + 0] = 1
+                    nw++
+                    wid = id; wefld = 0; waddr = 0; wnkey = 0
+                    next
+                }
+                if (wefld == 0) wefld = ind
+                if (ind == wefld) {
+                    c = substr(s, ind + 1)
+                    if (c ~ /^network_address[ \t]*:/) {
+                        if (!has_value(c)) fail("line " NR ": the network_address of worker " wid " of " short(key) " is empty")
+                        waddr = 1
+                    } else if (c ~ /^network_key[ \t]*:/) {
+                        if (!has_value(c)) fail("line " NR ": the network_key of worker " wid " of " short(key) " is empty")
+                        wnkey = 1
+                    }
+                }
+            }
+        }
+        END {
+            if (!failed) {
+                reason = lacks()
+                if (reason != "") failed = 1
+                else if (n == 0) { reason = "it holds no BLS public key entries"; failed = 1 }
+            }
+            if (failed) {
+                print reason
+                exit 1
+            }
+        }' "$1" 2>&1)" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        printf '%s' "${out:-could not read ${1}}"
+        return 1
+    fi
+    tn_map_addr_check "$1"
+}
+
+# tn_trusted_nodes_node_check SPEC FILE -- rc 0 when the node binary of runner SPEC
+# reads every entry of FILE, a trusted nodes map tn_trusted_nodes_shape_ok passed.
+# The node has no check flag for this map, but its entries and those of a
+# --bootstrap-peers map are one entry type (a primary and workers, each a
+# network_address and a network_key), so FILE goes to tn_node_parse_check as a
+# --bootstrap-peers map: line for line, read as the shape check reads it, with each
+# worker id turned into a list item ("0:" becomes "-"). The node then parses every
+# BLS key, network_key and network_address (its IP literal and /p2p peer id) and
+# every YAML line as it does at start, and a refusal names a line of FILE. It
+# cannot see what the node checks only at start: the worker ids (the shape check
+# holds them to 0, 1, ...), whether a /p2p peer id is the one of its network_key,
+# and whether a network key is this node's or another hub's. rc 1 refused, with the
+# node's reason on stdout; rc 4 the check could not run.
+tn_trusted_nodes_node_check() {
+    local map out rc=0
+    # the awk text holds no single quote; sq carries one
+    map="$(awk -v sq="'" '
+        BEGIN { bom = "\357\273\277"; wk = -1 }
+        {
+            s = $0
+            if (NR == 1 && index(s, bom) == 1) s = substr(s, length(bom) + 1)
+            sub(/\r$/, "", s)
+            match(s, /^ */)
+            ind = RLENGTH
+            t = substr(s, ind + 1)
+            if (t != "" && t !~ /^[ \t]*#/) {
+                if (wk >= 0 && ind <= wk) wk = -1
+                if (wk >= 0 && wi < 0) wi = ind
+                if (wk >= 0 && ind == wi) s = substr(s, 1, ind) "-"
+                else if (ind > 0 && t ~ ("^[\"" sq "]?workers[\"" sq "]?[ \t]*:")) { wk = ind; wi = -1 }
+            }
+            print s
+        }' "$2" 2>/dev/null)" || { printf 'could not read %s\n' "$2"; return 4; }
+    out="$(tn_node_parse_check "$1" --bootstrap-peers "$map")" || rc=$?
+    # the reason, without the flag the map went in through
+    out="${out#error: }"
+    printf '%s\n' "${out#"invalid value '…' for '--bootstrap-peers <MAP>': "}"
+    return "$rc"
+}
+
+# tn_local_worker_count DATA_DIR -- how many workers the node of DATA_DIR runs: the
+# workers its node-info.yaml lists (tn_node_info_worker_ports), or 1 before there is
+# one, as setup-node generates the keys of one worker.
+tn_local_worker_count() {
+    local ports
+    ports="$(tn_node_info_worker_ports "${1%/}/node-info.yaml" 2>/dev/null)" || ports=""
+    if [[ -z "$ports" ]]; then
+        printf '1\n'
+        return 0
+    fi
+    printf '%s\n' "$ports" | awk 'END { print NR }'
+}
+
+# tn_map_addr_check FILE -- rc 0 when every network_address in the trusted nodes
+# or bootstrap peers map FILE is one the node can dial:
+# /ip4/<address>/udp/<port>/quic-v1 or /ip6/<address>/udp/<port>/quic-v1,
+# optionally followed by /p2p/<peer id>, as node-info.yaml writes them. The
+# node's P2P transport is QUIC over IP and nothing else. It starts with an
+# address that names a host (/dns, /dns4, /dns6, /dnsaddr), another transport
+# (/tcp) or UDP port 0 and keeps it, but never dials it and says so only at
+# debug log level, and the P2P committee allowlist takes no address from a host
+# name. A value that is no multiaddr, or a peer id with a character outside
+# letters and digits, stops the node at start. The node's own parse check of a
+# peers map (node --bootstrap-peers MAP --help) accepts the first three. The map
+# is read line by line, block or flow YAML: a value may be quoted or on the line
+# after its key, a "#" comment is not read, and the entry a refusal names is the
+# last key at column 0 above the address. Otherwise rc 1, with the first
+# refusal on stdout: its line, the entry's BLS key and the address (both
+# shortened) and what the node takes instead.
+tn_map_addr_check() {
+    local out rc=0
+    # the awk text holds no single quote; sq carries one
+    out="$(awk -v sq="'" '
+        function short(s, n) { return (length(s) > n) ? substr(s, 1, n) "..." : s }
+        function ip4(a,    n, p, i) {
+            n = split(a, p, ".")
+            if (n != 4) return 0
+            for (i = 1; i <= 4; i++)
+                if (p[i] !~ /^[0-9]+$/ || length(p[i]) > 3 || p[i] + 0 > 255) return 0
+            return 1
+        }
+        # whether A is IP, then UDP and QUIC v1, then an optional peer id
+        function dialable(a,    n, p) {
+            n = split(a, p, "/")
+            if ((n != 6 && n != 8) || p[1] != "") return 0
+            if (p[2] == "ip4") {
+                if (!ip4(p[3])) return 0
+            } else if (p[2] == "ip6") {
+                if (p[3] !~ /^[0-9A-Fa-f:.]+$/ || p[3] !~ /:/) return 0
+            } else return 0
+            if (p[4] != "udp" || p[5] !~ /^[0-9]+$/ || length(p[5]) > 5 || p[5] + 0 > 65535 || p[5] + 0 == 0) return 0
+            if (p[6] != "quic-v1") return 0
+            if (n == 8 && (p[7] != "p2p" || p[8] !~ /^[0-9A-Za-z]+$/)) return 0
+            return 1
+        }
+        {
+            s = $0
+            sub(/\r$/, "", s)
+            sub(/(^|[ \t])#.*$/, "", s)
+            gsub(sq, "\"", s)
+            if (s ~ /^"?[0-9A-Za-z]/) {
+                key = s
+                sub(/"?[ \t]*:.*$/, "", key)
+                sub(/^"/, "", key)
+            }
+            # a value on the line after "network_address:" is that address
+            if (pend && s ~ /[^ \t]/) { pend = 0; sub(/^[ \t]*/, "network_address: ", s) }
+            t = s
+            while (match(t, /network_address"?[ \t]*:[ \t]*/)) {
+                t = substr(t, RSTART + RLENGTH)
+                pend = (t == "")
+                v = t
+                if (substr(v, 1, 1) == "\"") {
+                    v = substr(v, 2)
+                    sub(/".*$/, "", v)
+                } else {
+                    sub(/[ \t]*[],}].*$/, "", v)
+                    sub(/[ \t]+$/, "", v)
+                }
+                if (v == "" || dialable(v)) continue
+                if (v ~ /^\/dns(4|6|addr)?\//)
+                    why = "is a DNS name (" short(v, 40) "): the node does not resolve names, so it would never dial it. Give the IP address instead"
+                else
+                    why = "(" short(v, 40) ") is not an address the node can dial"
+                of = (key == "") ? "" : " of " short(key, 16)
+                print "line " NR ": the network_address" of " " why "; the node takes /ip4/<address>/udp/<port>/quic-v1/p2p/<peer id> (or /ip6/...), as node-info.yaml writes it"
+                bad = 1
+                exit 1
+            }
+        }
+        END { if (bad) exit 1 }' "$1" 2>&1)" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        printf '%s' "${out:-could not read ${1}}"
+        return 1
+    fi
+    return 0
 }
 
 # Record the ref of the source binary that was just installed, in a marker next

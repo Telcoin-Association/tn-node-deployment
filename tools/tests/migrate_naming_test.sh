@@ -464,6 +464,18 @@ check "allowlist stale (exit 3): migrated, synced, no warning of its own" "0 1 n
     "${RC} $(grep -cxF -- "$SYNC" "$EV") $(has "$OUT" "was not synced")"
 
 legacy "${META_TEXT}
+P2P_COMMITTEE=on"
+FW_STUB_RC=4 migrate
+check "allowlist floor kept (exit 4): migrated, names --accept-floor-shrink, not a plain sync" "0 yes no" \
+    "${RC} $(has "$OUT" "floor keeps addresses that the bootstrap peers map, the trusted nodes map and the genesis committee.yaml no longer hold (firewall-setup.sh exit 4, which names them), so they stay allowed; if they were taken out on purpose, drop them with: sudo bash ${MT}/firewall-setup.sh --p2p-committee sync --accept-floor-shrink") $(has "$OUT" "run: sudo bash ${MT}/firewall-setup.sh --p2p-committee sync")"
+
+legacy "${META_TEXT}
+P2P_COMMITTEE=on"
+FW_STUB_RC=5 migrate
+check "allowlist unfinished off (exit 5): migrated, names the rerun of off, not sync" "0 yes no" \
+    "${RC} $(has "$OUT" "was not synced with the new layout: a --p2p-committee off did not finish (firewall-setup.sh exit 5); finish it with: sudo bash ${MT}/firewall-setup.sh --p2p-committee off") $(has "$OUT" "run: sudo bash ${MT}/firewall-setup.sh --p2p-committee sync")"
+
+legacy "${META_TEXT}
 P2P_COMMITTEE=on
 P2P_COMMITTEE=on"
 migrate

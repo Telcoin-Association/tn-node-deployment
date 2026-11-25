@@ -7,6 +7,17 @@ It covers the scripts in this repository, run on the node itself, plus the `cast
 The README is the reference; this is the path.
 When you need every option of a script, follow the links into the [README](README.md).
 
+<!-- release: remove this block when the release that CHANGELOG/scripts-v2.3.0.md describes is cut -->
+> **Not in a script release yet.**
+> `firewall-setup.sh` 2.2.1, `setup-node.sh` 2.1.7, `edit-config.sh` 2.2.4 and `check-node.sh` 2.2.2 are on `main` only, and this runbook already describes them: sections 2.6, 2.7, 2.9, 2.10 and 2.12, and their rows in sections 4.3, 7 and 9.
+> [CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md) lists the changes.
+> On `scripts-v2.2.0`, which `update-scripts.sh` and the installer install today:
+>
+> - `--p2p-committee off` on a host with a stored `--p2p-from` list puts that list back as per-source rules and removes the open rules, which closes the P2P ports to every other source. To open them, run `sudo bash ~/telcoin-node-scripts/firewall-setup.sh --enable --p2p-anywhere` after it (on mainnet with `--ssh-from <list>` or `--ssh-anywhere`, unless an SSH source list is stored).
+> - The allowlist's floor is the bootstrap peers file alone, or the genesis `committee.yaml` when there is none: the trusted hubs are not in it, and there is no `--accept-floor-shrink`.
+> - Setup and `edit-config.sh` write any bootstrap peers map as `committee_peers`, and only `edit-config.sh` checks the shape of a trusted nodes file, so check both maps by hand (section 2.9).
+> - The mainnet keygen of section 2.12 is refused like every other mainnet run.
+
 Contents:
 
 - [0. Who this is for and vocabulary](#0-who-this-is-for-and-vocabulary)
@@ -217,6 +228,7 @@ Mainnet has not launched, and the scripts still lack two mainnet values that are
 A script release that sets them is announced at launch; until then a mainnet install stops before it changes anything.
 This release also keeps mainnet switched off (`TN_MAINNET_ENABLED=0` in `lib/common.sh`): option 2 of the setup network menu still reads `(coming soon)` and answers `Mainnet has not launched yet.`, `setup-node.sh --json --network mainnet` stops with `Mainnet is not enabled in this script release (lib/common.sh TN_MAINNET_ENABLED); nothing on this host was changed.`, and the Node Manager UI refuses a mainnet setup.
 The launch release switches it on together with the pins.
+One mainnet step is open before that: validators generate their mainnet keys with their own binary before the genesis exists (section 2.12, `TN_MAINNET_KEYGEN_ENABLED=1` in `lib/common.sh`).
 The mainnet image package is already set: `ghcr.io/telcoin-association/tn-mainnet`, where the release pipeline publishes the mainnet images (testnet's are in `ghcr.io/telcoin-association/tn-testnet`; the release tag picks the package).
 A mainnet node names its image by its release tag, and the digest comes from the signed release; a digest given alone is taken only when `.node-meta` records it as the image of a mainnet release this node has installed (section 4.3).
 Before you treat an endpoint as a given network, check its chain ID:
@@ -383,6 +395,7 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh --json --enable --ssh-from 19
 
 - `--ssh-from CIDR[,CIDR]` or `--ssh-from <file>` (one source per line) limits SSH to those sources; `--p2p-from` does the same for the P2P ports. The lists are stored in `.node-meta` as `SSH_ALLOW_FROM` and `P2P_ALLOW_FROM`, and a new list replaces the old one's rules. Addresses with leading zeros, `/0` and masks wider than `/8` are refused. An IPv6 entry must parse as Rust's `Ipv6Addr` parses it, the grammar `tn-p2p-allow-sync` reads `P2P_ALLOW_FROM` with: hex groups only, at most one `::`, and no zone (`%eth0`), brackets or dotted IPv4 tail (write `::ffff:192.0.2.1` as `::ffff:c000:201`), so a typo is refused before anything is written.
 - `--ssh-anywhere` and `--p2p-anywhere` drop a stored list and open the port to every address again. Each cannot be combined with its `-from` twin.
+- After `--p2p-committee off` (section 2.10) the stored P2P list is set aside (`P2P_PER_SOURCE=off`): the P2P ports stay open to every address on later runs until `--p2p-from` gives a list again.
 - `--gateway-from <list|file>` lets those hosts reach the node's RPC port and health port 43174, on every network, for a worker gateway on another host (section 4.15). It goes with `--enable` or `--reset`, is stored as `GATEWAY_ALLOW_FROM` and applied again by every later `--enable` and `--reset`; `--gateway-from none` removes the list and its rules. While `GATEWAY_UPSTREAM` is set in `.node-meta`, `--reset`, `--gateway-from none` and a list that leaves out a host it names are refused (section 4.15).
 - On a Google Cloud VM the IAP range `35.235.240.0/20` is added to the SSH sources, so the console's SSH button keeps working.
 - On mainnet, enabling the firewall without SSH sources is refused unless you pass `--ssh-anywhere`. The health port 43174 is never opened to everyone.
@@ -432,7 +445,10 @@ The node treats these peers as discovery hints only: it does not keep them conne
 - The file is a YAML or JSON map keyed by BLS public key. Each value is that node's `primary` and `workers` entries, copied from under `p2p_info` in its `node-info.yaml`.
 - It must be a regular file of at most 64 KiB that other users can read (`chmod 644`). The map does not stay private: setup installs it world-readable as `/etc/telcoin/bootstrap-peers.yaml`, and its check passes the map on the node binary's command line. A file its group or other users cannot read is refused, with the `chmod` to run.
 - Setup checks the map with the release's own parser and stops with the parser's reason if a key or value is wrong.
+- Every `network_address` is an IP address (`/ip4/<address>/udp/<port>/quic-v1/p2p/<peer id>` or the same with `/ip6`), as for the trusted nodes file (section 2.9): the node does not resolve names and never dials a `/dns...` or `/tcp` address, which its parser takes. Setup and `edit-config.sh` refuse one in the preflight, before the parser runs, naming the line and the entry: `line <n>: the network_address of <key>... is a DNS name (...)`.
 - The start script passes `--bootstrap-peers "$(cat /etc/telcoin/bootstrap-peers.yaml)"`, so the node reads the file again at every start. An edit to that file takes effect at the next restart without any check; `edit-config.sh` checks a new map before it installs it.
+- With an admission mode (section 2.9) the map is also written into `network-config` as `committee_peers`, but only when it lists every validator of the genesis committee, this node included, and its entry for this node holds this node's network keys.
+  Any other map is installed and dialed as usual and left out of `committee_peers`, with a warning.
 
 `--enable-state-export` (`v0.13.0-adiri` or later) writes each epoch's final execution state under `<data dir>/consensus-db/state_exports/epoch-N/`.
 Every export is a full copy of the state and none is deleted, so the disk fills over time.
@@ -491,7 +507,8 @@ The node's own description is `crates/network-libp2p/src/peers/admission.md` in 
 
 Mainnet validators are expected to run `--admission closed --trusted-nodes <hubs>`.
 On mainnet, mode closed without a trusted nodes map warns, at setup and in `edit-config.sh`: `Admission closed without --trusted-nodes: the node admits only the previous, current and next committees and the bootstrap peers. Mainnet validators are expected to run --admission closed --trusted-nodes <hubs>.`
-The hubs and the bootstrap peers are the only peers outside the committees a closed node takes, so give it both.
+Outside the committees, a closed node takes only its trusted hubs and its bootstrap peers.
+Put the hubs in the trusted nodes file; the bootstrap peers file must list every validator of the genesis committee, this node included, and may list hubs beside them, because with an admission mode it is also written into `network-config` as `committee_peers` (below), and only when it lists the whole committee.
 
 ```bash
 sudo bash ~/telcoin-node-scripts/setup-node.sh --admission closed --trusted-nodes ./hubs.yaml --bootstrap-peers ./peers.yaml
@@ -500,30 +517,50 @@ sudo bash ~/telcoin-node-scripts/setup-node.sh --admission closed --trusted-node
 **The trusted nodes file.**
 A YAML map keyed by each hub's BLS public key (base58, as in the hub's `node-info.yaml`).
 Each entry holds the hub's `primary`, with its `network_address` and `network_key`, and its `workers`, keyed by worker id, each with its own `network_address` and `network_key`.
+Do not paste an entry from a node-info file; workers are keyed by id.
+`node-info.yaml` lists the workers under `p2p_info` and adds fields such as `name`, and the node stops at start on either.
 Unlike the bootstrap peers map, `workers` is a map by worker id, not a list, and an entry holds nothing besides `primary` and `workers`.
 The node wants the worker ids `0` up to its own number of workers less one in every entry (`0` alone with one worker).
+Every `network_address` is an IP address: `/ip4/<address>/udp/<port>/quic-v1` or the same with `/ip6`, followed by `/p2p/<peer id>` as in the hub's `node-info.yaml` (the `/p2p/` part may be left out).
+The node does not resolve names: it starts with a `/dns`, `/dns4`, `/dns6` or `/dnsaddr` address, or a `/tcp` one, but never dials it, and says so only at debug log level, and the P2P committee allowlist (section 2.10) takes no address from a name.
+One correct entry, for a hub with one worker, with the values taken from the hub's `node-info.yaml` (`bls_public_key`, and under `p2p_info` the primary's and the first worker's `network_address` and `network_key`):
 
 ```yaml
-<hub BLS public key>:
+<hub bls_public_key>:
   primary:
-    network_address: /ip4/198.51.100.30/udp/49590/quic-v1/p2p/<peer id>
-    network_key: <primary network key>
+    network_address: /ip4/198.51.100.30/udp/49590/quic-v1/p2p/<primary peer id>
+    network_key: <primary network_key>
   workers:
     0:
-      network_address: /ip4/198.51.100.30/udp/49594/quic-v1/p2p/<peer id>
-      network_key: <worker network key>
+      network_address: /ip4/198.51.100.30/udp/49594/quic-v1/p2p/<worker peer id>
+      network_key: <worker network_key>
 ```
 
 - It must be a regular file of at most 64 KiB that other users can read (`chmod 644`), as for the peers map (section 2.7).
 - Setup installs it as `/etc/telcoin/trusted-nodes.yaml` (root 0644) and writes it into `network-config` under `trusted_nodes`.
-- `edit-config.sh --set trusted_nodes=FILE` checks its shape first, on a root-only copy: keys of 131 or 132 base58 characters, each named once, `primary` and `workers` as above with at least one worker id from 0 to 65535, block YAML only.
-  A refusal writes nothing and names the line: `<file> is not a trusted nodes map: <reason>. Each key is a hub's BLS public key, and each entry the hub's primary (network_address, network_key) and workers, as in its node-info.yaml.`
+- `setup-node.sh` and `edit-config.sh` check its shape with one check before they write anything: keys of 131 or 132 base58 characters, each named once, `primary` and `workers` as above with the worker ids of the workers this node runs (`0` alone for the one worker setup installs), block YAML only (a byte order mark and CRLF line ends are fine), and every `network_address` an IP address as above.
+  The node binary then reads the map too, before network-config is written or a running node restarted, and judges every BLS key, `network_key` and `network_address` as it does at start; its refusal reads `--trusted-nodes: <the node binary> does not read <file> (<the node's reason>; the line and column count in that file). ...` at setup, `the node rejects <file> as a trusted nodes map (<the node's reason>; ...)` in `edit-config.sh`.
+  Setup runs it in the preflight, before any key generation or install step, on a map it reads back from `.node-meta` on a re-run, and again just before the install; `edit-config.sh` runs it on a root-only copy.
+  A refusal writes nothing, restarts nothing and names the line and the entry, with the key shortened: `--trusted-nodes: <reason>.` at setup, `<file> is not a trusted nodes map: <reason>. Each key is a hub's BLS public key, and each entry the hub's primary (network_address, network_key) and its workers keyed by worker id, with the addresses and keys from its node-info.yaml.` in `edit-config.sh`.
+  For a name the reason reads `line <n>: the network_address of <key>... is a DNS name (<address>...): the node does not resolve names, so it would never dial it. Give the IP address instead; the node takes /ip4/<address>/udp/<port>/quic-v1/p2p/<peer id> (or /ip6/...), as node-info.yaml writes it`.
 - The map needs an admission mode: `--trusted-nodes` with no mode given or recorded stops setup, and `edit-config.sh` says `trusted_nodes needs an admission mode, which goes into network-config with it: set admission to open, grace or closed first`.
 - When a peer rotates its network key, a Closed node denies the new key until the peer's new record resolves; switching to Grace for the rotation, or putting the new binding in this file, avoids the wait, because a configured hub wins over a cached record.
 
 **`committee_peers`.**
-The scripts write the installed bootstrap peers map (`/etc/telcoin/bootstrap-peers.yaml`, section 2.7) into `network-config` as `committee_peers`, the node's launch inventory, and leave the entry out when the node runs without one.
-A node that starts during epoch 0 with a nonempty `committee_peers` stops unless it lists every member of the committee, each with its primary and the on-chain number of workers; after epoch 0 a gap is only logged and discovery covers it.
+The scripts write the installed bootstrap peers map (`/etc/telcoin/bootstrap-peers.yaml`, section 2.7) into `network-config` as `committee_peers`, the node's launch inventory, when it lists every validator of the genesis committee (the keys under `authorities` in `<data dir>/genesis/committee.yaml`), this node included; keys beside them, a hub's say, do no harm.
+They leave the entry out when the node runs without a map.
+A node that starts during epoch 0 with a nonempty `committee_peers` stops unless it lists every member of the committee, each with its primary and the on-chain number of workers (`Error: committee_peers: missing validator <key>`, within a second of the start, in every admission mode); after epoch 0 a gap is only logged and discovery covers it, but a new data dir starts at epoch 0 whenever it is made.
+So setup and the `edit-config.sh` edits of `admission`, `trusted_nodes` and `bootstrap_peers` check the map against that `committee.yaml` before they write `network-config`, and leave `committee_peers` out when a validator is missing, with a warning that starts `<map> lacks <n> of the <m> validators of the genesis committee in <committee.yaml> (<the first three keys>), so it is not written to network-config as committee_peers`.
+The run goes on: the map stays installed and on the start line, so the node still dials it at start and finds the other validators through peer discovery, and the P2P committee allowlist keeps it in its floor (section 2.10).
+To have it written, add the missing validators and install the map again with `edit-config.sh --set bootstrap_peers=FILE`.
+Setup copies `committee.yaml` into the data dir in "Step 6 of 8", before it writes `network-config` in "Step 7 of 8", so the check always has the file; when it cannot read it, the map is left out the same way.
+A key counts only at the map's first level, as the node reads it: a validator's block indented under another entry is a field of that entry, which the node ignores, and a key inside a flow value or a quoted value is none.
+A map in YAML the check does not read (an anchor, a tag, a block scalar, an explicit `?` key or a value over several lines) is left out the same way, and the warning names its line.
+At every start, at any epoch, the node also stops when its own entry names another primary `network_key`, or another `network_key` for a worker it runs, than its `node-info.yaml` (`Error: committee_peers: local validator <key>, worker ..., network key does not match node configuration`), as after its keys were made again once the map was shared.
+So the check compares this node's entry with `<data dir>/node-info.yaml` as well, and leaves the map out the same way when they differ, with a warning that starts `<map> has an entry for this node, <key>…, whose network keys are not this node's own`.
+A map that lists one key twice at its first level, a block pasted twice when the map was put together from the validators' files, is left out the same way, with a warning that starts `<map> lists <key>… more than once at its first level`: the node takes such a map on its start line, where the last entry for the key wins, but stops at every start, at any epoch, on a `committee_peers` that holds it (`Error running node: bad yaml data`).
+Keep one entry per key, the one with that validator's addresses, and install the map again.
+The number of workers in each entry is still the node's to check.
 At any epoch the node also stops on an entry with an empty address, or one whose `/p2p/` part names another peer than its network key.
 A `bootstrap_peers` edit on a node with an admission mode writes `network-config` again, so `committee_peers` follows the map.
 
@@ -568,8 +605,9 @@ sudo bash ~/telcoin-node-scripts/edit-config.sh --set admission=closed
 **Known limitations.**
 
 - `MIN_ADMISSION_VERSION` (0.17.0) is a placeholder until the node team names the first release that reads the entries; `setup-node.sh --help` and `edit-config.sh --help` repeat it.
-- `committee_peers` comes from the bootstrap peers map, which is the right source only when that map lists the committee; at genesis it must list all of it (above).
-- Setup checks a `--trusted-nodes` file as it checks a peers map, and the library only that it starts with a map; the shape check runs in `edit-config.sh` alone, which takes block YAML only (a JSON or flow-style map that setup takes is refused there).
+- `committee_peers` comes from the bootstrap peers map and is written only when that map lists the whole genesis committee and this node's own network keys (above); any other map keeps the node starting but leaves it without a launch inventory.
+- The node has no check flag for the file, so the scripts check its shape themselves and have the node binary parse it as a bootstrap peers map, which holds the same entries; block YAML only, so a JSON or flow-style map is refused.
+  The node still stops at start on a map that passes both when a `/p2p` peer id is not the one of its `network_key`, or a network key is this node's or another hub's, which the node checks only at start: `edit-config.sh` then rolls the change back, but a `setup-node.sh` re-run over a running node leaves it stopped until the map is fixed.
   A node-side check of the file would replace both.
 - When the release cannot be told, `--admission` and the two edits warn and write anyway rather than stop.
 - A Docker finalize without `--release-tag` asks the image registry which release the recorded image belongs to, because keygen records no release tag; when that lookup fails, it cannot tell the release and warns.
@@ -582,7 +620,20 @@ sudo bash ~/telcoin-node-scripts/edit-config.sh --set admission=closed
 
 A validator can narrow its P2P ports to the peers its own node lists: `firewall-setup.sh --p2p-committee on` loads the nftables table `inet tn_p2p_allow`, which drops every source to the P2P ports that is not on the list before `ufw` sees it.
 The list is every address of the node's admission snapshot (`tn_admissionSnapshot` on its local RPC), in the primary and every worker swarm: the committees, the validators the node tracks for a coming seat, and its trusted and bootstrap peers.
-The bootstrap floor (the addresses of `/etc/telcoin/bootstrap-peers.yaml`, or of the genesis `committee.yaml` when there is no peers file) and the P2P source list are always on it too.
+The floor and the P2P source list are always on it too.
+The floor is every address in `/etc/telcoin/bootstrap-peers.yaml`, in the genesis `committee.yaml` the data dir holds and in `/etc/telcoin/trusted-nodes.yaml` (the hubs of `--trusted-nodes`), taken from each of those files that exists.
+One of the first two must exist: `trusted-nodes.yaml` never stands in for the committee, so with neither (a data dir on a disk that is not mounted, say) `on` and every resync refuse with `... committee.yaml is missing and so is /etc/telcoin/bootstrap-peers.yaml, so the P2P committee allowlist floor was not captured ...`, and the loaded table stays as it is.
+Each of the three that exists must be a regular file: a symbolic link, a directory or a FIFO at one of them refuses `on` and every resync, with a message naming the file, what is there and the repair, and the loaded table stays as it is.
+The genesis `committee.yaml` sits in the data dir the node's service user writes, and the capture runs as root, so it never follows a link there; remove what is there and put the network's copy back with `13) Refresh chain configs` in `edit-config.sh`, or for a map run `edit-config.sh --set bootstrap_peers=FILE` or `--set trusted_nodes=FILE` again, then `--p2p-committee sync`.
+The tool drops a key on the second sync whose snapshot leaves it out, so a hub or committee member the node stops listing (after a restart with another `network-config`, say) stays on the list only through the floor: give a closed validator its hubs with `--trusted-nodes` and the committee with `--bootstrap-peers`.
+A genesis `committee.yaml` may carry no address at all, so a validator with neither map can have an empty floor, and `on` and every resync then say so: `The P2P committee allowlist floor holds no address: ... Nothing is protected if the node stops listing a peer: a committee member or trusted hub it leaves out is dropped on the second sync without it.`, with the `edit-config.sh --set bootstrap_peers=FILE` and `--set trusted_nodes=FILE` commands that fill it.
+The warning does not stop `on`.
+Every resync captures the floor again, and it never takes an address out of the floor on its own.
+When the files no longer hold an address the floor has (a hub removed from `trusted-nodes.yaml`, a peers map without an address the old one had, or a genesis `committee.yaml` gone missing), the resync keeps the floor it had and warns with `The P2P committee allowlist floor was not captured again, so it keeps <addresses>: ...`; the rest of the resync goes on with that floor (the config, the units and the sync), so those addresses stay allowed, and `--p2p-committee sync` then exits 4.
+Until the floor is captured again, an address added to those files is not on it either.
+Check the files first.
+To remove a hub on purpose, take it out of the map (`edit-config.sh --set trusted_nodes=FILE`, or `=none`), then accept the smaller floor with `sudo bash ~/telcoin-node-scripts/firewall-setup.sh --p2p-committee sync --accept-floor-shrink`: the edit's own resync keeps the old floor and warns with that command, since no script passes that flag for you.
+The hub then leaves the list at that sync, or, while the node's snapshot still lists it, on the second sync whose snapshot leaves it out.
 The signed tool `tn-p2p-allow-sync` builds the table and `telcoin-p2p-allow-sync.timer` keeps it in step every 5 minutes.
 The README's [P2P committee allowlist](README.md#p2p-committee-allowlist) is the reference: the verbs, the units, the state dir, the tool's pin and how to verify its release by hand.
 
@@ -624,7 +675,8 @@ A step after that sync that fails turns committee mode off again and exits 2; ex
 **The static list in committee mode.**
 `P2P_ALLOW_FROM` (from `--p2p-from`) becomes part of the table: host entries join the allow sets and networks go to the static sets `static_v4` and `static_v6`.
 `ufw` keeps its open P2P rule while committee mode is on, and keeps any per-source rules it had, so the table alone decides which sources pass.
-Change the list with `sudo bash ~/telcoin-node-scripts/firewall-setup.sh --enable --p2p-from <list>` (or `--p2p-anywhere`), which records it and resyncs the allowlist; after `off` the list goes back to per-source `ufw` rules, with the open rule removed.
+Change the list with `sudo bash ~/telcoin-node-scripts/firewall-setup.sh --enable --p2p-from <list>` (or `--p2p-anywhere`), which records it and resyncs the allowlist.
+`off` does not turn the list into per-source `ufw` rules: the P2P ports stay open to every source (see Day 2), and the list waits in `.node-meta` for the next `on`.
 A multicast, link-local or unspecified host in the list stops the config write, since it is never a peer's source: `P2P_ALLOW_FROM in .node-meta lists <entry>, an unspecified, multicast or link-local address that is never a peer's source, so the P2P committee allowlist config was not written; pass --p2p-from again without it.`
 
 **When a node sends from an address it does not advertise.**
@@ -632,19 +684,30 @@ Committee-mode validators admit a peer by the addresses its record carries.
 A validator behind NAT, on a multi-homed host, or with IPv6 temporary (privacy) addresses can send from an address that is not in its record, and every committee-mode peer drops those packets; the same happens on your table to a peer that does so.
 Keep the address the node sends from equal to the one it advertises (the external multiaddrs in `node-info.yaml`, section 1.3), and turn IPv6 temporary addresses off on its interface.
 When a known peer still arrives from another address, add that address to `P2P_ALLOW_FROM` with `--enable --p2p-from`: the static list is always admitted.
+Adding it does not change what the kill switch does: after `--p2p-committee off` the P2P ports are open to every source, not only to the static list.
 A rising `tn_drop_p2p_unlisted` counter in `--p2p-committee status` while a committee peer cannot connect points at this.
 
 **Day 2.**
 
-- The timer syncs every 5 minutes, and the scripts resync on their own after `--enable` and `--reset`, after an `edit-config.sh` edit of the listener addresses (`node.env`), the bootstrap peers or the chain configs once the node came back from its restart, after `14) Restart node`, and after `migrate-node-naming.sh`.
-- Run `sudo bash ~/telcoin-node-scripts/firewall-setup.sh --p2p-committee sync` yourself after a change those paths do not cover: a `setup-node.sh` re-run, a hand edit of `.node-meta`, `node.env` or the peers file, or an edit saved with "restart later" and restarted with `systemctl`.
+- The timer syncs every 5 minutes, and the scripts resync on their own after `--enable` and `--reset`, after an `edit-config.sh` edit of the listener addresses (`node.env`), the bootstrap peers, the trusted nodes or the chain configs once the node came back from its restart, after `14) Restart node`, at the end of every `setup-node.sh` re-run that completes (whatever it changed, so a re-run after one that failed midway catches up too), and after `migrate-node-naming.sh`.
+  Each resync captures the floor again, so a hub added to the trusted nodes map is protected from that sync on; a hub removed from it stays on the floor, and those resyncs sync with the old floor and warn with `--p2p-committee sync --accept-floor-shrink` until you run it (above).
+- Run `sudo bash ~/telcoin-node-scripts/firewall-setup.sh --p2p-committee sync` yourself after a change those paths do not cover: a `setup-node.sh` re-run that stopped before it finished, a hand edit of `.node-meta`, `node.env` or one of the maps, or an edit saved with "restart later" and restarted with `systemctl`.
   `check-node.sh` warns about the drift until you do.
 - After `update-scripts.sh`, run the `--p2p-committee sync` it prints when it changed `firewall-setup.sh` or `lib/common.sh`: that rewrites the units and installs the tool the new scripts pin.
 - Right after a node restart the node's RPC may not answer yet, so a resync then often keeps the last-good set (`sync` exit 3) while it rewrites the config and the floor; the next timer run applies the snapshot.
 - `--p2p-committee status` shows whether the table is loaded and what it holds, the last sync and its age, staleness and its reason, the two counters (`packets accepted from listed sources`, `dropped from others`), and whether the timer and the boot unit are in place.
   It warns at once of `rpc-method-missing`, `snapshot-version-*`, `epoch-regressed` and `state-invalid`, of a failed last sync (`its last sync failed (<reason>, failing since <time>)`) and of a failed last run of `telcoin-p2p-allow-sync.service`, in the words `check-node.sh` uses (below), and of any other reason once the tool reports the run stale.
   `journalctl -t tn-p2p-allow` holds the tool's log lines from the timer runs.
-- During an incident, `--p2p-committee off` is the kill switch: it never runs the tool, puts the earlier P2P rules and the new-flow limit back byte for byte, then removes the units, the table, the state dir and the tool.
+- During an incident, `--p2p-committee off` is the kill switch: it never runs the tool, opens the P2P ports to every source behind the new-flow limit, then removes the units, the table, the state dir and the tool.
+  It opens them whatever `P2P_ALLOW_FROM` holds, also on a host whose P2P ports took only that list before committee mode was turned on, so no committee peer the allowlist admitted is cut off.
+  A list it cannot use (an invalid entry, or the key set twice) does not stop it: the list stays as it is, and a warning says to correct it with `--enable --p2p-from <list>` (or drop it with `--enable --p2p-anywhere`) before you limit the ports to a list or turn committee mode on again.
+  It adds the open rule of every P2P port before it deletes any per-source rule, and a `ufw` call that fails does not stop the others.
+  When `off` cannot finish it exits 3 and says what is left: a port `ufw` would not open (it keeps its per-source rules; run `--enable` once `ufw` works), per-source rules it could not delete (with the `sudo ufw delete ...` commands; they admit no source the open rules do not), or, when another process held the tool's lock, the state dir it kept after deleting the table.
+  The allowlist is removed in each of these cases: it can only drop sources, so without it every port takes at least what it took before.
+  An `off` that did not finish (killed, `.node-meta` not writable, the tool's lock held) leaves `P2P_COMMITTEE=on`, and only running `off` again finishes it: `--enable`, `--reset`, `sync` (exit 5), `on` and the resyncs of `edit-config.sh`, `setup-node.sh` and `migrate-node-naming.sh` install and load nothing then, and they, `--p2p-committee status` and `check-node.sh` say that the `off` did not finish, whether the table is still loaded (or that it could not be checked), and the command that finishes it.
+  It prints `P2P committee mode is off: UDP 49590 and 49594 are open to every source.`, and with a list kept, the command that limits the ports to it again.
+  `P2P_ALLOW_FROM` stays in `.node-meta` for the next `on`, and `P2P_PER_SOURCE=off` next to it keeps later `--enable` and `--reset` runs from turning it into per-source rules.
+  To limit the P2P ports to a list again, run `sudo bash ~/telcoin-node-scripts/firewall-setup.sh --enable --p2p-from <list>`, which removes `P2P_PER_SOURCE`.
   `on` later starts again from the node's snapshot.
 
 **What `check-node.sh` reports.**
@@ -653,6 +716,7 @@ The epoch length it judges staleness by comes from the node's `tn_getCurrentEpoc
 
 | Message (shortened) | Level | What to do |
 |---|---|---|
+| `P2P committee mode is on in .node-meta, but a --p2p-committee off did not finish (the allowlist timer is gone; ...)` | error, and nothing else of the allowlist is checked | `--p2p-committee off`, which finishes the off (`sync` refuses in that state) |
 | `P2P committee mode is on, but its sync tool ... is missing` | error | `--p2p-committee sync`, which reinstalls the pinned tool |
 | `P2P committee mode is on, but nftables has no table inet tn_p2p_allow: P2P is open to every source.` | error | `--p2p-committee sync`, which loads the allowlist again |
 | `P2P committee mode is on, but tn-p2p-allow-sync check finds table inet tn_p2p_allow dormant (set by hand): it enforces nothing, and P2P is open to every source until a sync applies it again.` | error, with any committee address the table lacks on the line below | `--p2p-committee sync`, which applies the allowlist again and wakes the table |
@@ -678,8 +742,8 @@ Read the lines above the verdict: while the syncs fail the allowlist keeps its l
 
 **Known limitations.**
 
-- The floor trusts the genesis `committee.yaml` copy in the data dir on a node without `bootstrap-peers.yaml`: that copy is writable by the service user, so a compromised node process could add addresses to the floor.
-  Checking it against the network's chain-config pin would close this, and mainnet has no such pins yet; give a validator a `--bootstrap-peers` map, which lives root-owned in `/etc/telcoin`.
+- The floor trusts the genesis `committee.yaml` copy in the data dir: that copy is writable by the service user, so a compromised node process could add addresses to the floor.
+  Checking it against the network's chain-config pin would close this, and mainnet has no such pins yet; the two maps live root-owned in `/etc/telcoin`.
 - The counters `tn_accept_p2p_listed` and `tn_drop_p2p_unlisted` kept their values across reloads on the kernels tried so far; the Ubuntu runner kernels are confirmed by the first CI run of the VM test (`tools/tests/vm.d/P0-p2p-allow.sh`).
   The same first run confirms the sync unit's sandbox on systemd 255, and whether the boot unit could run with `ProtectKernelModules=` on (it is off for the first nftables load after boot).
 - The tool ships for x86_64 only until the node ships an aarch64 release, and how fast a release-key rotation must reach the pin is still to be agreed.
@@ -816,6 +880,73 @@ Ask for more in Service Quotas before a sixth node in one region.
 **Cost.**
 You pay AWS directly, mainly for the instance (by the hour, by type), the data volume (its size, plus the provisioned 15,000 IOPS and 300 MiB/s above what gp3 includes, 3,000 IOPS and 125 MiB/s), the Elastic IP (public IPv4 addresses are billed by the hour), and data transfer out to the internet: P2P traffic to peers, and on `PublicRPC` the RPC traffic.
 The AWS Pricing Calculator gives the figures for your region.
+
+### 2.12 Generate mainnet keys before genesis
+
+The mainnet genesis is built from the validators' `node-info.yaml` files, so a mainnet validator generates its keys before the genesis, its chain configs or a signed mainnet release exist.
+This script release opens that one step on mainnet (`TN_MAINNET_KEYGEN_ENABLED=1` in `lib/common.sh`); every other mainnet path stays refused until the launch release (section 1.5).
+The Node Manager UI does not offer it.
+
+You need:
+
+- The Safe address assigned to your validator (`0x` and 40 hex digits). It is signed into the proof of possession, becomes the validator's execution address in the genesis, and receives its rewards.
+- A `telcoin-network` binary built with no build features, from the commit the mainnet release is cut from: `cargo build -p telcoin-network --bin telcoin-network --release --locked` at the workspace root. Keep the `-p telcoin-network`: without it cargo builds a test binary (`Build Features: test_utils`). `telcoin-network --version` must print an empty `Build Features:` line; setup refuses a binary whose line names any feature, a testnet build included. Install it root-owned where the service user can run it, for example `sudo install -o root -g root -m 0755 target/release/telcoin-network /usr/local/bin/telcoin-network`.
+- The public IP address and the ports the node will use. They go into `node-info.yaml` and from there into the genesis `committee.yaml`. Setup generates one worker.
+- A mainnet host as in section 1: Ubuntu 24.04 or later, a usable TPM2 (or `--allow-no-tpm`), and a BLS passphrase of at least 16 bytes.
+
+```bash
+ARGS=(--network mainnet --install-method existing --binary-path /usr/local/bin/telcoin-network
+  --address 0xYOUR_VALIDATOR_SAFE
+  --external-primary /ip4/203.0.113.10/udp/49590/quic-v1
+  --external-worker  /ip4/203.0.113.10/udp/49594/quic-v1
+  --listener-primary /ip4/10.0.0.5/udp/49590/quic-v1
+  --listener-worker  /ip4/10.0.0.5/udp/49594/quic-v1)
+read -rs PASS
+printf '%s\n' "$PASS" | sudo bash ~/telcoin-node-scripts/setup-node.sh --json --phase=keygen --passphrase-stdin "${ARGS[@]}"
+unset PASS
+```
+
+The run checks the binary's build features before anything on the host changes, and runs it for that (`--version`, as root, given 30 seconds) only once it is a root-owned file, not group- or other-writable, in root-owned directories; then it runs the preflight, creates the service user and the directories, records the install and `NETWORK=mainnet` in `.node-meta`, has the keytool generate the keys and the proof of possession for the Safe address, and stores the passphrase as an encrypted credential.
+It gets no chain configs (`Mainnet chain configs are not published before genesis: keygen goes on without them. ...`), writes no unit and starts nothing.
+It ends with `node-info.yaml` and the next steps below; the onboarding and staking steps a testnet run prints do not apply to a genesis validator and are not shown.
+It refuses to run over an existing `node-keys/`, and it does so right after the root check, before anything on the host changes (`node-keys already exist at ... nothing on this host was changed.`), saying what it found against this run:
+
+- Keys recorded for another network (`They are recorded for testnet (NETWORK=testnet in /etc/telcoin/.node-meta) and this run is for mainnet, ...`): they are not this run's keys, and the record stays as it is. Generate the mainnet keys on another host, or remove `node-keys/` and `node-info.yaml` first if the keys there are no longer wanted.
+- A `node-info.yaml` for another execution address than `--address` (`... is for the execution address 0xOLD, and this run asks for 0xNEW: its proof of possession is signed for 0xOLD, so it is not the file to send for 0xNEW.`), as after a mistyped Safe address. Before genesis there is no chain for `prepare-stake.sh --rotate-address` (6.6) to check, so remove `node-keys/` and `node-info.yaml`, run keygen again with the right address, and send the new `node-info.yaml` in place of any you sent.
+- A `node-info.yaml` with no execution address that can be read (`... holds no execution address that can be read (it is empty, cut short or damaged, or a symbolic link, which is not read), so it is not a file to send ...`), such as the empty or cut-short file a power loss while it was written can leave, whatever `--address` the run gives. `prepare-stake.sh --rotate-address` reads that address first, so on every network remove `node-keys/` and `node-info.yaml`, run keygen again, and send the new `node-info.yaml` in place of any you sent.
+- The same address and network: what an earlier keygen left, as below.
+
+The passphrase is stored before the keys are made, and a hangup (an SSH drop), Ctrl-C or TERM during key generation is held until the keys are checked, so no run leaves keys without their stored passphrase; a run whose keytool fails or is stopped removes what the keytool wrote and the stored passphrase, and you run it again.
+Send `node-info.yaml` only from a run whose `done` event says `"ok":true`.
+A run killed outright (KILL, a power loss) can still stop between two steps; a second run then names what it found instead of making keys:
+
+- `... all in place: there is nothing to generate.`: the keys, `node-info.yaml` for this `--address` and the stored passphrase are there. Use that `node-info.yaml`.
+- `An earlier keygen did not finish ...`: nothing from that run was reported. Remove `node-keys/` and `node-info.yaml` as the message says and run keygen again.
+- `... but no stored passphrase ...` (left by an earlier script version): the keys open only with the passphrase typed for that run, and finalize refuses them too. If you still have that passphrase, store it, with `--with-key=host` instead on a host keyed with `--allow-no-tpm`:
+
+  ```bash
+  read -rs PASS
+  printf '%s\n' "$PASS" | sudo sh -c 'umask 077 && systemd-creds encrypt --name=bls-passphrase --with-key=host+tpm2 - /etc/telcoin/bls-passphrase.cred'
+  unset PASS
+  sudo sh -c 'printf "PASSPHRASE_METHOD=credential\nCREDENTIAL_KEY=host+tpm2\n" >> /etc/telcoin/.node-meta'
+  ```
+
+  Otherwise remove `node-keys/` and `node-info.yaml`, run keygen again, and send the new `node-info.yaml` in place of any you sent.
+
+Before anything on the host changes, `--install-method release`, `docker` or `source` stops with `--install-method <method> cannot install a mainnet node yet: before genesis no mainnet release, image or source tag can be verified. Generate the mainnet keys with --phase=keygen --install-method existing --binary-path <...>`, and a binary with build features with `Refusing the node binary at <path>: it is not a mainnet build (This build has the features <features>; a mainnet build has none.)`.
+
+Send `node-info.yaml` from the data directory (`/var/lib/telcoin/node-info.yaml` by default; the run prints the path, and its `done` event carries the file in `node_info`).
+It is public: the node's name, BLS public key, primary and worker addresses and network keys, the execution address and the proof of possession.
+Never send or copy anywhere `node-keys/` (`bls.kw` is the BLS private key, wrapped with the passphrase) or the passphrase.
+Back both up offline now (section 2.5): together they are the identity the genesis registers, and losing either one loses it.
+
+The proof of possession signs the BLS key and the Safe address only, with no chain ID or genesis hash, so it stays valid for whatever genesis is built.
+Once the mainnet release and genesis are published, update the scripts (section 4.1) to the release that enables mainnet and run `setup-node.sh --json --phase=finalize` with the same arguments on this host, as that release's notes say; it uses these keys as they are.
+Finalize keeps the install method and the binary path keygen recorded, and refuses a different `--install-method` or `--binary-path`, so keep the binary at that path.
+This finalize does not fetch the mainnet chain configs itself, so on install day put the published `genesis.yaml`, `committee.yaml` and `parameters.yaml` in a root-owned directory and pass it with `--genesis-dir`, and install the signed mainnet release binary by hand, root-owned, at the path keygen recorded (`grep BINARY_PATH /etc/telcoin/.node-meta`).
+A mainnet BLS key must never sign on another network, so once keygen has recorded `NETWORK=mainnet` (before it makes the keys, and kept when a keygen fails), setup refuses a finalize, a keygen or an interactive install for testnet or devnet on this host (a `--json` run without `--network` is a testnet run) with `This host is recorded for mainnet (NETWORK=mainnet in /etc/telcoin/.node-meta, written before keygen makes mainnet keys), and a mainnet BLS key must never be used on another network, ...`.
+A `--json` finalize or keygen stops right after the root check, before anything on the host changes; an interactive install stops once you have chosen the network, after the first preflight steps (the update lock, the needrestart and apt guards that keep package upgrades from restarting the node, the data directory, and `curl` or `git` if they were missing), but before it writes the node's keys, configuration or service.
+Set up a testnet node on another host.
 
 ## 3. Confirm the node is syncing, then synced
 
@@ -1131,10 +1262,10 @@ When the value is already in place, nothing is written and the node is not resta
 | `metrics` | `<IPv4>:<port>` adds or changes `--metrics`; `off` removes it. |
 | `verbosity` | `-v`, `-vv`, `-vvv`, `-vvvv` or `-vvvvv`. |
 | `docker_image` | A release tag (on testnet a release candidate too) or `<repository>@sha256:<digest>` of the network's package, `ghcr.io/telcoin-association/tn-mainnet` or `ghcr.io/telcoin-association/tn-testnet` (on testnet also the legacy `us-docker.pkg.dev/telcoin-network/tn-public/adiri`), Docker installs only. The image is pulled by digest first, the digest is checked after the pull, and the image's build features are checked against the network before the change is made (`refusing <image>: it is not a <network> image (see above); the image is not changed`). A release older than the network's oldest supported one is refused. On mainnet the change is refused until a mainnet release can be verified (section 1.5); after that a digest alone is taken only when `.node-meta` records it as the image of a mainnet release. |
-| `bootstrap_peers` | An absolute path to a peers map, checked as at setup (section 2.7) and installed as `/etc/telcoin/bootstrap-peers.yaml`, or `none` to remove the flag and the file. Needs `v0.15.0-adiri` or later and a start script (section 4.8). |
+| `bootstrap_peers` | An absolute path to a peers map, checked as at setup (section 2.7) and installed as `/etc/telcoin/bootstrap-peers.yaml`, or `none` to remove the flag and the file. With an admission mode it is also written as `committee_peers` when it lists every genesis validator (section 2.9). Needs `v0.15.0-adiri` or later and a start script (section 4.8). |
 | `state_export` | `off`, `unlimited` (every export kept; `v0.13.0-adiri` or later) or a number of epochs to keep, 1 to 999999 (`v0.15.0-adiri` or later). |
 | `allow_private_forward_targets` | `true` or `false`. `true` lets the node forward transactions to committee RPC endpoints on private addresses. `true` is refused on testnet and mainnet, so it is for private networks such as a devnet; `false` is accepted everywhere. |
-| `admission` | `open`, `grace` or `closed`: the admission mode, written into `network-config` with the recorded trusted nodes map and, as `committee_peers`, the installed bootstrap peers map. Needs node release 0.17.0 or later (section 2.9). |
+| `admission` | `open`, `grace` or `closed`: the admission mode, written into `network-config` with the recorded trusted nodes map and, as `committee_peers`, the installed bootstrap peers map when it lists every genesis validator. Needs node release 0.17.0 or later (section 2.9). |
 | `trusted_nodes` | An absolute path to a trusted nodes map, shape-checked and installed as `/etc/telcoin/trusted-nodes.yaml`, or `none` to remove it. Needs an admission mode first (section 2.9). |
 | `gateway_upstream` | `<IPv4>[,<IPv4>...]` or `off`. The list binds the RPC and the health check to every interface (`--http.addr 0.0.0.0`, `--healthcheck 0.0.0.0:43174`) for worker gateways on those hosts, and is refused unless `ufw` already admits them (`firewall-setup.sh --enable --gateway-from`) and keeps every other address out of both ports; `off` puts both back. A stopped node (inactive or failed) stays stopped; a node that is starting, stopping or waiting for its automatic restart is refused. Section 4.15. |
 
@@ -1149,7 +1280,7 @@ The edit is written before that wait.
 If the run is stopped before the restart is issued (Ctrl-C, SIGTERM or SIGHUP, or a Node Manager tab that is closed), it puts back every file it changed: `Stopped by SIGINT before the restart, so the edit was rolled back: every file it changed is as it was before this run.`
 Once the restart has been issued, the edit stays.
 On a host with the host baseline (section 4.13), the AIDE baseline is made again after a `--set` restart came back healthy, after a menu edit's restart came back active, after `14) Restart node` came back active (so an edit saved for later is folded in then), and after a passphrase action that went through.
-With P2P committee mode on (section 2.10), the same restarts of an edit that changed `node.env` or the bootstrap peers, of `13) Refresh chain configs` and of `14) Restart node` also resync the allowlist (`firewall-setup.sh --p2p-committee sync`); a sync that fails is a warning naming that command.
+With P2P committee mode on (section 2.10), the same restarts of an edit that changed `node.env`, the bootstrap peers or the trusted nodes, of `13) Refresh chain configs` and of `14) Restart node` also resync the allowlist (`firewall-setup.sh --p2p-committee sync`); a sync that fails is a warning naming that command.
 
 `13) Refresh chain configs` reads `NETWORK` from `.node-meta` and refuses unless the node's genesis and the new one declare the same chain ID.
 It copies the network's `genesis.yaml` and `committee.yaml` into `genesis/` and its `parameters.yaml` over the node's, so set `allow_private_forward_targets` again afterwards if you had changed it (item 10).
@@ -2599,8 +2730,8 @@ sudo bash ~/telcoin-node-scripts/setup-node.sh --json --phase=finalize "${ARGS[@
 - Each phase prints one JSON object per line on stdout, with `event` set to `step`, `log`, `error` or `done`. Every run ends with exactly one `{"event":"done","ok":true|false,...}`, and a failed run's `done` carries the reason in `msg`. Human-readable output goes to stderr.
 - Finalize's `done` adds `operator_guide` (the URL of this runbook) and `public_rpc` (`enabled`, `domain`, `http`, `ws`).
 - The inputs are checked before anything runs as root. A flag with no value, an unknown phase, network or install method, a malformed URL, an image that is not the network's repository by digest, a ref that is not a release tag of the network, and a relative `--binary-path` each stop the run with an `error` event.
-- `--data-dir`, the four multiaddr flags, `--address`, `--passphrase-method`, `--service-user` and `--service-group` are checked before root too, and a `--json` keygen without `--address` stops with an error that names it.
-- `--network` takes `testnet` (or `adiri`), `mainnet` or `devnet`. A mainnet install stops until the mainnet values in section 1.5 are set.
+- `--data-dir`, the four multiaddr flags, `--address`, `--passphrase-method`, `--service-user` and `--service-group` are checked before root too, and a `--json` keygen without `--address`, or with the zero address, stops with an error that names it.
+- `--network` takes `testnet` (or `adiri`), `mainnet` or `devnet`. A mainnet install stops until the mainnet values in section 1.5 are set; only the mainnet keygen of section 2.12 runs before that.
 - `--install-method` takes `source` or `release` (each with `--release-tag <tag>`; `--build-ref` is the older name), `docker` or `existing`. A Docker keygen takes `--release-tag <tag>` or `--docker-image <repository>@sha256:<digest>`; with neither it picks the newest release image (section 2.3; never a release candidate), by digest, and records it. For `existing`, `--binary-path <path>` (absolute) names the binary and, in `--json` mode, implies `existing`; without it keygen searches PATH, `/usr/local/bin`, `/opt` and `/home`, and stops when it finds none. A finalize whose keygen ran under `setup-node.sh` 1.2.1 or older has no recorded binary, so pass `--binary-path` to it.
 - Node flags: `--bootstrap-peers <file>`, `--enable-state-export` and `--state-export-keep <n>` (section 2.7), and `--admission open|grace|closed` with `--trusted-nodes <file>` (section 2.9).
   Finalize reads the admission choices back from what keygen recorded, as it does the node flags.
@@ -2630,7 +2761,7 @@ If an explicit URL differs from the domain, setup warns that `rpc-enable` will r
 |---|---|
 | `install-caddy.sh` | `--phase=rpc-status`, `rpc-check-dns`, `rpc-enable`, `rpc-disable` and the dashboard phases `status`, `check-dns`, `enable`, `disable`, with or without `--json`. `rpc-enable` needs `--yes` (or `-y`) outside a terminal; in `--json` mode the exposure summary is a `warn` event and the run itself is the consent. The dashboard password, at least 16 bytes, comes on standard input with `--password-stdin`, or from `TN_CADDY_PASSWORD`, not both. A value flag given last is a usage error (exit 2). A successful `done` message may end with a parenthesised list of what was left undone, such as `(wss:// not answering yet)`. The worker gateway phases `gateway-status`, `gateway-check-dns`, `gateway-enable`, `gateway-disable`, `rpc-advertise` and `rpc-unadvertise` (section 4.15) take the same forms. |
 | `update-node.sh` | `--json --check`, `--json --prepare --ref <release tag>`, `--json --apply --yes [--no-epoch-wait] [--allow-quorum-risk]`, `--json --discard`. `--ref` takes a release tag only. A failed apply rolls back; its `done` line carries `"ok":false` and a boolean `rolled_back` (`true` when the rollback succeeded), and `"voting":false` when a node that voted before does not vote again. A refused downgrade's `done` carries `"downgrade":true` and `storage_downgrade`. `--json --check` adds `tag_moved` and `tag_unknown` (a Docker digest whose release tag is not known; Docker compares digests). A one-way apply (section 4.2) never rolls back: its failed `done` carries `"rolled_back":false` and `"storage_migration":true`, and `--json --check` adds the same boolean, `true` when updating to `latest_ref` is one-way. A `--json --discard` after such an apply had started the new release keeps the launch files; it sends a `warn` event with the steps to go back, and its `done` carries `"storage_migration":true`. |
-| `firewall-setup.sh` | `--reset`, `--json --status`, `--json --enable [--ssh-from <list\|file>] [--p2p-from <list\|file>] [--ssh-anywhere] [--p2p-anywhere] [--gateway-from <list\|file\|none>]`, `--json --port <49590/udp\|49594/udp\|43174/tcp> <on\|off>`. `--json --enable` on mainnet needs `--ssh-from` or `--ssh-anywhere`. Its `done` carries `rc` (0 done, 1 refused with nothing changed, 2 a step failed and the old rules are back, 3 the restore failed too) and `active`. `--json --status` adds `p2p_ports`, one object per P2P port with `port`, `proto`, `label` and `allowed` (`null` while `ufw` is off), `p2p_new_flow_limit` (`reason` `committee` while committee mode is on) and, last, `p2p_committee`: `enabled`, `persistent`, `timer` and `reason`, then with committee mode on the tool's `loaded`, `epoch`, `allowed_v4`, `allowed_v6`, `static`, `floor`, `keys`, `dns_skipped`, `last_good`, `age_secs`, `stale`, `stale_since`, `stale_reason` and `counters`; otherwise `reason` is `off`, `unreadable`, `tool-missing` or `tool-error` (README, [P2P committee allowlist](README.md#p2p-committee-allowlist)). `--p2p-committee on\|off\|sync\|status` (section 2.10) has no `--json` form and goes alone; `on` exits 0 on, 1 refused, 2 failed and turned off again, 3 that undo did not finish; `sync` 0 fresh, 1 refused, 2 failed, 3 stale or busy; `off` 0, 1 refused, 3 partly done. |
+| `firewall-setup.sh` | `--reset`, `--json --status`, `--json --enable [--ssh-from <list\|file>] [--p2p-from <list\|file>] [--ssh-anywhere] [--p2p-anywhere] [--gateway-from <list\|file\|none>]`, `--json --port <49590/udp\|49594/udp\|43174/tcp> <on\|off>`. `--json --enable` on mainnet needs `--ssh-from` or `--ssh-anywhere`. Its `done` carries `rc` (0 done, 1 refused with nothing changed, 2 a step failed and the old rules are back, 3 the restore failed too) and `active`. `--json --status` adds `p2p_ports`, one object per P2P port with `port`, `proto`, `label` and `allowed` (`null` while `ufw` is off), `p2p_new_flow_limit` (`reason` `committee` while committee mode is on) and, last, `p2p_committee`: `enabled`, `persistent`, `timer` and `reason`, then with committee mode on the tool's `loaded`, `epoch`, `allowed_v4`, `allowed_v6`, `static`, `floor`, `keys`, `dns_skipped`, `last_good`, `age_secs`, `stale`, `stale_since`, `stale_reason` and `counters`; otherwise `reason` is `off`, `unreadable`, `tool-missing` or `tool-error` (README, [P2P committee allowlist](README.md#p2p-committee-allowlist)). `--p2p-committee on\|off\|sync\|status` (section 2.10) has no `--json` form and goes alone; `on` exits 0 on, 1 refused, 2 failed and turned off again, 3 that undo did not finish; `sync` 0 fresh, 1 refused, 2 failed, 3 stale or busy, 4 synced with the old floor while a floor shrink waits for `--accept-floor-shrink`, 5 refused because an `off` did not finish; `off` 0, 1 refused, 3 partly done. |
 | `edit-config.sh` | `--set <field>=<value>`, with or without `--json`, for the fields in section 4.3; `--migrate-credential`, `--reseal` (with `--allow-no-tpm`, `--bind-pcrs <list>\|none`); `--no-epoch-wait`, `--allow-quorum-risk`, `--allow-public-metrics` (not with `--json`). |
 | `prepare-stake.sh` | `--json`, `--network-rpc <URL>`, and `--rotate-address <0xNEW> --yes [--no-restart]`. With `--json` it prints one JSON object at the end; the exit codes are in section 6.2. |
 | `remove-node.sh` | `--json --remove observer\|validator --scope service\|data\|keys --yes [--remove-ui]`. The `--remove` value is a UI slot name, not a role; either one removes the node. |
@@ -2720,6 +2851,11 @@ Start with `sudo bash ~/telcoin-node-scripts/check-node.sh` and `journalctl -u t
 | `--bootstrap-peers needs telcoin-network v0.15.0-adiri or later, and ... does not have it.` (setup), or `the installed release has no --bootstrap-peers; update the node first` (edit-config) | The node release lacks the flag. The same messages name `--enable-state-export` (`v0.13.0-adiri`) and `--state-export-keep` (`v0.15.0-adiri`). | Pick a newer release, update the node (section 4.2), or leave the flag out. |
 | `<file> is mode 600: other users cannot read it. ... Run chmod 644 <file> first.` | Setup and `edit-config.sh` take only a peers file that other users can read, because the installed copy is world-readable. | `chmod 644 <file>`, then run it again. |
 | `the node rejects <file> as a --bootstrap-peers map (...)` | A key is not a BLS public key, or a value is not the `primary` and `workers` entries of that node's `node-info.yaml`. | Fix the map (section 2.7). |
+| `line <n>: the network_address of <key>... is a DNS name (...): the node does not resolve names, so it would never dial it.` (setup, after `--trusted-nodes:` or `--bootstrap-peers:`; `edit-config.sh`), or `... is not an address the node can dial` | A trusted nodes or bootstrap peers map names a host, or another transport, where the node needs an IP address and QUIC: the node would start, keep the entry and never dial it. Nothing was written. | Put the IP address in, `/ip4/<address>/udp/<port>/quic-v1/p2p/<peer id>` as in that node's `node-info.yaml` (sections 2.7, 2.9), and run the command again. |
+| `[WARN] /etc/telcoin/bootstrap-peers.yaml lacks <n> of the <m> validators of the genesis committee in .../genesis/committee.yaml (...), so it is not written to network-config as committee_peers: ...` | With an admission mode, the bootstrap peers map does not list every genesis validator (a map of hubs only, or of the other validators without this node). The node would not start during epoch 0 with it as `committee_peers`, so it was left out; the node still dials the map. | Nothing stops. To have it written, add the validators the warning names, this node included, and run `edit-config.sh --set bootstrap_peers=FILE` (section 2.9). |
+| `Error: committee_peers: missing validator <key>` in `journalctl -u telcoin`, the node stopping within a second of each start | `network-config` holds a `committee_peers` map without that genesis validator, written by hand or by scripts older than this check, and the node's chain is at epoch 0. | Run `edit-config.sh --set bootstrap_peers=FILE` again (it leaves an incomplete map out), or add the validator to the map (section 2.9). |
+| `[WARN] /etc/telcoin/bootstrap-peers.yaml lists <key>… more than once at its first level, ...`, or `Error running node: bad yaml data` in `journalctl -u telcoin` with such a map in `committee_peers` | The map names one key twice, often a validator's block pasted twice. The node stops at every start on a `committee_peers` that holds it, so setup and `edit-config.sh` leave the map out of it; the journal error means `network-config` got it by hand or from scripts older than this check. | Keep one entry per key and run `edit-config.sh --set bootstrap_peers=FILE` again (section 2.9). |
+| `[WARN] /etc/telcoin/bootstrap-peers.yaml has an entry for this node, <key>…, whose network keys are not this node's own (...)`, or `Error: committee_peers: local validator <key>, worker ..., network key does not match node configuration` in `journalctl -u telcoin` | The map's entry for this node names other network keys than its `node-info.yaml`, often because the keys were made again after the map was shared. The node stops at every start with that entry in `committee_peers`, so setup and `edit-config.sh` leave the map out of it; the journal error means `network-config` got it by hand or from older scripts. | Nothing stops on the warning. Put this node's `primary` and `workers` network keys from `node-info.yaml` in its entry, and in the copy the other validators use, then run `edit-config.sh --set bootstrap_peers=FILE` (section 2.9). |
 | `bootstrap_peers needs a start wrapper: ...`, or `... move it to the current unit and start script first: sudo ./edit-config.sh --migrate-credential (nothing was changed)` | A node that starts straight from its systemd unit, holds the passphrase in the unit, or uses the old TPM method. | `sudo bash ~/telcoin-node-scripts/edit-config.sh --migrate-credential` (section 4.8). |
 | `committee of <n>: <d> member(s) down; stopping this node makes ... Refused: ...`, or `could not count the committee members that are down (...)` | The committee quorum check refused the stop or restart (section 4.11). | Wait until the other members are back. For a restart the fleet coordinator has planned, run again with `--allow-quorum-risk` or `TN_ALLOW_QUORUM_RISK=1`. On mainnet, record `VALIDATOR_ADDRESS` in `.node-meta` so an unstaked node can go ahead when the committee cannot be read. |
 | `... still has the old file ownership layout and must be installed fresh; it is not migrated in place.` | A mainnet host set up by older scripts. | Install it fresh on Ubuntu 26.04 or 24.04 (section 4.9). |
@@ -2767,7 +2903,7 @@ Start with `sudo bash ~/telcoin-node-scripts/check-node.sh` and `journalctl -u t
 | `wss://<domain>/` returns 502 | Nothing listens on the WebSocket port 8546 yet. | Wait if the node is still starting. Otherwise check `install-caddy.sh --phase=rpc-status`; after `migrate-node-naming.sh`, re-run `rpc-enable`. |
 | `firewall-setup.sh` stops right after `Firewall is active` in `1) View current firewall status` | A bug in `firewall-setup.sh` before 1.6.0. | `bash ~/telcoin-node-scripts/update-scripts.sh`. |
 | `P2P committee mode was not turned on: <reason>. Nothing was changed.` | The node's snapshot is not authoritative yet (often right after a restart), its release lacks `tn_admissionSnapshot`, or the snapshot lists no address beyond the floor; the reason says which. A tool that cannot be installed says `tn-p2p-allow-sync <tag> is not installed` instead. | Section 2.10, "What `on` refuses, and why". |
-| A committee peer cannot connect after `--p2p-committee on`, and `tn_drop_p2p_unlisted` rises in `--p2p-committee status` | The peer sends from an address its record does not carry (NAT, multi-homing, IPv6 temporary addresses), or the allowlist is stale. | Run `check-node.sh`; add the peer's source to `P2P_ALLOW_FROM` with `--enable --p2p-from` (section 2.10); `--p2p-committee off` is the kill switch. |
+| A committee peer cannot connect after `--p2p-committee on`, and `tn_drop_p2p_unlisted` rises in `--p2p-committee status` | The peer sends from an address its record does not carry (NAT, multi-homing, IPv6 temporary addresses), or the allowlist is stale. | Run `check-node.sh`; add the peer's source to `P2P_ALLOW_FROM` with `--enable --p2p-from` (section 2.10); `--p2p-committee off` is the kill switch, which opens the P2P ports to every source. |
 | `check-node.sh` warns or fails on a `P2P committee` line | The allowlist is missing, stale, behind the committee or out of step with the node's config. | The table in section 2.10, "What `check-node.sh` reports". |
 | The node cannot decrypt its BLS key at start | The stored passphrase is not the one the keys were generated with. | Store the correct one with `edit-config.sh` option 5, `1) Change the stored passphrase`; it never re-encrypts the keys. |
 | The node does not start after a firmware, Secure Boot or TPM change; systemd cannot decrypt `bls-passphrase.cred` | The credential is bound to the TPM (and to PCRs with `--bind-pcrs`), and the state changed or the TPM was reset. | `sudo bash ~/telcoin-node-scripts/edit-config.sh --reseal` after a PCR change. After a TPM reset or a move to another host, store the passphrase you kept offline again with option 5. |

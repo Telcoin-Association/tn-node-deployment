@@ -11,14 +11,20 @@
 #       P2P committee allowlist: on lets only the sources the node's admission
 #       snapshot lists (plus the bootstrap floor and P2P_ALLOW_FROM) reach the P2P
 #       ports, and a timer keeps it in step with the committee; off is the kill
-#       switch back to the earlier P2P rules and new-flow limit; sync resyncs now;
-#       status prints its state.
+#       switch: the P2P ports open to every source behind the new-flow limit,
+#       whatever P2P_ALLOW_FROM holds (--enable --p2p-from applies a list to ufw
+#       again); sync resyncs now; status prints its state.
+#   sudo bash firewall-setup.sh --p2p-committee sync --accept-floor-shrink
+#       A resync never drops an address from the allowlist floor on its own:
+#       one whose files no longer hold an address the floor has keeps the floor
+#       it had, names the address and syncs with that floor (exit 4). This
+#       resync captures the smaller floor (a hub removed on purpose).
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="2.2.0"
+readonly SCRIPT_VERSION="2.2.1"
 readonly SSH_CONFIG="${TN_ROOT_PREFIX:-}/etc/ssh/sshd_config"
 
 # Ports required for a fully working Telcoin node deployment.
@@ -86,6 +92,12 @@ FW_GW_NONE=false
 FW_GW_ONLY=false
 # The --p2p-committee verb of this run (on, off, sync or status); empty without one.
 FW_COMMITTEE_VERB=""
+# --accept-floor-shrink of this run: a resync may capture a floor without
+# addresses the saved floor has (fw_allow_capture_floor keep).
+FW_FLOOR_SHRINK=false
+# Set by fw_allow_capture_floor keep when it kept the saved floor because a new
+# capture would drop addresses: those addresses, space-separated; else empty.
+FW_FLOOR_KEPT=""
 # Filled by fw_preflight: the validated sshd ports and SSH sources, and (lazily,
 # fw_load_p2p_srcs) the P2P sources. An empty source array means "anywhere".
 FW_SSH_PORTS=()
@@ -131,6 +143,11 @@ FW_COMMITTEE_ACTIVE=false
 # P2P_COMMITTEE=off is. fw_on_exit then takes committee mode off again, or
 # finishes taking it off (fw_allow_on_exit).
 FW_ALLOW_INFLIGHT=""
+# Set by fw_p2p_open, the kill switch's P2P rules: the ports whose open rule
+# ufw refused (space separated), and the per-source rules it could not delete
+# (one `ufw delete ...` command per line).
+FW_P2P_OPEN_FAILED=""
+FW_P2P_OPEN_LEFT=""
 # Set by fw_allow_bin_ensure: "new" when this run installed tn-p2p-allow-sync where
 # there was none, "upgraded" when it replaced another version, else "".
 FW_ALLOW_BIN_CHANGED=""
@@ -452,11 +469,12 @@ fw_p2p_all_open() {
 # whatever the source list, and nothing is deleted: the allowlist (nftables table
 # inet tn_p2p_allow, which holds the source list as static entries) drops every
 # source it does not list, ufw's open rule admits the rest, and per-source rules
-# already there stay for the way back. Otherwise, with a P2P source list
-# (--p2p-from, or P2P_ALLOW_FROM in .node-meta) it adds one rule per source and
-# port and then deletes the open rule of that port (IPv4 and IPv6 together). The
-# first ufw call that fails is reported (fw_try) and ends it with rc 1, so the
-# caller stops there; an unreadable source list is rc 1 too.
+# already there stay until the kill switch (fw_p2p_open). Otherwise, with a P2P
+# source list (--p2p-from, or P2P_ALLOW_FROM in .node-meta unless the kill
+# switch set it aside, see fw_sources) it adds one rule per source and port and
+# then deletes the open rule of that port (IPv4 and IPv6 together). The first
+# ufw call that fails is reported (fw_try) and ends it with rc 1, so the caller
+# stops there; an unreadable source list is rc 1 too.
 fw_p2p_allow() {
     local port label s
     fw_load_p2p_srcs || return 1
@@ -474,6 +492,69 @@ fw_p2p_allow() {
         fi
     done < <(fw_p2p_ports)
     return 0
+}
+
+# fw_p2p_open -- the kill switch's P2P rules: every P2P port open to every
+# source. First the open rule of every port (one ufw allow PORT/udp adds the
+# IPv4 and the IPv6 rule), carrying on past one that fails (said, fw_try); only
+# then, on each port whose open rule went in, the per-source rules of the
+# stored list (P2P_ALLOW_FROM in .node-meta, whatever fw_sources says) are
+# deleted, carrying on past a delete that fails, so no source that reached a
+# port loses it in between. A port whose open rule failed keeps its per-source
+# rules. Other rules on the P2P ports stay. For the caller's report,
+# FW_P2P_OPEN_FAILED lists the ports whose open rule failed and FW_P2P_OPEN_LEFT
+# the per-source rules left (one ufw delete command per line). rc 0; 1 a ufw
+# call failed.
+fw_p2p_open() {
+    local port label s stored rc=0
+    local -a srcs=() ports=() opened=()
+    FW_P2P_OPEN_FAILED=""
+    FW_P2P_OPEN_LEFT=""
+    stored="$(addon_meta_get P2P_ALLOW_FROM 2>/dev/null)" || stored=""
+    while IFS= read -r s; do
+        s="${s//[[:space:]]/}"
+        [[ -n "$s" ]] || continue
+        fw_src_deletable "$s" && srcs+=("$s")
+    done <<< "$(printf '%s\n' "$stored" | tr ',' '\n')"
+    while read -r port label; do
+        [[ -n "$port" ]] || continue
+        ports+=("$port")
+    done < <(fw_p2p_ports)
+    for port in ${ports[@]+"${ports[@]}"}; do
+        if fw_try "ufw allow ${port}/udp" ufw allow "${port}/udp"; then
+            opened+=("$port")
+        else
+            FW_P2P_OPEN_FAILED="${FW_P2P_OPEN_FAILED:+${FW_P2P_OPEN_FAILED} }${port}"
+            rc=1
+        fi
+    done
+    for port in ${opened[@]+"${opened[@]}"}; do
+        for s in ${srcs[@]+"${srcs[@]}"}; do
+            if ! ufw delete allow from "$s" to any port "$port" proto udp > /dev/null 2>&1; then
+                FW_P2P_OPEN_LEFT="${FW_P2P_OPEN_LEFT}ufw delete allow from ${s} to any port ${port} proto udp"$'\n'
+                rc=1
+            fi
+        done
+    done
+    return "$rc"
+}
+
+# fw_p2p_set_aside -- record that the kill switch opened P2P: when
+# P2P_ALLOW_FROM in .node-meta holds a list, write P2P_PER_SOURCE=off, so the
+# runs after this one (--enable, --reset, "Manage node ports", the status) keep
+# the P2P ports open to every source (fw_sources) while the list still feeds the
+# committee allowlist, until --enable --p2p-from or --p2p-anywhere removes the
+# key (fw_persist_sources). The run itself applies no P2P source list from here
+# on (FW_P2P_SRCS empty). rc 0 written or nothing to write; 1 the write failed.
+fw_p2p_set_aside() {
+    local stored per
+    FW_P2P_SRCS=()
+    FW_P2P_LOADED=true
+    stored="$(addon_meta_get P2P_ALLOW_FROM 2>/dev/null)" || stored="unreadable"
+    [[ -n "$stored" ]] || return 0
+    per="$(addon_meta_get P2P_PER_SOURCE on 2>/dev/null)" || per=""
+    [[ "$per" == "off" ]] && return 0
+    meta_set P2P_PER_SOURCE off
 }
 
 # fw_port_ok VALUE -- 0 when VALUE is a decimal port 1-65535 without leading zeros.
@@ -516,12 +597,15 @@ fw_src_list() {
 # --ssh-from / --p2p-from / --gateway-from value of this run, else SSH_ALLOW_FROM /
 # P2P_ALLOW_FROM / GATEWAY_ALLOW_FROM in .node-meta, else nothing (anywhere for
 # ssh and p2p, no gateway source for gw). --ssh-anywhere / --p2p-anywhere /
-# --gateway-from none print nothing, and so does gw on a host with no node. On a
-# host with a worker gateway and no node (FW_GW_ONLY) the stored SSH list is
-# SSH_ALLOW_FROM in gateway.meta. rc 1 on an invalid entry or a key set more than
-# once (message on stderr).
+# --gateway-from none print nothing, and so does gw on a host with no node. So
+# does p2p when the kill switch set the stored list aside (P2P_PER_SOURCE=off in
+# .node-meta, fw_p2p_set_aside): the P2P ports stay open to every source, and
+# P2P_ALLOW_FROM only feeds the committee allowlist, until a --p2p-from list is
+# given again. On a host with a worker gateway and no node (FW_GW_ONLY) the
+# stored SSH list is SSH_ALLOW_FROM in gateway.meta. rc 1 on an invalid entry or
+# a key set more than once (message on stderr).
 fw_sources() {
-    local kind="$1" given anywhere key flag stored rc=0 where=".node-meta"
+    local kind="$1" given anywhere key flag stored per rc=0 where=".node-meta"
     case "$kind" in
         ssh) given="$FW_SSH_FROM"; anywhere="$FW_SSH_ANYWHERE"; key="SSH_ALLOW_FROM"; flag="--ssh-from" ;;
         p2p) given="$FW_P2P_FROM"; anywhere="$FW_P2P_ANYWHERE"; key="P2P_ALLOW_FROM"; flag="--p2p-from" ;;
@@ -545,6 +629,10 @@ fw_sources() {
         where="the worker gateway's gateway.meta"
         stored="$(tn_gateway_meta_get "$key")" || return 1
     else
+        if [[ "$kind" == "p2p" ]]; then
+            per="$(addon_meta_get P2P_PER_SOURCE on)" || return 1
+            [[ "$per" == "off" ]] && return 0
+        fi
         stored="$(addon_meta_get "$key")" || return 1
     fi
     [[ -n "$stored" ]] || return 0
@@ -1233,33 +1321,155 @@ P2P_ALLOW_FROM=${list}"
 }
 
 # fw_allow_capture_floor -- have tn-p2p-allow-sync write FW_ALLOW_DIR/floor, the
-# addresses the allowlist never drops, from the peers the node dials at start:
-# <config dir>/bootstrap-peers.yaml when it exists, else the bootstrap servers of
-# the genesis committee.yaml in the data dir (setup-node copies it there). The
-# file must be a regular file, not a symlink. TN_P2P_ALLOW_BIN runs here through
+# addresses the allowlist never drops: the union of every one of these files
+# that exists, <config dir>/bootstrap-peers.yaml (the peers the node dials at
+# start), the genesis committee.yaml in the data dir (setup-node copies it
+# there) and <config dir>/trusted-nodes.yaml (the hubs, which TRUSTED_NODES_FILE
+# names). capture-floor takes them all and unites their addresses, so a partial
+# peers map no longer hides the committee file and a trusted hub stays when the
+# node stops listing it. A missing file is skipped, but one of the first two
+# must exist: trusted-nodes.yaml never stands in for the committee, so with
+# neither (the data dir's disk not mounted, say) nothing is captured. One that
+# exists must be a regular file, not a symlink (fw_allow_floor_src_refuse says
+# what is there instead and how to repair it). A floor with no address is
+# written and warns (fw_allow_floor_warn). With keep (a resync) the floor never
+# loses an address without the operator's word: when the files no longer hold
+# an address the saved floor has (fw_allow_floor_lost), nothing is captured, the
+# saved floor stays as it is (FW_FLOOR_KEPT names those addresses) and a warning
+# names them and --accept-floor-shrink, which lets the capture go ahead
+# (FW_FLOOR_SHRINK); the resync then goes on with the saved floor. A floor that
+# only grows is captured as before. TN_P2P_ALLOW_BIN runs here through
 # fw_allow_run, outside the sync unit's sandbox (which keeps the tool out of
-# /etc/telcoin and the data dir). rc 0 captured; 1 no such file, or the data dir
-# cannot be resolved; else the tool's exit code (the floor it had stays); the
-# reason is on stderr.
+# /etc/telcoin and the data dir).
+# rc 0 captured, or with keep the saved floor kept (FW_FLOOR_KEPT set); 1
+# neither bootstrap-peers.yaml nor committee.yaml exists, one is not a regular
+# file or the data dir cannot be resolved; else the tool's exit code (the floor
+# it had stays); the reason is on stderr.
 fw_allow_capture_floor() {
-    local src dd rc=0
-    src="$(tn_resolve_config_dir)/bootstrap-peers.yaml"
-    if [[ ! -e "$src" && ! -L "$src" ]]; then
-        if ! dd="$(tn_resolve_data_dir)"; then
-            print_error "The data dir cannot be resolved, so the genesis committee cannot be read and the P2P committee allowlist floor was not captured." >&2
-            return 1
-        fi
-        src="${dd}/genesis/committee.yaml"
-    fi
-    if [[ -L "$src" || ! -f "$src" ]]; then
-        print_error "${src#"${TN_ROOT_PREFIX:-}"} is missing or not a regular file, so the P2P committee allowlist floor was not captured." >&2
+    local keep="${1:-}" cfg dd src list="" lost rc=0 committee=false
+    local -a srcs=()
+    FW_FLOOR_KEPT=""
+    cfg="$(tn_resolve_config_dir)"
+    if ! dd="$(tn_resolve_data_dir)"; then
+        print_error "The data dir cannot be resolved, so the genesis committee cannot be read and the P2P committee allowlist floor was not captured." >&2
         return 1
     fi
-    fw_allow_run capture-floor "$src" || rc=$?
-    if [[ $rc -ne 0 ]]; then
-        print_error "tn-p2p-allow-sync capture-floor ${src#"${TN_ROOT_PREFIX:-}"} failed (exit ${rc}); the P2P committee allowlist keeps the floor it had." >&2
+    for src in "${cfg}/bootstrap-peers.yaml" "${dd}/genesis/committee.yaml" "${cfg}/trusted-nodes.yaml"; do
+        [[ -e "$src" || -L "$src" ]] || continue
+        if [[ -L "$src" || ! -f "$src" ]]; then
+            fw_allow_floor_src_refuse "$src"
+            return 1
+        fi
+        [[ "$src" == "${cfg}/trusted-nodes.yaml" ]] || committee=true
+        srcs+=("$src")
+        list="${list:+${list} }${src#"${TN_ROOT_PREFIX:-}"}"
+    done
+    if [[ "$committee" != "true" ]]; then
+        print_error "${dd#"${TN_ROOT_PREFIX:-}"}/genesis/committee.yaml is missing and so is ${cfg#"${TN_ROOT_PREFIX:-}"}/bootstrap-peers.yaml, so the P2P committee allowlist floor was not captured: one of them must name the committee, and trusted-nodes.yaml does not stand in for it. If the data dir is on a disk of its own, it may not be mounted." >&2
+        return 1
     fi
-    return $rc
+    if [[ "$keep" == "keep" && "$FW_FLOOR_SHRINK" != "true" ]]; then
+        lost="$(fw_allow_floor_lost "$list" "${srcs[@]}")" || return $?
+        if [[ -n "$lost" ]]; then
+            FW_FLOOR_KEPT="$lost"
+            print_warn "The P2P committee allowlist floor was not captured again, so it keeps ${lost}: none of the files it is taken from (${list}) holds them now. The sync goes on with the floor it had, so they stay allowed, and an address added to those files is not on the floor until it is captured again. Check those files first (a data dir on a disk that is not mounted loses the genesis committee.yaml). If the addresses were taken out on purpose, a hub removed from trusted-nodes.yaml say, drop them from the floor with: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee sync --accept-floor-shrink" >&2
+            return 0
+        fi
+    fi
+    fw_allow_run capture-floor "${srcs[@]}" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        print_error "tn-p2p-allow-sync capture-floor ${list} failed (exit ${rc}); the P2P committee allowlist keeps the floor it had." >&2
+        return $rc
+    fi
+    fw_allow_floor_warn "$cfg"
+    return 0
+}
+
+# fw_allow_floor_src_refuse SRC -- the refusal of a floor file SRC that exists but
+# is a symlink or not a regular file: what is there and how to put a regular file
+# back. It is a refusal, not a skip, because the capture runs as root outside the
+# sync unit's sandbox and the tool follows symlinks: the genesis committee.yaml
+# lives in the data dir the service user writes, so following a link there would
+# have root open whatever path the node process chose (the rule edit-config's
+# refresh keeps too); a directory, FIFO, socket or device holds nothing to read;
+# and skipping the file would drop its addresses from the floor. The saved floor
+# stays as it is until the file is repaired. Never fails.
+fw_allow_floor_src_refuse() {
+    local src="$1" shown="${1#"${TN_ROOT_PREFIX:-}"}" what fix
+    if [[ -L "$src" ]]; then
+        what="a symbolic link"
+    elif [[ -d "$src" ]]; then
+        what="a directory"
+    elif [[ -p "$src" ]]; then
+        what="a named pipe (FIFO)"
+    elif [[ -S "$src" ]]; then
+        what="a socket"
+    elif [[ -b "$src" || -c "$src" ]]; then
+        what="a device node"
+    else
+        what="not a regular file"
+    fi
+    case "${src##*/}" in
+        committee.yaml)
+            fix="remove it (sudo rm -r -- ${shown}) and put the network's copy back with 13) Refresh chain configs in: sudo bash ${SCRIPT_DIR}/edit-config.sh" ;;
+        bootstrap-peers.yaml)
+            fix="install the map again, or drop it: sudo bash ${SCRIPT_DIR}/edit-config.sh --set bootstrap_peers=FILE (or bootstrap_peers=none)" ;;
+        *)
+            fix="install the map again, or drop it: sudo bash ${SCRIPT_DIR}/edit-config.sh --set trusted_nodes=FILE (or trusted_nodes=none)" ;;
+    esac
+    print_error "${shown} is ${what}, where the P2P committee allowlist floor reads only a regular file, so the floor was not captured. To repair it, ${fix}; then run: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee sync" >&2
+    return 0
+}
+
+# fw_allow_floor_lost LIST FILE... -- print, space-separated, the addresses of
+# FW_ALLOW_DIR/floor that a capture of FILE... would not hold (nothing when it
+# holds them all, or when the saved floor is missing, not a regular file,
+# unreadable or holds no address, since then there is nothing to keep). The
+# tool captures FILE... into a scratch state dir of its own (mktemp -d under
+# TN_FW_SNAP_PARENT, default /run, removed after), so the saved floor is never
+# touched here and both floors are written by the same parser; their lines are
+# canonical addresses (the floor file's grammar), so they compare as strings.
+# rc 0 compared; 1 no scratch dir could be made; else the scratch capture's exit
+# code; a failure is said on stderr, with LIST naming the files.
+fw_allow_floor_lost() {
+    local list="$1" old="${FW_ALLOW_DIR}/floor" tmp a lost="" rc=0
+    shift
+    [[ -f "$old" && ! -L "$old" ]] || return 0
+    grep -q -v -e '^#' -e '^$' "$old" 2>/dev/null || return 0
+    if ! tmp="$(mktemp -d "${TN_FW_SNAP_PARENT:-/run}/tn-p2p-floor.XXXXXX")"; then
+        print_error "No scratch directory could be made to compare a new P2P committee allowlist floor with the saved one, so the floor was not captured; it keeps the floor it had." >&2
+        return 1
+    fi
+    fw_allow_run_in "$tmp" capture-floor "$@" > /dev/null || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        while IFS= read -r a; do
+            case "$a" in
+                ''|'#'*) continue ;;
+            esac
+            grep -q -x -F -e "$a" "${tmp}/floor" 2>/dev/null || lost="${lost:+${lost} }${a}"
+        done < "$old"
+    fi
+    rm -rf -- "$tmp"
+    if [[ $rc -ne 0 ]]; then
+        print_error "tn-p2p-allow-sync capture-floor ${list} failed (exit ${rc}); the P2P committee allowlist keeps the floor it had." >&2
+        return $rc
+    fi
+    [[ -z "$lost" ]] || printf '%s\n' "$lost"
+    return 0
+}
+
+# fw_allow_floor_warn CONFIG_DIR -- after a capture, warn when FW_ALLOW_DIR/floor
+# holds no address, only the header line the tool writes for an empty floor (a
+# genesis committee.yaml may carry no multiaddr): a peer the node stops listing
+# then has nothing to keep it. A floor file that is missing, not a regular file
+# or unreadable is not judged. Never fails.
+fw_allow_floor_warn() {
+    local floor="${FW_ALLOW_DIR}/floor" cfg="${1#"${TN_ROOT_PREFIX:-}"}" rc=0
+    [[ -f "$floor" && ! -L "$floor" ]] || return 0
+    grep -q -v -e '^#' -e '^$' "$floor" 2>/dev/null || rc=$?
+    [[ $rc -eq 1 ]] || return 0
+    print_warn "The P2P committee allowlist floor holds no address: no /ip4 or /ip6 peer is listed in ${cfg}/bootstrap-peers.yaml, ${cfg}/trusted-nodes.yaml or the genesis committee.yaml. Nothing is protected if the node stops listing a peer: a committee member or trusted hub it leaves out is dropped on the second sync without it. Give the node a bootstrap peers map with the committee's addresses (sudo bash ${SCRIPT_DIR}/edit-config.sh --set bootstrap_peers=FILE) or a trusted nodes map (--set trusted_nodes=FILE)."
+    return 0
 }
 
 # -----------------------------------------------------------------------------
@@ -1295,9 +1505,17 @@ fw_committee_require_lib() {
 # descriptor above 2 (not the update lock, not the --json channel) and without
 # TN_BLS_PASSPHRASE. rc is the tool's.
 fw_allow_run() {
+    fw_allow_run_in "$FW_ALLOW_DIR" "$@"
+}
+
+# fw_allow_run_in DIR ARG... -- fw_allow_run with --state-dir DIR, for a scratch
+# state dir (fw_allow_floor_lost). rc is the tool's.
+fw_allow_run_in() {
+    local dir="$1"
+    shift
     (
         unset TN_BLS_PASSPHRASE 2>/dev/null || true
-        _tn_exec_closed "$TN_P2P_ALLOW_BIN" --state-dir "$FW_ALLOW_DIR" "$@"
+        _tn_exec_closed "$TN_P2P_ALLOW_BIN" --state-dir "$dir" "$@"
     ) < /dev/null
 }
 
@@ -1642,6 +1860,34 @@ fw_allow_leftovers() {
     grep -qx 'table inet tn_p2p_allow' <<< "$tables"
 }
 
+# fw_allow_off_unfinished -- rc 0 when P2P_COMMITTEE is on but its timer unit
+# file is gone: on writes the units before it records P2P_COMMITTEE=on, and off
+# removes the timer first and records P2P_COMMITTEE=off last, so that is an off
+# that did not finish (stopped by KILL, .node-meta not writable, the tool's lock
+# held). Only a rerun of off may act on it; nothing reinstalls the allowlist.
+fw_allow_off_unfinished() {
+    local mode f
+    mode="$(addon_meta_get P2P_COMMITTEE off 2>/dev/null)" || return 1
+    [[ "$mode" == "on" ]] || return 1
+    f="$(fw_allow_unit_path "$FW_ALLOW_TIMER")"
+    [[ ! -e "$f" && ! -L "$f" ]]
+}
+
+# fw_allow_off_unfinished_text -- the words for an unfinished off: whether the
+# allowlist table is still loaded, is gone, or could not be checked (no nft, or
+# nft could not list the tables), and the command that finishes the off.
+fw_allow_off_unfinished_text() {
+    local tables left="nft could not list the tables, so whether table inet tn_p2p_allow is still loaded was not checked"
+    if command -v nft >/dev/null 2>&1 && tables="$(nft list tables 2>/dev/null)"; then
+        if grep -qx 'table inet tn_p2p_allow' <<< "$tables"; then
+            left="table inet tn_p2p_allow is still loaded, so the P2P ports drop every source it does not list"
+        else
+            left="the table is gone, so the P2P ports take what ufw admits"
+        fi
+    fi
+    printf 'P2P committee mode is on in .node-meta, but a --p2p-committee off did not finish (the allowlist timer is gone; %s); finish it with: sudo bash %s/firewall-setup.sh --p2p-committee off' "$left" "$SCRIPT_DIR"
+}
+
 # fw_allow_discard -- undo what fw_committee_on did before its sync, which leaves
 # no table and no unit: remove FW_ALLOW_DIR (a real directory, never a symlink)
 # and the binary when this run installed it where there was none. A binary this
@@ -1666,11 +1912,13 @@ fw_allow_discard() {
 # lock (flock -w 30 on FW_ALLOW_DIR/lock, so a run in progress ends first), the
 # table is deleted (absent is fine) and FW_ALLOW_DIR removed (a real directory,
 # never a symlink); a table that cannot be deleted keeps FW_ALLOW_DIR, so the
-# next run tries again. Last TN_P2P_ALLOW_BIN, unless the argument is
-# keep-binary. rc 0; 2 something stays (said): the lock was not free within 30
-# seconds, nft refused the delete, FW_ALLOW_DIR or its lock is a symlink, the
-# lock is neither missing nor a regular file or cannot be opened, or a removal
-# failed.
+# next run tries again. Without the lock (not free within 30 seconds, or a lock
+# it cannot open) the table is deleted all the same and FW_ALLOW_DIR stays,
+# so a held lock does not keep the allowlist loaded. Last
+# TN_P2P_ALLOW_BIN, unless the argument is keep-binary. rc 0; 2 something stays
+# (said): the lock was not free within 30 seconds, nft refused the delete,
+# FW_ALLOW_DIR or its lock is a symlink, the lock is neither missing nor a
+# regular file or cannot be opened, or a removal failed.
 fw_allow_uninstall() {
     local keep="${1:-}" lock bin old_umask rc=0
     fw_allow_units_remove
@@ -1688,12 +1936,22 @@ fw_allow_uninstall() {
         umask 077
         if [[ -L "$lock" ]] || { [[ -e "$lock" ]] && [[ ! -f "$lock" ]]; } || ! { exec 8>>"$lock"; } 2>/dev/null; then
             umask "$old_umask"
-            fw_error "${lock#"${TN_ROOT_PREFIX:-}"} cannot be opened, so the P2P committee allowlist was left in place."
+            if fw_allow_table_delete; then
+                fw_error "${lock#"${TN_ROOT_PREFIX:-}"} cannot be opened, so table inet tn_p2p_allow was deleted without the lock and ${FW_ALLOW_DIR#"${TN_ROOT_PREFIX:-}"} was left in place."
+            else
+                fw_error "${lock#"${TN_ROOT_PREFIX:-}"} cannot be opened, so ${FW_ALLOW_DIR#"${TN_ROOT_PREFIX:-}"} was left in place."
+            fi
             rc=2
         else
             umask "$old_umask"
             if ! flock -w 30 8; then
-                fw_error "A tn-p2p-allow-sync run held ${lock#"${TN_ROOT_PREFIX:-}"} for 30 seconds, so the P2P committee allowlist was left in place; run this again."
+                # The units are stopped already: the table goes without the lock,
+                # so a held lock never leaves the allowlist dropping sources.
+                if fw_allow_table_delete; then
+                    fw_error "A tn-p2p-allow-sync run held ${lock#"${TN_ROOT_PREFIX:-}"} for 30 seconds, so table inet tn_p2p_allow was deleted without the lock and ${FW_ALLOW_DIR#"${TN_ROOT_PREFIX:-}"} was left in place; run this again once that run has ended."
+                else
+                    fw_error "A tn-p2p-allow-sync run held ${lock#"${TN_ROOT_PREFIX:-}"} for 30 seconds, so ${FW_ALLOW_DIR#"${TN_ROOT_PREFIX:-}"} was left in place; run this again once that run has ended."
+                fi
                 rc=2
             elif ! fw_allow_table_delete; then
                 rc=2
@@ -1717,19 +1975,26 @@ fw_allow_uninstall() {
     return "$rc"
 }
 
-# fw_committee_teardown NODES [keep-binary] -- leave committee mode. The P2P ufw
-# rules and the new-flow limit go back to the non-committee path first
-# (FW_COMMITTEE_ACTIVE=false; fw_p2p_allow when a node is installed, which with
-# a source list brings its per-source rules back and deletes the open rule;
-# fw_p2p_limit_sync, which without one brings the limit and its boot copy
-# back), so P2P never goes without the filter that path uses; then
-# fw_allow_uninstall. rc 0; 1 a ufw rule failed (said; the allowlist is gone
-# anyway, and P2P takes what ufw has); 2 fw_allow_uninstall left something
-# (said).
+# fw_committee_teardown NODES open|back [keep-binary] -- leave committee mode.
+# The P2P ufw rules and the new-flow limit go to the non-committee path first
+# (FW_COMMITTEE_ACTIVE=false), so P2P never goes without the filter that path
+# uses: with open, the kill switch's way, every P2P port open to every source
+# (fw_p2p_open, after fw_p2p_set_aside emptied this run's P2P source list); with
+# back, the undo of an unfinished on, the rules from before it (fw_p2p_allow,
+# which with a source list brings its per-source rules back and deletes the
+# open rule); both only when a node is installed. Then fw_p2p_limit_sync, which
+# without a source list brings the limit and its boot copy back, and
+# fw_allow_uninstall. The allowlist goes even when a ufw rule failed: it only
+# ever drops, so without it every port takes at least what it took with it. rc
+# 0; 1 a ufw rule failed (said, with open by the caller from FW_P2P_OPEN_FAILED
+# and FW_P2P_OPEN_LEFT; the allowlist is gone anyway, and P2P takes what ufw
+# has); 2 fw_allow_uninstall left something (said).
 fw_committee_teardown() {
-    local nodes="$1" keep="${2:-}" rc=0 urc=0
+    local nodes="$1" way="$2" keep="${3:-}" rc=0 urc=0
     FW_COMMITTEE_ACTIVE=false
-    if [[ "$nodes" != "none" ]]; then
+    if [[ "$nodes" != "none" && "$way" == "open" ]]; then
+        fw_p2p_open || rc=1
+    elif [[ "$nodes" != "none" ]]; then
         fw_p2p_allow || rc=1
     fi
     fw_p2p_limit_sync "$nodes"
@@ -1739,14 +2004,15 @@ fw_committee_teardown() {
 }
 
 # fw_allow_undo_on NODES -- turn a committee mode that fw_committee_on did not
-# finish off again (fw_committee_teardown), keeping a binary that was there
-# before the run. rc as fw_committee_teardown.
+# finish off again (fw_committee_teardown back: the P2P rules from before the
+# run), keeping a binary that was there before the run. rc as
+# fw_committee_teardown.
 fw_allow_undo_on() {
     local keep="keep-binary"
     if [[ "$FW_ALLOW_BIN_CHANGED" == "new" ]]; then
         keep=""
     fi
-    fw_committee_teardown "$1" "$keep"
+    fw_committee_teardown "$1" back "$keep"
 }
 
 # fw_allow_fresh LINE -- rc 0 when LINE, a tn-p2p-allow-sync sync line, says
@@ -1797,7 +2063,7 @@ fw_allow_reason_text() {
 # an absolute path (the scripts' own nft calls), systemctl and flock are there,
 # and the new-flow rate and burst and the P2P source list are valid; when
 # P2P_COMMITTEE is on already it is a resync (fw_committee_sync; its rc, with a
-# stale or busy sync 0). Under the update lock (fw_meta_lock): the pinned
+# stale or busy sync or a kept floor 0 and an unfinished off 1). Under the update lock (fw_meta_lock): the pinned
 # tn-p2p-allow-sync (fw_allow_bin_ensure), FW_ALLOW_DIR root 0700, its config
 # and floor; then one
 # `sync --require-authoritative --wait 30`, which loads the table and writes
@@ -1857,11 +2123,13 @@ fw_committee_on() {
         print_info "P2P committee mode is on already; syncing it."
         rc=0
         fw_committee_sync || rc=$?
-        # a stale or busy sync keeps the loaded set and the mode stays on; 3 is
-        # reserved for an undo that did not finish.
-        if [[ "$rc" -eq 3 ]]; then
-            rc=0
-        fi
+        # a stale or busy sync, or one that kept the saved floor (said), keeps the
+        # mode on; 3 is reserved for an undo that did not finish. An unfinished
+        # off is a refusal (said, naming the rerun of off).
+        case "$rc" in
+            3|4) rc=0 ;;
+            5) rc=1 ;;
+        esac
         return "$rc"
     fi
     fw_allow_bin_ensure fw_baseline_say || rc=$?
@@ -1925,30 +2193,40 @@ fw_committee_on() {
     else
         FW_ALLOW_INFLIGHT=""
         print_ok "P2P committee mode is on: only the sources the allowlist lists reach UDP $(fw_p2p_port_text) ($(fw_allow_summary "$line"))."
-        print_info "${FW_ALLOW_TIMER} syncs it every 5 minutes; sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee off returns to the earlier P2P rules."
+        print_info "${FW_ALLOW_TIMER} syncs it every 5 minutes; sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee off opens the P2P ports to every source again."
     fi
     fw_baseline_refresh
     return "$rc"
 }
 
 # fw_committee_sync [quiet] -- firewall-setup.sh --p2p-committee sync, and the
-# resync hook of every writer of RPC_PORT, the P2P ports, P2P_ALLOW_FROM or
-# bootstrap-peers.yaml. Under the update lock (fw_meta_lock; held already when
-# a hook calls it): the pinned binary (fw_allow_bin_ensure: installed when it is
-# missing or its --version differs; a failed install keeps the binary there
-# is), FW_ALLOW_DIR root 0700 again, its config rewritten and the floor captured
-# again, the units rewritten where their text differs (fw_allow_units_write)
+# resync hook of every writer of RPC_PORT, the P2P ports, P2P_ALLOW_FROM,
+# bootstrap-peers.yaml or trusted-nodes.yaml. Under the update lock
+# (fw_meta_lock; held already when a hook calls it): the pinned binary
+# (fw_allow_bin_ensure: installed when it is missing or its --version differs; a
+# failed install keeps the binary there is), FW_ALLOW_DIR root 0700 again, its
+# config rewritten and the floor captured again, the units rewritten where their
+# text differs (fw_allow_units_write)
 # and enabled, then `sync --wait 30`, whose exit 0 counts only with
 # result=applied or result=unchanged on its line (fw_allow_fresh). With quiet it
-# is a no-op while P2P_COMMITTEE is off and says only what failed. After an
+# is a no-op while P2P_COMMITTEE is off and says only what failed. While an off
+# did not finish (fw_allow_off_unfinished) neither form installs or loads
+# anything: that would bring back the allowlist the operator turned off, so it
+# says what is left and that a rerun of off finishes it. After an
 # install or upgrade of the binary the host baseline is made again on every
 # return, whatever the steps after it did; with quiet the hook's caller makes it
-# itself. rc 0 fresh; 1 refused (off, the lock held elsewhere, P2P_COMMITTEE set
-# twice); 2 a step failed (said, with the tool's reason= when it gave one); 3
-# the tool kept its last-good set (stale) or another run held its lock.
+# itself. A floor that would lose addresses is not captured (fw_allow_capture_floor
+# keep): the sync goes on with the saved floor, and the run ends with rc 4 so the
+# hooks can name --accept-floor-shrink. rc 0 fresh; 1 refused (off, the lock held
+# elsewhere, P2P_COMMITTEE set twice); 2 a step failed (said, with the tool's
+# reason= when it gave one); 3 the tool kept its last-good set (stale) or
+# another run held its lock; 4 fresh, stale or busy with the saved floor kept
+# (FW_FLOOR_KEPT; said); 5 refused because an off did not finish (said, naming
+# the rerun of off).
 fw_committee_sync() {
     local rc=0
     FW_ALLOW_BIN_CHANGED=""
+    FW_FLOOR_KEPT=""
     fw_committee_sync_run "${1:-}" || rc=$?
     if [[ "${1:-}" != "quiet" && -n "$FW_ALLOW_BIN_CHANGED" ]]; then
         fw_baseline_refresh
@@ -1972,6 +2250,10 @@ fw_committee_sync_run() {
     fi
     fw_committee_require_lib || return 2
     fw_meta_lock || return 1
+    if fw_allow_off_unfinished; then
+        fw_error "The P2P committee allowlist was not installed or synced again: $(fw_allow_off_unfinished_text)"
+        return 5
+    fi
     fw_allow_bin_ensure fw_baseline_say || rc=$?
     if [[ "$rc" -ne 0 ]]; then
         if [[ ! -x "$TN_P2P_ALLOW_BIN" ]]; then
@@ -1980,7 +2262,7 @@ fw_committee_sync_run() {
         fi
         print_warn "tn-p2p-allow-sync ${TN_P2P_ALLOW_VERSION} could not be installed; syncing with the installed binary."
     fi
-    if ! _tn_root_layout_dir "$FW_ALLOW_DIR" root 0700 || ! fw_allow_write_config || ! fw_allow_capture_floor; then
+    if ! _tn_root_layout_dir "$FW_ALLOW_DIR" root 0700 || ! fw_allow_write_config || ! fw_allow_capture_floor keep; then
         fw_error "The P2P committee allowlist inputs could not be written, so it was not synced; the loaded table stays as it is."
         return 2
     fi
@@ -2005,36 +2287,45 @@ fw_committee_sync_run() {
             if [[ "$quiet" != "quiet" ]]; then
                 print_ok "P2P committee allowlist $(fw_allow_word "$line" result): $(fw_allow_summary "$line")."
             fi
+            [[ -z "$FW_FLOOR_KEPT" ]] || return 4
             return 0 ;;
         3)
             if [[ "$quiet" != "quiet" ]]; then
                 print_warn "P2P committee allowlist kept its last-good set: $(fw_allow_reason_text "$reason")."
             fi
+            [[ -z "$FW_FLOOR_KEPT" ]] || return 4
             return 3 ;;
         4)
             if [[ "$quiet" != "quiet" ]]; then
                 print_warn "Another tn-p2p-allow-sync run held its lock for 30 seconds; ${FW_ALLOW_TIMER} syncs again within 5 minutes."
             fi
+            [[ -z "$FW_FLOOR_KEPT" ]] || return 4
             return 3 ;;
     esac
     fw_error "tn-p2p-allow-sync sync failed (exit ${rc}${reason:+, reason=${reason}}); the P2P committee allowlist keeps the table it has loaded. See: journalctl -t tn-p2p-allow"
     return 2
 }
 
-# fw_committee_off -- firewall-setup.sh --p2p-committee off, the kill switch: back
-# to the P2P rules of the non-committee path (fw_committee_teardown: ufw and the
+# fw_committee_off -- firewall-setup.sh --p2p-committee off, the kill switch: the
+# P2P ports open to every source, behind the new-flow limit, whatever the P2P
+# source list holds, so a committee peer the allowlist admitted is never cut off
+# (fw_p2p_set_aside records it as P2P_PER_SOURCE=off, which keeps the stored
+# list out of ufw on later runs; fw_committee_teardown open: ufw and the
 # new-flow limit first, then the units, the table, FW_ALLOW_DIR and the binary),
-# then P2P_COMMITTEE=off in .node-meta and the host baseline. It never runs
-# tn-p2p-allow-sync, so it also works with an older library. Nothing to do when
-# P2P_COMMITTEE is off and nothing of the allowlist is on the host. Until
-# P2P_COMMITTEE=off is written a stop is finished by fw_allow_on_exit. rc 0 off;
-# 1 refused, nothing changed (systemctl or flock missing, the new-flow rate or
-# burst or the P2P source list invalid, the update lock held elsewhere,
-# P2P_COMMITTEE set twice); 3
+# then P2P_COMMITTEE=off in .node-meta and the host baseline. P2P_ALLOW_FROM
+# stays for committee mode; --enable --p2p-from applies a list to ufw again. It
+# never runs tn-p2p-allow-sync, so it also works with an older library. Nothing
+# to do when P2P_COMMITTEE is off and nothing of the allowlist is on the host.
+# Until P2P_COMMITTEE=off is written a stop is finished by fw_allow_on_exit. A
+# P2P_ALLOW_FROM it cannot use (an invalid entry, the key set twice) does not
+# stop it, since it applies no list: the value stays as it is, and a warning
+# says to correct it before a list or committee mode is asked for again. rc 0
+# off; 1 refused, nothing changed (systemctl or flock missing, the new-flow rate
+# or burst invalid, the update lock held elsewhere, P2P_COMMITTEE set twice); 3
 # partly done (said; P2P_COMMITTEE stays as it was when the allowlist could not
-# be removed).
+# be removed or P2P_PER_SOURCE=off not written).
 fw_committee_off() {
-    local nodes mode t rc=0
+    local nodes mode t stored usable=true l left rc=0 arc=0
     for t in systemctl flock; do
         if ! command -v "$t" >/dev/null 2>&1; then
             fw_error "${t} is not installed, so P2P committee mode cannot be turned off here; nothing was changed."
@@ -2043,10 +2334,6 @@ fw_committee_off() {
     done
     nodes="$(detect_installed_nodes)"
     fw_p2p_limit_load || return 1
-    if ! fw_load_p2p_srcs; then
-        fw_error "The P2P source list (P2P_ALLOW_FROM in .node-meta) is not usable; nothing was changed."
-        return 1
-    fi
     fw_meta_lock || return 1
     if ! mode="$(addon_meta_get P2P_COMMITTEE off)"; then
         return 1
@@ -2056,22 +2343,60 @@ fw_committee_off() {
         return 0
     fi
     FW_ALLOW_INFLIGHT="off"
-    fw_committee_teardown "$nodes" || rc=$?
-    # P2P_COMMITTEE=off only once the allowlist is gone, so a partial off still
-    # reads as on and the next run finishes it.
-    if [[ "$rc" -ne 2 ]] && ! meta_set P2P_COMMITTEE off; then
+    # The stored P2P source list is set aside before any rule changes, so this
+    # run and every later one keep the P2P ports open; a stop from here on is
+    # finished by fw_allow_on_exit, which opens them too.
+    fw_p2p_set_aside || arc=1
+    fw_committee_teardown "$nodes" open || rc=$?
+    # P2P_COMMITTEE=off only once the allowlist is gone and P2P_PER_SOURCE=off is
+    # recorded, so a partial off still reads as on and the next run finishes it.
+    if [[ "$rc" -ne 2 && "$arc" -ne 0 ]]; then
+        rc=5
+    elif [[ "$rc" -ne 2 ]] && ! meta_set P2P_COMMITTEE off; then
         rc=4
     fi
     FW_ALLOW_INFLIGHT=""
     fw_baseline_refresh
+    if ! stored="$(addon_meta_get P2P_ALLOW_FROM 2>/dev/null)"; then
+        stored=""
+        usable=false
+    elif [[ -n "$stored" ]] && ! fw_src_list "$stored" > /dev/null 2>&1; then
+        usable=false
+    fi
     case "$rc" in
         0)
-            print_ok "P2P committee mode is off: the P2P ports take the earlier ufw rules and new-flow limit again."
+            if [[ "$nodes" == "none" ]]; then
+                print_ok "P2P committee mode is off."
+                return 0
+            fi
+            print_ok "P2P committee mode is off: UDP $(fw_p2p_port_text) are open to every source."
+            if [[ "$usable" != "true" ]]; then
+                print_warn "P2P_ALLOW_FROM in .node-meta is not usable (an invalid entry, or the key set more than once). It stays as it is and no longer limits the P2P ports; per-source ufw rules of its entries can stay beside the open rules (sudo ufw status numbered). Correct it before you limit the P2P ports to a list or turn committee mode on again: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --enable --p2p-from <list>, or --enable --p2p-anywhere to drop it."
+            elif [[ -n "$stored" ]]; then
+                print_info "P2P_ALLOW_FROM (${stored}) stays in .node-meta for committee mode but is no longer applied to ufw, even where the P2P ports took only that list before committee mode was turned on. To limit them to a source list again, run: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --enable --p2p-from ${stored}"
+            else
+                print_info "To limit them to a source list, run: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --enable --p2p-from <list>"
+            fi
             return 0 ;;
         1)
-            fw_error "P2P committee mode is off, but the P2P ufw rules could not all be put back; run: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --enable" ;;
+            if [[ -n "$FW_P2P_OPEN_FAILED" ]]; then
+                fw_error "P2P committee mode is off and the allowlist is removed, but ufw allow failed for UDP ${FW_P2P_OPEN_FAILED// /, } (see above): such a port takes every source only if ufw had its open rule already (sudo ufw status), and it keeps the per-source rules of P2P_ALLOW_FROM. Fix ufw, then run: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --enable"
+            fi
+            if [[ -n "$FW_P2P_OPEN_LEFT" ]]; then
+                left=""
+                while IFS= read -r l; do
+                    [[ -n "$l" ]] || continue
+                    left="${left:+${left}; }sudo ${l}"
+                done <<< "$FW_P2P_OPEN_LEFT"
+                fw_error "P2P committee mode is off and the allowlist is removed, but these per-source rules of P2P_ALLOW_FROM on ports open to every source could not be deleted; they admit no source the open rules do not. Delete them with: ${left}"
+            fi
+            if [[ -z "$FW_P2P_OPEN_FAILED$FW_P2P_OPEN_LEFT" ]]; then
+                fw_error "P2P committee mode is off and the allowlist is removed, but a P2P ufw rule could not be changed (see above); run: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --enable"
+            fi ;;
         2)
             fw_error "P2P committee mode was only partly turned off (see above); P2P_COMMITTEE stays ${mode}. Fix that and run: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee off" ;;
+        5)
+            fw_error "The P2P committee allowlist is removed and the P2P ports are open to every source, but P2P_PER_SOURCE=off could not be written to .node-meta, so P2P_COMMITTEE stays ${mode}; run: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee off" ;;
         *)
             fw_error "The P2P committee allowlist is removed, but P2P_COMMITTEE=off could not be written to .node-meta; run: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee off" ;;
     esac
@@ -2099,7 +2424,9 @@ fw_allow_unit_why() {
 }
 
 # fw_committee_report -- the status screen's lines for the P2P committee
-# allowlist: off, or on with what the tool reports. The tool's status file
+# allowlist: off, an off that did not finish (fw_allow_off_unfinished: one error
+# line naming the rerun of off, never sync), or on with what the tool reports.
+# The tool's status file
 # (FW_ALLOW_DIR/status) and `tn-p2p-allow-sync status`, which adds the live keys
 # (LOADED, AGE_SECS, STALE, the counters), are read key by key (fw_allow_kv), the
 # live answer first. As in check-node, rpc-method-missing, snapshot-version-*,
@@ -2117,6 +2444,15 @@ fw_committee_report() {
     fi
     if [[ "$mode" != "on" ]]; then
         print_info "P2P committee allowlist: off (sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee on turns it on)"
+        if [[ "$(addon_meta_get P2P_PER_SOURCE on 2>/dev/null)" == "off" ]] && text="$(addon_meta_get P2P_ALLOW_FROM 2>/dev/null)" && [[ -n "$text" ]]; then
+            print_info "P2P source list: P2P_ALLOW_FROM (${text}) feeds only the allowlist since --p2p-committee off, so the P2P ports stay open to every source; --enable --p2p-from applies a list to ufw again"
+        fi
+        return 0
+    fi
+    # An unfinished off: a sync would bring the allowlist back, so the lines
+    # below, which name sync, would send the operator the wrong way.
+    if fw_allow_off_unfinished; then
+        print_error "P2P committee allowlist: $(fw_allow_off_unfinished_text)"
         return 0
     fi
     bin="${TN_P2P_ALLOW_BIN:-}"
@@ -2184,11 +2520,12 @@ fw_committee_report() {
 # fw_allow_on_exit RC -- the run is ending (exit RC) while fw_committee_on or
 # fw_committee_off was changing the mode (FW_ALLOW_INFLIGHT). An unfinished on
 # is undone (fw_allow_undo_on), unless P2P_COMMITTEE=on was written already; an
-# unfinished off is finished (fw_committee_teardown, P2P_COMMITTEE=off). Then the
+# unfinished off is finished (fw_p2p_set_aside, fw_committee_teardown open,
+# P2P_COMMITTEE=off). Then the
 # host baseline, when the binary, the new-flow limit or the mode changed.
 # Reported with fw_error either way. Never fails.
 fw_allow_on_exit() {
-    local rc="$1" what="$FW_ALLOW_INFLIGHT" nodes mode urc=0 refresh=true
+    local rc="$1" what="$FW_ALLOW_INFLIGHT" nodes mode urc=0 arc=0 refresh=true
     FW_ALLOW_INFLIGHT=""
     nodes="$(detect_installed_nodes)"
     case "$what" in
@@ -2205,8 +2542,9 @@ fw_allow_on_exit() {
                 fw_error "Stopped (exit ${rc}) while P2P committee mode was being turned on, and turning it off again did not finish; run: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee off"
             fi ;;
         off)
-            fw_committee_teardown "$nodes" >/dev/null 2>&1 || urc=$?
-            if [[ "$urc" -ne 2 ]] && meta_set P2P_COMMITTEE off >/dev/null 2>&1; then
+            fw_p2p_set_aside >/dev/null 2>&1 || arc=1
+            fw_committee_teardown "$nodes" open >/dev/null 2>&1 || urc=$?
+            if [[ "$urc" -ne 2 && "$arc" -eq 0 ]] && meta_set P2P_COMMITTEE off >/dev/null 2>&1; then
                 fw_error "Stopped (exit ${rc}) while P2P committee mode was being turned off; the removal was finished."
             else
                 fw_error "Stopped (exit ${rc}) while P2P committee mode was being turned off, and the removal did not finish; run: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee off"
@@ -2892,7 +3230,8 @@ fw_apply_rules() {
 # fw_persist_sources -- record the source lists given on this run in .node-meta
 # (SSH_ALLOW_FROM, P2P_ALLOW_FROM, GATEWAY_ALLOW_FROM as comma lists;
 # --ssh-anywhere / --p2p-anywhere / --gateway-from none remove the key), so a
-# later enable keeps them. On a host with a worker gateway and no node
+# later enable keeps them; --p2p-from and --p2p-anywhere also remove the kill
+# switch's P2P_PER_SOURCE=off (fw_p2p_set_aside). On a host with a worker gateway and no node
 # (FW_GW_ONLY) only the SSH list is kept, as SSH_ALLOW_FROM in gateway.meta (it
 # goes with the gateway: setup-gateway.sh --remove deletes that file). Call
 # fw_meta_lock first. rc 1 when a write failed (warned).
@@ -2924,6 +3263,10 @@ fw_persist_sources() {
         meta_set P2P_ALLOW_FROM "$v" || rc=1
     elif [[ "$FW_P2P_ANYWHERE" == "true" ]]; then
         meta_unset P2P_ALLOW_FROM || rc=1
+    fi
+    # A P2P list given again (or none) ends the kill switch's set-aside.
+    if [[ -n "$FW_P2P_FROM" || "$FW_P2P_ANYWHERE" == "true" ]]; then
+        meta_unset P2P_PER_SOURCE || rc=1
     fi
     if [[ -n "$FW_GW_FROM" ]]; then
         v="$(printf '%s\n' ${FW_GW_SRCS[@]+"${FW_GW_SRCS[@]}"} | paste -sd, -)"
@@ -3703,7 +4046,8 @@ caddy_serves_public_edge() {
 # <spec> is "<port>/<proto>" or the literal "overlay-ssh"; <source> is a hint
 # (anywhere|restricted|<cidr>[,<cidr>...]): the SSH and the P2P rows name their
 # source list (--ssh-from / --p2p-from of this run, else SSH_ALLOW_FROM /
-# P2P_ALLOW_FROM in .node-meta) joined with commas, say anywhere without one, and
+# P2P_ALLOW_FROM in .node-meta, which the kill switch can set aside, see
+# fw_sources) joined with commas, say anywhere without one, and
 # say "unknown (... source list not usable)" when the list cannot be read (a key
 # set more than once, an invalid entry), which every enable also refuses. In P2P
 # committee mode (P2P_COMMITTEE=on in .node-meta) the P2P rows say "committee
@@ -4328,6 +4672,7 @@ main() {
                       shift; [[ $# -gt 0 ]] && shift; [[ $# -gt 0 ]] && shift ;;
             --p2p-committee)   committee=true; FW_COMMITTEE_VERB="${2:-}"; shift; [[ $# -gt 0 ]] && shift ;;
             --p2p-committee=*) committee=true; FW_COMMITTEE_VERB="${1#*=}"; shift ;;
+            --accept-floor-shrink) FW_FLOOR_SHRINK=true; shift ;;
             --ssh-from)     FW_SSH_FROM="${2:-}"; shift; [[ $# -gt 0 ]] && shift ;;
             --ssh-from=*)   FW_SSH_FROM="${1#*=}"; shift ;;
             --p2p-from)     FW_P2P_FROM="${2:-}"; shift; [[ $# -gt 0 ]] && shift ;;
@@ -4427,7 +4772,9 @@ main() {
     # --p2p-committee VERB: each verb takes the update lock itself, and its exit
     # code is the run's (on: 0 on, 1 refused, 2 undone or an older library, 3
     # partial; off: 0, 1, 3; sync: 0 fresh, 1 refused, 2 failed or an older
-    # library, 3 stale or busy; status: 0).
+    # library, 3 stale or busy, 4 synced with the saved floor, which keeps
+    # addresses until --accept-floor-shrink, 5 refused because an off did not
+    # finish; status: 0).
     if [[ "$committee" == "true" ]]; then
         check_root
         fw_load_network || exit 1

@@ -14,11 +14,12 @@
 # firewall-setup.sh, which logs its arguments, whether the update lock is free,
 # whether fd 3 (the --json event channel) is open and how many bytes it read on
 # stdin, then exits FW_STUB_RC. Cases: which edits trigger the sync (node.env,
-# bootstrap-peers.yaml, no backup at all) and which do not (the launch file
-# alone, P2P_COMMITTEE off, missing or set twice); the update lock released
-# before the child runs; the child's exit codes; --json events on fd 3 with the
-# child's output kept off it; the sync only after a restart the node came back
-# from, after the host baseline, and before the done event of --set.
+# bootstrap-peers.yaml, trusted-nodes.yaml, no backup at all) and which do not
+# (the launch file alone, P2P_COMMITTEE off, missing or set twice); the update
+# lock released before the child runs; the child's exit codes; --json events on
+# fd 3 with the child's output kept off it; the sync only after a restart the
+# node came back from, after the host baseline, and before the done event of
+# --set.
 #
 # Maintainer tooling (not updater-tracked, no sidecar). bash 3.2 safe.
 # =============================================================================
@@ -53,6 +54,7 @@ FWS
 META="$T/fx/etc/telcoin/.node-meta"
 ENVF="$T/fx/etc/telcoin/node.env"
 PEERS="$T/fx/etc/telcoin/bootstrap-peers.yaml"
+TRUSTED="$T/fx/etc/telcoin/trusted-nodes.yaml"
 LAUNCH="$T/fx/usr/local/libexec/telcoin/tn-start"
 
 TN_ROOT_PREFIX="$T/fx"
@@ -116,6 +118,13 @@ check "node.env changed, on: no warning" no "$(has "$OUT" "WARN")"
 check "node.env changed, on: nothing on fd 3 in human mode" "" "$(cat "$T/json")"
 resync on "$PEERS"
 check "bootstrap-peers.yaml changed, on: one sync" "$SYNC" "$(fwlog)"
+resync on "$TRUSTED"
+check "trusted-nodes.yaml changed, on: one sync" "$SYNC" "$(fwlog)"
+resync on "$T/fx/var/lib/telcoin/network-config" "$TRUSTED"
+check "network-config and trusted-nodes.yaml changed (trusted_nodes=FILE), on: one sync" "$SYNC" "$(fwlog)"
+resync off "$TRUSTED"
+check "trusted-nodes.yaml changed, off: no sync, the lock still held" "| true" "$(fwlog)| $EDIT_LOCK_HELD"
+edit_unlock
 resync on
 check "no backup (the chain-config refresh), on: one sync" "$SYNC" "$(fwlog)"
 resync on "$LAUNCH"
@@ -144,6 +153,16 @@ check "sync failed: warned with the command" yes \
 export FW_STUB_RC=3
 resync on "$ENVF"
 check "stale: the timer named" yes "$(has "$OUT" "keeps its last-good set for now")"
+# a floor shrink pending (exit 4) names --accept-floor-shrink, an off that did not
+# finish (exit 5) the rerun of off; neither names a plain sync
+export FW_STUB_RC=4
+resync on "$TRUSTED"
+check "floor kept: names --accept-floor-shrink, not a plain sync" "yes no" \
+    "$(has "$OUT" "The P2P committee allowlist floor keeps addresses that the bootstrap peers map, the trusted nodes map and the genesis committee.yaml no longer hold (firewall-setup.sh exit 4, which names them), so they stay allowed; if they were taken out on purpose, drop them with: sudo bash ${T}/h/firewall-setup.sh --p2p-committee sync --accept-floor-shrink") $(has "$OUT" "run: sudo bash ${T}/h/firewall-setup.sh --p2p-committee sync")"
+export FW_STUB_RC=5
+resync on "$ENVF"
+check "unfinished off: names the rerun of off, not sync" "yes no" \
+    "$(has "$OUT" "The P2P committee allowlist was not synced with this edit: a --p2p-committee off did not finish (firewall-setup.sh exit 5); finish it with: sudo bash ${T}/h/firewall-setup.sh --p2p-committee off") $(has "$OUT" "run: sudo bash ${T}/h/firewall-setup.sh --p2p-committee sync")"
 export FW_STUB_RC=0
 
 # --- --json: events on fd 3, the child's output never there --------------------------

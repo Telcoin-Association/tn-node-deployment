@@ -6,8 +6,13 @@
 #   the flags      main's option loop takes both, and refuses an empty or
 #                  missing value; init_node_extra_flags keeps the mode in lower
 #                  case, refuses another word, checks the trusted nodes file as
-#                  a peers file is checked (the peers refusals are unchanged),
-#                  refuses --trusted-nodes without --admission in a --json keygen
+#                  a peers file is checked (the peers refusals are unchanged)
+#                  and its shape with edit-config's check, so a shape of
+#                  trusted_shapes.sh the node cannot use (the table
+#                  edit_config_admission_test.sh runs too) and a peers map
+#                  with a DNS name stop the run in the preflight with nothing
+#                  written, also over a recorded map and in a --json keygen;
+#                  it refuses --trusted-nodes without --admission in a --json keygen
 #                  (elsewhere the read-back checks the pair) and refuses a
 #                  --release-tag below the floor before anything else;
 #   the read-back  admission_read_back fills a flag left out from .node-meta
@@ -32,6 +37,13 @@
 #                  with no flags: the re-run leaves network-config (its
 #                  committee_peers too), the trusted nodes map and .node-meta
 #                  byte-identical; --trusted-nodes alone over a recorded mode;
+#   the allowlist  every run that completes resyncs the P2P committee
+#                  allowlist (setup_committee_resync, through a firewall-setup.sh
+#                  stub) when P2P_COMMITTEE is on, once the update lock is
+#                  released after step_create_service, whether or not it changed
+#                  a map, so a run that installed a map and then failed is
+#                  followed by a resync at the next run; committee mode off does
+#                  not, and a failed resync warns with the command;
 #   the library    a lib/common.sh without the renderer is refused up front;
 #                  --help names both flags and the mainnet default.
 #
@@ -139,7 +151,14 @@ tn_write_root_file() {
     cat > "$1" && chmod "$2" "$1"
 }
 tn_node_has_flag() { return 0; }
-tn_node_parse_check() { return 0; }
+# the node's parse check: the map it is given goes to parse.map; SNM_PARSE_ERR
+# makes it refuse with that reason, as clap words it
+tn_node_parse_check() {
+    printf '%s\n' "$3" > "$SNM_DIR/parse.map"
+    [ -z "${SNM_PARSE_ERR:-}" ] && return 0
+    printf "error: invalid value '…' for '--bootstrap-peers <MAP>': %s\n" "$SNM_PARSE_ERR"
+    return 1
+}
 # the peers map's own installer chowns to root; here it copies (the real one
 # goes through a temp file, so the installed map given again stays)
 install_bootstrap_peers() {
@@ -170,6 +189,8 @@ case "$1" in
     keygen) init_node_extra_flags; prepare_node_extra_flags; vars ;;
     finalize) init_node_extra_flags; finalize_node_extra_flags; prepare_node_extra_flags; setup_admission_config; vars ;;
     interactive) init_node_extra_flags; prepare_node_extra_flags; setup_admission_config; vars ;;
+    resync) init_node_extra_flags; prepare_node_extra_flags; setup_admission_config; setup_committee_resync; vars ;;
+    failafter) init_node_extra_flags; prepare_node_extra_flags; setup_admission_config; setup_fail "simulated: a later step failed"; vars ;;
     summary) set +u; PASSPHRASE_METHOD=credential; step_final_summary ;;
 esac
 DRV
@@ -201,7 +222,7 @@ metakey() { grep "^$1=" "$META" 2>/dev/null || true; }
 # ---- inputs -------------------------------------------------------------------
 cat > "$T/in/trusted.yaml" <<'TRU'
 # hubs for the closed validator
-HubBLSkey1:
+pDmpE29YEhr93MPVPCGkWx3BsCcow4oExmxv5viJz2GTjsaXwc3YwKxE1CFdVuTVSudsFDutFSVmtgF98Abs56JZPfGQs6GzbqXDFkGA1eZx2edkwfP2Q6eRLo8coLhvTNj:
   primary:
     network_address: /ip4/203.0.113.10/udp/49590/quic-v1/p2p/12D3KooWHubPrimary
     network_key: 4XTTMhubprimary
@@ -227,6 +248,12 @@ chmod 0600 "$T/in/private.yaml"
 TRUSTED="$T/in/trusted.yaml"
 Z64=0000000000000000000000000000000000000000000000000000000000000000
 PEERS="$T/in/peers.yaml"
+# the genesis committee.yaml step_write_config copies into the data dir before
+# the render: here the one validator of the peers map above, so that map is the
+# whole committee
+mkdir -p "$DD/genesis"
+printf -- '---\nauthorities:\n  PeerBLSkey1:\n    protocol_key: PeerBLSkey1\n    execution_address: "0x0000000000000000000000000000000000000001"\nepoch: 0\nbootstrap_servers: {}\n' > "$T/in/committee1.yaml"
+cp "$T/in/committee1.yaml" "$DD/genesis/committee.yaml"
 # the network-config setup-node finds before the render: the advertised name
 printf 'hostname: "validator-1"\n' > "$T/in/nc-before"
 # what the render makes of it with the trusted nodes and the peers, mode closed
@@ -236,7 +263,7 @@ admission:
   mode: Closed
 trusted_nodes:
   # hubs for the closed validator
-  HubBLSkey1:
+  pDmpE29YEhr93MPVPCGkWx3BsCcow4oExmxv5viJz2GTjsaXwc3YwKxE1CFdVuTVSudsFDutFSVmtgF98Abs56JZPfGQs6GzbqXDFkGA1eZx2edkwfP2Q6eRLo8coLhvTNj:
     primary:
       network_address: /ip4/203.0.113.10/udp/49590/quic-v1/p2p/12D3KooWHubPrimary
       network_key: 4XTTMhubprimary
@@ -532,6 +559,335 @@ marker v0.17.0
 SNM_NETWORK=mainnet SNM_JSON=true SNM_PHASE=keygen SNM_MODE=closed drv keygen
 check "warning: a mainnet --json keygen warns too, as a log event" "0 yes" \
     "$RC $(has "$(logf "$T/events")" "\"msg\":\"WARNING: ${W_CLOSED}\"")"
+
+# -----------------------------------------------------------------------------
+# the allowlist: every run that completes resyncs it, a map changed or not
+# -----------------------------------------------------------------------------
+cat > "$T/sn/firewall-setup.sh" <<'FWS'
+#!/bin/sh
+printf 'firewall-setup %s stdin=%s\n' "$*" "$(cat | wc -c | tr -d ' ')" >> "$SNM_DIR/fw.log"
+exit "${SNM_FW_RC:-0}"
+FWS
+fwlog() { logf "$T/fw.log"; }
+FW_SYNC="firewall-setup --p2p-committee sync stdin=0"
+FW_FIX="run: sudo bash ${T}/sn/firewall-setup.sh --p2p-committee sync"
+reset
+marker v0.17.0
+cp "$T/in/nc-before" "$NC"
+meta "P2P_COMMITTEE=on"
+rm -f "$T/fw.log"
+SNM_MODE=closed SNM_TRUSTED="$TRUSTED" drv resync
+check "allowlist: a new trusted nodes map, committee on: one sync" "0|$FW_SYNC" "$RC|$(fwlog)"
+rm -f "$T/fw.log"
+drv resync
+check "allowlist: a re-run that changes no map: one sync all the same" "0|$FW_SYNC" "$RC|$(fwlog)"
+rm -f "$T/fw.log"
+SNM_TRUSTED="$T/in/trusted-b.yaml" drv resync
+check "allowlist: another trusted nodes map: one sync" "0|$FW_SYNC" "$RC|$(fwlog)"
+rm -f "$T/fw.log"
+SNM_PEERS="$PEERS" drv resync
+check "allowlist: a new bootstrap peers map: one sync" "0|$FW_SYNC" "$RC|$(fwlog)"
+rm -f "$T/fw.log"
+SNM_FW_RC=2 SNM_TRUSTED="$TRUSTED" drv resync
+check "allowlist: a failed sync warns with the command, setup goes on" "0|$FW_SYNC|yes" \
+    "$RC|$(fwlog)|$(has "$OUT" "not synced with the node's settings (firewall-setup.sh exit 2); ${FW_FIX}")"
+rm -f "$T/fw.log"
+SNM_FW_RC=4 SNM_TRUSTED="$TRUSTED" drv resync
+check "allowlist: a kept floor (exit 4) names --accept-floor-shrink, not a plain sync" "0|yes|no" \
+    "$RC|$(has "$OUT" "floor keeps addresses that the bootstrap peers map, the trusted nodes map and the genesis committee.yaml no longer hold (firewall-setup.sh exit 4, which names them), so they stay allowed; if they were taken out on purpose, drop them with: sudo bash ${T}/sn/firewall-setup.sh --p2p-committee sync --accept-floor-shrink")|$(has "$OUT" "${FW_FIX}")"
+rm -f "$T/fw.log"
+SNM_FW_RC=5 SNM_TRUSTED="$TRUSTED" drv resync
+check "allowlist: an unfinished off (exit 5) names the rerun of off, not sync" "0|yes|no" \
+    "$RC|$(has "$OUT" "not synced with the node's settings: a --p2p-committee off did not finish (firewall-setup.sh exit 5); finish it with: sudo bash ${T}/sn/firewall-setup.sh --p2p-committee off")|$(has "$OUT" "${FW_FIX}")"
+rm -f "$T/fw.log"
+sed 's/^P2P_COMMITTEE=on$/P2P_COMMITTEE=off/' "$META" > "$T/meta.off" && mv "$T/meta.off" "$META"
+SNM_TRUSTED="$T/in/trusted-b.yaml" drv resync
+check "allowlist: committee off: no sync" "0|" "$RC|$(fwlog)"
+printf 'P2P_COMMITTEE=on\nP2P_COMMITTEE=on\n' >> "$META"
+SNM_TRUSTED="$TRUSTED" drv resync
+check "allowlist: P2P_COMMITTEE twice: no sync, says why" "0||yes" \
+    "$RC|$(fwlog)|$(has "$OUT" "P2P_COMMITTEE is set more than once in .node-meta, so the P2P committee allowlist was not synced")"
+# a run that installed a new map and then failed before the resync: the next run
+# sees the same bytes and still resyncs, since the node it restarts runs that map
+for m in trusted peers; do
+    reset
+    marker v0.17.0
+    cp "$T/in/nc-before" "$NC"
+    meta "P2P_COMMITTEE=on"
+    rm -f "$T/fw.log"
+    if [[ "$m" == "trusted" ]]; then
+        SNM_MODE=closed SNM_TRUSTED="$TRUSTED" drv failafter
+        r1="$RC|$(cmp -s "$TRUSTED" "$CFG/trusted-nodes.yaml" && echo installed)|$(fwlog)"
+        SNM_MODE=closed SNM_TRUSTED="$TRUSTED" drv resync
+    else
+        SNM_PEERS="$PEERS" drv failafter
+        r1="$RC|$(cmp -s "$PEERS" "$CFG/bootstrap-peers.yaml" && echo installed)|$(fwlog)"
+        SNM_PEERS="$PEERS" drv resync
+    fi
+    check "allowlist: ${m} map installed by a run that failed later, no sync; the next run with it resyncs" \
+        "1|installed||0|$FW_SYNC" "$r1|$RC|$(fwlog)"
+done
+rm -f "$T/sn/firewall-setup.sh" "$T/fw.log"
+check "order: main resyncs right after it releases the lock that step_create_service held" \
+    "step_create_service setup_release_lock setup_committee_resync" \
+    "$(sed -n '/^main() {/,/^}/p' "$SN" | grep -E '^    [a-z_]+$' | grep -A2 -x '    step_create_service' | tr -d ' ' | tr '\n' ' ' | sed 's/ $//')"
+
+# -----------------------------------------------------------------------------
+# the genesis committee: committee_peers only from a map that lists all of it
+# -----------------------------------------------------------------------------
+# ten validators, as on mainnet; this node is GenesisVal0
+{
+    printf -- '---\nauthorities:\n'
+    for i in 0 1 2 3 4 5 6 7 8 9; do
+        printf '  GenesisVal%s:\n    protocol_key: GenesisVal%s\n    execution_address: "0x000000000000000000000000000000000000000%s"\n' "$i" "$i" "$i"
+    done
+    printf 'epoch: 0\nbootstrap_servers: {}\nnum_workers: 1\n'
+} > "$T/in/committee10.yaml"
+# peer KEY OCTET -- one bootstrap peers entry
+peer() {
+    printf '%s:\n  primary:\n    network_address: /ip4/198.51.100.%s/udp/49590/quic-v1/p2p/12D3KooWV%sP\n    network_key: 4XTTMv%sp\n  workers:\n    - network_address: /ip4/198.51.100.%s/udp/49594/quic-v1/p2p/12D3KooWV%sW\n      network_key: 4XTTMv%sw\n' \
+        "$1" "$2" "$2" "$2" "$2" "$2" "$2"
+}
+# peers FILE N... -- a map of GenesisVal<N> for each N given, then the hub
+peers() {
+    local f="$1" i
+    shift
+    : > "$f"
+    for i in "$@"; do
+        peer "GenesisVal${i}" "3${i}" >> "$f"
+    done
+    peer HubBLSkey1 40 >> "$f"
+    chmod 0644 "$f"
+}
+peers "$T/in/peers-all.yaml" 0 1 2 3 4 5 6 7 8 9
+peers "$T/in/peers-hubs.yaml"
+peers "$T/in/peers-nine.yaml" 0 1 2 3 4 6 7 8 9
+peers "$T/in/peers-noself.yaml" 1 2 3 4 5 6 7 8 9
+cp "$T/in/committee10.yaml" "$DD/genesis/committee.yaml"
+# what the render makes of nc-before with the trusted nodes, mode closed, and no
+# committee_peers
+sed '/^committee_peers:/,$d' "$T/in/nc-closed" > "$T/in/nc-closed-nopeers"
+CP_FLAGS="Node flags: --bootstrap-peers \"\$(cat ${CFG}/bootstrap-peers.yaml)\""
+CP_LEFT="so it is not written to network-config as committee_peers: a node whose committee_peers misses a genesis validator refuses to start while its chain is at epoch 0"
+# the whole committee and a hub: written as the map is, as before
+reset
+marker v0.17.0
+cp "$T/in/nc-before" "$NC"
+SNM_MODE=closed SNM_TRUSTED="$TRUSTED" SNM_PEERS="$T/in/peers-all.yaml" drv interactive
+check "committee: ten of ten and a hub, rendered with the map" "0 ${DD} closed ${CFG}/trusted-nodes.yaml ${CFG}/bootstrap-peers.yaml" \
+    "$RC $(logf "$T/render.log")"
+check "committee: ten of ten and a hub, network-config as before" \
+    "$(cat "$T/in/nc-closed-nopeers"; echo 'committee_peers:'; sed 's/^/  /' "$T/in/peers-all.yaml")" "$(cat "$NC")"
+check "committee: ten of ten and a hub, no warning" no "$(has "$OUT" "committee_peers misses")"
+# a hubs-only map, nine of ten, and the nine others without this node
+for c in "hubs 10 GenesisVal0…, GenesisVal1…, GenesisVal2… and 7 more" "nine 1 GenesisVal5…" "noself 1 GenesisVal0…"; do
+    m="${c%% *}"; c="${c#* }"
+    n="${c%% *}"; list="${c#* }"
+    reset
+    marker v0.17.0
+    cp "$T/in/nc-before" "$NC"
+    SNM_MODE=closed SNM_TRUSTED="$TRUSTED" SNM_PEERS="$T/in/peers-${m}.yaml" drv interactive
+    check "committee: ${m}, setup goes on and renders without committee_peers" \
+        "0 ${DD} closed ${CFG}/trusted-nodes.yaml none" "$RC $(logf "$T/render.log")"
+    check "committee: ${m}, network-config has no committee_peers" "$(cat "$T/in/nc-closed-nopeers")" "$(cat "$NC")"
+    check "committee: ${m}, the warning names the gap" yes \
+        "$(has "$OUT" "[WARN] ${CFG}/bootstrap-peers.yaml lacks ${n} of the 10 validators of the genesis committee in ${DD}/genesis/committee.yaml (${list}), ${CP_LEFT}")"
+    check "committee: ${m}, the map is installed, recorded and on the launch line" "same|BOOTSTRAP_PEERS_FILE=${CFG}/bootstrap-peers.yaml|yes" \
+        "$(cmp -s "$T/in/peers-${m}.yaml" "$CFG/bootstrap-peers.yaml" && echo same)|$(metakey BOOTSTRAP_PEERS_FILE)|$(has "$OUT" "$CP_FLAGS")"
+done
+# a re-run with no flags: the recorded map is read back and left out again
+cp "$NC" "$T/nc-noself"
+drv interactive
+check "committee: a re-run reads the map back and leaves it out again" "0 ${DD} closed ${CFG}/trusted-nodes.yaml none same yes" \
+    "$RC $(logf "$T/render.log") $(cmp -s "$T/nc-noself" "$NC" && echo same) $(has "$OUT" "lacks 1 of the 10 validators")"
+# a re-run that brings the whole committee writes it
+SNM_PEERS="$T/in/peers-all.yaml" drv interactive
+check "committee: a re-run with the whole committee writes committee_peers" "0 ${DD} closed ${CFG}/trusted-nodes.yaml ${CFG}/bootstrap-peers.yaml 1" \
+    "$RC $(logf "$T/render.log") $(grep -c '^committee_peers:' "$NC")"
+# the map as the node reads it: GenesisVal9's block indented under GenesisVal8 is
+# a field of that entry, not a validator of the map
+awk '/^GenesisVal9:/ { n = 1 } /^HubBLSkey1:/ { n = 0 } { print (n ? "  " : "") $0 }' "$T/in/peers-all.yaml" > "$T/in/peers-nested.yaml"
+chmod 0644 "$T/in/peers-nested.yaml"
+reset
+marker v0.17.0
+cp "$T/in/nc-before" "$NC"
+SNM_MODE=closed SNM_TRUSTED="$TRUSTED" SNM_PEERS="$T/in/peers-nested.yaml" drv interactive
+check "committee: a validator's block indented under another, left out with the gap named" "0 ${DD} closed ${CFG}/trusted-nodes.yaml none yes" \
+    "$RC $(logf "$T/render.log") $(has "$OUT" "[WARN] ${CFG}/bootstrap-peers.yaml lacks 1 of the 10 validators of the genesis committee in ${DD}/genesis/committee.yaml (GenesisVal9…), ${CP_LEFT}")"
+check "committee: the indented map installed as given, network-config without committee_peers" "same|$(cat "$T/in/nc-closed-nopeers")" \
+    "$(cmp -s "$T/in/peers-nested.yaml" "$CFG/bootstrap-peers.yaml" && echo same)|$(cat "$NC")"
+# a validator listed twice: the node takes the map on its launch line, but stops at
+# every start on a committee_peers that holds it, so it is left out with the key named
+{ cat "$T/in/peers-all.yaml"; peer GenesisVal3 53; } > "$T/in/peers-dup.yaml"
+chmod 0644 "$T/in/peers-dup.yaml"
+reset
+marker v0.17.0
+cp "$T/in/nc-before" "$NC"
+SNM_MODE=closed SNM_TRUSTED="$TRUSTED" SNM_PEERS="$T/in/peers-dup.yaml" drv interactive
+check "committee: a validator listed twice, left out with the key named" "0 ${DD} closed ${CFG}/trusted-nodes.yaml none yes" \
+    "$RC $(logf "$T/render.log") $(has "$OUT" "[WARN] ${CFG}/bootstrap-peers.yaml lists GenesisVal3… more than once at its first level, so it is not written to network-config as committee_peers: a node whose committee_peers names a key twice cannot read its network-config and refuses to start, at every epoch")"
+check "committee: the map with a validator twice installed and on the launch line, network-config without committee_peers" "same|yes|$(cat "$T/in/nc-closed-nopeers")" \
+    "$(cmp -s "$T/in/peers-dup.yaml" "$CFG/bootstrap-peers.yaml" && echo same)|$(has "$OUT" "$CP_FLAGS")|$(cat "$NC")"
+# this node is GenesisVal0: its entry must carry the network keys of its
+# node-info.yaml, at every epoch
+ni0() {
+    printf 'bls_public_key: GenesisVal0\np2p_info:\n  primary:\n    network_address: /ip4/198.51.100.30/udp/49590/quic-v1\n    network_key: %s\n  workers:\n    - network_address: /ip4/198.51.100.30/udp/49594/quic-v1\n      network_key: %s\n' "$1" "$2" > "$DD/node-info.yaml"
+}
+ni0 4XTTMv30p 4XTTMnew30w
+reset
+marker v0.17.0
+cp "$T/in/nc-before" "$NC"
+SNM_MODE=closed SNM_TRUSTED="$TRUSTED" SNM_PEERS="$T/in/peers-all.yaml" drv interactive
+check "committee: this node's entry with a worker key not its own, left out with the entry named" "0 ${DD} closed ${CFG}/trusted-nodes.yaml none yes" \
+    "$RC $(logf "$T/render.log") $(has "$OUT" "[WARN] ${CFG}/bootstrap-peers.yaml has an entry for this node, GenesisVal0…, whose network keys are not this node's own (the primary and worker network_key in ${DD}/node-info.yaml), so it is not written to network-config as committee_peers: a node whose committee_peers entry for itself names other network keys than its node-info.yaml refuses to start, at every epoch.")"
+check "committee: the stale entry installed and on the launch line, network-config without committee_peers" "same|yes|$(cat "$T/in/nc-closed-nopeers")" \
+    "$(cmp -s "$T/in/peers-all.yaml" "$CFG/bootstrap-peers.yaml" && echo same)|$(has "$OUT" "$CP_FLAGS")|$(cat "$NC")"
+ni0 4XTTMv30p 4XTTMv30w
+reset
+marker v0.17.0
+cp "$T/in/nc-before" "$NC"
+SNM_MODE=closed SNM_TRUSTED="$TRUSTED" SNM_PEERS="$T/in/peers-all.yaml" drv interactive
+check "committee: this node's entry with its own keys, rendered with the map as before" \
+    "0 ${DD} closed ${CFG}/trusted-nodes.yaml ${CFG}/bootstrap-peers.yaml|$(cat "$T/in/nc-closed-nopeers"; echo 'committee_peers:'; sed 's/^/  /' "$T/in/peers-all.yaml")" \
+    "$RC $(logf "$T/render.log")|$(cat "$NC")"
+rm -f "$DD/node-info.yaml"
+# keygen, then finalize: the warning is a log event of the finalize
+reset
+marker v0.17.0
+cp "$T/in/nc-before" "$NC"
+SNM_JSON=true SNM_PHASE=keygen SNM_MODE=closed SNM_TRUSTED="$TRUSTED" SNM_PEERS="$T/in/peers-hubs.yaml" drv keygen
+SNM_JSON=true SNM_PHASE=finalize drv finalize
+check "committee: a --json finalize warns in a log event and writes no committee_peers" "0 yes yes 0" \
+    "$RC $(has "$(logf "$T/events")" "\"msg\":\"WARNING: ${CFG}/bootstrap-peers.yaml lacks 10 of the 10 validators") $(has "$(logf "$T/events")" "\"msg\":\"admission: closed, trusted nodes ${CFG}/trusted-nodes.yaml, committee peers none\"") $(grep -c '^committee_peers' "$NC")"
+# the floor: the map left out of committee_peers still feeds the allowlist
+cat > "$T/sn/firewall-setup.sh" <<'FWS'
+#!/bin/sh
+printf 'firewall-setup %s floor-file=%s\n' "$*" "$(cat "$SNM_DIR/fx/etc/telcoin/bootstrap-peers.yaml" | wc -l | tr -d ' ')" >> "$SNM_DIR/fw.log"
+FWS
+reset
+marker v0.17.0
+cp "$T/in/nc-before" "$NC"
+meta "P2P_COMMITTEE=on"
+rm -f "$T/fw.log"
+SNM_MODE=closed SNM_TRUSTED="$TRUSTED" SNM_PEERS="$T/in/peers-hubs.yaml" drv resync
+check "committee: committee mode on, a hubs-only map: resynced with the installed map in place" \
+    "0|firewall-setup --p2p-committee sync floor-file=$(wc -l < "$T/in/peers-hubs.yaml" | tr -d ' ')|0" \
+    "$RC|$(logf "$T/fw.log")|$(grep -c '^committee_peers' "$NC")"
+rm -f "$T/sn/firewall-setup.sh" "$T/fw.log"
+# no committee file to check against: left out, with the reason
+rm -f "$DD/genesis/committee.yaml"
+reset
+marker v0.17.0
+cp "$T/in/nc-before" "$NC"
+SNM_MODE=closed SNM_TRUSTED="$TRUSTED" SNM_PEERS="$T/in/peers-all.yaml" drv interactive
+check "committee: no genesis committee.yaml, the map is left out and setup goes on" "0 ${DD} closed ${CFG}/trusted-nodes.yaml none yes" \
+    "$RC $(logf "$T/render.log") $(has "$OUT" "${DD}/genesis/committee.yaml cannot be read, so ${CFG}/bootstrap-peers.yaml was not checked against the genesis committee")"
+# every run copies the committee file (step_write_config) before the render
+check "order: step_write_config runs right before step_create_service in every run" "2 2" \
+    "$(grep -c '^    step_create_service$' "$SN") $(awk '/^    step_write_config$/ { w = NR } /^    step_create_service$/ && w && NR - w <= 2 { n++ } END { print n + 0 }' "$SN")"
+cp "$T/in/committee1.yaml" "$DD/genesis/committee.yaml"
+
+# -----------------------------------------------------------------------------
+# the shapes: the table of trusted_shapes.sh, which edit_config_admission_test.sh
+# runs too. A map the node cannot use stops the run in the preflight, naming the
+# line, the entry and the reason, with nothing installed, recorded or rendered;
+# one the node binary refuses stops it at the install, the same way.
+# -----------------------------------------------------------------------------
+# shellcheck source=tools/tests/trusted_shapes.sh
+. "$(dirname "${BASH_SOURCE[0]}")/trusted_shapes.sh"
+SK1=pDmpE29YEhr93MPVPCGkWx3BsCcow4oExmxv5viJz2GTjsaXwc3YwKxE1CFdVuTVSudsFDutFSVmtgF98Abs56JZPfGQs6GzbqXDFkGA1eZx2edkwfP2Q6eRLo8coLhvTNj
+SK2=rZdhyVGJAtz7kyFtFARWVVcw5DB3o9E4GvPN6zuKfUhUBGFRvEK2PgEV44CJt9wu9GMyssFQBFXRknrenuhJixo9KCADrZzHdtcvAwAYDmcLc7Ugh9epGc5LRZC5TK2hnYA
+mkdir -p "$T/shapes"
+# untouched -- nothing installed, recorded or rendered, network-config as before
+untouched() {
+    printf '%s|%s|%s' "$(logf "$T/rootw.log")$(logf "$T/render.log")" \
+        "$([[ -e "$META" ]] && echo meta)$([[ -e "$CFG/trusted-nodes.yaml" ]] && echo map)" \
+        "$(cmp -s "$T/in/nc-before" "$NC" && echo same)"
+}
+while read -r class name reason; do
+    shape_map "$name" "$SK1" "$SK2" > "$T/shapes/${name}.yaml"
+    chmod 0644 "$T/shapes/${name}.yaml"
+    reset
+    marker v0.17.0
+    cp "$T/in/nc-before" "$NC"
+    if [[ "$class" == node ]]; then
+        SNM_PARSE_ERR="$reason" SNM_MODE=closed SNM_TRUSTED="$T/shapes/${name}.yaml" drv interactive
+        check "shape ${name}, ${class}: refused at the install" "1 yes" \
+            "$RC $(has "$OUT" "--trusted-nodes: the node binary at ${T}/fx/opt/telcoin-network (v0.17.0) does not read ${T}/shapes/${name}.yaml (${reason}")"
+        check "shape ${name}, ${class}: nothing written" "||same" "$(untouched)"
+        continue
+    fi
+    SNM_MODE=closed SNM_TRUSTED="$T/shapes/${name}.yaml" drv interactive
+    if [[ "$class" == kept || "$class" == start ]]; then
+        check "shape ${name}, ${class}: installed and rendered" "0 yes yes" \
+            "$RC $(cmp -s "$T/shapes/${name}.yaml" "$CFG/trusted-nodes.yaml" && echo yes) $(has "$(logf "$T/render.log")" "closed ${CFG}/trusted-nodes.yaml none")"
+        continue
+    fi
+    check "shape ${name}, ${class}: refused in the preflight" "1 yes yes" "$RC $(has "$OUT" "--trusted-nodes: ") $(has "$OUT" "$reason")"
+    check "shape ${name}, ${class}: nothing written" "||same" "$(untouched)"
+    if [[ "$class" == new ]]; then
+        check "shape ${name}: the refusal names the entry" yes "$(has "$OUT" "of ${SK1:0:16}...")"
+    fi
+done <<ROWS
+$(shape_rows)
+ROWS
+# a --json keygen stops before the key generation; a recorded map is held to the
+# same check on a re-run
+reset
+marker v0.17.0
+cp "$T/in/nc-before" "$NC"
+SNM_JSON=true SNM_PHASE=keygen SNM_MODE=closed SNM_TRUSTED="$T/shapes/dns4.yaml" drv keygen
+check "shapes: a --json keygen with a DNS name stops, nothing written" "1 yes ||same" \
+    "$RC $(has "$OUT" "is a DNS name (/dns4/hub.example.org") $(untouched)"
+reset
+marker v0.17.0
+cp "$T/in/nc-before" "$NC"
+meta ADMISSION_MODE=closed "TRUSTED_NODES_FILE=$T/shapes/workers-list.yaml"
+drv interactive
+check "shapes: a recorded map the node cannot read stops a re-run, nothing rendered" "1 yes yes" \
+    "$RC $(has "$OUT" "TRUSTED_NODES_FILE in ${META}: line ") $([[ ! -s "$T/render.log" ]] && cmp -s "$T/in/nc-before" "$NC" && echo yes)"
+# the node binary reads the map before network-config is written, and so before
+# a re-run restarts a running node: a recorded map it refuses stops the re-run
+reset
+marker v0.17.0
+cp "$T/in/nc-before" "$NC"
+meta ADMISSION_MODE=closed "TRUSTED_NODES_FILE=$T/shapes/well.yaml"
+SNM_PARSE_ERR="data did not match any variant of untagged enum PrimaryWorkersRepr at line 1 column 132" drv interactive
+check "shapes: a recorded map the node binary refuses stops a re-run, nothing rendered" "1 yes yes" \
+    "$RC $(has "$OUT" "does not read ${T}/shapes/well.yaml (data did not match any variant") $([[ ! -s "$T/render.log" ]] && cmp -s "$T/in/nc-before" "$NC" && echo yes)"
+# what the node binary is given: the map line for line, its workers a list,
+# without a byte order mark or CRLF line ends
+for name in well bom crlf; do
+    reset
+    marker v0.17.0
+    SNM_MODE=closed SNM_TRUSTED="$T/shapes/${name}.yaml" drv interactive
+    check "shapes: ${name} goes to the node binary with its workers as a list" "0 yes" \
+        "$RC $(shape_map well "$SK1" "$SK2" | sed 's/^    0:$/    -/' | { if [[ "$name" == crlf ]]; then head -n 8; else cat; fi; } | cmp -s - "$T/parse.map" && echo yes)"
+done
+# the worker ids are those of the workers the data dir's node-info.yaml lists
+printf 'p2p_info:\n  primary:\n    network_address: /ip4/127.0.0.1/udp/49590/quic-v1\n    network_key: k\n  workers:\n    - network_address: /ip4/127.0.0.1/udp/49594/quic-v1\n      network_key: k0\n    - network_address: /ip4/127.0.0.1/udp/49595/quic-v1\n      network_key: k1\n' > "$DD/node-info.yaml"
+reset
+SNM_MODE=closed SNM_TRUSTED="$T/shapes/well.yaml" drv init
+check "shapes: worker 0 alone, the data dir's node runs two: refused in the preflight" "1 yes" \
+    "$RC $(has "$OUT" "--trusted-nodes: the workers of ${SK1:0:16}... name 1 of the 2 workers this node runs: each entry holds workers 0 to 1")"
+SNM_MODE=closed SNM_TRUSTED="$T/shapes/workers-three.yaml" drv init
+check "shapes: workers 0, 1 and 2, the data dir's node runs two: refused, naming worker 2" "1 yes" \
+    "$RC $(has "$OUT" "worker 2 of ${SK1:0:16}... is not one this node runs: it runs 2 workers, so each entry holds workers 0 to 1")"
+rm -f "$DD/node-info.yaml"
+# the same address rule for the bootstrap peers map, which the node's own parse
+# check lets through
+sed 's|/ip4/198.51.100.21/udp/49590|/dns4/peer.example.org/udp/49590|' "$PEERS" > "$T/in/peers-dns.yaml"
+chmod 0644 "$T/in/peers-dns.yaml"
+reset
+SNM_PEERS="$T/in/peers-dns.yaml" drv init
+check "shapes: --bootstrap-peers with a DNS name stops in the preflight" "1 yes" \
+    "$RC $(has "$OUT" "--bootstrap-peers: line 3: the network_address of PeerBLSkey1 is a DNS name (/dns4/peer.example.org")"
+awk 'NR == 3 { sub(/network_address: /, "network_address:\n      ") } { print }' "$T/in/peers-dns.yaml" > "$T/in/peers-dns-next.yaml"
+chmod 0644 "$T/in/peers-dns-next.yaml"
+reset
+SNM_PEERS="$T/in/peers-dns-next.yaml" drv init
+check "shapes: --bootstrap-peers with a DNS name on the line after its key stops in the preflight" "1 yes" \
+    "$RC $(has "$OUT" "--bootstrap-peers: line 4: the network_address of PeerBLSkey1 is a DNS name (/dns4/peer.example.org")"
 
 # -----------------------------------------------------------------------------
 # the library gate and --help

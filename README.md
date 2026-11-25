@@ -288,7 +288,7 @@ Each script walks through numbered steps:
 - Detects your Linux distribution and package manager
 - Checks the required ports
 - Installs any missing tools (curl, git)
-- Asks which network to connect to (Adiri testnet; mainnet is offered once it launches), then offers the testnet add-ons and, on every network, [private alerts](#private-alerts-every-network), which it sets up once the node runs. The network is chosen here, so the script's own step headers go from Step 1 to Step 3. While this script release keeps mainnet off (`TN_MAINNET_ENABLED=0` in `lib/common.sh`), option 2 answers `Mainnet has not launched yet.` and asks again, and `--json --network mainnet` stops with `Mainnet is not enabled in this script release (lib/common.sh TN_MAINNET_ENABLED); nothing on this host was changed.`
+- Asks which network to connect to (Adiri testnet; mainnet is offered once it launches), then offers the testnet add-ons and, on every network, [private alerts](#private-alerts-every-network), which it sets up once the node runs. The network is chosen here, so the script's own step headers go from Step 1 to Step 3. While this script release keeps mainnet off (`TN_MAINNET_ENABLED=0` in `lib/common.sh`), option 2 answers `Mainnet has not launched yet.` and asks again, and `--json --network mainnet` stops with `Mainnet is not enabled in this script release (lib/common.sh TN_MAINNET_ENABLED); nothing on this host was changed.` The one exception is the mainnet keygen before genesis (`TN_MAINNET_KEYGEN_ENABLED=1`): `--json --phase=keygen --network mainnet --install-method existing --binary-path <binary>` generates the keys with a binary built with no build features, gets no chain configs and starts nothing ([OPERATOR.md section 2.12](OPERATOR.md#212-generate-mainnet-keys-before-genesis)).
 - Checks internet connectivity against the chosen network's public RPC (testnet `https://rpc.adiri.tel`, mainnet `https://rpc.telcoin.network`, devnet `https://rpc.devnet.telcoin.network`), then `https://1.1.1.1`
 - Reports the hardware against each role's minimum in the chosen network's table (see [Hardware](#hardware); warns only, never blocks)
 - Checks the systemd version against the network's floor (see [Supported Operating Systems](#supported-operating-systems))
@@ -338,7 +338,7 @@ Each script walks through numbered steps:
 - Writes the P2P listener addresses to `/etc/telcoin/node.env` (root, mode 0644)
 - Sends the node's output to the journal (`--log-target journal`, the mainnet default, with a 4G journald cap) or to `/var/log/telcoin/telcoin.log` and `telcoin-error.log` (`--log-target file`, the default elsewhere, rotated by logrotate)
 - With a bootstrap peers map, the start script passes `--bootstrap-peers "$(cat /etc/telcoin/bootstrap-peers.yaml)"`, so the file is read at every start
-- With `--admission`, writes the admission mode, the installed trusted nodes map and, as `committee_peers`, the installed bootstrap peers map into the data directory's `network-config`, as the service user, before the node starts (see [Node admission settings](#node-admission-settings))
+- With `--admission`, writes the admission mode, the installed trusted nodes map and, as `committee_peers`, the installed bootstrap peers map when it lists every genesis validator into the data directory's `network-config`, as the service user, before the node starts (see [Node admission settings](#node-admission-settings))
 - With a public RPC domain, adds the public RPC limits to the node command (see [Public node tuning](#public-node-tuning))
 - Optionally starts the node immediately
 - Optionally enables auto-start on server reboot
@@ -436,6 +436,7 @@ re-run of setup. The keys the scripts read back:
 | `SSH_ALLOW_FROM`, `P2P_ALLOW_FROM` | firewall-setup | The source lists of [Firewall Setup](#firewall-setup) |
 | `ENABLE_ALERTS` | setup-node, setup-alerts, remove-node | `true`, `pending` (asked for during setup, not enabled yet) or `false`; absent means off. See [Private alerts](#private-alerts-every-network) |
 | `P2P_COMMITTEE` | firewall-setup | `on` while the [P2P committee allowlist](#p2p-committee-allowlist) is on, `off` after `--p2p-committee off`; absent reads as off, and a key set twice is refused |
+| `P2P_PER_SOURCE` | firewall-setup | `off` after `--p2p-committee off` on a host with `P2P_ALLOW_FROM`: the P2P ports stay open to every address and the list only feeds the committee allowlist; `--p2p-from` or `--p2p-anywhere` removes it |
 
 A `.node-meta` saved with CRLF line endings (edited on Windows, say) is read correctly, and the next script that writes a key rewrites the file with LF endings.
 
@@ -865,6 +866,7 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh --enable --p2p-from /root/tn-
 - `--p2p-from CIDR[,CIDR]` or `--p2p-from FILE` allows the P2P ports from those sources only and removes the open rule for each port.
 - A file holds one or more entries per line, separated by commas; `#` starts a comment. Every entry must be an address or a CIDR of /8 or narrower, without leading zeros; the first bad entry stops the run before anything changes. An IPv6 entry must parse as Rust's `Ipv6Addr` parses it (`tn-p2p-allow-sync` reads `P2P_ALLOW_FROM` with that grammar): eight groups of 1 to 4 hex digits, or fewer around one `::`, with no zone (`%eth0`), brackets or dotted IPv4 tail (write `::ffff:192.0.2.1` as `::ffff:c000:201`), so a typo such as `2001:db8:::1` or `2001:db8::12345` is refused before anything is written.
 - The lists are stored in `.node-meta` as `SSH_ALLOW_FROM` and `P2P_ALLOW_FROM` and used by later runs. A new list replaces the stored one and deletes the rules of the sources it drops. `--ssh-anywhere` and `--p2p-anywhere` drop a stored list; neither can be combined with its `--*-from` flag.
+- After `--p2p-committee off` the stored P2P list is set aside (`P2P_PER_SOURCE=off`, see [P2P committee allowlist](#p2p-committee-allowlist)): later runs keep the P2P ports open to every address until `--p2p-from` gives a list again.
 - **Mainnet refuses to enable the firewall without an SSH source list**: give `--ssh-from` (or have `SSH_ALLOW_FROM` stored), or pass `--ssh-anywhere` to keep SSH open to every address on purpose. The Node Manager UI's `--json --enable` refuses the same way.
 
 `--enable` exits 0 when the rules are in place, 1 when it refused and changed nothing, 2 when a step failed and the old rules were restored, and 3 when even the restore failed (the message names the saved rule files).
@@ -895,7 +897,7 @@ On any network but testnet and devnet the status screen does not show the Uptime
 
 On a validator, P2P committee mode lets only the sources the node itself lists reach the P2P ports and drops every other source before `ufw` sees it.
 The list comes from the node's admission snapshot (`tn_admissionSnapshot` on its local RPC): every address the snapshot holds, in the primary and every worker swarm, for the committees, the validators the node tracks for a coming seat, and its trusted and bootstrap peers.
-The bootstrap floor and the P2P source list are always in it as well, so a wrong snapshot can never cut the peers the node starts with.
+The floor (the bootstrap peers, the genesis committee and the trusted hubs) and the P2P source list are always in it as well, so a wrong snapshot can never cut the peers the node starts with or its hubs.
 It is meant for a closed validator (see [Node admission settings](#node-admission-settings)); hubs and observers keep open P2P.
 [OPERATOR.md section 2.10](OPERATOR.md#210-p2p-committee-allowlist-validators) has the procedure, the day-2 steps and the limits.
 
@@ -938,16 +940,22 @@ It is a server task: the Node Manager UI shows the allowlist but cannot turn it 
   A step after the sync that fails turns committee mode off again (exit 2), and exit 3 means that undo did not finish either; the message names `--p2p-committee off`.
   On a host where committee mode is on already, `on` is a resync.
 - `sync` rewrites `config`, captures the floor again, reinstalls the tool when it is missing or answers another version than the pin, rewrites the units whose text differs and runs one `tn-p2p-allow-sync sync --wait 30`.
-  It exits 0 when the tool reports `result=applied` or `result=unchanged`, 1 when it refused (committee mode is off, the update lock is held, `P2P_COMMITTEE` is set twice), 2 when a step failed (with the tool's `reason=`), and 3 when the tool kept its last-good set (stale) or another run held the tool's lock.
+  It exits 0 when the tool reports `result=applied` or `result=unchanged`, 1 when it refused (committee mode is off, the update lock is held, `P2P_COMMITTEE` is set twice), 2 when a step failed (with the tool's `reason=`), 3 when the tool kept its last-good set (stale) or another run held the tool's lock, 4 when it synced with the floor it had because a new capture would drop addresses (below), and 5 when it refused because an `off` did not finish.
+  The floor never loses an address on its own: when the files no longer hold an address the saved floor has, `sync` (and every resync hook) keeps the saved floor, warns naming those addresses and `--accept-floor-shrink`, and goes on with the config, the units and the sync, so the loaded table keeps them; it then exits 4 (2 when a later step failed); `--p2p-committee sync --accept-floor-shrink` captures the smaller floor, for a hub removed on purpose.
+  With neither `bootstrap-peers.yaml` nor the genesis `committee.yaml` it exits 2 as well, since `trusted-nodes.yaml` never stands in for the committee.
 - `off` is the kill switch.
   It never runs the tool, so it works with the binary missing or broken and with an older library.
-  It puts the earlier P2P path back first (with a source list the per-source `ufw` rules return and the open rule goes; without one the new-flow limit and its boot copy return), then stops and removes the timer, the sync service and the boot unit, deletes the table and the state dir, removes the tool and only then records `P2P_COMMITTEE=off`.
-  `ufw`'s rule files and the limit files end byte for byte as they were before `on`.
-  Exit 0 off, 1 refused, 3 partly done: the message names the command that finishes it, and while the allowlist is not gone `P2P_COMMITTEE` stays `on`, so a rerun of `off` finishes it.
+  It first opens the P2P ports to every source behind the new-flow limit, whatever `P2P_ALLOW_FROM` holds and whether or not the ports took only that list before `on` (the open rule of every port goes in before any per-source rule of the list goes, a failed `ufw` call does not stop the others, then the limit and its boot copy return), then stops and removes the timer, the sync service and the boot unit, deletes the table and the state dir, removes the tool and only then records `P2P_COMMITTEE=off`.
+  A `P2P_ALLOW_FROM` it cannot use (an invalid entry, or the key set twice) does not stop it: the value stays as it is, with a warning to correct it before a list or committee mode is asked for again.
+  On a host without a source list, `ufw`'s rule files and the limit files end byte for byte as they were before `on`.
+  With one, `P2P_ALLOW_FROM` stays for the next `on`, and `P2P_PER_SOURCE=off`, written before the rules change, keeps later `--enable`, `--reset` and "Manage node ports" runs from turning it into per-source rules until `--enable --p2p-from <list>` (which the message names) or `--p2p-anywhere`.
+  With the tool's lock held by another process for 30 seconds, or a lock it cannot open, it deletes the table without the lock and keeps the state dir; after a failed `ufw` call it removes the allowlist all the same, since the table can only drop sources.
+  Exit 0 off, 1 refused, 3 partly done: the message names what is left and the command that finishes it (`--enable` for a port `ufw` would not open, the `ufw delete` commands for per-source rules it could not delete).
+  While the allowlist is not gone or `P2P_PER_SOURCE=off` is not written, `P2P_COMMITTEE` stays `on` and only a rerun of `off` finishes it: until then `sync` (exit 5), `on`, `--enable` and `--reset` install and load nothing and say that the `off` did not finish, whether the table is still loaded or could not be checked, and so do `status` and `check-node.sh`.
 - `status` prints the allowlist lines of the status screen (also under "View current firewall status"): whether the table is loaded and what it holds, the last sync and its age, staleness and its reason, the two counters, and whether the timer and the boot unit are in place, each warning with the command that fixes it.
   `rpc-method-missing`, `snapshot-version-*`, `epoch-regressed` and `state-invalid` warn at once, and so do a failed last sync (`RESULT=error`, its reason named) and a failed last run of `telcoin-p2p-allow-sync.service` (exit 3 and 4 count as success), in check-node's words; any other reason once the tool reports the run stale.
-- Every writer of the tool's inputs resyncs, and only while `P2P_COMMITTEE` is on: `--enable`, `--reset`, the menu's enable and the UI's enable (after the source list is stored), `edit-config.sh` after an edit that changed `/etc/telcoin/node.env` (it holds the P2P listener addresses) or the bootstrap peers, and after the chain-config refresh (the genesis `committee.yaml` feeds the floor), each once the node came back from its restart, the menu's Restart node (an edit saved with "restart later" reaches the node only then), and `migrate-node-naming.sh` after it rewrote `RPC_PORT`.
-  A hook runs `firewall-setup.sh --p2p-committee sync` as a child once it has released its own update lock, and a failure there is a warning naming that command.
+- Every writer of the tool's inputs resyncs, and only while `P2P_COMMITTEE` is on: `--enable`, `--reset`, the menu's enable and the UI's enable (after the source list is stored), `edit-config.sh` after an edit that changed `/etc/telcoin/node.env` (it holds the P2P listener addresses), the bootstrap peers or the trusted nodes (both feed the floor), and after the chain-config refresh (the genesis `committee.yaml` feeds the floor too), each once the node came back from its restart, the menu's Restart node (an edit saved with "restart later" reaches the node only then), every `setup-node.sh` re-run that completes, once the node is started (whether or not it changed a map, since an earlier run may have installed one and failed before its resync), and `migrate-node-naming.sh` after it rewrote `RPC_PORT`.
+  A hook runs `firewall-setup.sh --p2p-committee sync` as a child once it has released its own update lock, and a failure there is a warning naming the command to run: `--p2p-committee sync --accept-floor-shrink` after exit 4, `--p2p-committee off` after exit 5, else `--p2p-committee sync`.
   `update-scripts.sh` prints `sudo bash <tree>/firewall-setup.sh --p2p-committee sync` after an install that changed `firewall-setup.sh` or `lib/common.sh` while the timer unit exists; it never runs it.
 
 **The tool and its pin.**
@@ -976,7 +984,7 @@ The scripts write `config`; the tool writes the rest, each file 0600.
 | File | What it holds |
 |---|---|
 | `config` | `CONFIG_VERSION=1`, `RPC_PORT` (the node's RPC port from `.node-meta`), `P2P_PORTS` (the node's P2P ports, each once) and `P2P_ALLOW_FROM` (the stored source list). A multicast, link-local or unspecified host in the list refuses the write, since it is never a peer's source |
-| `floor` | The addresses of `/etc/telcoin/bootstrap-peers.yaml`, or of the genesis `committee.yaml` in the data dir when there is no peers file, captured by `tn-p2p-allow-sync capture-floor` at `on` and every resync |
+| `floor` | The addresses of `/etc/telcoin/bootstrap-peers.yaml`, the genesis `committee.yaml` in the data dir and `/etc/telcoin/trusted-nodes.yaml`, each one that exists (one of the first two must), captured by `tn-p2p-allow-sync capture-floor` at `on` and every resync; an empty floor warns, and a resync that would drop an address refuses until `--accept-floor-shrink` |
 | `current.nft` | The last program loaded, which the boot unit loads |
 | `state.json` | The per-key memory |
 | `status` | `KEY=VALUE` lines the scripts read key by key: `RESULT`, `LAST_GOOD`, `EPOCH`, `STALE_SINCE`, `STALE_REASON`, the set sizes and more |
@@ -1214,7 +1222,7 @@ Items 8 to 10 came with edit-config 1.3.0, and items 11 and 12 with edit-config 
 | `bootstrap_peers` | An absolute path to a peers map, or `none` to remove the flag and the installed file. See [Bootstrap peers](#bootstrap-peers) |
 | `state_export` | `off`; `unlimited` (`--enable-state-export`, every export kept, `v0.13.0-adiri` or later); or `N` from 1 to 999999 (`--state-export-keep N` as well, only the newest N kept, `v0.15.0-adiri` or later) |
 | `allow_private_forward_targets` | `true` or `false`: the `parameters.yaml` key that lets the node forward transactions to committee RPC endpoints on private addresses. `true` is refused on testnet (2017) and mainnet (731), and when the genesis chain ID cannot be read |
-| `admission` | `open`, `grace` or `closed` (the node's `Open`, `Grace` and `Closed` are taken too): the node's connection admission mode, written into `<data dir>/network-config` with the recorded trusted nodes map and, as `committee_peers`, the installed bootstrap peers map when the node command loads one. Needs node release 0.17.0 or later. See [Node admission settings](#node-admission-settings) |
+| `admission` | `open`, `grace` or `closed` (the node's `Open`, `Grace` and `Closed` are taken too): the node's connection admission mode, written into `<data dir>/network-config` with the recorded trusted nodes map and, as `committee_peers`, the installed bootstrap peers map when the node command loads one and it lists every genesis validator. Needs node release 0.17.0 or later. See [Node admission settings](#node-admission-settings) |
 | `trusted_nodes` | An absolute path to a trusted nodes map, checked and installed as `/etc/telcoin/trusted-nodes.yaml`, or `none` to remove the map and its `trusted_nodes` entry. A map needs an admission mode set first. See [Node admission settings](#node-admission-settings) |
 
 How an edit runs:
@@ -1281,14 +1289,16 @@ The scripts write the three together, as the service user, and replace the entri
   Grace enforces nothing beyond Open and differs only in the status the node reports, for a rollout towards Closed.
   A `snapshot_max_age_secs` the entry already holds is kept.
 - `trusted_nodes`: the trusted hubs, from the installed map `/etc/telcoin/trusted-nodes.yaml` (root, mode 0644), or left out.
-- `committee_peers`: the installed bootstrap peers map `/etc/telcoin/bootstrap-peers.yaml` when the node runs with one (see [Bootstrap peers](#bootstrap-peers)), or left out.
+- `committee_peers`: the installed bootstrap peers map `/etc/telcoin/bootstrap-peers.yaml` when the node runs with one (see [Bootstrap peers](#bootstrap-peers)) and it lists every validator of the genesis committee, or left out.
 
 Set them on a new node with `setup-node.sh --admission open|grace|closed`, with `--trusted-nodes FILE` for the hubs, or on a running one with `edit-config.sh --set admission=...` and `--set trusted_nodes=FILE|none` (menu items 11 and 12).
 Without `--admission`, and with no earlier choice recorded, setup leaves the admission entries of `network-config` alone on every network, mainnet validators included.
 Mainnet validators are expected to run `--admission closed --trusted-nodes <hubs>`; on mainnet, closed without a trusted nodes map gets a warning: `Admission closed without --trusted-nodes: the node admits only the previous, current and next committees and the bootstrap peers.`
 There is no `admission=none`: `open` is what the node does without the entry.
 
-A trusted nodes map is keyed by each hub's BLS public key, as in its `node-info.yaml`; each entry holds the hub's `primary` and its `workers`, keyed by worker id (a map, where the bootstrap peers map has a list):
+A trusted nodes map is keyed by each hub's BLS public key, as in its `node-info.yaml`; each entry holds the hub's `primary` and its `workers`, keyed by worker id (a map, where the bootstrap peers map has a list).
+Do not paste an entry from a node-info file; workers are keyed by id.
+Every `network_address` is an IP address, `/ip4/<address>/udp/<port>/quic-v1` or the same with `/ip6`, with or without the `/p2p/<peer id>` part: the node does not resolve names, and keeps a `/dns...` or `/tcp` address without ever dialing it.
 
 ```yaml
 <hub BLS public key>:
@@ -1302,9 +1312,11 @@ A trusted nodes map is keyed by each hub's BLS public key, as in its `node-info.
 ```
 
 - The file must be a regular file of at most 64 KiB that other users can read (`chmod 644`), as a peers map must; the installed copy is world-readable.
-- The node has no check command for this map, so `edit-config.sh` checks its shape on a root-only copy before it installs it: base58 BLS keys of 131 or 132 characters, each named once, each entry holding `primary` (with `network_address` and `network_key`) and `workers` (at least one worker id from 0 to 65535, each once, each with its own `network_address` and `network_key`) and nothing else, in block YAML.
-  A refusal names the line and writes nothing: `<file> is not a trusted nodes map: <reason>. Each key is a hub's BLS public key, and each entry the hub's primary (network_address, network_key) and workers, as in its node-info.yaml.`
-- `setup-node.sh --trusted-nodes` does not run that shape check; the library refuses a map that does not start with a key, holds a second YAML document or holds nothing, and the node checks the rest when it starts.
+- The node has no check command for this map, so `edit-config.sh` checks its shape on a root-only copy before it installs it, and `setup-node.sh` checks the operator's file: base58 BLS keys of 131 or 132 characters, each named once, each entry holding `primary` (with `network_address` and `network_key`) and `workers` (the worker ids of the workers the node runs, `0` alone for one worker, each with its own `network_address` and `network_key`) and nothing else, in block YAML; both then have the installed node binary parse the map before it is written into `network-config`.
+  A refusal names the line and writes nothing: `<file> is not a trusted nodes map: <reason>. Each key is a hub's BLS public key, and each entry the hub's primary (network_address, network_key) and its workers keyed by worker id, with the addresses and keys from its node-info.yaml.`
+- `setup-node.sh --trusted-nodes` runs the same check (`tn_trusted_nodes_shape_ok` in `lib/common.sh`) in its preflight, on a map it reads back from `.node-meta` and before the install, and stops with `--trusted-nodes: <reason>.` before anything is written or started.
+- Both scripts refuse a `/dns`, `/dns4`, `/dns6` or `/dnsaddr` address, a `/tcp` one and a value that is no such multiaddr, naming the line and the entry: `line <n>: the network_address of <key>... is a DNS name (...): the node does not resolve names, so it would never dial it. Give the IP address instead; ...`.
+  The bootstrap peers map is held to the same address rule, before the node's own parser, which takes such an address.
 - The node itself wants the worker ids `0` up to its own number of workers less one (`0` alone with one worker) in every entry, and refuses to start otherwise.
 - `.node-meta` records `ADMISSION_MODE` (in lower case) and `TRUSTED_NODES_FILE` (the installed path, or empty).
   A `--json` finalize reads both back from keygen's record, and an interactive re-run reads them back too, with `BOOTSTRAP_PEERS_FILE` when a mode is in effect, so a re-run keeps the settings it does not name.
@@ -1313,7 +1325,13 @@ A trusted nodes map is keyed by each hub's BLS public key, as in its `node-info.
 `committee_peers` is the node's launch inventory.
 A node that starts during epoch 0 with a nonempty map refuses to start unless the map lists every committee member with its primary and the on-chain number of workers; later a gap is only logged.
 At any epoch, the node also refuses an entry with an empty address, or one whose `/p2p/` part names another peer than its network key.
-The scripts take the map from the bootstrap peers file, so at genesis that file must list the whole committee.
+The scripts take the map from the bootstrap peers file, and a new data dir starts at epoch 0 at any time, so they write it only when it lists every validator under `authorities` in the data dir's `genesis/committee.yaml`, this node included; keys beside them, such as hubs, are fine.
+Before every write (setup, and the `admission`, `trusted_nodes` and `bootstrap_peers` edits of `edit-config.sh`) `tn_committee_peers_check` compares the keys; a map that lists fewer, such as one of hubs alone or of the other validators without this node, is left out of `committee_peers` with a warning (`<map> lacks <n> of the <m> validators of the genesis committee in <file> (<the first three keys>), so it is not written to network-config as committee_peers: ...`), and the run goes on.
+The map stays installed and on the start line, so the node still dials it at start, and it stays in the floor of the [P2P committee allowlist](#p2p-committee-allowlist).
+Only the map's first-level keys count, as the node reads them: a validator's block indented under another entry, or a key inside a flow value or a quoted value, is none.
+When the map has an entry for this node, it must carry the primary and worker network keys of the data dir's `node-info.yaml`, because the node stops at every start on its own entry with other keys; such a map is left out the same way, with a warning that starts `<map> has an entry for this node, <key>…, whose network keys are not this node's own`.
+A map that lists one key twice at its first level is left out too (`<map> lists <key>… more than once at its first level`): the node takes it on its start line, the last entry for the key winning, but cannot read a `committee_peers` that holds it and stops at every start.
+The check does not compare the number of workers in each entry.
 A `bootstrap_peers` edit on a node with an admission mode writes `network-config` again, so `committee_peers` follows the peers map.
 
 The node reads these entries from `MIN_ADMISSION_VERSION` (0.17.0, in `lib/common.sh`) on.
@@ -1957,8 +1975,8 @@ Interactive setup prompts for everything. The public RPC flags (`--rpc-domain` t
 | `--bootstrap-peers <file>` | Peers the node dials at start, replacing the genesis bootstrap servers. `v0.15.0-adiri` or later. See [Bootstrap peers](#bootstrap-peers) |
 | `--enable-state-export` | Export each epoch's final execution state under `<datadir>/consensus-db/state_exports/epoch-N/`. `v0.13.0-adiri` or later. Each export is a full copy of the state, and without `--state-export-keep` none is ever deleted, so setup warns about the disk |
 | `--state-export-keep <n>` | Keep only the newest n exports, 1 to 999999; 2 or more keeps the previous export while the next one is written. Turns `--enable-state-export` on as well, and says so. `v0.15.0-adiri` or later |
-| `--admission open\|grace\|closed` | The node's connection admission mode, written into the data directory's `network-config` with `trusted_nodes` from `--trusted-nodes` and `committee_peers` from the `--bootstrap-peers` map. Node release 0.17.0 or later (`MIN_ADMISSION_VERSION`); setup stops on an older one. Without it, and with no earlier choice recorded, setup leaves the admission settings alone. See [Node admission settings](#node-admission-settings) |
-| `--trusted-nodes <file>` | The trusted hubs map, with `--admission` or over a recorded mode, installed world-readable as `/etc/telcoin/trusted-nodes.yaml` and written into `network-config` under `trusted_nodes`. At most 64 KiB, `chmod 644` |
+| `--admission open\|grace\|closed` | The node's connection admission mode, written into the data directory's `network-config` with `trusted_nodes` from `--trusted-nodes` and `committee_peers` from the `--bootstrap-peers` map when that map lists every genesis validator. Node release 0.17.0 or later (`MIN_ADMISSION_VERSION`); setup stops on an older one. Without it, and with no earlier choice recorded, setup leaves the admission settings alone. See [Node admission settings](#node-admission-settings) |
+| `--trusted-nodes <file>` | The trusted hubs map, with `--admission` or over a recorded mode, installed world-readable as `/etc/telcoin/trusted-nodes.yaml` and written into `network-config` under `trusted_nodes`. At most 64 KiB, `chmod 644`; shape-checked in the preflight, IP addresses only (see [Node admission settings](#node-admission-settings)) |
 | `-h`, `--help` | Print the usage and exit. With `--json` the usage goes to stderr and stdout gets one `done` event |
 | `--json --phase=keygen\|finalize` | Non-interactive setup in two phases: `keygen` generates the keys (back them up before the next phase), `finalize` writes the config and starts the node. Pass the same flags to both; finalize refuses flags that differ from what keygen recorded, except a Docker image (below). When finalize's flags leave them out, it reads back what keygen recorded in `.node-meta`: the install method, the Docker image or binary, the bootstrap peers and state export. On a Docker install finalize holds the recorded image to the same pull rule and build-feature check as keygen's preflight before it writes the config or the unit or starts the container, and does not pull it: a refusal ends `Refusing the image <image>: ... No container was started; to replace it, run finalize again with ...` and names the way out for the network: `--release-tag <tag>` on mainnet, `--docker-image <repository>@sha256:<digest>` or `--release-tag <tag>` on testnet, `--docker-image` on devnet. Finalize's `--release-tag`, or a `--docker-image` that names another image than the recorded one, replaces it (not both flags together): the new image goes through keygen's steps (the pull rule, a release tag resolved by its signed release and, on mainnet, the digest rule; the release a digest belongs to and the release floor; the pull by digest and its digest check; the build-feature check), and only then is `.node-meta` written, in order: the old `RELEASE_TAG` removed, `DOCKER_IMAGE` and `DOCKER_IMAGE_DIGEST` written, the new `RELEASE_TAG` last when a release names the image. Every other input check runs first, so a refused input pulls nothing, and a refusal anywhere leaves `.node-meta` unchanged. On mainnet the override takes `--release-tag` only. The install method, the data directory and the binary path cannot be replaced at finalize. The passphrase comes from `--passphrase-stdin` or `TN_BLS_PASSPHRASE`. Both phases refuse to run once a node unit exists |
 | `--network <name>` | `testnet` (or `adiri`), `mainnet` or `devnet`. Mainnet is accepted here, but setup stops before it copies chain configs until a script release publishes the mainnet pins (see [Networks and endpoints](#networks-and-endpoints)) |
@@ -2121,6 +2139,55 @@ prints the exact fix command.
 > **Versioning note (from v1.1.48 onwards):** each script bumps `SCRIPT_VERSION`
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
+
+<!-- release: remove this block when the release that CHANGELOG/scripts-v2.3.0.md describes is cut -->
+> **Not released yet:** the entries from here down to `lib/common.sh v2.2.8` are on `main` only and
+> come with the next script release ([CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md)).
+> `scripts-v2.2.0` ends at `update-node v2.1.3` below.
+
+### firewall-setup v2.2.1 — the kill switch opens the P2P ports, and the allowlist floor keeps the trusted hubs
+Fix for validators in P2P committee mode with a static source list: `--p2p-committee off` turned `P2P_ALLOW_FROM` back into per-source rules and cut off every committee peer outside it.
+It now opens the P2P ports to every source behind the new-flow limit, keeps the list for the next `on` and records `P2P_PER_SOURCE=off`, so later runs keep them open until `--enable --p2p-from <list>`.
+An `off` that cannot finish exits 3 and says what is left; until a rerun of `off` finishes it, `--enable`, `--reset`, `sync` (exit 5) and `on` install and load nothing and say so.
+Fix for validators in P2P committee mode with trusted hubs: the allowlist's floor came from one file, and `trusted-nodes.yaml` was never part of it, so a hub the node stopped listing left the allowlist on the second sync without it.
+The floor is now the union of `bootstrap-peers.yaml`, the genesis `committee.yaml` and `trusted-nodes.yaml`, each one that exists.
+A resync never takes an address out of the floor on its own: it keeps the floor it had, names the addresses and exits 4, and `--p2p-committee sync --accept-floor-shrink` drops them on purpose.
+See [P2P committee allowlist](#p2p-committee-allowlist).
+Full release note: [CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md).
+
+### setup-node v2.1.7 — committee_peers only from a complete map, the trusted hubs checked before anything is written, mainnet keys before genesis
+Fix for validators set up with `--admission` and a `--bootstrap-peers` map that does not list the whole genesis committee (a map of hubs alone, or of the other validators without this node): setup wrote it as `committee_peers`, and the node then exited within a second of every start during epoch 0 (`Error: committee_peers: missing validator <key>`).
+Setup now writes `committee_peers` only from a map that lists every validator of the genesis `committee.yaml` at its first level, each key once, and holds this node's own network keys in this node's entry; any other map is left out of it with a warning naming the gap, and stays installed, dialed and in the allowlist floor.
+Fix for validators given a trusted hubs map the node cannot use: `--trusted-nodes` checked only the file, so a hub entry pasted from `node-info.yaml` (workers as a list), one without a `network_key` or one with a DNS name passed, and the node then refused to start, or started and never dialed the hub.
+Setup now runs edit-config's shape check, which also refuses `/dns*`, `/tcp` and malformed addresses, in the preflight; the bootstrap peers map gets the same address rule.
+Mainnet validators can generate their keys before the mainnet genesis exists: `--json --phase=keygen --network mainnet --install-method existing --binary-path <binary>` runs with a root-owned binary that has no build features, records `NETWORK=mainnet` before any key exists and gets no chain configs ([OPERATOR.md section 2.12](OPERATOR.md#212-generate-mainnet-keys-before-genesis)).
+Every other mainnet path stays refused, a host recorded for mainnet refuses a keygen, a finalize or an interactive install for another network, and a keygen over existing keys changes nothing and says what it compared.
+With P2P committee mode on, every re-run that completes resyncs the allowlist.
+It needs lib/common.sh 2.2.8 or later.
+Full release note: [CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md).
+
+### edit-config v2.2.4 — the same committee_peers and trusted hubs checks, and a resync after a trusted nodes edit
+The `admission`, `trusted_nodes` and `bootstrap_peers` edits write the bootstrap peers map as `committee_peers` only when it lists every validator of the genesis `committee.yaml` and its entry for this node holds this node's network keys, as setup-node v2.1.7 does; any other map is installed as before and left out of `committee_peers` with a warning, so the node starts at epoch 0.
+`--set trusted_nodes=` and `--set bootstrap_peers=` refuse a `network_address` that is a DNS name (`/dns`, `/dns4`, `/dns6`, `/dnsaddr`), uses TCP or is no multiaddr, naming the line and the entry: the node never dials such an address.
+`--set trusted_nodes=` also refuses worker ids other than those of the node's workers, and a map the installed release's parser rejects, quoting the node's reason.
+With P2P committee mode on, an edit that changed the trusted nodes map resyncs the allowlist once the node came back from its restart, as an edit of the bootstrap peers already did.
+It needs lib/common.sh 2.2.8 or later.
+Full release note: [CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md).
+
+### check-node v2.2.2 — an unfinished --p2p-committee off is reported with the command that finishes it
+With `P2P_COMMITTEE=on` in `.node-meta` and the allowlist timer's unit file gone, check-node reports one error, `P2P committee mode is on in .node-meta, but a --p2p-committee off did not finish (...)`, which says whether the table is still loaded, and names `firewall-setup.sh --p2p-committee off` as the fix.
+It checks nothing else of the allowlist then.
+Full release note: [CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md).
+
+### migrate-node-naming v2.0.1 — a source list the kill switch set aside stays aside
+A P2P source list that `--p2p-committee off` set aside (`P2P_PER_SOURCE=off`) is not turned into per-source rules when the migration opens the P2P ports: both ports open to every source.
+The warning after the migration's allowlist resync names the command that works: `--p2p-committee sync --accept-floor-shrink` after exit 4, `--p2p-committee off` after exit 5, else `--p2p-committee sync`.
+Full release note: [CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md).
+
+### lib/common.sh v2.2.8 — the map checks setup-node and edit-config share, and the mainnet keygen switch
+New `tn_committee_peers_check`, `tn_trusted_nodes_shape_ok` (moved here from edit-config), `tn_map_addr_check`, `tn_trusted_nodes_node_check` and `tn_local_worker_count`: setup-node and edit-config call them before they write `network-config`.
+New `TN_MAINNET_KEYGEN_ENABLED=1` and `tn_mainnet_keygen_enabled`, which open setup-node's mainnet keygen and nothing else while `TN_MAINNET_ENABLED` is 0, and `tn_keys_network_ok`, which refuses another network on a host recorded for mainnet.
+Full release note: [CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md).
 
 ### update-node v2.1.3 — v0.18.0-adiri is a one-way update
 `STORAGE_MIGRATION_FLOOR_TESTNET` lists `0.16.0 0.17.0 0.18.0`. `v0.18.0-adiri` moves the execution database (`db/mdbx.dat`) into tn-lmdb (`db/tn-lmdb.dat`) on its first start and deletes the MDBX files; `v0.17.0-adiri` refuses the migrated database. An update from v0.17.x or older is one-way: the warning, the snapshot question, the 600-second health window, no automatic rollback, and `"storage_migration":true` from `--check`. A downgrade from v0.18.x below 0.18.0 is refused with `"storage_downgrade":true`.

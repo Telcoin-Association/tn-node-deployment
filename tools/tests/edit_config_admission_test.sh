@@ -19,12 +19,19 @@
 #                  show and the menu reflect the settings; trusted_nodes=none
 #                  removes the entry, the map and the record; a bootstrap peers
 #                  edit carries committee_peers along;
-#   the shape      a malformed trusted nodes map is refused before anything is
-#                  written;
+#   the shape      a malformed trusted nodes map, or one with an address the
+#                  node cannot dial, is refused before anything is written
+#                  (the table of trusted_shapes.sh, which
+#                  setup_node_admission_test.sh runs too), and so is a
+#                  bootstrap peers map with such an address;
 #   the restart    the committee guard and the epoch wait run before the
 #                  restart, a refusal puts every file back, and a node that does
 #                  not come back healthy has network-config, the map and
 #                  .node-meta rolled back byte for byte;
+#   the allowlist  with P2P_COMMITTEE on, an edit that changed the trusted
+#                  nodes map resyncs the P2P committee allowlist (its floor
+#                  holds the hubs) after the restart, and one that changed
+#                  nothing does not;
 #   the library    a lib/common.sh without the renderer is refused up front;
 #                  --help names both fields.
 #
@@ -172,7 +179,14 @@ tn_host_baseline_refresh() { :; }
 tn_local_rpc_url() { printf 'http://127.0.0.1:8545\n'; }
 tn_launch_runner() { printf '%s\n' "${ECA_SPEC:-binary:$ECA_DIR/fx/opt/telcoin/telcoin-network}"; }
 tn_node_has_flag() { return 0; }
-tn_node_parse_check() { return 0; }
+# the node's parse check: the map it is given goes to parse.map; ECA_PARSE_ERR
+# makes it refuse with that reason, as clap words it
+tn_node_parse_check() {
+    printf '%s\n' "$3" > "$ECA_DIR/parse.map"
+    [ -z "${ECA_PARSE_ERR:-}" ] && return 0
+    printf "error: invalid value '…' for '--bootstrap-peers <MAP>': %s\n" "$ECA_PARSE_ERR"
+    return 1
+}
 edit_require_root() { :; }
 edit_lock() { EDIT_LOCK_HELD=true; return 0; }
 resolve_target() {
@@ -254,7 +268,14 @@ hub() {
 { printf -- '---\n# hubs for the closed validator\n'; hub "$K1" 10; } > "$T/in/t1.yaml"
 { hub "$K1" 10; printf '\n'; hub "$K2" 11; } > "$T/in/t2.yaml"
 printf '%s:\n  primary:\n    network_address: /ip4/198.51.100.21/udp/49590/quic-v1/p2p/12D3KooWPeer1P\n    network_key: 4XTTMpeer1p\n  workers:\n    - network_address: /ip4/198.51.100.21/udp/49594/quic-v1/p2p/12D3KooWPeer1W\n      network_key: 4XTTMpeer1w\n' "$K2" > "$T/in/peers.yaml"
+# a peers map of the hub K1 alone
+printf '%s:\n  primary:\n    network_address: /ip4/203.0.113.10/udp/49590/quic-v1/p2p/12D3KooWHub10P\n    network_key: 4XTTMhub10p\n  workers:\n    - network_address: /ip4/203.0.113.10/udp/49594/quic-v1/p2p/12D3KooWHub10W\n      network_key: 4XTTMhub10w\n' "$K1" > "$T/in/peers-hub.yaml"
+cat "$T/in/peers.yaml" "$T/in/peers-hub.yaml" > "$T/in/peers-both.yaml"
 chmod 0644 "$T/in/"*.yaml
+# the genesis committee.yaml in the data dir: one validator, K2, the key of
+# peers.yaml, so that map is the whole committee
+mkdir -p "$DD/genesis"
+printf -- '---\nauthorities:\n  %s:\n    protocol_key: %s\n    execution_address: "0x0000000000000000000000000000000000000002"\nepoch: 0\nbootstrap_servers: {}\n' "$K2" "$K2" > "$DD/genesis/committee.yaml"
 
 # ---- admission ------------------------------------------------------------------
 reset
@@ -442,8 +463,6 @@ hub "$K1" 10 | sed 's|network_address: .*|network_address: ~|' > "$T/in/bad.yaml
 bad "null address" "the network_address of"
 { hub "$K1" 10; printf -- '---\n'; hub "$K2" 11; } > "$T/in/bad.yaml"
 bad "second document" "starts a second YAML document"
-hub "$K1" 10 | awk '{ printf "%s\r\n", $0 }' > "$T/in/bad.yaml"
-bad "CRLF" "ends in a carriage return"
 printf '# no hubs yet\n---\n' > "$T/in/bad.yaml"
 bad "no entries" "holds no BLS public key entries"
 printf '  %s:\n' "$K1" > "$T/in/bad.yaml"
@@ -459,7 +478,9 @@ wk() { printf '    %s:\n      network_address: /ip4/203.0.113.10/udp/49594/quic-
 { prim "$K1"; printf '  workers:\n'; wk zero; } > "$T/in/bad.yaml"
 bad "worker id not a number" "zero is not a worker id; the workers of"
 { prim "$K1"; printf '  workers:\n'; wk 70000; } > "$T/in/bad.yaml"
-bad "worker id past 65535" "70000 is not a worker id"
+bad "worker id past 65535" "worker 70000 of ${K1:0:16}... is not one this node runs: it runs 1 worker, so each entry holds worker 0 alone"
+{ prim "$K1"; printf '  workers:\n'; wk 0; wk 1; } > "$T/in/bad.yaml"
+bad "workers 0 and 1 on a node of one worker" "worker 1 of ${K1:0:16}... is not one this node runs"
 { prim "$K1"; printf '  workers:\n'; wk '"0"'; } > "$T/in/bad.yaml"
 bad "worker id quoted" "is not a worker id"
 for v in '~' '{}' 0; do
@@ -482,17 +503,77 @@ bad "worker without network_address, then another field" "has no network_address
 bad "worker in flow style" "write worker 0 of"
 { prim "$K1"; printf '  workers:\n'; wk 0 | sed 's|network_address: .*|network_address: ""|'; } > "$T/in/bad.yaml"
 bad "worker with an empty network_address" "the network_address of worker 0 of"
-# what the node takes: a 132-character key, several workers, the last id 65535
-{ prim "${K1}a"; printf '  workers:\n'; wk 0; wk 1; printf '    65535:   # the last id\n      network_address: /ip4/203.0.113.10/udp/49599/quic-v1\n      network_key: 4XTTMhubx\n      rpc: {}\n'; } > "$T/in/good.yaml"
+# what the node takes: a 132-character key, the worker ids of the workers its
+# node-info.yaml lists (one when there is none), an rpc field
+{ prim "${K1}a"; printf '  workers:\n    0:   # the one worker\n      network_address: /ip4/203.0.113.10/udp/49599/quic-v1\n      network_key: 4XTTMhubx\n      rpc: {}\n'; } > "$T/in/good.yaml"
 chmod 0644 "$T/in/good.yaml"
 drv set "trusted_nodes=$T/in/good.yaml"
-check "a 132-character key and workers 0, 1 and 65535: installed" "0 yes" "$RC $(cmp -s "$T/in/good.yaml" "$DEST" && echo yes)"
+check "a 132-character key and worker 0: installed" "0 yes" "$RC $(cmp -s "$T/in/good.yaml" "$DEST" && echo yes)"
+check "the node is given the map with its workers as a list" "$(sed 's/^    0:   # the one worker$/    -/' "$T/in/good.yaml")" "$(cat "$T/parse.map")"
+printf 'p2p_info:\n  primary:\n    network_address: /ip4/127.0.0.1/udp/49590/quic-v1\n    network_key: k\n  workers:\n    - network_address: /ip4/127.0.0.1/udp/49594/quic-v1\n      network_key: k0\n    - network_address: /ip4/127.0.0.1/udp/49595/quic-v1\n      network_key: k1\n' > "$DD/node-info.yaml"
+{ prim "$K1"; printf '  workers:\n'; wk 0; wk 1; } > "$T/in/two.yaml"
+chmod 0644 "$T/in/two.yaml"
+drv set "trusted_nodes=$T/in/two.yaml"
+check "workers 0 and 1 on a node whose node-info.yaml lists two: installed" "0 yes" "$RC $(cmp -s "$T/in/two.yaml" "$DEST" && echo yes)"
+cp "$T/in/good.yaml" "$T/in/bad.yaml"
+bad "worker 0 alone on a node of two workers" "the workers of ${K1:0:16}... name 1 of the 2 workers this node runs: each entry holds workers 0 to 1"
+rm -f "$DD/node-info.yaml"
+hub "$K1" 10 | awk '{ printf "%s\r\n", $0 }' > "$T/in/good.yaml"
+drv set "trusted_nodes=$T/in/good.yaml"
+check "CRLF line ends: installed as given, the node given the map without them" "0 yes yes" \
+    "$RC $(cmp -s "$T/in/good.yaml" "$DEST" && echo yes) $(hub "$K1" 10 | sed 's/^    0:$/    -/' | cmp -s - "$T/parse.map" && echo yes)"
+hub "$K1" 10 > "$T/in/bad.yaml"
+export ECA_PARSE_ERR="data did not match any variant of untagged enum PrimaryWorkersRepr at line 1 column 132"
+bad "the node binary refuses it" "the node rejects $T/in/bad.yaml as a trusted nodes map (data did not match any variant of untagged enum PrimaryWorkersRepr at line 1 column 132; the line and column count in that file)"
+unset ECA_PARSE_ERR
 hub "$K1" 10 > "$T/in/bad.yaml"
 chmod 0600 "$T/in/bad.yaml"
 snap
 drv set "trusted_nodes=$T/in/bad.yaml"
 check "map other users cannot read: refused, nothing written" "1|yes||same" \
     "$RC|$(has "$OUT" "other users cannot read it")|$(calls)|$(same)"
+
+# ---- the shapes table, which setup_node_admission_test.sh runs too ---------------
+# shellcheck source=tools/tests/trusted_shapes.sh
+. "$(dirname "${BASH_SOURCE[0]}")/trusted_shapes.sh"
+mkdir -p "$T/shapes"
+reset ADMISSION_MODE=closed
+while read -r class name reason; do
+    shape_map "$name" "$K1" "$K2" > "$T/shapes/${name}.yaml"
+    if [[ "$class" == kept || "$class" == start ]]; then
+        chmod 0644 "$T/shapes/${name}.yaml"
+        drv set "trusted_nodes=$T/shapes/${name}.yaml"
+        check "shape ${name}, ${class}: installed and rendered" "0 yes yes" \
+            "$RC $(cmp -s "$T/shapes/${name}.yaml" "$DEST" && echo yes) $(has "$(calls)" "render $DD closed $DEST none")"
+        continue
+    fi
+    cp "$T/shapes/${name}.yaml" "$T/in/bad.yaml"
+    if [[ "$class" == node ]]; then
+        export ECA_PARSE_ERR="$reason"
+        bad "shape ${name}, ${class}" "the node rejects $T/in/bad.yaml as a trusted nodes map (${reason}"
+        unset ECA_PARSE_ERR
+        continue
+    fi
+    bad "shape ${name}, ${class}" "$reason"
+    if [[ "$class" == new ]]; then
+        check "shape ${name}: the refusal names the entry" yes "$(has "$OUT" "of ${K1:0:16}...")"
+    fi
+done <<ROWS
+$(shape_rows)
+ROWS
+# the same address rule for a bootstrap peers map, which the node's parse check
+# lets through
+sed 's|/ip4/198.51.100.21/udp/49590|/dns4/peer.example.org/udp/49590|' "$T/in/peers.yaml" > "$T/in/peers-dns.yaml"
+chmod 0644 "$T/in/peers-dns.yaml"
+cp "$T/in/peers.yaml" "$PEERS"
+launch peers
+snap
+cp -p "$PEERS" "$T/snap/peers-before"
+drv set "bootstrap_peers=$T/in/peers-dns.yaml"
+check "bootstrap_peers with a DNS name: refused, naming the line and the entry" "1 yes yes" \
+    "$RC $(has "$OUT" "is not a bootstrap peers map the node can use: line 3: the network_address of ${K2:0:16}... is a DNS name (/dns4/peer.example.org") $(has "$OUT" "the node does not resolve names")"
+check "bootstrap_peers with a DNS name: nothing written or restarted" "|same|same" \
+    "$(logf "$T/rootw.log")$(calls)|$(same)|$(cmp -s "$T/snap/peers-before" "$PEERS" && echo same)"
 
 # ---- the restart window and the rollback ----------------------------------------
 reset ADMISSION_MODE=closed
@@ -604,6 +685,97 @@ drv menu-trusted
 check "menu: the rollback restart fails too: files put back, said so" "same yes" \
     "$(same) $(has "$OUT" "and again after the edit was put back")"
 DRV_IN=""
+
+# ---- the P2P committee allowlist follows the trusted nodes map -------------------
+# a firewall-setup.sh stub beside the copy logs its calls with the restarts
+cat > "$T/ec/firewall-setup.sh" <<'FWS'
+#!/bin/sh
+printf 'firewall-setup %s\n' "$*" >> "$ECA_DIR/calls.log"
+FWS
+fwcalls() { grep -E '^(systemctl restart|firewall-setup)' "$T/calls.log" | tr '\n' ';'; }
+FWSYNC="systemctl restart telcoin;firewall-setup --p2p-committee sync;"
+reset ADMISSION_MODE=closed P2P_COMMITTEE=on
+drv set "trusted_nodes=$T/in/t1.yaml"
+check "committee on, trusted_nodes=FILE: resynced after the restart" "0|$FWSYNC" "$RC|$(fwcalls)"
+drv set "trusted_nodes=$T/in/t2.yaml"
+check "committee on, another trusted nodes map: resynced after the restart" "0|$FWSYNC" "$RC|$(fwcalls)"
+drv set "trusted_nodes=$T/in/t2.yaml"
+check "committee on, the same map again: no restart, no resync" "0|" "$RC|$(fwcalls)"
+drv set trusted_nodes=none
+check "committee on, trusted_nodes=none: resynced after the restart" "0|$FWSYNC" "$RC|$(fwcalls)"
+reset ADMISSION_MODE=closed P2P_COMMITTEE=off
+drv set "trusted_nodes=$T/in/t1.yaml"
+check "committee off, trusted_nodes=FILE: no resync" "0|systemctl restart telcoin;" "$RC|$(fwcalls)"
+# a peers map that misses a genesis validator stays out of committee_peers but
+# is installed, so the resync captures it into the floor
+reset ADMISSION_MODE=closed P2P_COMMITTEE=on
+launch peers
+cp "$T/in/peers.yaml" "$PEERS"
+drv set "bootstrap_peers=$T/in/peers-hub.yaml"
+check "committee on, bootstrap_peers=<hub only>: installed, no committee_peers, resynced after the restart" "0|same|0|$FWSYNC" \
+    "$RC|$(cmp -s "$T/in/peers-hub.yaml" "$PEERS" && echo same)|$(grep -c '^committee_peers' "$NC")|$(fwcalls)"
+rm -f "$T/ec/firewall-setup.sh"
+
+# ---- committee_peers only from a map that lists the whole genesis committee ------
+CP_GAP="$PEERS lacks 1 of the 1 validators of the genesis committee in $DD/genesis/committee.yaml (${K2:0:16}…), so it is not written to network-config as committee_peers: a node whose committee_peers misses a genesis validator refuses to start while its chain is at epoch 0"
+reset ADMISSION_MODE=closed
+launch peers
+cp "$T/in/peers.yaml" "$PEERS"
+drv set "bootstrap_peers=$T/in/peers-hub.yaml"
+check "bootstrap_peers=<hub only> with a mode: rc 0, rendered without committee_peers" "0 yes 0" \
+    "$RC $(has "$(calls)" "render $DD closed none none") $(grep -c '^committee_peers' "$NC")"
+check "bootstrap_peers=<hub only> with a mode: the warning names the gap" yes "$(has "$OUT" "$CP_GAP")"
+check "bootstrap_peers=<hub only> with a mode: the map installed and on the launch line" "same yes" \
+    "$(cmp -s "$T/in/peers-hub.yaml" "$PEERS" && echo same) $(has "$(cat "$LAUNCH")" "--bootstrap-peers \"\$(cat $PEERS)\"")"
+check "bootstrap_peers=<hub only> with a mode: the node is restarted on it" yes "$(has "$(calls)" "systemctl restart telcoin")"
+export ECA_JSON=true
+drv set admission=grace
+check "admission=grace over a map with a gap: written without committee_peers, the warning as an event" "0 yes 0 yes" \
+    "$RC $(has "$(calls)" "render $DD grace none none") $(grep -c '^committee_peers' "$NC") $(has "$(logf "$T/events")" "{\"event\":\"warn\",\"msg\":\"${CP_GAP}")"
+unset ECA_JSON
+drv set "bootstrap_peers=$T/in/peers-both.yaml"
+check "bootstrap_peers=<the committee and a hub>: committee_peers is the map, no warning" \
+    "0|$(echo 'committee_peers:'; sed 's/^/  /' "$T/in/peers-both.yaml")|no" \
+    "$RC|$(sed -n '/^committee_peers:/,$p' "$NC")|$(has "$OUT" "lacks")"
+# set trusted_nodes renders committee_peers too, and checks it the same way
+cp "$T/in/peers-hub.yaml" "$PEERS"
+drv set "trusted_nodes=$T/in/t1.yaml"
+check "trusted_nodes=FILE over a map with a gap: rendered without committee_peers, warned" "0 yes 0 yes" \
+    "$RC $(has "$(calls)" "render $DD grace $DEST none") $(grep -c '^committee_peers' "$NC") $(has "$OUT" "$CP_GAP")"
+# no committee file to check against: left out, with the reason
+mv "$DD/genesis/committee.yaml" "$T/committee.saved"
+drv set "bootstrap_peers=$T/in/peers-both.yaml"
+check "no genesis committee.yaml: rc 0, left out, says why" "0 yes 0 yes" \
+    "$RC $(has "$(calls)" "render $DD grace $DEST none") $(grep -c '^committee_peers' "$NC") $(has "$OUT" "$DD/genesis/committee.yaml cannot be read, so $PEERS was not checked against the genesis committee")"
+mv "$T/committee.saved" "$DD/genesis/committee.yaml"
+# the map as the node reads it: K2's block indented under the hub's entry is a
+# field of that entry, not a validator of the map
+{ cat "$T/in/peers-hub.yaml"; sed 's/^/  /' "$T/in/peers.yaml"; } > "$T/in/peers-nested.yaml"
+chmod 0644 "$T/in/peers-nested.yaml"
+drv set "bootstrap_peers=$T/in/peers-nested.yaml"
+check "bootstrap_peers=<the validator indented under the hub>: installed, rendered without committee_peers, the gap named" "0 same yes 0 yes" \
+    "$RC $(cmp -s "$T/in/peers-nested.yaml" "$PEERS" && echo same) $(has "$(calls)" "render $DD grace $DEST none") $(grep -c '^committee_peers' "$NC") $(has "$OUT" "$CP_GAP")"
+# the committee's validator listed twice: the node takes the map on its launch
+# line, but stops at every start on a committee_peers that holds it
+{ cat "$T/in/peers-both.yaml"; cat "$T/in/peers.yaml"; } > "$T/in/peers-dup.yaml"
+chmod 0644 "$T/in/peers-dup.yaml"
+drv set "bootstrap_peers=$T/in/peers-dup.yaml"
+check "bootstrap_peers=<a validator listed twice>: installed, rendered without committee_peers, the key named" "0 same yes 0 yes" \
+    "$RC $(cmp -s "$T/in/peers-dup.yaml" "$PEERS" && echo same) $(has "$(calls)" "render $DD grace $DEST none") $(grep -c '^committee_peers' "$NC") $(has "$OUT" "$PEERS lists ${K2:0:16}… more than once at its first level, so it is not written to network-config as committee_peers: a node whose committee_peers names a key twice cannot read its network-config and refuses to start, at every epoch")"
+# this node is K2: its entry must carry the network keys of its node-info.yaml
+ni2() {
+    printf 'bls_public_key: %s\np2p_info:\n  primary:\n    network_address: /ip4/198.51.100.21/udp/49590/quic-v1\n    network_key: 4XTTMpeer1p\n  workers:\n    - network_address: /ip4/198.51.100.21/udp/49594/quic-v1\n      network_key: %s\n' "$K2" "$1" > "$DD/node-info.yaml"
+}
+ni2 4XTTMnewer
+drv set "bootstrap_peers=$T/in/peers-both.yaml"
+check "bootstrap_peers=<the committee, this node's entry stale>: rc 0, installed, rendered without committee_peers, the entry named" "0 same yes 0 yes" \
+    "$RC $(cmp -s "$T/in/peers-both.yaml" "$PEERS" && echo same) $(has "$(calls)" "render $DD grace $DEST none") $(grep -c '^committee_peers' "$NC") $(has "$OUT" "$PEERS has an entry for this node, ${K2:0:16}…, whose network keys are not this node's own (the primary and worker network_key in $DD/node-info.yaml), so it is not written to network-config as committee_peers")"
+ni2 4XTTMpeer1w
+drv set admission=closed
+check "admission=closed, this node's entry with its own keys: committee_peers is the map, no warning" \
+    "0|$(echo 'committee_peers:'; sed 's/^/  /' "$T/in/peers-both.yaml")|no" \
+    "$RC|$(sed -n '/^committee_peers:/,$p' "$NC")|$(has "$OUT" "WARN")"
+rm -f "$DD/node-info.yaml"
 
 # ---- the library and --help -----------------------------------------------------
 help="$(bash "$TN_TEST_REPO/edit-config.sh" --help 2>&1)"

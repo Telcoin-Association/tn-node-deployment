@@ -81,6 +81,27 @@ fails unless the three agree. The launch release flips all three in one change, 
 the mainnet chain-config tag and pins (`MAINNET_CHAIN_CONFIGS_TAG`, `tn_chain_config_pin`) and
 `MIN_SOURCE_VERSION_MAINNET`.
 
+A second switch, `readonly TN_MAINNET_KEYGEN_ENABLED=1` (`tn_mainnet_keygen_enabled`), opens one mainnet path while `TN_MAINNET_ENABLED` is 0: `setup-node.sh --json --phase=keygen --network mainnet`, because validators generate their keys and proofs of possession before the genesis that is built from their `node-info.yaml` files.
+setup-node's `setup_mainnet_keygen_only` names that run (`--json`, keygen, mainnet, the first switch 0, the second 1), and only it passes `json_set_network`.
+`json_check_install_flags` then takes `--install-method existing --binary-path` only, because no mainnet release, image or source tag can be verified before genesis; the other methods are refused with a message that names this way.
+`check_binary_mainnet` refuses a binary whose `--version` lists any build feature (`tn_release_version_ok ... mainnet`); it runs again in `_preflight_existing` on every mainnet existing install.
+It runs the binary only after `_tn_root_binary_ok` passed (setup runs as root), under `timeout -k 5 30` where coreutils `timeout` exists, and `run_json_mode` calls it only once `json_check_keygen_inputs` passed.
+`step_create_infrastructure` skips `ensure_chain_configs_available` in that run, and keygen's address, multiaddr, passphrase and existing-keys checks apply unchanged.
+Finalize, a full install, the gateway and the UI (its helper asks `tn_mainnet_enabled` and passes no `--binary-path`) stay refused by the first switch with the message of before; with the second switch at 0 the keygen gets that message too.
+The run leaves the keys, the stored passphrase and keygen's `.node-meta` record, and no chain configs.
+That record includes `NETWORK`, which `step_create_infrastructure` writes on every network before any key exists; it is the network the keys are for.
+`tn_keys_network_ok WANTED [META]` in `lib/common.sh` refuses (rc 1) only when it is `mainnet` and WANTED is another network, so mainnet keys never sign on another network; a host keyed by an older release has no `NETWORK` before finalize and passes, as does every testnet or devnet record.
+setup-node's `setup_keys_network_check` asks it in `run_json_mode` right after the root check (finalize and keygen, before the lock or any write) and in `step_preflight` once an interactive install has its network.
+update-node and edit-config need no call: they stop without an installed unit, which a keygen-only host lacks, and take their network from that same `NETWORK` (`tn_detect_network`).
+For new keys `step_generate_keys` stores the passphrase (`setup_store_passphrase`) before the keytool runs and holds HUP, INT and TERM (`setup_hold_signals` to `setup_release_signals`) until the keys are checked; a keytool that fails or writes no `bls.kw` or `node-info.yaml` gets `setup_keygen_undo` (the new `node-keys/` and `node-info.yaml`, the stored passphrase and its `.node-meta` keys).
+Over keys that already exist (an interactive overwrite, which the keytool refuses) the passphrase is still stored after the keytool, so the kept keys keep theirs.
+`json_phase_keygen` reports success only with the key, `node-info.yaml` and `SETUP_PASS_STORED` all in place, and a keygen re-run over `node-keys/` or a finalize without a stored passphrase says what it found (`setup_keys_found`).
+A `--json` keygen over `node-keys/` stops in `run_json_mode` before the lock and before any write (`setup_keygen_keys_refuse`, asked again in `step_generate_keys` under the lock), because `step_create_infrastructure` would otherwise rewrite `NETWORK`, `INSTALL_METHOD` and `DATA_DIR` first.
+It compares the keys with the run: a `NETWORK` record for another network, or a `node-info.yaml` whose `execution_address` is not `--address` (case aside), each get their own refusal with the way out (before genesis, a new keygen after removing `node-keys/` and `node-info.yaml`, since `prepare-stake.sh --rotate-address` needs a chain); so does a `node-info.yaml` that is a symbolic link or a file with no `0x`-and-40-hex `execution_address`, on every network, since `--rotate-address` reads that address first; only the same address and network, or keys with no record, get `setup_keys_found`'s "all in place".
+`tn_keys_network_ok`'s refusal names the `NETWORK` record, not keys: a failed or stopped mainnet keygen keeps the record (the safe direction) without keys.
+So a finalize of the launch release must get the chain configs itself (this finalize only searches for them, so a mainnet finalize would need `--genesis-dir`), and it keeps `INSTALL_METHOD=existing`.
+`tools/tests/mainnet_keygen_test.sh` covers both switches.
+
 Each network has its own image package, and the channel follows the release tag: mainnet
 `ghcr.io/telcoin-association/tn-mainnet` (`TN_MAINNET_IMAGE_REPO`, tags `vX.Y.Z`), testnet
 `ghcr.io/telcoin-association/tn-testnet` (`TN_TESTNET_IMAGE_REPO`, tags `vX.Y.Z-adiri`), and
@@ -185,7 +206,7 @@ Code that runs as root keeps it that way:
 - The data dir's `network-config` is the service user's, and the node writes it too.
   The scripts change it only through `write_advertised_name` (the `hostname` line) and `tn_network_config_render` (the admission entries), both run as the service user, the second through `network-config.tn-new` and one rename.
   edit-config backs it up and puts it back as that user (`edit_backup_copy`, `edit_restore_one`), so root never opens a path the service user controls.
-- The trusted nodes map is installed with `tn_write_root_file` as `/etc/telcoin/trusted-nodes.yaml` (root 0644): from the operator's file in setup-node (`install_trusted_nodes`), and from a root-only copy that passed the shape check in edit-config (`edit_trusted_install`).
+- The trusted nodes map is installed with `tn_write_root_file` as `/etc/telcoin/trusted-nodes.yaml` (root 0644): from the operator's file in setup-node (`install_trusted_nodes`), once it passed the shape check, and from a root-only copy that passed the same check in edit-config (`edit_trusted_install`).
 - The P2P committee allowlist (`firewall-setup.sh --p2p-committee`) keeps the same rules.
   `tn_p2p_allow_install` installs the tool with `tn_install_root_binary` as `/usr/local/libexec/telcoin/tn-p2p-allow-sync` (root 0755), `_tn_root_layout_dir` makes the state dir `/var/lib/telcoin-p2p-allow` root 0700 (it is on `tn_root_dir_ok`'s strict list; a numeric mode is padded to five digits, `00700`, so GNU `install` and `chmod` clear an inherited setgid bit the tool would refuse), `fw_allow_write_config` writes its `config` 0600 with `tn_write_root_file` from a here-string, and `fw_allow_unit_put` writes `telcoin-p2p-allow.service`, `telcoin-p2p-allow-sync.service` and `telcoin-p2p-allow-sync.timer` root 0644 the same way.
   The tool writes every other file in the state dir itself; the scripts never write there except `config`, and `off` (`fw_allow_uninstall`) removes the dir only after a `-L` and `-d` check, under the tool's lock; `remove-node.sh` (`_rm_p2p_allow`) removes it with the last node under the same lock.
@@ -323,15 +344,28 @@ Rules for any code that touches them:
   Code that writes the settings asks `tn_node_supports_admission` about the release that will read them: rc 1 (below `MIN_ADMISSION_VERSION`) refuses before anything is written, rc 2 (the release cannot be told) warns and writes.
   `MIN_ADMISSION_VERSION` (0.17.0, marked `TODO(node team): confirm`) changes together with the floor in the `--help` text of setup-node and edit-config and in README, OPERATOR.md and the changelog.
 - The shape check is advisory; the restart-and-verify is the net.
-  The node has no check flag for the trusted nodes map, so `trusted_nodes_shape_ok` (awk, block YAML) refuses the common mistakes before the install, and a map that passes and still stops the node is caught after the restart.
+  The node has no check flag for the trusted nodes map, so `tn_trusted_nodes_shape_ok` in `lib/common.sh` (awk, block YAML) refuses the common mistakes before anything is written, with the worker ids held to those of the workers the data dir's `node-info.yaml` lists (`tn_local_worker_count`, one before keys exist).
+  `tn_trusted_nodes_node_check` then has the installed release parse the map as a `--bootstrap-peers` value, line for line with each worker id turned into a list item, because both maps hold one entry type: the node's own parser judges every BLS key, `network_key`, IP literal, peer id and YAML line, before anything is rendered or restarted (setup-node in `install_trusted_nodes`, the first point of a run with a binary; edit-config on its root-only copy).
+  What only the node's start checks, a `/p2p` peer id that is not the one of its `network_key` or a key this node or another hub holds, edit-config catches after the restart and rolls back; a setup-node re-run over a running node restarts it with no rollback, so that node stays down until the map is fixed.
+  It is the one check of both scripts: setup-node runs it in `trusted_nodes_file_ok` (the preflight `init_node_extra_flags`, the read-back of a recorded map and `install_trusted_nodes`), edit-config on its root-only copy; a second shape check is a bug.
+  Its address rule, `tn_map_addr_check`, holds every `network_address` to `/ip4` or `/ip6`, `/udp/<port>/quic-v1`, then an optional `/p2p/<peer id>`, because the node's P2P transport is QUIC over IP alone: it starts with a `/dns*` or `/tcp` address, keeps it and never dials it (logged at debug level only), and the allowlist takes no address from a name.
+  The bootstrap peers map gets the same rule (setup-node's `peers_file_ok`, edit-config's `set_bootstrap_peers` on its staged copy, before the node's parse check, which accepts such an address).
+  Both scripts list the two functions in their `tn_require_fns` checks; `tools/tests/trusted_shapes.sh` is the shapes table both admission tests run, so a shape added there is held to both scripts.
   An edit that writes `network-config` records it with `edit_backup`, which is what makes `edit_watch_secs` give `edit_verify_up` its `TN_EDIT_VERIFY_TIMEOUT` window (default 60 s, polls of `is-active` and `NRestarts` every 5 s); a failure goes through `edit_rollback_restart`, in `--set` and in the menu.
   Do not drop the backup or bypass the verify for an admission edit.
 - `.node-meta` keys: `ADMISSION_MODE` (lower case, empty for none) and `TRUSTED_NODES_FILE` (the installed path, or empty); every admission edit records both (`edit_admission_record`; a value already in place is left alone), and setup reads them back on a finalize and on an interactive re-run.
   An edit whose only change is `.node-meta` keeps it without a restart (`edit_only_meta_changed`).
-- `committee_peers` is the installed bootstrap peers map, when the node command loads one.
+- `committee_peers` is the installed bootstrap peers map, when the node command loads one and the map names every validator of the data dir's genesis `committee.yaml` (its `authorities` keys), the node's own included.
+  A node whose nonempty `committee_peers` misses one exits at start while its chain is at epoch 0, in every admission mode, and a new data dir is always at epoch 0, so the two render points, `setup_admission_config` and `edit_admission_render`, ask `tn_committee_peers_check` first and pass `none` with a warning when it fails; a new render point does the same.
+  A map left out stays installed, on the launch line and in the allowlist floor (`fw_allow_capture_floor` reads the file, never `network-config`), and the run does not fail.
+  Extra keys (hubs) are fine, as the node accepts them; the check compares keys, not worker counts.
+  A key counts only at the map's first level, as the node reads it: the check reads the map as YAML, block or flow style (JSON included), so a validator's block indented under another entry, or a key inside a flow value or a quoted value, is no key, and YAML the reader does not take (anchors, tags, block scalars, explicit keys, a value over several lines) fails the check, naming the line.
+  A key listed twice at the first level makes the check fail too (the reader's `top()` keeps the first such key, exit 9, naming it): the node's `--bootstrap-peers` parse takes such a map (the last entry wins), but a `committee_peers` that holds it is YAML the node cannot read, and it exits at every start (`bad yaml data`).
+  The node also stops at every epoch when its own entry names another primary `network_key`, or another `network_key` for a worker it runs, than its `node-info.yaml` (`validate_local_committee_peer`), so the check compares that entry with the data dir's `node-info.yaml` too; a data dir without one has no entry to compare.
+  It reads the files as the service user, because they are in the data dir; setup copies the committee file in `step_write_config`, which runs before `step_create_service` on every path.
   Anything that changes that map on a node with a recorded mode renders `network-config` again, as `set_bootstrap_peers` does through `edit_admission_follow_peers`.
 - Mainnet closed without a trusted nodes map warns (`edit_admission_closed_warn` and setup's twin), it does not refuse.
-- setup-node and edit-config list `tn_network_config_render` and `tn_node_supports_admission` in their `tn_require_fns` checks.
+- setup-node and edit-config list `tn_network_config_render`, `tn_node_supports_admission` and `tn_committee_peers_check` in their `tn_require_fns` checks.
 - Not wired yet: the UI helper's and `ui/server.py`'s `--set` allowlists, check-node, remove-node's listing and update-node's floor check do not know the settings.
 
 ## P2P committee allowlist
@@ -344,12 +378,25 @@ Rules for any code that touches it:
 - Bash orchestrates, the binary syncs.
   The tool owns the fetch, the validation, the per-key memory, the floor, the static list, the render, the apply, `state.json`, `status` and `check`.
   The scripts own the verbs, the units, the `ufw` and new-flow-limit interplay, `P2P_COMMITTEE` in `.node-meta`, the kill switch and the download, verify and install of the binary.
-  Bash reads the tool only through its exit codes, its one stdout result line (`fw_allow_word`), the `status` file and `status` output key by key (`fw_allow_kv`, `_cn_allow_kv`, value grammar `[A-Za-z0-9._:-]*`) and the one line of `status --json`, spliced whole after a shape check (`json_fw_committee`); it never parses the snapshot, never sources a tool file and never needs python3.
+  Bash reads the tool only through its exit codes, its one stdout result line (`fw_allow_word`), the `status` file and `status` output key by key (`fw_allow_kv`, `_cn_allow_kv`, value grammar `[A-Za-z0-9._:-]*`) and the one line of `status --json`, spliced whole after a shape check (`json_fw_committee`), and, after a capture, whether `floor` holds a line after its header (`fw_allow_floor_warn`), and before a resync's capture the address lines of the saved `floor` and of a scratch capture, compared as whole strings (`fw_allow_floor_lost`; the floor file's lines are canonical addresses); it never parses the snapshot, never sources a tool file and never needs python3.
   The one log-line exception is `check`: check-node reads the `reason=` word of the tool's `error` and `stale` lines, which the contract names as part of it.
 - Never hold the tool's lock (`/var/lib/telcoin-p2p-allow/lock`) while the binary runs: a second open file description conflicts with the tool's own `flock`, and the tool skips its run as busy (exit 4).
   The timer never takes the update lock either; the verbs take the update lock (`fw_meta_lock`) and pass `--wait 30` to the tool.
 - `off` never runs the binary, so it works with the binary missing or broken and with an older library; it holds `flock -w 30` on the tool's lock itself around the table delete and the removal of the state dir.
-  It puts the non-committee P2P path back (`fw_p2p_allow`, `fw_p2p_limit_sync`) before it removes anything, and writes `P2P_COMMITTEE=off` last, so a partial `off` still reads as on and the next run finishes it.
+  When that lock stays busy for 30 seconds or cannot be opened, `fw_allow_uninstall` deletes the table without it (the units are stopped by then) and keeps the state dir for a rerun of `off`, so a held lock does not keep the allowlist loaded.
+  It opens the P2P ports to every source behind the new-flow limit (`fw_p2p_open`: the open rule of every port first, then the per-source rules of `P2P_ALLOW_FROM` on each port whose open rule went in, carrying on past a failed `ufw` call; then `fw_p2p_limit_sync`) before it removes anything, whatever the static list holds and whether or not the ports took only that list before `on`, so a committee peer the allowlist admitted keeps its path.
+  A `P2P_ALLOW_FROM` it cannot use (an invalid entry, the key set twice) does not stop it, since it applies no list; it stays as it is, with a warning.
+  The allowlist goes even when a `ufw` call failed, because the table can only take sources away (its accept does not end a packet's way through `ufw`'s chains): without it every port takes at least what it took with it.
+  A port whose open rule `ufw` refused then takes only what `ufw` admits, and `off` exits 3 naming the port and `--enable`; a per-source rule it could not delete is named with its `ufw delete` command (`FW_P2P_OPEN_FAILED`, `FW_P2P_OPEN_LEFT`).
+  `off` refuses, changing nothing, only when `systemctl` or `flock` is missing, `TN_P2P_NEW_FLOW_RATE` or `TN_P2P_NEW_FLOW_BURST` is invalid, the update lock is held elsewhere or `P2P_COMMITTEE` is set twice.
+  `P2P_ALLOW_FROM` stays in `.node-meta` for committee mode; `fw_p2p_set_aside` records `P2P_PER_SOURCE=off` before the rules change, which makes `fw_sources p2p` give no list, so `--enable`, `--reset`, "Manage node ports" and the status keep P2P open until `--enable --p2p-from` (or `--p2p-anywhere`) removes the key in `fw_persist_sources`.
+  The allowlist config reads `P2P_ALLOW_FROM` itself and is not affected.
+  The undo of an unfinished `on` is not the kill switch: `fw_allow_undo_on` takes `fw_committee_teardown back`, the rules from before the run (`fw_p2p_allow`).
+  `off` writes `P2P_COMMITTEE=off` last, only after the allowlist is gone and `P2P_PER_SOURCE=off` is recorded, so a partial `off` (killed, `.node-meta` not writable, the tool's lock held) still reads as on, and only a rerun of `off` finishes it; a TERM, INT or HUP is finished in the same run by `fw_allow_on_exit`.
+  Nothing else may finish or undo it: `P2P_COMMITTEE=on` without the timer unit, which `on` writes before it records the mode and `off` removes first, is an unfinished `off` (`fw_allow_off_unfinished`).
+  In that state `fw_committee_sync`, quiet or not, installs and loads nothing, names the rerun of `off` and returns 5 (`on` turns it into its refusal, 1), so `--enable`, `--reset`, the menu, the edit-config, setup-node and migrate-node-naming hooks and `on` cannot bring the allowlist back, and `fw_committee_report` names the rerun of `off`, never `sync`.
+  `fw_allow_off_unfinished_text` says whether the table is still loaded, gone, or could not be checked (no `nft`, or `nft list tables` failed); it never calls a table it could not list gone.
+  check-node's `check_p2p_committee` reads the same state from the timer unit file and reports it as one failure naming `off`, before its other committee checks, whose fixes name `sync`.
   `remove-node.sh` (`_rm_p2p_allow`) holds it the same way on fd 8; on a busy lock, one it cannot open, or no `flock`, it leaves the table and the state dir for a later run and warns.
   Both open the lock only when it is missing or a regular file, never through a symlink: a FIFO there would block the open, and a failed `exec 8>>` prints a raw shell error and ends a POSIX-mode shell.
 - The tool runs its `--nft` default, `/usr/sbin/nft` (`FW_ALLOW_NFT`), because neither the units nor the verbs pass `--nft`.
@@ -364,9 +411,21 @@ Rules for any code that touches it:
 - The config file is a contract with a version.
   `fw_allow_write_config` writes exactly `CONFIG_VERSION`, `RPC_PORT`, `P2P_PORTS` and `P2P_ALLOW_FROM`, once each, unquoted, with every P2P port once and no host the tool would refuse (`fw_allow_src_dropped`); `TN_P2P_ALLOW_CONFIG_VERSION` names the version, and the installed binary's `--version` must list it (`_tn_p2p_allow_version_ok`: the first line, `config-version`, `snapshot-versions`).
   A change to the format moves `CONFIG_VERSION` and the pin together, in one scripts release.
-- Every writer of `RPC_PORT`, the P2P ports, `P2P_ALLOW_FROM` or the floor's sources (`bootstrap-peers.yaml`, the genesis `committee.yaml`) ends with a resync, and only while `P2P_COMMITTEE` is on.
-  Inside firewall-setup that is `fw_committee_sync quiet`, after `fw_persist_sources`; any other script releases its update lock and runs `bash firewall-setup.sh --p2p-committee sync </dev/null` as a child, because firewall-setup.sh runs `main` when sourced and the lock cannot be handed to a child (`edit_committee_resync`, `resync_committee_allowlist`).
+- The floor is the union of `bootstrap-peers.yaml`, the data dir's genesis `committee.yaml` and `trusted-nodes.yaml`, each one that exists: `fw_allow_capture_floor` hands them all to one `capture-floor`, which unites them, so a partial peers map never hides the committee file and a hub the node stops listing stays.
+  A missing file is skipped, but with neither `bootstrap-peers.yaml` nor `committee.yaml` the capture refuses (a data dir that is not mounted must not leave the hubs alone in the floor), and a symlink or special file refuses it too: `fw_allow_floor_src_refuse` names what is there and the repair (a refusal, not a skip, because root never follows a link in the data dir the service user writes, and a skip would shrink the floor).
+  An empty floor is no refusal, since refusing could block `on`: `fw_allow_floor_warn` warns with the consequence and the two `edit-config.sh --set` commands that fill it.
+- A resync never takes an address out of the floor without the operator's word.
+  `fw_committee_sync_run` calls `fw_allow_capture_floor keep`: `fw_allow_floor_lost` has the tool capture the same files into a scratch state dir (`fw_allow_run_in`, mktemp under `TN_FW_SNAP_PARENT`), and an address of the saved floor that the scratch floor lacks stops the capture, keeping the saved floor (`FW_FLOOR_KEPT`), with a warning naming it and `--p2p-committee sync --accept-floor-shrink` (`FW_FLOOR_SHRINK`), the one way to drop it; a floor that grows or stays is captured as before.
+  Only the capture is skipped: the resync goes on with the saved floor (units, `sync --wait 30`), because the config is written by then and the operator's other inputs, a `--enable --p2p-from` for a peer behind NAT say, must reach the table now; `fw_committee_sync` then returns 4 (over a fresh, stale or busy sync; a failed step stays 2) and `on` while on returns 0.
+  `on` from off has no loaded table to protect and does not compare, and `off` never captures, so the kill switch is never held up by this.
+  No hook passes the flag: a hub removed with edit-config stays on the floor, and the hook's warning names that command, until the operator runs it.
+- Every writer of `RPC_PORT`, the P2P ports, `P2P_ALLOW_FROM` or the floor's sources (`bootstrap-peers.yaml`, the genesis `committee.yaml`, `trusted-nodes.yaml`) ends with a resync, and only while `P2P_COMMITTEE` is on.
+  Inside firewall-setup that is `fw_committee_sync quiet`, after `fw_persist_sources`; any other script releases its update lock and runs `bash firewall-setup.sh --p2p-committee sync </dev/null` as a child, because firewall-setup.sh runs `main` when sourced and the lock cannot be handed to a child (`edit_committee_resync`, `resync_committee_allowlist`, `setup_committee_resync`).
+  edit-config resyncs when the edit backed up `node.env`, `bootstrap-peers.yaml` or `trusted-nodes.yaml`, or recorded no backup (the chain-config refresh), once the node came back from its restart; setup-node at the end of every run that gets past `step_create_service`, right after main releases the lock that step held, whether or not the run changed a file.
+  The genesis `committee.yaml` in the data dir has exactly those two writers (setup-node's copy and edit-config's refresh; `tn_chain_configs_from_tag` writes the checkout's `chain-configs/`, not the data dir).
+  A run that stops first (a setup-node `setup_fail` after the maps were installed, an edit whose node did not come back) does not resync: the next completed setup-node run, a later edit's resync or a manual `--p2p-committee sync` captures the floor, and the timer alone never does.
   A failed resync warns with the command to run; it never fails the writer.
+  The hooks read the child's exit code: 3 (stale or busy) is a note that the timer syncs again, 4 names `--p2p-committee sync --accept-floor-shrink`, 5 names the rerun of `--p2p-committee off`, and any other failure names `--p2p-committee sync`.
 - No `ct state established` rule.
   The table matches on addresses and never on connection state, so conntrack stays off the consensus path, and a committee-mode validator completes connections only with listed sources in either direction.
   An `established,related` accept first (counter `tn_accept_p2p_established`) was considered and rejected: it would admit the replies of every peer the node dials, strangers found by discovery included, and put conntrack on the consensus path.
@@ -1044,6 +1103,19 @@ So after you edit any tracked file:
 `MANIFEST` on main stays the previous release's until the next release is cut; CI compares it
 with the tree only on a release change or a release tag.
 
+Between releases `main` runs ahead of the release, and hosts keep installing the tag `RELEASE`
+names: from `main` the updater reads only `RELEASE` and a HEAD probe of `README.md`, and
+everything else from the tag. A change merged after a tag goes into the pending note
+`CHANGELOG/scripts-v<next>.md` (titled "not released yet"), never into the note of a release
+that is already cut, and bumps each touched file's version above the released one. Its README
+changelog entries sit under the "Not released yet" marker at the top of the Changelog, and
+`OPERATOR.md` carries the same marker below its introduction, with what differs on the released
+scripts. Each marker follows a `<!-- release: remove ... -->` comment. The release change
+removes the three (`grep -rn 'release: remove' README.md OPERATOR.md CHANGELOG`), dates the note
+and updates the partner guide, which is published from `main` and so describes released
+scripts only. While a change is unreleased, do not touch `RELEASE`, `MANIFEST`, `MANIFEST.asc`
+or `install.sh`.
+
 `AGENTS.md` itself is intentionally untracked (docs are not shipped to nodes), so it
 has no sidecar and is absent from the updater arrays. Keep it that way.
 The same holds for the other docs and the maintainer tooling: `OPERATOR.md`, `followup.md`,
@@ -1291,9 +1363,9 @@ line.
   `gpgv` print the real status lines, so the status parser runs in every environment.
   `cut_release_test.sh` drives `cut-release.sh` against a bare repository on disk with
   stand-in `gh`, `gpg` and `curl`.
-- The P2P committee allowlist has `p2p_allow_install_test.sh` (the signed install of the tool and every refusal, each leaving an installed binary byte-identical) and `p2p_committee_mode_test.sh` (the verbs, the units, the kill switch, the lock rule and the `p2p_committee` status object), both on the stubs of `tools/tests/fwstub.sh`: a `#!/bin/sh` `tn-p2p-allow-sync` stand-in that records argv, environment and stdin and takes its output and exit codes from `TN_P2P_STUB_*`, and an nft stub that models `table inet tn_p2p_allow`; its systemctl stub prints `$SYSTEMCTL_SHOW` as it is for `show` (nothing when unset), which feeds check-node's and the status screen's read of the sync unit's last run.
+- The P2P committee allowlist has `p2p_allow_install_test.sh` (the signed install of the tool and every refusal, each leaving an installed binary byte-identical, the config writer, and the floor capture: the union of files it hands the tool, the refusal without a peers map or committee file, the shrink refusal and `--accept-floor-shrink`, and the empty-floor warning) and `p2p_committee_mode_test.sh` (the verbs, the units, the kill switch, the lock rule and the `p2p_committee` status object), both on the stubs of `tools/tests/fwstub.sh`: a `#!/bin/sh` `tn-p2p-allow-sync` stand-in that records argv, environment and stdin, takes its output and exit codes from `TN_P2P_STUB_*` and writes a capture's floor from `TN_P2P_STUB_FLOOR`, and an nft stub that models `table inet tn_p2p_allow`; its systemctl stub prints `$SYSTEMCTL_SHOW` as it is for `show` (nothing when unset), which feeds check-node's and the status screen's read of the sync unit's last run.
   `p2p_reason_text_test.sh` checks that `fw_allow_reason_text rpc-method-missing` appears byte for byte in check-node.sh, and that both scripts word a failed sync and a failed unit run the same.
-  `edit_config_resync_test.sh` covers edit-config's resync hook and its three call sites.
+  `edit_config_resync_test.sh` covers edit-config's resync hook and its three call sites; `edit_config_admission_test.sh` and `setup_node_admission_test.sh` cover the resync after a changed trusted nodes or bootstrap peers map.
 - `release_keys_test.sh` drives `tools/check-release-keys.sh` on a fixture superproject and
   submodule (a changed byte, a missing, extra or symlinked key file, a pointer moved without the
   copies, an uninitialized submodule), then runs it over the tree; that last check is skipped
@@ -1305,7 +1377,8 @@ line.
   The test trusts the throwaway key through `TN_RELEASE_KEYS_DIR` with `--release-dir`, so `lib/release-keys` is never touched.
   The key does not expire; the cases on its real signature skip without a working real `gpg` (`REAL_GPG`), and every other case re-signs copies of the files with `signing.sh` keys and runs in all three environments.
   Every file is as the dry run wrote it, and all of them are refreshed together from a new dry run (`gateway-pin.d/README`).
-- The node admission settings have `network_config_test.sh` (the renderer), `setup_node_admission_test.sh` and `edit_config_admission_test.sh`.
+- The node admission settings have `network_config_test.sh` (the renderer, and `tn_committee_peers_check` against the testnet `committee.yaml` of `genesis.d/`), `setup_node_admission_test.sh` and `edit_config_admission_test.sh`.
+  The last two put a genesis `committee.yaml` in the fixture data dir whose validators are the keys of their complete peers map, and cover the maps left out of `committee_peers` (hubs only, nine of ten, the others without this node, no committee file) next to the complete one, which renders as before.
 - The hardware check has `hardware_check_test.sh`: the output for the testnet validators' machine
   on both networks, the 350 GB boundary, the logical-CPU fallback and the order of the calls in
   `step_preflight`. The UI's twin is `hardware_profile` in `ui/server.py`, and

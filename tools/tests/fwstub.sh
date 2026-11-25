@@ -94,7 +94,8 @@
 # else 0. A sync that exits neither 1 (refused) nor 4 (busy) writes
 # $TN_P2P_STUB_STATUS, when set, as the status file of --state-dir (default
 # $TN_ROOT_PREFIX/var/lib/telcoin-p2p-allow), and exits 2 when that directory is
-# missing, as the tool does.
+# missing, as the tool does. A capture-floor that exits 0 writes
+# $TN_P2P_STUB_FLOOR, when set, as the floor file of --state-dir the same way.
 # Not updater-tracked. bash 3.2 safe.
 # =============================================================================
 
@@ -771,6 +772,13 @@ if [ "$key" = SYNC ] && [ -n "${TN_P2P_STUB_STATUS+x}" ] && [ "$rc" != 1 ] && [ 
         exit 2
     fi
     printf '%s\n' "$TN_P2P_STUB_STATUS" > "$state/status"
+fi
+if [ "$key" = CAPTURE_FLOOR ] && [ -n "${TN_P2P_STUB_FLOOR+x}" ] && [ "$rc" = 0 ]; then
+    if [ ! -d "$state" ]; then
+        echo "tn-p2p-allow-sync stub: state directory $state is missing" >&2
+        exit 2
+    fi
+    printf '%s\n' "$TN_P2P_STUB_FLOOR" > "$state/floor"
 fi
 [ -z "$out" ] || printf '%s\n' "$out"
 exit "$rc"

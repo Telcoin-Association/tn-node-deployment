@@ -93,7 +93,7 @@ set -E
 
 
 # Version, gated by update-scripts.sh like every other tracked file.
-readonly SCRIPT_VERSION="2.0.0"
+readonly SCRIPT_VERSION="2.0.1"
 
 # Unified (target) identity -- mirrors lib/fallback.sh's canonical new-install names.
 readonly SYSTEMD_DIR="/etc/systemd/system"
@@ -1052,13 +1052,15 @@ remove_legacy_units() {
 # A host whose firewall admits P2P only from a source list (P2P_ALLOW_FROM in
 # .node-meta, set by firewall-setup.sh --p2p-from) gets one rule per source and
 # port instead, never an open rule; a list that cannot be read or holds an entry
-# that is not an address or CIDR opens nothing and says so.
+# that is not an address or CIDR opens nothing and says so. A list the kill
+# switch set aside (P2P_PER_SOURCE=off) is not applied: both ports open.
 open_consensus_ports() {
     local srcs="" rc=0 s port bad=""
     local -a list=()
     print_step "Opening P2P consensus UDP ports (49590 primary, 49594 worker)..."
     if command -v ufw >/dev/null 2>&1; then
         srcs="$(meta_get P2P_ALLOW_FROM 2>/dev/null)" || rc=$?
+        [[ "$(meta_get P2P_PER_SOURCE 2>/dev/null || true)" != "off" ]] || { srcs=""; rc=0; }
         if [[ $rc -eq 2 ]]; then
             print_warn "P2P_ALLOW_FROM is set more than once in .node-meta, so no P2P rule was added."
             print_warn "Fix .node-meta, then run firewall-setup.sh to open UDP 49590 and 49594."
@@ -1124,7 +1126,8 @@ restart_ui_if_present() {
 # the lock itself (the report after it changes nothing). A no-op while
 # P2P_COMMITTEE is off. NON-FATAL by design, like the two steps above: the ERR
 # trap is still armed, so every command is guarded, and a failed sync is a
-# warning naming the command to run.
+# warning naming the command to run (--accept-floor-shrink for a kept floor, exit
+# 4; the rerun of off for an unfinished off, exit 5; else the sync).
 resync_committee_allowlist() {
     local mode rc=0
     mode="$(meta_get P2P_COMMITTEE 2>/dev/null)" || rc=$?
@@ -1137,9 +1140,12 @@ resync_committee_allowlist() {
     tn_release_update_lock 2>/dev/null || true
     rc=0
     bash "${SCRIPT_DIR}/firewall-setup.sh" --p2p-committee sync < /dev/null || rc=$?
-    if [[ $rc -ne 0 && $rc -ne 3 ]]; then
-        print_warn "The P2P committee allowlist was not synced with the new layout (firewall-setup.sh exit ${rc}); run: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee sync"
-    fi
+    case "$rc" in
+        0|3) ;;
+        4) print_warn "The P2P committee allowlist floor keeps addresses that the bootstrap peers map, the trusted nodes map and the genesis committee.yaml no longer hold (firewall-setup.sh exit 4, which names them), so they stay allowed; if they were taken out on purpose, drop them with: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee sync --accept-floor-shrink" ;;
+        5) print_warn "The P2P committee allowlist was not synced with the new layout: a --p2p-committee off did not finish (firewall-setup.sh exit 5); finish it with: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee off" ;;
+        *) print_warn "The P2P committee allowlist was not synced with the new layout (firewall-setup.sh exit ${rc}); run: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee sync" ;;
+    esac
     return 0
 }
 
