@@ -64,7 +64,7 @@ case "${1:-}" in
         lacks="$(cat "$GWT_DIR/help-lacks" 2>/dev/null)"
         printf 'Usage: worker-gateway [OPTIONS]\n'
         for f in --listen-addr --probe-addr --metrics --upstream-rpc-url --upstream-readiness-url \
-                 --worker-id --redirect-queries --trusted-proxies; do
+                 --worker-id --redirect-queries --rate-limit-submissions --trusted-proxies; do
             [ "$f" = "$lacks" ] && continue
             printf '      %s <VALUE>\n' "$f"
         done
@@ -234,6 +234,7 @@ gin() {
     GW_IN_MODE="" GW_IN_NETWORK="" GW_IN_IMAGE="$IMG" GW_IN_DOMAIN="" GW_IN_FRONT=""
     GW_IN_UPSTREAM="" GW_IN_RPC_PORT="" GW_IN_HEALTH_PORT="" GW_IN_REDIRECT="$RQ"
     GW_IN_LISTEN_PORT="" GW_IN_PROBE_PORT="" GW_IN_METRICS_PORT="" GW_IN_TRUSTED_PROXIES=""
+    GW_IN_RATE_LIMIT_SUBMISSIONS=""
     for kv in "$@"; do
         printf -v "GW_IN_${kv%%=*}" '%s' "${kv#*=}"
     done
@@ -299,9 +300,11 @@ refuse() {
     check "refusal, ${name}: no docker run" 0 "$(docker_runs)"
 }
 
-ARGS_SH_CADDY="--listen-addr 127.0.0.1:8655 --probe-addr 127.0.0.1:8656 --metrics 127.0.0.1:9655 --upstream-rpc-url http://127.0.0.1:8544 --upstream-readiness-url http://127.0.0.1:43180/health/workers --worker-id 0 --redirect-queries ${RQ} --trusted-proxies 127.0.0.1/32"
-ARGS_SH_NONE="--listen-addr 0.0.0.0:8655 --probe-addr 127.0.0.1:8656 --metrics 127.0.0.1:9655 --upstream-rpc-url http://127.0.0.1:8544 --upstream-readiness-url http://127.0.0.1:43180/health/workers --worker-id 0 --redirect-queries ${RQ}"
-ARGS_SA_CADDY="--listen-addr 127.0.0.1:8655 --probe-addr 127.0.0.1:8656 --metrics 127.0.0.1:9655 --upstream-rpc-url http://10.0.0.12:8545 --upstream-readiness-url http://10.0.0.12:43174/health/workers --worker-id 0 --redirect-queries ${RQ} --trusted-proxies 127.0.0.1/32"
+ARGS_SH_CADDY="--listen-addr 127.0.0.1:8655 --probe-addr 127.0.0.1:8656 --metrics 127.0.0.1:9655 --upstream-rpc-url http://127.0.0.1:8544 --upstream-readiness-url http://127.0.0.1:43180/health/workers --worker-id 0 --redirect-queries ${RQ} --rate-limit-submissions 300 --trusted-proxies 127.0.0.1/32"
+ARGS_SH_NONE="--listen-addr 0.0.0.0:8655 --probe-addr 127.0.0.1:8656 --metrics 127.0.0.1:9655 --upstream-rpc-url http://127.0.0.1:8544 --upstream-readiness-url http://127.0.0.1:43180/health/workers --worker-id 0 --redirect-queries ${RQ} --rate-limit-submissions 300"
+ARGS_SA_CADDY="--listen-addr 127.0.0.1:8655 --probe-addr 127.0.0.1:8656 --metrics 127.0.0.1:9655 --upstream-rpc-url http://10.0.0.12:8545 --upstream-readiness-url http://10.0.0.12:43174/health/workers --worker-id 0 --redirect-queries ${RQ} --rate-limit-submissions 300 --trusted-proxies 127.0.0.1/32"
+# ARGS_SH_CADDY as scripts-v2.2.0 rendered it: no --rate-limit-submissions.
+ARGS_SH_CADDY_V220="${ARGS_SH_CADDY/ --rate-limit-submissions 300/}"
 
 # =============================================================================
 # library: the pins this scripts release ships
@@ -368,6 +371,17 @@ check "library: standalone + caddy renders the contract's argument line" "$ARGS_
 check "library: standalone + caddy renders the contract's unit" \
     "$(want_unit standalone caddy "$IMG" "$ARGS_SA_CADDY")" "$(gw_unit_text)"
 
+# The submission reservation: 300 a second by default, any whole number, 0 off.
+host "$NODE"
+gin MODE=same-host FRONT=none RATE_LIMIT_SUBMISSIONS=0
+rc=0; gw_validate_inputs quiet || rc=$?
+check "library: --rate-limit-submissions 0 validates and renders the flag off" \
+    "0 ${ARGS_SH_NONE/ --rate-limit-submissions 300/ --rate-limit-submissions 0}" "${rc} $(gw_render_args)"
+gin MODE=same-host FRONT=none RATE_LIMIT_SUBMISSIONS=1200
+rc=0; gw_validate_inputs quiet || rc=$?
+check "library: --rate-limit-submissions 1200 renders that rate" \
+    "0 ${ARGS_SH_NONE/ --rate-limit-submissions 300/ --rate-limit-submissions 1200}" "${rc} $(gw_render_args)"
+
 # =============================================================================
 # library: every refusal of --enable (contract 3.1, amendment A-1(b))
 # =============================================================================
@@ -379,6 +393,11 @@ refuse "--upstream with same-host" "--upstream is for --mode standalone" MODE=sa
 refuse "front caddy without a domain" "--front caddy needs --domain" MODE=same-host
 refuse "a domain with front none" "--domain is for --front caddy" MODE=same-host FRONT=none DOMAIN=gw.example.org
 refuse "a domain that is not a hostname" "is not a hostname" MODE=same-host DOMAIN=gw_example
+refuse "a rate that is not a number" "--rate-limit-submissions takes a whole number" MODE=same-host DOMAIN=gw.example.org RATE_LIMIT_SUBMISSIONS=abc
+refuse "a negative rate" "--rate-limit-submissions takes a whole number" MODE=same-host DOMAIN=gw.example.org RATE_LIMIT_SUBMISSIONS=-1
+refuse "a rate with a leading zero" "--rate-limit-submissions takes a whole number" MODE=same-host DOMAIN=gw.example.org RATE_LIMIT_SUBMISSIONS=0300
+refuse "a rate with a fraction" "--rate-limit-submissions takes a whole number" MODE=same-host DOMAIN=gw.example.org RATE_LIMIT_SUBMISSIONS=1.5
+refuse "a rate of seven digits" "--rate-limit-submissions takes a whole number" MODE=same-host DOMAIN=gw.example.org RATE_LIMIT_SUBMISSIONS=1000000
 refuse "listen port 0" "is not a port" MODE=same-host DOMAIN=gw.example.org LISTEN_PORT=0
 refuse "listen port 65536" "is not a port" MODE=same-host DOMAIN=gw.example.org LISTEN_PORT=65536
 refuse "a port with a leading zero" "is not a port" MODE=same-host DOMAIN=gw.example.org PROBE_PORT=08656
@@ -493,6 +512,13 @@ check "image trust: the only docker run is the offline --help probe" \
     "run --rm --network=none --read-only --cap-drop ALL --user 1101:1101 --pull=never ${IMG} --help" \
     "$(grep '^run ' "$T/docker.log")"
 check "image trust: the image was pulled by digest before the probe" "pull ${IMG}" "$(grep '^pull ' "$T/docker.log")"
+printf '%s' "--rate-limit-submissions" > "$T/help-lacks"
+before="$(snap)"
+logs_reset
+rc=0; gw_enable quiet || rc=$?
+check_rc "image trust: an image whose --help lacks --rate-limit-submissions is refused" 1 "$rc"
+check "image trust: the refusal names --rate-limit-submissions" yes "$(has "$GW_ERR" "lacks --rate-limit-submissions")"
+check "image trust: the --rate-limit-submissions refusal leaves the tree byte-identical" "$before" "$(snap)"
 rm -f "$T/help-lacks"
 
 # =============================================================================
@@ -523,7 +549,8 @@ LISTEN_PORT=8655
 PROBE_PORT=8656
 METRICS_PORT=9655
 REDIRECT_QUERIES=${RQ}
-TRUSTED_PROXIES=127.0.0.1/32" "$(cat "$(META_P)")"
+TRUSTED_PROXIES=127.0.0.1/32
+RATE_LIMIT_SUBMISSIONS=300" "$(cat "$(META_P)")"
 check "enable: gateway.meta is 0600" "-rw-------" "$(mode_of "$(META_P)")"
 check "enable: the unit is 0644" "-rw-r--r--" "$(mode_of "$(UNIT_P)")"
 check "enable: systemctl reloads, enables and restarts the gateway only" \
@@ -603,6 +630,41 @@ check "refresh: an image outside the allow-list is refused, nothing written" "1 
 GW_IN_IMAGE="$IMG"
 rc=0; gw_refresh quiet || rc=$?
 check_rc "refresh: back to the first image" 0 "$rc"
+
+# A gateway.meta and unit as scripts-v2.2.0 left them: no RATE_LIMIT_SUBMISSIONS
+# line and no --rate-limit-submissions flag. The meta loads with the default,
+# status says the unit differs, and one refresh writes the key and the flag.
+grep -v '^RATE_LIMIT_SUBMISSIONS=' "$(META_P)" > "$T/meta.v220"
+cat "$T/meta.v220" > "$(META_P)"
+want_unit same-host caddy "$IMG" "$ARGS_SH_CADDY_V220" > "$(UNIT_P)"
+rc=0; gw_status quiet || rc=$?
+check "refresh: a scripts-v2.2.0 gateway.meta: status counts the unit that differs" "1 1" "${rc} ${GW_ST_ISSUES}"
+logs_reset
+GW_IN_IMAGE=""
+rc=0; gw_refresh quiet || rc=$?
+check_rc "refresh: a scripts-v2.2.0 gateway.meta is rc 0" 0 "$rc"
+check "refresh: a scripts-v2.2.0 gateway.meta applies refreshed" "refreshed" "$GW_APPLIED"
+check "refresh: a scripts-v2.2.0 gateway.meta restarts the gateway once" "daemon-reload;restart telcoin-gateway.service;" "$(sys_changes)"
+check "refresh: a scripts-v2.2.0 gateway.meta gets the default reservation" 300 "$(tn_gateway_meta_get RATE_LIMIT_SUBMISSIONS)"
+check "refresh: a scripts-v2.2.0 unit gets --rate-limit-submissions 300" "$(want_unit same-host caddy "$IMG" "$ARGS_SH_CADDY")" "$(cat "$(UNIT_P)")"
+rc=0; gw_status quiet || rc=$?
+check "refresh: after it the status has no issue" "0 0" "${rc} ${GW_ST_ISSUES}"
+printf 'RATE_LIMIT_SUBMISSIONS=300\n' >> "$(META_P)"
+before="$(snap)"
+logs_reset
+rc=0; gw_refresh quiet || rc=$?
+check "refresh: RATE_LIMIT_SUBMISSIONS twice in gateway.meta is refused, nothing written" "1 yes yes" \
+    "${rc} $(has "$GW_ERR" "more than once") $([[ "$before" == "$(snap)" ]] && echo yes || echo no)"
+check "refresh: the duplicate key refusal restarts nothing" "" "$(sys_changes)"
+{ cat "$T/meta.v220"; printf 'RATE_LIMIT_SUBMISSIONS=abc\n'; } > "$(META_P)"
+before="$(snap)"
+rc=0; gw_refresh quiet || rc=$?
+check "refresh: a RATE_LIMIT_SUBMISSIONS this release does not write is refused, nothing written" "1 yes yes" \
+    "${rc} $(has "$GW_ERR" "holds a value this release does not write") $([[ "$before" == "$(snap)" ]] && echo yes || echo no)"
+{ cat "$T/meta.v220"; printf 'RATE_LIMIT_SUBMISSIONS=300\n'; } > "$(META_P)"
+logs_reset
+rc=0; gw_refresh quiet || rc=$?
+check "refresh: the restored gateway.meta is no change again" "0 " "${rc} ${GW_APPLIED}"
 
 # =============================================================================
 # library: rollback (a host without a node)
@@ -781,6 +843,7 @@ argfail "a flag outside its action" "--domain goes with --enable" --status --dom
 argfail "--image with --remove" "--image goes with --enable or --refresh" --remove --image "$IMG"
 argfail "--yes with --status" "--yes goes with" --status --yes
 argfail "a mode outside its words" "--mode takes same-host or standalone" --enable --mode both
+argfail "a bad --rate-limit-submissions" "--rate-limit-submissions takes a whole number" --enable --mode same-host --domain gw.example.org --image "$IMG" --redirect-queries "$RQ" --rate-limit-submissions abc --yes
 argfail "a front outside its words" "--front takes caddy or none" --enable --front nginx
 argfail "a network outside its words" "--network takes devnet, testnet or mainnet" --enable --network devnet2
 argfail "a port with a leading zero" "takes a port number" --enable --listen-port 08655
@@ -845,6 +908,11 @@ sg --enable --mode same-host --domain gw.example.org --image "$IMG" --redirect-q
 check "script: plain --enable with --yes applies the change" "0 yes" "${RC} $(has "$(cat "$(UNIT_P)")" "--listen-addr 127.0.0.1:8700 ")"
 sg --enable --mode same-host --domain gw.example.org --image "$IMG" --redirect-queries "$RQ" --yes
 check_rc "script: plain --enable --yes back to the default ports" 0 "$RC"
+sg --enable --mode same-host --domain gw.example.org --image "$IMG" --redirect-queries "$RQ" --rate-limit-submissions=500 --yes
+check "script: --rate-limit-submissions=500 reaches the unit and gateway.meta" "0 yes 500" \
+    "${RC} $(has "$(cat "$(UNIT_P)")" "--rate-limit-submissions 500 ") $(tn_gateway_meta_get RATE_LIMIT_SUBMISSIONS)"
+sg --enable --mode same-host --domain gw.example.org --image "$IMG" --redirect-queries "$RQ" --yes
+check "script: plain --enable --yes back to the default reservation" "0 300" "${RC} $(tn_gateway_meta_get RATE_LIMIT_SUBMISSIONS)"
 sg --remove
 check "script: plain --remove of an installation without --yes is refused" "1 yes yes" \
     "${RC} $(has "${ERR}${OUT}" "needs your consent") $(exists "$(UNIT_P)")"
