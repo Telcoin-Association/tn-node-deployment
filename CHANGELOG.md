@@ -7,6 +7,27 @@ For recent entries (v1.1.40 onwards), see the Changelog section of README.md.
 
 ## Unreleased
 
+### Testnet worker-gateway pin, a third release key and the updater's installer hint, November 2026 -- lib/gateway 2.2.0, update-scripts 2.2.0
+Part of `scripts-v2.2.0`; see [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
+`lib/gateway.sh` pins the testnet worker-gateway image: `GW_TESTNET_IMAGE_PIN` is
+`ghcr.io/telcoin-association/tn-worker-gateway@sha256:efed742a…bcffb`, the
+`IMAGE_DIGEST-worker-gateway` of the signed telcoin-network `v0.18.0-adiri`, with
+`GW_TESTNET_PIN_RELEASE` `v0.18.0-adiri`, so `setup-gateway.sh --enable` runs on testnet. The
+mainnet pin stays empty, and mainnet still refuses the enable. `v0.18.0-adiri`, published on
+2026-11-24, is the first signed release on the testnet channel. A third release key ships:
+`lib/release-keys/sstanfield.asc`, sstanfield's ed25519 key
+(`9D72ECBEE3AA983FA8671DA511423DE08DDE052C`, expires 2028-11-19), copied from tn-release-signing at
+`172be74`. Any of the three keys may sign, one good signature is still enough, and the release's
+`install.sh` embeds all three. `update-scripts.sh` now prints the installer one-liner after it
+refuses a release that no installed key signed, or one signed by an expired or revoked key; it
+does not print it for a signature that does not match the manifest. `update-scripts.sh`
+(`SCRIPT_VERSION`) and `lib/gateway.sh` (`GATEWAY_VERSION`) stay 2.2.0 in number, since both
+already carry this cycle's bump. A host on `scripts-v2.1.0` holds only the retired RSA key, so its
+`update-scripts.sh` refuses `scripts-v2.2.0` and every later release, and the hint cannot reach
+it: run `curl --proto '=https' --tlsv1.2 -fsSL https://install.telcoin.network | bash -s -- --yes`
+once, and on an AWS one-click stack run it as the stack's `ubuntu` user (the release note gives
+the command).
+
 ### Node release v0.18.0-adiri, November 2026 -- lib/common 2.2.7, update-node 2.1.3, setup-node 2.1.6, edit-config 2.2.3
 Part of `scripts-v2.2.0`; see [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
 The scripts take telcoin-network `v0.18.0-adiri`. Its testnet `committee.yaml` lists no bootstrap
@@ -144,6 +165,7 @@ the maintainers' key allowlist, carried as the submodule `vendor/tn-release-sign
 `lib/common.sh` pins `tn-p2p-allow-sync` v0.1.2, signed with the new key (v0.1.1 is signed only
 by the RSA key). Hosts on `scripts-v2.1.0` hold only the RSA key, which no longer signs: they
 refuse `scripts-v2.2.0` and re-run the installer once.
+Later in this cycle a third key, sstanfield's, was added (see the first entry of this section).
 
 ### Worker gateway, November 2026 -- setup-gateway.sh runs telcoin-network's worker gateway, a public JSON-RPC front for transaction submissions
 Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md). The Changelog
@@ -195,7 +217,9 @@ the operator out (confirmed on ufw 0.36.2). Sources are now compared the way `uf
 Limits: no signed telcoin-network release with a worker-gateway image exists yet. devnet takes a
 digest from `ghcr.io/telcoin-association/tn-dev`, `ghcr.io/telcoin-association/tn-worker-gateway`
 or `us-docker.pkg.dev/telcoin-network/tn-public/worker-gateway`; testnet and mainnet refuse the
-enable until a scripts release pins the image of a signed release (next entry). Each client IP
+enable until a scripts release pins the image of a signed release (next entry). Later in this
+cycle the testnet pin was set to the image of the signed `v0.18.0-adiri` (first entry of this
+section); mainnet still refuses. Each client IP
 gets 100 requests a second and 32 connections, so a relay that forwards many users'
 transactions counts as one client. The runbook is OPERATOR.md section 4.15.
 
@@ -203,6 +227,7 @@ transactions counts as one client. The runbook is OPERATOR.md section 4.15.
 Part of `scripts-v2.2.0`; see "setup-gateway 2.2.0 and lib/gateway 2.2.0" in [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
 `lib/gateway.sh` takes a testnet or mainnet worker-gateway image only from `ghcr.io/telcoin-association/tn-worker-gateway`, the package every signed telcoin-network release publishes it to, and records beside each pin the telcoin-network release it comes from: `GW_TESTNET_IMAGE_PIN` with `GW_TESTNET_PIN_RELEASE`, `GW_MAINNET_IMAGE_PIN` with `GW_MAINNET_PIN_RELEASE`, one line per network.
 Both pins stay empty: no signed release with a worker-gateway image exists yet.
+Later in this cycle the testnet pin was set to the image of the signed `v0.18.0-adiri` (first entry of this section); the mainnet pin stays empty.
 On testnet and mainnet nothing changes for an operator until a scripts release sets a pin: the enable is refused as before, and the refusal now says that a later scripts release pins the image of a signed telcoin-network release.
 Devnet also takes `ghcr.io/telcoin-association/tn-dev`, where telcoin-network's unsigned gateway builds go, and the release package.
 The maintainer tool `tools/check-gateway-pin.sh` checks a set pin against its release: the release must be a tag of that network, so a release candidate never backs the mainnet pin; `SHA256SUMS-edge.asc` must verify against `lib/release-keys` under the rule node releases follow; `SHA256SUMS-edge` must list only that release's edge files, the worker gateway's among them; and the `IMAGE_DIGEST-worker-gateway` it lists must hold the pin.
