@@ -40,7 +40,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 # else should abort the run.
 set +e
 
-readonly SCRIPT_VERSION="2.2.1"
+readonly SCRIPT_VERSION="2.2.2"
 readonly STALE_THRESHOLD_SECONDS=60
 # WorkerConfigs system contract: numWorkers() is the number of workers every
 # committee member must run.

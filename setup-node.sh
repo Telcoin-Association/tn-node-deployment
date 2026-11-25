@@ -243,7 +243,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
 fi
 unset _tn_old
 
-readonly SCRIPT_VERSION="2.1.6"
+readonly SCRIPT_VERSION="2.1.7"
 readonly SERVICE_NAME="telcoin"
 # The node's role is decided on-chain from committee membership, and the dashboard's
 # validator view follows the on-chain stake status (ConsensusRegistry getValidator).

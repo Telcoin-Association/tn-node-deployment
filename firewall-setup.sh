@@ -24,7 +24,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="2.2.0"
+readonly SCRIPT_VERSION="2.2.1"
 readonly SSH_CONFIG="${TN_ROOT_PREFIX:-}/etc/ssh/sshd_config"
 
 # Ports required for a fully working Telcoin node deployment.

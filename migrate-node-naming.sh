@@ -93,7 +93,7 @@ set -E
 
 
 # Version, gated by update-scripts.sh like every other tracked file.
-readonly SCRIPT_VERSION="2.0.0"
+readonly SCRIPT_VERSION="2.0.1"
 
 # Unified (target) identity -- mirrors lib/fallback.sh's canonical new-install names.
 readonly SYSTEMD_DIR="/etc/systemd/system"
