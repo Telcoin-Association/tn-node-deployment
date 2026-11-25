@@ -88,8 +88,8 @@ Every other script, library and UI file keeps its version. The runbook for the g
 
 A host on `scripts-v2.1.0` cannot take this release with `update-scripts.sh`. Its updater verifies
 a release against the keys the host already has, which is the RSA key alone, and no release is
-signed by that key any more (see [The release keys](#the-release-keys)). It prints this and
-exits 1:
+signed by that key any more (see [The release keys](#the-release-keys)). It prints its banner
+and `Latest release: scripts-v2.2.0` first; its output ends with these lines, and it exits 1:
 
 ```
 a signature by key 28FD56AD2F9FAE47, which is not a release key, was not checked
@@ -99,8 +99,9 @@ a signature by key 28FD56AD2F9FAE47, which is not a release key, was not checked
   [ERROR] The release manifest is not signed by a Telcoin release key (no release key in lib/release-keys made a good signature); nothing was changed.
 ```
 
-`28FD56AD2F9FAE47` is the long key id of grantkee's ed25519 key, and the `gpgv:` lines come from
-gpgv. The message names no remedy. Nothing on the host changes and the node keeps running, and
+`28FD56AD2F9FAE47` is the long key id of grantkee's ed25519 key, which signs this release; a
+later release signed by another key names that key's id. The `gpgv:` lines come from gpgv. The
+message names no remedy. Nothing on the host changes and the node keeps running, and
 the same refusal meets every later release, so running `update-scripts.sh` again never helps.
 Run the installer once, as the user who owns `~/telcoin-node-scripts`:
 
@@ -111,13 +112,16 @@ curl --proto '=https' --tlsv1.2 -fsSL https://install.telcoin.network | bash -s 
 It verifies the release with the keys embedded in the installer, replaces only
 `~/telcoin-node-scripts`, and puts the old tree back if anything fails. It does not touch the
 node, its data or its keys. Afterwards `bash ~/telcoin-node-scripts/update-scripts.sh --check`
-reports `scripts-v2.2.0`; where the Node Manager UI runs, `sudo bash ui/install-ui.sh --update`
-brings its copy of the scripts up to date. Later releases update with `update-scripts.sh` as
-usual.
+reports `scripts-v2.2.0`; where the Node Manager UI runs,
+`sudo bash ~/telcoin-node-scripts/ui/install-ui.sh --update` brings its copy of the scripts up to
+date. Later releases update with `update-scripts.sh` as usual.
 
 This applies to hosts installed or updated through the signed flow since 2026-11-10, and to any
-older host that carries the RSA `lib/release-keys/grantkee.asc`. A host on update-scripts 1.1.72
-or older with no key file takes this release through the one-time key bootstrap, as before.
+older host that carries the RSA `lib/release-keys/grantkee.asc`. On an older host the message
+can differ: one on update-scripts 2.0.0 (cloned from main before `scripts-v2.1.0`) stops with
+`Release scripts-v2.2.0 has no MANIFEST.sig; nothing was changed.`, and the remedy is the same
+installer run. A host on update-scripts 1.1.72 or older with no key file takes this release
+through the one-time key bootstrap, as before.
 
 AWS one-click stacks launched before `scripts-v2.2.0` installed `scripts-v2.1.0`: their daily
 update association fails at `update-scripts.sh` until the operator runs the installer once in a
@@ -354,8 +358,8 @@ and leave the stack's scripts on `scripts-v2.1.0`.
   ed25519 `lib/release-keys/grantkee.asc` (see [The release keys](#the-release-keys)).
 - When it refuses a release with `The release manifest is not signed by a Telcoin release key
   (<reason>); nothing was changed.` because no installed key made a good signature, or because
-  the signing key has expired or been revoked, it now names the installer after the error, with
-  the hint it already printed for other refusals:
+  the signing key has expired, it now names the installer after the error, with the hint it
+  already printed for other refusals:
 
   ```
     ->  Re-install the scripts with the verified installer, then run the updater again:
@@ -364,8 +368,13 @@ and leave the stack's scripts on `scripts-v2.1.0`.
 
   It does not print the hint for a signature that does not match the manifest (a changed file,
   not a key problem), for an expired signature or when gpgv reports an error for a signature,
-  and never prints it twice in one run. A host on `scripts-v2.1.0` does not get the hint after
-  this refusal, because its updater predates the change (see
+  and never prints it twice in one run. It prints none for a revoked key either: a host holds a
+  revoked copy of a key only because a signed release shipped it, so a release signed by that
+  key is a mistake or a compromised key in use, and the installer verifies the same release
+  with the same key and refuses it too. Nor does it print one on the first signed run of a host
+  with no key file yet: its keys are the ones the release lists, and the installer embeds the
+  same files. A host on `scripts-v2.1.0` does not get the hint after this refusal, because its
+  updater predates the change (see
   [Updating from scripts-v2.1.0](#updating-from-scripts-v210)); from this release on, the next
   change of the key set explains itself.
 - Tracks `setup-gateway.sh` and `lib/gateway.sh`. When an update changes either on a host with
@@ -598,7 +607,7 @@ version. Since pull request #71 it changed as follows.
 
 | Message (shortened) | What to do |
 |---|---|
-| `The release manifest is not signed by a Telcoin release key (no release key in lib/release-keys made a good signature)`, on a host on `scripts-v2.1.0`, after the warning `a signature by key 28FD56AD2F9FAE47, which is not a release key, was not checked` | Run the installer once; `update-scripts.sh` cannot take this release there (see [Updating from scripts-v2.1.0](#updating-from-scripts-v210)). |
+| `The release manifest is not signed by a Telcoin release key (no release key in lib/release-keys made a good signature)`, on a host on `scripts-v2.1.0`, after the warning `a signature by key <id>, which is not a release key, was not checked` (for this release `<id>` is `28FD56AD2F9FAE47`) | Run the installer once; `update-scripts.sh` cannot take this release there (see [Updating from scripts-v2.1.0](#updating-from-scripts-v210)). |
 | `this scripts release pins no worker-gateway image for mainnet yet (...)` | Mainnet only: this release pins the testnet image. Mainnet waits for a scripts release that pins the image of a signed telcoin-network release; `update-scripts.sh` brings it. |
 | `this scripts release's <network> worker-gateway pin cannot be used: ...` | A defect of the scripts release; a corrected one comes through `update-scripts.sh`. |
 | `on mainnet the gateway runs on its own host (use --mode standalone there)` | Run the gateway on a host of its own. |

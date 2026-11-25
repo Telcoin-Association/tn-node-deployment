@@ -53,10 +53,10 @@ tarball against its SHA256SUMS line and the sha256 lib/common.sh pins.
 Script releases
 ---------------
 
-The same maintainer keys sign node releases and script releases: these keys
-sign the script releases of this repository too, from scripts-v2.1.0, the
-first signed one. A release's MANIFEST.asc holds detached OpenPGP signatures
-over its MANIFEST, and
+The same maintainer keys sign node releases and script releases. Script
+releases of this repository have been signed since scripts-v2.1.0, the first
+signed one, and these keys sign them from scripts-v2.2.0. A release's
+MANIFEST.asc holds detached OpenPGP signatures over its MANIFEST, and
 update-scripts.sh and install.sh (whose embedded copy of these files is its
 trust root) run gpgv --status-fd 1 against a keyring made from these files
 alone. The release is accepted when at least TN_SIG_THRESHOLD of these keys

@@ -249,7 +249,8 @@ A `c7i.4xlarge` sustains the full 15,000.
 
 With `AutoUpdate` enabled, a State Manager association runs a Command document daily (03:00 UTC, then a random wait of up to an hour): nothing before setup has written `/etc/telcoin/.node-meta`; then `printf 'y\n' | sudo -u ubuntu -H bash update-scripts.sh`, `update-node.sh --json --check`, and when `update_available` is true (read with `python3`) `--json --prepare --ref <latest_ref>` and `--json --apply` without `--yes`. A prepared update that is already pending is applied, not prepared again. On a staked validator, or one whose stake cannot be read, the apply refuses without `--yes` and the prepared update waits for the apply document. When the check reports `storage_migration` true (a one-way update), the association prepares the update and never applies it, on any node; it waits for the apply document too. The association never runs `ui/install-ui.sh --update` or `setup-alerts.sh --refresh`. A stack launched before `scripts-v2.2.0` installed `scripts-v2.1.0`, whose updater refuses every later release, so its association fails at `update-scripts.sh` until the operator runs the installer once as `ubuntu` from a Session Manager shell (see [Keeping Scripts Up to Date](#keeping-scripts-up-to-date)).
 
-A stack launched from an earlier template keeps running as it is; nothing in this release needs a change on it.
+A stack launched from an earlier template keeps running as it is, and the stack itself needs no change.
+Its scripts do: a stack launched before `scripts-v2.2.0` needs the installer run once as `ubuntu`, as the paragraph above says.
 Do not update a stack to this template.
 Every stack update reads Canonical's image parameter again.
 Once a newer image is out, the update tries to replace the instance, fails because the old instance holds the network interface, and rolls back.
@@ -1425,7 +1426,7 @@ When a release ships a new `update-scripts.sh`, the running updater first downlo
 
 The updater refuses, with nothing changed:
 
-- a manifest that no release key in `lib/release-keys/` signed, or that carries a bad, expired or revoked signature (`The release manifest is not signed by a Telcoin release key (<reason>); nothing was changed.`), or that is malformed or names a different release than `RELEASE`. From update-scripts 2.2.0, when no installed key made a good signature or the signing key has expired or been revoked, it then prints the installer command (`Re-install the scripts with the verified installer, then run the updater again:` and `curl --proto '=https' --tlsv1.2 -fsSL https://install.telcoin.network | bash`); a signature that does not match the manifest means a changed file, not a key problem, and gets no such hint;
+- a manifest that no release key in `lib/release-keys/` signed, or that carries a bad, expired or revoked signature (`The release manifest is not signed by a Telcoin release key (<reason>); nothing was changed.`), or that is malformed or names a different release than `RELEASE`. From update-scripts 2.2.0, when no installed key made a good signature or the signing key has expired, it then prints the installer command (`Re-install the scripts with the verified installer, then run the updater again:` and `curl --proto '=https' --tlsv1.2 -fsSL https://install.telcoin.network | bash`); a signature that does not match the manifest means a changed file, not a key problem, and gets no such hint, and neither does a revoked key: a host holds a revoked copy of a key only because a signed release shipped it, so a release signed by that key is a mistake or a compromised key in use, and the installer refuses it too;
 - a release older than the installed one (a lower `serial`), or a different manifest that reuses the installed serial;
 - a release whose `min_updater` is newer than both the running updater and the release's own copy of it. It then prints the installer one-liner, which installs a current release from scratch.
 
@@ -1461,7 +1462,7 @@ The retired `lib/allowed_signers` file stays in the install directory, unused; y
 
 After that update, the first root run of `update-node.sh`, `edit-config.sh`, `install-caddy.sh` or `prepare-stake.sh` moves the host to the root-owned layout (see [System Layout](#system-layout)), and `sudo bash edit-config.sh --migrate-credential`, at a time you choose, moves the passphrase to the encrypted credential (see [Passphrase delivery](#passphrase-delivery)). Docker installs take the new start script and unit with their next `update-node.sh` run.
 
-**A host on `scripts-v2.1.0`.** Its only release key is grantkee's retired RSA key, which signs no release any more, so its updater refuses `scripts-v2.2.0` and every later release: it stops with `The release manifest is not signed by a Telcoin release key (no release key in lib/release-keys made a good signature); nothing was changed.`, after the warning `a signature by key 28FD56AD2F9FAE47, which is not a release key, was not checked` and `gpgv`'s own lines, names no remedy and exits 1. Nothing on the host changes and the node keeps running. Run the installer one-liner above once, as the user who owns `~/telcoin-node-scripts`: it verifies the release with the keys it carries, replaces only `~/telcoin-node-scripts`, puts the old tree back if anything fails, and does not touch the node, its data or its keys. Then `bash ~/telcoin-node-scripts/update-scripts.sh --check` reports `scripts-v2.2.0`, and where the Node Manager UI runs, `sudo bash ~/telcoin-node-scripts/ui/install-ui.sh --update` brings its copy up to date. An AWS one-click stack launched before `scripts-v2.2.0` runs it as `ubuntu` from a Session Manager shell (`sudo -u ubuntu -H bash -c "set -o pipefail; curl --proto '=https' --tlsv1.2 -fsSL https://install.telcoin.network | bash -s -- --yes"`); until then its daily update association fails at `update-scripts.sh`.
+**A host on `scripts-v2.1.0`.** Its only release key is grantkee's retired RSA key, which signs no release any more, so its updater refuses `scripts-v2.2.0` and every later release: it stops with `The release manifest is not signed by a Telcoin release key (no release key in lib/release-keys made a good signature); nothing was changed.`, after the warning `a signature by key <id>, which is not a release key, was not checked` and `gpgv`'s own lines, names no remedy and exits 1. For `scripts-v2.2.0` the id is `28FD56AD2F9FAE47`, grantkee's ed25519 key, which signs that release. Nothing on the host changes and the node keeps running. Run the installer one-liner above once, as the user who owns `~/telcoin-node-scripts`: it verifies the release with the keys it carries, replaces only `~/telcoin-node-scripts`, puts the old tree back if anything fails, and does not touch the node, its data or its keys. Then `bash ~/telcoin-node-scripts/update-scripts.sh --check` reports `scripts-v2.2.0`, and where the Node Manager UI runs, `sudo bash ~/telcoin-node-scripts/ui/install-ui.sh --update` brings its copy up to date. An AWS one-click stack launched before `scripts-v2.2.0` runs it as `ubuntu` from a Session Manager shell (`sudo -u ubuntu -H bash -c "set -o pipefail; curl --proto '=https' --tlsv1.2 -fsSL https://install.telcoin.network | bash -s -- --yes"`); until then its daily update association fails at `update-scripts.sh`.
 
 ---
 
@@ -2365,10 +2366,14 @@ Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
 - A host on `scripts-v2.1.0` holds only the RSA key, so it refuses a `scripts-v2.2.0` signed only
   by the new keys (`The release manifest is not signed by a Telcoin release key`) and takes it by
   re-running the installer once.
-- When it refuses a manifest that no installed key signed, or one signed by an expired or revoked
-  key, the updater then prints the installer command (`Re-install the scripts with the verified
-  installer, then run the updater again:` and the `curl ... | bash` line). A signature that does
-  not match the manifest is a changed file, not a key problem, and gets no such hint.
+- When it refuses a manifest that no installed key signed, or one signed by a key that has
+  expired, the updater then prints the installer command (`Re-install the scripts with the
+  verified installer, then run the updater again:` and the `curl ... | bash` line). A signature
+  that does not match the manifest is a changed file, not a key problem, and gets no such hint.
+  Nor does a revoked key: a host holds a revoked copy of a key only because a signed release
+  shipped it, so a release signed by that key is a mistake or a compromised key in use, and the
+  installer refuses it too. The first-run key bootstrap gets no hint either, since the installer
+  embeds the same keys.
 
 Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
 

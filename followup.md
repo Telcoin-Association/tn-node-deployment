@@ -47,6 +47,10 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   release's key set (the keys in `lib/release-keys` at the previous `scripts-v*` tag), so a key
   change that leaves no common key, as 2.2.0's did, passes unnoticed. It should refuse such a
   release unless an explicit override is given. Closes when the check and its test are in.
+- The updater's installer hint and `install.sh` always install to `~/telcoin-node-scripts`
+  (`install.sh` `INSTALL_DIR`, fixed to `${HOME}/telcoin-node-scripts`). On a host whose scripts
+  live elsewhere, the hint's command makes a second copy there, and "run the updater again" runs
+  the old one. Closes when the hint names the directory, or `install.sh` takes one.
 - tn-release-signing's co-signer policy (KEYS.md) refuses a `SHA256SUMS.asc` that carries any
   signature not good by one of its keys; these scripts only warn on a signature by a key that
   is not shipped (`NO_PUBKEY`, `ERRSIG` code 9), and count distinct primary keys where it
@@ -62,7 +66,9 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   sstanfield), and `TN_SIG_THRESHOLD` is still 1 in the three verifiers (`update-scripts.sh`,
   `install.sh`, `tools/release-scripts.sh`), so any one of them signs a release. With three keys,
   2-of-N signatures (#40) are now possible and remain a decision; if taken, the constant rises to
-  the number of distinct keys that must sign. Closes when #40 is decided.
+  the number of distinct keys that must sign. When it rises, the updater's installer hint should
+  also cover the `THRESHOLD` verdict (a release co-signed by a key the host lacks). Closes when #40
+  is decided.
 - The `.sha256` sidecars stay for the transition. update-scripts 2.1.0 still checks a published
   sidecar against the signed manifest and needs the key files' sidecars to fetch the release keys
   the first time on a host that has none; older updaters use the sidecars as their only check.
@@ -76,10 +82,13 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   legacy Artifact Registry tag listing in `latest_docker_image`, the registry digest for a named
   tag whose release publishes no signed files (`tn_docker_image_for_tag`), and
   `DEFAULT_DOCKER_IMAGE`/`DEFAULT_DOCKER_TAG` on the legacy repository, which then move to the
-  signed release's ghcr digest. Until then they stay as fallbacks: they run when the Releases API
-  cannot be read and for a tag with no signed release, so a tag a user names (including
-  `update-node.sh --check`'s `latest_ref` applied from the UI) can still run by the registry's
-  digest on testnet, with the warning. `scripts-v2.2.0` removes none of them.
+  signed release's ghcr digest. Until then they stay as fallbacks. The tag listing runs when the
+  Releases API cannot be read, or answers but lists no final testnet release; `DEFAULT_DOCKER_IMAGE`
+  is taken when that listing gives no image, and when the newest release's signed files cannot be
+  downloaded or checked. The registry digest runs for a named tag with no signed release, and when
+  no release key is installed, so a tag a user names (including `update-node.sh --check`'s
+  `latest_ref` applied from the UI) can still run by the registry's digest on testnet, with the
+  warning. `scripts-v2.2.0` removes none of them.
 - `tn_release_newest_tag` reads the first page of the Releases API only (100 releases). Closes
   when a channel's newest final can sit beyond that page: page, or filter the API by tag prefix.
 - Nothing tests GitHub's anonymous API rate limit (60 requests an hour per address), which the

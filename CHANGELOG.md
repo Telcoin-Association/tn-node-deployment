@@ -19,8 +19,9 @@ mainnet pin stays empty, and mainnet still refuses the enable. `v0.18.0-adiri`, 
 (`9D72ECBEE3AA983FA8671DA511423DE08DDE052C`, expires 2028-11-19), copied from tn-release-signing at
 `172be74`. Any of the three keys may sign, one good signature is still enough, and the release's
 `install.sh` embeds all three. `update-scripts.sh` now prints the installer one-liner after it
-refuses a release that no installed key signed, or one signed by an expired or revoked key; it
-does not print it for a signature that does not match the manifest. `update-scripts.sh`
+refuses a release that no installed key signed, or one signed by a key that has expired; it
+does not print it for a signature that does not match the manifest or for a revoked key, which
+the installer refuses too. `update-scripts.sh`
 (`SCRIPT_VERSION`) and `lib/gateway.sh` (`GATEWAY_VERSION`) stay 2.2.0 in number, since both
 already carry this cycle's bump. A host on `scripts-v2.1.0` holds only the retired RSA key, so its
 `update-scripts.sh` refuses `scripts-v2.2.0` and every later release, and the hint cannot reach

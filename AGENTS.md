@@ -924,10 +924,17 @@ the repository root, and `RELEASE` on main (one line, `<tag> <date>`) names the 
   release signed by another key of the installed set verifies.
 - The reinstall hint: from `scripts-v2.2.0`, `verify_manifest` in `update-scripts.sh` follows
   that "not signed by a Telcoin release key" error with `reinstall_hint` (the installer
-  one-liner) when the verdict is `NOSIG`, `EXPKEYSIG` or `REVKEYSIG`, and not for `BADSIG` (a
-  changed file, not a key problem), `EXPSIG` or `ERRSIG`. A run never prints the hint twice,
-  the `--check` paths that print it themselves included. Keep it that way: the hint cannot
-  reach a 2.1.0 host, but it makes the next key change explain itself.
+  one-liner) when the verdict is `NOSIG` or `EXPKEYSIG`, the two cases where the installer's
+  embedded keys can differ from the host's. It prints no hint for `REVKEYSIG`: a host holds a
+  revoked copy of a key only because a signed release shipped it, so a release signed by that
+  key is a mistake or a compromised key in use, and the installer verifies the same release with
+  the same key and refuses it too. None for `BADSIG` (a changed file, not a key problem),
+  `EXPSIG` or `ERRSIG` either, and none when the keys are the ones the one-time key bootstrap
+  fetched (`nohint`): those are the release's own keys, which its installer embeds too. A run
+  never prints the hint twice, the `--check` paths that print it themselves included. Keep it
+  that way: the hint cannot reach a 2.1.0 host, but it makes the next key change explain itself.
+  When `TN_SIG_THRESHOLD` rises above 1, a `THRESHOLD` verdict on a release co-signed by a key
+  the host lacks is a key-set problem too, and joins the hint's verdicts then.
 - Key expiry: the release keys' primaries expire on 2028-11-16 (grantkee,
   `95A38484E1CBD31D773F6AF928FD56AD2F9FAE47`), 2028-11-10 (MavenRain,
   `32F886ADE9C3A88218E4B67CA0A69159FC76DBFD`) and 2028-11-19 (sstanfield,
