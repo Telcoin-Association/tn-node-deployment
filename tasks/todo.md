@@ -1,3 +1,95 @@
+## Review: scripts-v2.2.0 pull request, gateway pin, third release key, installer hint (branch chore/2.2.0-gateway-pin-third-key, 2026-11-24)
+
+Base `origin/main` at `1e71337`. Plan block at the top of `tasks/plan.md`, shared facts
+`tasks/spec-v220-shared.md`, checkpoints `tasks/ckpt-v220-<id>.md` (A key, B gateway, C hint,
+D1 to D3 docs, E guide, F and G the fix round), operator note
+`tasks/operator-note-scripts-v2.2.0.md`. The partner guide is its own pull request, #80
+(branch `docs/mno-guide-1.14`).
+
+### What landed
+
+- `e44fcd8` release keys: `vendor/tn-release-signing` at `172be74`, `lib/release-keys/sstanfield.asc`
+  (ed25519 `9D72ECBEE3AA983FA8671DA511423DE08DDE052C`, expires 2028-11-19), its `SCRIPTS` row,
+  the `TN_RELEASE_KEYS` block of `install.sh` (MavenRain, grantkee, sstanfield), the key README.
+- `2c43d2f` gateway: `GW_TESTNET_IMAGE_PIN` is the `IMAGE_DIGEST-worker-gateway` of the signed
+  `v0.18.0-adiri`; mainnet stays empty. `gateway_setup_test.sh` checks the pins the tree ships,
+  then blanks them.
+- `2afa908` and `d3c5a70` updater: `verify_manifest` follows the "not signed by a Telcoin
+  release key" error with `reinstall_hint` for `NOSIG` and `EXPKEYSIG`, at most once per run.
+- `fe8719a` and `c4219ce` docs: OPERATOR.md, README.md, both changelogs, AGENTS.md, followup.md,
+  `lib/release-keys/README`.
+- `2ca7fdb` test: `bootstrap_servers_test.sh` renders its start script for a non-root account.
+- `1c72582` and `027f4df` checksums. No version constant moved.
+
+### What the review round changed
+
+Two fresh agents reviewed the range cold, one the code and tests, one the docs against the code.
+
+- The plan had the hint print for a revoked key too. A host holds a revoked copy of a key only
+  because a signed release shipped it, so a release signed by that key is a mistake or a
+  compromised key in use, and the installer verifies the same release with the same key and
+  refuses it too. `REVKEYSIG` left the list. The same reasoning removed the hint from the
+  one-time key bootstrap, where the keys are the release's own.
+- README.md and OPERATOR.md still said nothing needs a change on an existing AWS stack, two
+  lines from the new paragraph that says its scripts need the installer.
+- The quoted 2.1.0 output is the end of that updater's output, and the key id in its warning
+  depends on who signs: the docs write `<id>` and give `28FD56AD2F9FAE47` for `scripts-v2.2.0`.
+- The operator note gave `~` paths that are wrong in a Session Manager shell, and the partner
+  documents' contact instead of `support@telcoin.org`.
+
+### What the plan had wrong
+
+- "Exactly the two lines the docs quote": the real 2.1.0 tree prints five, with three `gpgv:`
+  lines between them. Measured with the rehearsal harness before the docs were written.
+- The remedy for AWS stacks: the Session Manager shell is `ssm-user` and the scripts belong to
+  `ubuntu`, so the plain one-liner installs a second tree. The docs give the form the stack's
+  own user data runs.
+
+### Verification, on tip `027f4df` (the commits after it change `tasks/` only)
+
+| Check | Result |
+|---|---|
+| `bash tools/tests/run.sh`, bash 5.3 on the host | 85 files, 0 failed |
+| the same in `bash:3.2` | 85 files, 0 failed |
+| the same in `ubuntu:24.04` (root) | 85 files, 0 failed |
+| the same in `ubuntu:26.04` (root) | 85 files, 0 failed |
+| `python -m pytest -q ui`, Python 3.10, hashed requirements | 319 passed |
+| `ui/tests/helper_test.sh`, `install_ui_test.sh`, `open_ui_test.sh`, bash 5 and `/bin/bash` 3.2 | 0 failed |
+| `bash -n` and `tools/check-bash32.sh` on the 245 tracked `*.sh`, both shells | clean |
+| `tools/check-perl-interp.sh`, `tools/check-network-hits.sh`, `shellcheck -x --severity=error` | clean |
+| `tools/check-release-keys.sh` | three keys at `172be74` |
+| `tools/check-gateway-pin.sh`, online | the testnet pin is the image of the signed `v0.18.0-adiri` |
+| `tools/gen-checksums.sh` | leaves the tree clean |
+| the pinned image's `--help`, offline and unprivileged, `linux/amd64` | lists every flag of `GW_REQUIRED_FLAGS` |
+
+Not run: `tools/tests/gateway_smoke.sh` (it needs host networking, which Docker Desktop on
+macOS does not give it) and the `vm.d` assertions (they need a disposable VM; CI runs them).
+
+### Found on the way
+
+`bootstrap_servers_test.sh` failed one check as root in the three containers. It fails the same
+way on an archive of `origin/main`, so it predates this branch: the test set `SERVICE_USER` to
+the current account and then rendered a start script, which the library refuses for root. CI
+runs both fixture jobs as a non-root user and never saw it. Fixed in `2ca7fdb`.
+
+### Open
+
+- The ceremony signs with grantkee's key alone: the docs name `28FD56AD2F9FAE47` as the id a
+  2.1.0 host prints for `scripts-v2.2.0`. A co-signature or another signer changes that line.
+- The sentences about AWS stacks launched before 2.2.0 apply only to stacks someone launched
+  from main's template: the template has never been published to S3.
+- OPERATOR.md section 4.5 tells Node Manager UI users to snapshot before an update to
+  `v0.17.0-adiri`; `v0.18.0-adiri` is one-way too. Not part of this round.
+- The partner guide says Telcoin publishes the AWS template with every scripts release; the
+  publish is not wired yet (followup.md).
+- Phases 2 to 4 of the plan: prepare and sign, merge and tag, the checks after the tag. The
+  rehearsal harness is `tasks/verify-v220/rehearse-updater.sh`; it ran the real 2.1.0 tree
+  against a release signed by a key that tree does not hold. Before the release pull request
+  merges, run it twice against the release branch:
+  `bash tasks/verify-v220/rehearse-updater.sh scripts-v2.1.0 origin/release/scripts-v2.2.0 scripts-v2.2.0`
+  (exit 1, tree byte-identical) and the same with `origin/main` as the installed tree (exit 0,
+  `release=scripts-v2.2.0` recorded).
+
 ## Review: node requirements one-pagers, testnet and mainnet (PR #67, branch docs/node-requirements-one-pagers, 2026-11-17)
 
 Base `origin/main` at b89ada4 (`scripts-v2.1.0`). Plan block at the top of `tasks/plan.md`,
