@@ -5,12 +5,13 @@ telcoin-network's worker gateway: a public JSON-RPC front that sends transaction
 the worker of a node and proxies every other call to a query endpoint the operator names. The
 gateway runs next to a testnet or devnet node, or on a host of its own in front of a validator's
 private address, so the validator stays off the public internet. Six existing scripts and
-`lib/common.sh` change with it. No signed telcoin-network release with a worker-gateway image
-exists yet: devnet takes one by digest, and testnet and mainnet refuse the enable until a scripts
-release pins the image of a signed release.
+`lib/common.sh` change with it. On testnet the gateway takes the image this release pins, the
+`IMAGE_DIGEST-worker-gateway` of the signed telcoin-network `v0.18.0-adiri`; devnet takes one by
+digest; mainnet has no pin yet and refuses the enable.
 
-This is also the script release for telcoin-network `v0.18.0-adiri`. The scripts before it refuse
-that release: `scripts-v2.1.0` cannot check its signature (the RSA key is gone, see
+This is also the script release for telcoin-network `v0.18.0-adiri`, published on 2026-11-24 and
+the first signed release on the testnet channel. The scripts before it refuse that release:
+`scripts-v2.1.0` cannot check its signature (the RSA key is gone, see
 [The release keys](#the-release-keys)), and the chain-config pin did not match its
 `committee.yaml`, whose bootstrap servers moved into the binary. The committee pin now accepts
 that file beside the earlier one, and new testnet installs keep the earlier one, which names the
@@ -51,10 +52,14 @@ upstream devnet genesis files use now (see [lib/common 2.2.7](#libcommon-227)). 
 launched and stays switched off, so no running node changes.
 
 The release keys change, for every operator. grantkee's RSA key, the only key of
-`scripts-v2.1.0`, is replaced by grantkee's new ed25519 key, and MavenRain's key is added. The keys now come
-from the maintainers' key allowlist, the tn-release-signing repository, and `tn-p2p-allow-sync`
-moves to v0.1.2, the first release signed with the new key. A host on `scripts-v2.1.0` takes this
-release by re-running the installer once (see [The release keys](#the-release-keys)).
+`scripts-v2.1.0`, is replaced by grantkee's new ed25519 key, and the keys of MavenRain and
+sstanfield are added. The keys now come from the maintainers' key allowlist, the
+tn-release-signing repository, and `tn-p2p-allow-sync` moves to v0.1.2, the first release signed
+with grantkee's ed25519 key (see [The release keys](#the-release-keys)). A host on
+`scripts-v2.1.0` cannot take this release with `update-scripts.sh`: run the installer once (see
+[Updating from scripts-v2.1.0](#updating-from-scripts-v210)). From this release on, the updater
+names the installer when no installed key signed a release (see
+[update-scripts 2.2.0](#update-scripts-220)).
 
 Ubuntu 26.04 LTS is the recommended OS; 24.04 stays supported. The systemd messages of
 `setup-node.sh` and `lib/common.sh` say so; what they check is unchanged (mainnet still needs
@@ -72,12 +77,64 @@ systemd 255).
 | setup-node | 2.1.6 |
 | lib/common (`COMMON_VERSION`) | 2.2.7 |
 | telcoin-ui (`UI_VERSION`) | 2.1.3 |
-| Release keys (`lib/release-keys/*.asc`) | grantkee `95A38484E1CBD31D773F6AF928FD56AD2F9FAE47` (replaces `4E36D35A4AB61B589861D01AC7173F2377CA7573`), MavenRain `32F886ADE9C3A88218E4B67CA0A69159FC76DBFD` (new) |
+| Release keys (`lib/release-keys/*.asc`) | grantkee `95A38484E1CBD31D773F6AF928FD56AD2F9FAE47` (replaces `4E36D35A4AB61B589861D01AC7173F2377CA7573`), MavenRain `32F886ADE9C3A88218E4B67CA0A69159FC76DBFD` (new), sstanfield `9D72ECBEE3AA983FA8671DA511423DE08DDE052C` (new) |
 | `tn-p2p-allow-sync` (pinned in lib/common) | v0.1.2 (was v0.1.1) |
 
 Every other script, library and UI file keeps its version. The runbook for the gateway is
 [OPERATOR.md section 4.15](../OPERATOR.md#415-worker-gateway). `aws/node.yaml` changed too (see
 [AWS one-click stack](#aws-one-click-stack)); it is not an updater entry.
+
+## Updating from scripts-v2.1.0
+
+A host on `scripts-v2.1.0` cannot take this release with `update-scripts.sh`. Its updater verifies
+a release against the keys the host already has, which is the RSA key alone, and no release is
+signed by that key any more (see [The release keys](#the-release-keys)). It prints its banner
+and `Latest release: scripts-v2.2.0` first; its output ends with these lines, and it exits 1:
+
+```
+a signature by key 28FD56AD2F9FAE47, which is not a release key, was not checked
+    gpgv: Signature made <date>
+    gpgv:                using EDDSA key 95A38484E1CBD31D773F6AF928FD56AD2F9FAE47
+    gpgv: Can't check signature: No public key
+  [ERROR] The release manifest is not signed by a Telcoin release key (no release key in lib/release-keys made a good signature); nothing was changed.
+```
+
+`28FD56AD2F9FAE47` is the long key id of grantkee's ed25519 key, which signs this release; a
+later release signed by another key names that key's id. The `gpgv:` lines come from gpgv. The
+message names no remedy. Nothing on the host changes and the node keeps running, and
+the same refusal meets every later release, so running `update-scripts.sh` again never helps.
+Run the installer once, as the user who owns `~/telcoin-node-scripts`:
+
+```
+curl --proto '=https' --tlsv1.2 -fsSL https://install.telcoin.network | bash -s -- --yes
+```
+
+It verifies the release with the keys embedded in the installer, replaces only
+`~/telcoin-node-scripts`, and puts the old tree back if anything fails. It does not touch the
+node, its data or its keys. Afterwards `bash ~/telcoin-node-scripts/update-scripts.sh --check`
+reports `scripts-v2.2.0`; where the Node Manager UI runs,
+`sudo bash ~/telcoin-node-scripts/ui/install-ui.sh --update` brings its copy of the scripts up to
+date. Later releases update with `update-scripts.sh` as usual.
+
+This applies to hosts installed or updated through the signed flow since 2026-11-10, and to any
+older host that carries the RSA `lib/release-keys/grantkee.asc`. On an older host the message
+can differ: one on update-scripts 2.0.0 (cloned from main before `scripts-v2.1.0`) stops with
+`Release scripts-v2.2.0 has no MANIFEST.sig; nothing was changed.`, and the remedy is the same
+installer run. A host on update-scripts 1.1.72 or older with no key file takes this release
+through the one-time key bootstrap, as before.
+
+AWS one-click stacks launched before `scripts-v2.2.0` installed `scripts-v2.1.0`: their daily
+update association fails at `update-scripts.sh` until the operator runs the installer once in a
+Session Manager shell. That shell runs as `ssm-user`, and the stack keeps the scripts in
+`/home/ubuntu/telcoin-node-scripts`, owned by `ubuntu`, so there the command is the form the
+stack's own user data runs:
+
+```
+sudo -u ubuntu -H bash -c "set -o pipefail; curl --proto '=https' --tlsv1.2 -fsSL https://install.telcoin.network | bash -s -- --yes"
+```
+
+The plain one-liner in a Session Manager shell would install a second tree in `ssm-user`'s home
+and leave the stack's scripts on `scripts-v2.1.0`.
 
 ## The release keys
 
@@ -85,14 +142,17 @@ Every other script, library and UI file keeps its version. The runbook for the g
 |---|---|---|
 | `lib/release-keys/grantkee.asc` | ed25519 `95A38484E1CBD31D773F6AF928FD56AD2F9FAE47` | 2028-11-16 |
 | `lib/release-keys/MavenRain.asc` | ed25519 `32F886ADE9C3A88218E4B67CA0A69159FC76DBFD` | 2028-11-10 |
+| `lib/release-keys/sstanfield.asc` | ed25519 `9D72ECBEE3AA983FA8671DA511423DE08DDE052C` | 2028-11-19 |
 
-- Either key may sign script releases, node releases and `tn-p2p-allow-sync` releases, under the
-  same `gpgv` status rules as before; one good signature is still enough (`TN_SIG_THRESHOLD` 1). The
-  RSA-2048 key `4E36D35A4AB61B589861D01AC7173F2377CA7573` is gone from `grantkee.asc` and
+- Any of the three keys may sign script releases, node releases and `tn-p2p-allow-sync` releases,
+  under the same `gpgv` status rules as before; one good signature is still enough
+  (`TN_SIG_THRESHOLD` 1). Each key is held on its holder's YubiKey, so losing one no longer
+  strands hosts: a release signed by either of the other two verifies against the installed set.
+  The RSA-2048 key `4E36D35A4AB61B589861D01AC7173F2377CA7573` is gone from `grantkee.asc` and
   verifies nothing from this release on.
 - The files are byte-for-byte copies of `keys/` in
   [tn-release-signing](https://github.com/Telcoin-Association/tn-release-signing) at the commit
-  this repository records for its submodule `vendor/tn-release-signing` (`813fcf4`). They still
+  this repository records for its submodule `vendor/tn-release-signing` (`172be74`). They still
   ship as ordinary files in `lib/release-keys/`, listed in `MANIFEST` and embedded in
   `install.sh`: the installer downloads GitHub's archive of the release tag, which never holds a
   submodule's files. For maintainers: `tools/check-release-keys.sh` fails when the copies differ
@@ -101,11 +161,8 @@ Every other script, library and UI file keeps its version. The runbook for the g
   `lib/release-keys/README` has the steps to move the pointer and copy the keys.
 - Hosts on `scripts-v2.1.0` hold only the RSA key, and the updater verifies a release against the
   keys a host already has. The RSA key no longer signs, so `scripts-v2.2.0` carries only the new
-  keys' signatures and a 2.1.0 host refuses it with `The release manifest is not signed by a
-  Telcoin release key (no release key in lib/release-keys made a good signature); nothing was
-  changed.` Re-run the installer once, whose embedded keys are the new ones:
-  `curl --proto '=https' --tlsv1.2 -fsSL https://install.telcoin.network | bash -s -- --yes`.
-  Later releases update with `update-scripts.sh` as usual.
+  keys' signatures and a 2.1.0 host refuses it. Such a host runs the installer once, whose
+  embedded keys are the new ones (see [Updating from scripts-v2.1.0](#updating-from-scripts-v210)).
 - The Node Manager UI runs its own copy of the scripts and keys: run
   `sudo bash ui/install-ui.sh --update` after the update, as for every script release, or its
   release checks keep the RSA key.
@@ -153,9 +210,12 @@ Every other script, library and UI file keeps its version. The runbook for the g
   image this release pins in `lib/gateway.sh` is taken: the image a signed telcoin-network
   release names in its `IMAGE_DIGEST-worker-gateway`, in
   `ghcr.io/telcoin-association/tn-worker-gateway`, with that release's tag on the same line
-  (`GW_TESTNET_PIN_RELEASE`, `GW_MAINNET_PIN_RELEASE`). This release pins none. Before it writes
-  anything, the enable pulls the digest when Docker does not hold it, runs the image's `--help`
-  under a time limit and refuses an image that lacks a flag the unit passes. For maintainers:
+  (`GW_TESTNET_PIN_RELEASE`, `GW_MAINNET_PIN_RELEASE`). This release pins the testnet image, the
+  `IMAGE_DIGEST-worker-gateway` of the signed `v0.18.0-adiri`:
+  `ghcr.io/telcoin-association/tn-worker-gateway@sha256:efed742a8a32db4f71b397d17ac448bcd98dcc0d14083197c1f7cecbc72bcffb`.
+  The mainnet pin is empty, so mainnet refuses the enable. Before it writes anything, the enable
+  pulls the digest when Docker does not hold it, runs the image's `--help` under a time limit and
+  refuses an image that lacks a flag the unit passes. For maintainers:
   `tools/check-gateway-pin.sh` checks each set pin against its release. The tag must be a release
   tag of that network, `SHA256SUMS-edge.asc` must verify against `lib/release-keys` under the rule
   node releases follow, `SHA256SUMS-edge` must list only that release's edge files, the worker
@@ -294,8 +354,29 @@ Every other script, library and UI file keeps its version. The runbook for the g
 
 ### update-scripts 2.2.0
 
-- Tracks `lib/release-keys/MavenRain.asc`, and ships the ed25519 `lib/release-keys/grantkee.asc`
-  (see [The release keys](#the-release-keys)).
+- Tracks `lib/release-keys/MavenRain.asc` and `lib/release-keys/sstanfield.asc`, and ships the
+  ed25519 `lib/release-keys/grantkee.asc` (see [The release keys](#the-release-keys)).
+- When it refuses a release with `The release manifest is not signed by a Telcoin release key
+  (<reason>); nothing was changed.` because no installed key made a good signature, or because
+  the signing key has expired, it now names the installer after the error, with the hint it
+  already printed for other refusals:
+
+  ```
+    ->  Re-install the scripts with the verified installer, then run the updater again:
+    ->    curl --proto '=https' --tlsv1.2 -fsSL https://install.telcoin.network | bash
+  ```
+
+  It does not print the hint for a signature that does not match the manifest (a changed file,
+  not a key problem), for an expired signature or when gpgv reports an error for a signature,
+  and never prints it twice in one run. It prints none for a revoked key either: a host holds a
+  revoked copy of a key only because a signed release shipped it, so a release signed by that
+  key is a mistake or a compromised key in use, and the installer verifies the same release
+  with the same key and refuses it too. Nor does it print one on the first signed run of a host
+  with no key file yet: its keys are the ones the release lists, and the installer embeds the
+  same files. A host on `scripts-v2.1.0` does not get the hint after this refusal, because its
+  updater predates the change (see
+  [Updating from scripts-v2.1.0](#updating-from-scripts-v210)); from this release on, the next
+  change of the key set explains itself.
 - Tracks `setup-gateway.sh` and `lib/gateway.sh`. When an update changes either on a host with
   `/etc/systemd/system/telcoin-gateway.service`, it prints `The worker gateway script or its
   library changed. Render the gateway again on the host:` and the `setup-gateway.sh --refresh`
@@ -470,10 +551,17 @@ Every other script, library and UI file keeps its version. The runbook for the g
   / ...` and the shell's sentence about the comparison follows. A missing RAM figure shows `?`.
 - The network tables (`NETWORKS`, `NETWORK_PUBLIC_RPC`) key mainnet by 731. Chain 487 is not
   listed, so a node on it is named through `.node-meta`, like a node on any unknown chain.
+- `ui/requirements.txt` pins `click` 8.5.1, up from 8.5.0 (Dependabot, pull request #63). Since
+  the requirements changed, `sudo bash ui/install-ui.sh --update` builds the UI's Python venv
+  again.
 
 ### AWS one-click stack
 
-`aws/node.yaml` carries no version.
+The stack is new since `scripts-v2.1.0` (pull request #71): `aws/node.yaml` is a CloudFormation
+template that launches a ready node host in the operator's own AWS account, where the operator
+runs `setup-node.sh` and `firewall-setup.sh` from a Session Manager shell
+([OPERATOR.md section 2.11](../OPERATOR.md#211-aws-one-click)). `aws/node.yaml` carries no
+version. Since pull request #71 it changed as follows.
 
 - The presets follow the recommended column of the testnet table for cores and RAM. `FullNode`
   (the default) and `Validator` are `c7i.2xlarge`, 4 cores (8 vCPU), 16 GiB; `PublicRPC` is
@@ -485,8 +573,12 @@ Every other script, library and UI file keeps its version. The runbook for the g
 - The `DataVolumeSize` description in the console says what each preset sustains: a `c7i.2xlarge`
   (`FullNode`, `Validator`) 12,000 IOPS to EBS and 15,000 in bursts, a `c7i.4xlarge`
   (`PublicRPC`) the full 15,000.
-- Existing stacks keep running as they are, and nothing in this release needs a change on them. Do
-  not update a stack to this template: once Canonical's image has moved, the update fails and its
+- Existing stacks keep running as they are, and nothing in this release needs a change to the
+  stack itself. Their scripts do: a stack launched before this release installed
+  `scripts-v2.1.0`, and its daily update association fails at `update-scripts.sh` until the
+  operator runs the installer once as the stack's `ubuntu` user (see
+  [Updating from scripts-v2.1.0](#updating-from-scripts-v210)). Do not update a stack to this
+  template: once Canonical's image has moved, the update fails and its
   rollback waits, possibly for hours, until the volume's IOPS change completes; if the image has
   not moved, a `Validator` stack's update stops and starts the instance outside the epoch-boundary
   wait. Raise the volume's IOPS or change the instance type in the EC2 console instead, as
@@ -499,6 +591,7 @@ Every other script, library and UI file keeps its version. The runbook for the g
 |---|---|
 | `setup-gateway.sh`, `lib/gateway.sh` | The worker gateway's script and library |
 | `lib/release-keys/MavenRain.asc` | MavenRain's release key (`32F886ADE9C3A88218E4B67CA0A69159FC76DBFD`) |
+| `lib/release-keys/sstanfield.asc` | sstanfield's release key (`9D72ECBEE3AA983FA8671DA511423DE08DDE052C`) |
 | `lib/release-keys/grantkee.asc` | Now grantkee's ed25519 key (`95A38484E1CBD31D773F6AF928FD56AD2F9FAE47`); the RSA key is gone |
 | `/etc/systemd/system/telcoin-gateway.service` | The gateway's unit |
 | `/etc/telcoin/gateway/gateway.meta` | The gateway's settings (`GATEWAY_META_VERSION=1`) |
@@ -514,8 +607,8 @@ Every other script, library and UI file keeps its version. The runbook for the g
 
 | Message (shortened) | What to do |
 |---|---|
-| `The release manifest is not signed by a Telcoin release key (no release key in lib/release-keys made a good signature)`, on a host on `scripts-v2.1.0` | Re-run the installer once (see [The release keys](#the-release-keys)). |
-| `this scripts release pins no worker-gateway image for <network> yet (...)` | Testnet and mainnet wait for a scripts release that pins the image of a signed telcoin-network release; `update-scripts.sh` brings it. |
+| `The release manifest is not signed by a Telcoin release key (no release key in lib/release-keys made a good signature)`, on a host on `scripts-v2.1.0`, after the warning `a signature by key <id>, which is not a release key, was not checked` (for this release `<id>` is `28FD56AD2F9FAE47`) | Run the installer once; `update-scripts.sh` cannot take this release there (see [Updating from scripts-v2.1.0](#updating-from-scripts-v210)). |
+| `this scripts release pins no worker-gateway image for mainnet yet (...)` | Mainnet only: this release pins the testnet image. Mainnet waits for a scripts release that pins the image of a signed telcoin-network release; `update-scripts.sh` brings it. |
 | `this scripts release's <network> worker-gateway pin cannot be used: ...` | A defect of the scripts release; a corrected one comes through `update-scripts.sh`. |
 | `on mainnet the gateway runs on its own host (use --mode standalone there)` | Run the gateway on a host of its own. |
 | `--reset is refused while GATEWAY_UPSTREAM is set` | Set `gateway_upstream=off` first; OPERATOR.md section 4.15 has the order. |
@@ -535,7 +628,7 @@ Every other script, library and UI file keeps its version. The runbook for the g
 | `Nothing to refresh: the node's data dir already holds the <network> chain configs this script release pins (<tag>), ...` (menu 13) | Nothing; use `14) Restart node` if the node was not restarted after those files were copied. |
 | `Clone the repository at <tag> into <dir> now?` (menu 13) | No checkout and no pinned files. Answer yes, or follow the manual clone command and the raw-file URLs it prints. |
 | `This script release pins no <network> chain configs yet, so there is nothing to install. Chain configs unchanged.` (menu 13) | Mainnet today: its chain configs come with a signed scripts release. |
-| `Release v0.18.0-adiri: SHA256SUMS is not verified: no good signature by a key in lib/release-keys ...`, on `scripts-v2.1.0` | Re-run the installer once (see [The release keys](#the-release-keys)). |
+| `Release v0.18.0-adiri: SHA256SUMS is not verified: no good signature by a key in lib/release-keys ...`, on `scripts-v2.1.0` | Run the installer once (see [Updating from scripts-v2.1.0](#updating-from-scripts-v210)). |
 | `Release <tag>: chain-configs/testnet/committee.yaml has sha256 <x>, but these scripts pin 009b6d7b... or 886f016b...` | The release does not carry a testnet `committee.yaml` this script release accepts; report it. |
 | `One-way update: v0.18.0-adiri migrates ...` | Expected. Check free disk first; there is no way back once the node has started it (see [update-node 2.1.3](#update-node-213)). |
 | `Release v0.17.0-adiri has no signed image digest to read; using the digest the registry serves for <repo>:v0.17.0-adiri (testnet only).` | Expected: the exception for that tag is gone. |
@@ -551,15 +644,17 @@ Every other script, library and UI file keeps its version. The runbook for the g
   `v0.18.0-adiri` they say "consensus store" and measure `consensus-db/epochs`, not
   `db/mdbx.dat`, and the undo line offers a snapshot restore that upstream does not support for
   this release.
-- telcoin-network main still lists the RSA key (`.github/maintainer-gpg-keys/grantkee.asc`). From
-  this release on the scripts accept a node release only when a tn-release-signing key signed it,
-  so the first telcoin-network release must be signed with one.
 - tn-release-signing refuses a `SHA256SUMS.asc` that carries any signature not good by one of its
   keys, and counts signatures per holder; these scripts only warn on a signature by a key they do
   not ship, and count distinct primary keys. The two policies are not reconciled yet.
-- No signed telcoin-network release with a worker-gateway image exists yet. Testnet and mainnet
-  refuse the gateway until a scripts release pins the image of a signed release in
-  `lib/gateway.sh` and `tools/check-gateway-pin.sh` passes on it; devnet takes one by digest from
-  the three repositories above.
+- The mainnet worker-gateway pin is empty: mainnet refuses the gateway until a scripts release pins
+  the image of a signed mainnet release in `lib/gateway.sh` and `tools/check-gateway-pin.sh`
+  passes on it.
 - The per-client limit (100 requests a second, 32 connections) is keyed on the client IP address,
   so a relay that forwards many users' transactions counts as one client.
+- Publishing the AWS template to S3 (`publish-aws-templates.yml`) is not wired yet: the
+  `aws-templates` environment and its variables do not exist, so that workflow's upload job fails
+  on the release tag. The installer is published by its own workflow and is not affected.
+- `tools/release-scripts.sh` does not yet check that a release verifies against the previous
+  release's key set, so a key change that strands hosts, as this one strands `scripts-v2.1.0`,
+  can pass unnoticed. A check that refuses such a release unless overridden is a follow-up.

@@ -72,7 +72,7 @@ GW_DEVNET_IMAGE_REPOS="us-docker.pkg.dev/telcoin-network/tn-public/worker-gatewa
 # and before an installer is published. Empty: no gateway on that network yet.
 # The signed MANIFEST covers this file.
 # network-gated: the testnet pin and its release (vX.Y.Z-adiri); gw_image_allowed reads them for testnet only
-GW_TESTNET_IMAGE_PIN="" GW_TESTNET_PIN_RELEASE=""
+GW_TESTNET_IMAGE_PIN="ghcr.io/telcoin-association/tn-worker-gateway@sha256:efed742a8a32db4f71b397d17ac448bcd98dcc0d14083197c1f7cecbc72bcffb" GW_TESTNET_PIN_RELEASE="v0.18.0-adiri"
 # network-gated: the mainnet pin and its release (vX.Y.Z); gw_image_allowed reads them for mainnet only
 GW_MAINNET_IMAGE_PIN="" GW_MAINNET_PIN_RELEASE=""
 # Every flag the unit passes; gw_image_probe needs each in the image's --help.

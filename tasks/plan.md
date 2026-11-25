@@ -1,179 +1,85 @@
-# Plan: node requirements from the benchmarks, chain configs at the pinned tag, mainnet chain id 731 (2026-11-21)
+# Plan: scripts-v2.2.0 for testnet with the v0.18.0-adiri packages (2026-11-24)
 
-Three changes on one branch, `requirements-from-benchmarks`, as separate commits, ending in one
-pull request.
+`scripts-v2.1.0` (serial 1) is the signed release. Main (`1e71337`) holds everything meant for
+`scripts-v2.2.0`. telcoin-network `v0.18.0-adiri` was published on 2026-11-24, signed by
+grantkee's ed25519 key: the first signed release on the testnet channel. Three things on main do
+not match that yet, so the release is a pull request first and the signing ceremony second.
 
-1. **Bug fix.** Fresh testnet Docker and signed-release installs fail at keygen:
-   `ensure_chain_configs_available` clones the node repository's default branch, and since
-   2026-11-14 `main`'s testnet `committee.yaml` no longer matches the pinned hash. The scripts
-   take the chain configs at the pinned tag instead.
-2. **Hardware requirements per network.** Testnet figures follow the five Adiri validators;
-   the mainnet validator storage figure follows the latest benchmark runs. Docs, three operator
-   PDFs, the hardware check in the scripts and the UI, and the AWS template say the same thing.
-3. **Mainnet chain id 731** (added by the user during wave 0, 2026-11-21: "also ensure mainnet
-   chain id is listed as 731 everywhere using more subagents"). Upstream moved it from 487 to
-   731 in telcoin-network #1716 (`90ed40b39`, 2026-11-12); this repository still says 487.
+Branch: `chore/2.2.0-gateway-pin-third-key` from `origin/main` at `1e71337`, in the main checkout.
+Partner guide branch: `docs/mno-guide-1.14`, worktree `~/coding/telcoin/tnd-v220-guide`.
+Shared facts: `tasks/spec-v220-shared.md`. Checkpoints: `tasks/ckpt-v220-<id>.md`.
 
-Base: `origin/main` at `01664cc` (fetched 2026-11-21), which contains #74 (Ubuntu 26.04
-recommended), #73, #72, #71 (AWS stack), #70, #69 and #68. No open pull requests.
-`scripts-v2.2.0` is not tagged. Integration branch: the main checkout. Agent worktrees:
-`~/coding/telcoin/tnd-req-<id>`. Shared spec: `tasks/spec-req-shared.md`. Checkpoints:
-`tasks/ckpt-req-<id>.md` in each agent's worktree.
+## Decisions (user, 2026-11-24)
 
-## Decisions (user, 2026-11-21)
+- Pin the testnet worker gateway to the image `v0.18.0-adiri` signs. The node image needs no pin;
+  the `v0.16.0-adiri` offline fallback stays.
+- Ship the third release key, `sstanfield.asc`: `vendor/tn-release-signing` moves from `813fcf4`
+  to `172be74`.
+- Hosts on 2.1.0 cannot be made to accept 2.2.0: their updater verifies against the RSA key
+  alone, and that key no longer signs. The release tells them the remedy everywhere they can
+  land: the installer one-liner.
+- 2.2.0's updater names the installer when no installed key signed a release, or the signing key
+  has expired. (The plan also listed a revoked key; the review round took it out, see
+  `tasks/todo.md`.)
+- No Claude attribution on any commit or on the pull request.
+- No version constant moves: `update-scripts.sh` and `lib/gateway.sh` stay 2.2.0, as in the
+  earlier edits of this unreleased cycle.
 
-- CPU is written as physical cores with vCPU in parentheses.
-- Testnet storage is one row for every role: 350 GB minimum, 500 GB TLC NVMe recommended.
-- Testnet minimum storage mirrors the deployed disks: 15,000 IOPS, 240 MB/s.
-- Mainnet: 20,000 IOPS for validators only; observers stay at 10,000.
-- AWS Validator preset `c7i.2xlarge`, with a note that this size sustains 12,000 IOPS and bursts.
-- The round ends with the branch pushed and one PR opened.
-- No Claude attribution on any commit or on the PR.
-- Mainnet chain id is 731 everywhere.
+## Phase 1: PR A (release-critical)
 
-Defaults chosen by the orchestrator: testnet validator rows drop "ECC"; observer rows get the
-vCPU parentheses too; AWS data volume default 500 GiB, allowed 350/500/2000/4000, 15,000 IOPS,
-300 MB/s; the hardware check uses testnet tiers on devnet and mainnet tiers with no network;
-the fix's docs are a separate commit; released changelog entries that record 487 as what an
-older release shipped are history and stay (they are listed in the final report).
+- [x] Gate: the pinned image runs `--help` offline and unprivileged and lists every flag of
+      `GW_REQUIRED_FLAGS` (2026-11-24, `linux/amd64`, the probe's own regex).
+- [x] Commit 1 `feat(release-keys)`: the submodule pointer, `lib/release-keys/sstanfield.asc`,
+      its `SCRIPTS` row, the `TN_RELEASE_KEYS` block of `install.sh`, the key README. (agent A)
+- [x] Commit 2 `chore(gateway)`: the testnet pin and the tree-pin check in
+      `tools/tests/gateway_setup_test.sh`. (agent B)
+- [x] Commit 3 `feat(update-scripts)`: the installer hint in `verify_manifest` and its test
+      cases. (agent C, after A: both edit `update-scripts.sh`)
+- [x] Commit 4 `docs`: OPERATOR.md and README.md (D1), the two changelogs (D2), AGENTS.md and
+      followup.md (D3).
+- [x] `chore(release)`: `bash tools/gen-checksums.sh`, once after commit 4 and once after the
+      review round.
+- [x] Cold review of the diff by two fresh agents (code and tests; docs against code).
+- [x] Review round: `fix(update-scripts)` (no hint for a revoked key or on the key bootstrap),
+      `docs` corrections, `test(bootstrap-servers)` (a test that failed as root on main too).
+- [x] Verification on the tip after the review round: the fixture tests in four environments,
+      the UI tests, the lints, `check-release-keys.sh`, `check-gateway-pin.sh` online, a clean
+      `gen-checksums.sh`.
+- [x] `tasks`: this plan, the review in `tasks/todo.md`, the lessons, the operator note, the
+      checkpoints.
+- [ ] Push and open the pull request; report CI.
 
-## Baseline on `main` (01664cc), 2026-11-21
+## Phase 1b: PR B, partner guide 1.14 (not release-critical)
 
-- `bash tools/tests/run.sh`: 81 files, 0 failed on the host (bash 5.3.9) and as root in
-  `ubuntu:26.04`.
-- `shellcheck -x` 0.11.0 over 211 tracked `*.sh`: 0 errors, 307 warnings.
-- `bash tools/check-network-hits.sh`: clean, 153 annotated hits in 29 files.
-- Lines naming 26.04: `README.md` 9, `OPERATOR.md` 8, guide 5, each one-pager 1,
-  `aws/node.yaml` 4, `lib/common.sh` 4, `setup-node.sh` 1.
-- Images present: `tn-pdf-tools`, `python:3.10-slim`, `bash:3.2`, `ubuntu:26.04`.
-- `gh auth status`: scopes `read:org`, `repo`; git over SSH.
+- [x] `mno-node-guide.md`: signed releases started with `v0.18.0-adiri` (lines 330 and 847), and
+      the troubleshooting row for the unsigned-manifest refusal gives the installer (line 1852).
+- [x] `metadata.yaml` 1.14; PDF rebuilt on the Ubuntu 26.04 toolchain; rendered pages read.
+- [x] Pushed and opened as pull request #80. It merges before the release PR or after the tag,
+      never between the release merge and the tag. After it merges: Publish on tn-partner-site.
 
-## Wave 0 (orchestrator)
+## Phase 2: prepare and sign (user)
 
-- [x] `git fetch`; branch `requirements-from-benchmarks` off `origin/main` (01664cc)
-- [x] project-context refreshed (`.claude/project-context.md`)
-- [x] Google Cloud and AWS figures rechecked on the live pages
-- [x] `scripts-v2.2.0` still untagged; no open PRs
-- [x] Baseline gates on `main`
-- [x] Mainnet chain id: upstream checked (731 on `main` since #1716; 487 at the pinned tags)
-- [x] `tasks/plan.md`, `tasks/spec-req-shared.md`
+- [ ] Main checkout on the merged main, submodule at the new pointer, `git status --short` empty.
+- [ ] `bash tools/cut-release.sh prep scripts-v2.2.0 --serial 2` (user, YubiKey).
+- [ ] Rehearsal against `release/scripts-v2.2.0` (`tasks/verify-v220/rehearse-updater.sh`):
+      `cut-release.sh status`; the real 2.1.0 tree refuses with the documented `[ERROR]` line
+      and changes nothing; a tree with the three keys installs 2.2.0.
 
-## Wave 1 (seven implementers in parallel, disjoint files or ranges)
+## Phase 3: merge and tag (user)
 
-- [x] FIX-A1: chain-config helpers in `lib/common.sh`; `genesis_hash_test.sh` ensure cases
-- [x] HW-SH: per-network tiers and `check_hardware` in `lib/common.sh`; `step_preflight` order
-- [x] HW-UI-SRV: `ui/server.py` hardware profile per network; contract and mirror tests
-- [x] HW-UI-PAGE: `ui/static/index.html` preflight sends the network; wording; wiring test
-- [x] AWS: `aws/node.yaml` presets, volume size and IOPS; guard rules and their tests
-- [x] CHAIN-SH: `MAINNET_CHAIN_ID` 731 in the library, script comments, shell fixtures
-- [x] CHAIN-UI: chain 731 in `ui/server.py` network tables and the UI tests
+- [ ] Merge the release PR with a merge commit.
+- [ ] `bash tools/cut-release.sh tag scripts-v2.2.0`.
 
-## Wave 1b (four agents, each after its prerequisite is integrated)
+## Phase 4: after the tag
 
-- [x] FIX-A2 (after FIX-A1): `setup-node.sh` search order, hint, progress fn, require list
-- [x] FIX-T (after FIX-A1): `tools/tests/chain_configs_tag_test.sh`, written from the spec
-- [x] FIX-B (after FIX-A1): `edit-config.sh` menu 13; `chain_configs_refresh_test.sh`
-- [x] HW-T (after HW-SH): `tools/tests/hardware_check_test.sh`, written from the spec
+- [ ] `cut-release.sh status` and the three tag workflows.
+- [ ] Fresh install from the published one-liner in `ubuntu:26.04`; `update-scripts.sh --check`
+      exits 0 on `scripts-v2.2.0`, serial 2, three key files.
+- [ ] The 2.1.0 path for real: install 2.1.0, its updater refuses, the one-liner brings 2.2.0.
+- [ ] User: post `tasks/operator-note-scripts-v2.2.0.md`; wire the AWS template publish.
 
-## Integration 1 (orchestrator; version constants and sidecars are mine)
+## Not in this release
 
-- [x] `fix(setup): take the chain configs from the pinned tag, not from main`
-- [x] `fix(edit-config): refresh installs the pinned chain configs instead of pulling`
-- [x] `feat(setup): check the hardware against the chosen network's tiers`
-- [x] `feat(ui): the setup preflight judges the hardware tiers of the wizard's network`
-- [x] `feat(aws): Validator preset c7i.2xlarge, a 500 GiB data volume at 15,000 IOPS`
-- [x] `fix(network): the mainnet chain id is 731`
-- [x] All gates on the tip
-
-## Wave 2 (five independent verifiers, then the range review)
-
-- [x] V-FIX-S: setup end to end, skew, `remove-node`, the live proof in `ubuntu:26.04`
-- [x] V-FIX-E: menu 13
-- [x] V-HW-UI: shell and server parity, parameter validation, page wording
-- [x] V-AWS: lint and guard, EBS limits, update behaviour, presets against the hardware check
-- [x] V-CHAIN: no surviving 487 as the mainnet id; behaviour on 731 and on 487; sibling repos
-      (read-only report)
-- [x] Findings fixed (implementer if under budget, else a fresh agent)
-- [x] V-RANGE: one whole-diff review of the code range, then its fixes
-- [x] Code freeze
-
-## Wave 3 (docs, five writers in parallel, one owner per file)
-
-- [x] DOC-O: `OPERATOR.md` (three passes: fix, hardware, chain id)
-- [x] DOC-R: `README.md` (three passes; changelog entries, nothing older edited)
-- [x] DOC-M: `CHANGELOG/scripts-v2.2.0.md`, `CHANGELOG.md`, `AGENTS.md`, `followup.md`
-- [x] GUIDE: `mno-node-guide.md` 1.13, all topics in one pass, PDF
-- [x] ONEPAGERS: both one-pagers 1.3, PDFs, the list of cuts used
-
-## Wave 4 (verification, read-only)
-
-- [x] V-DOC-REF: quoted messages, changelog headings, 26.04 counts, surviving old figures
-- [x] V-DOC-PDF: `pdftotext` assertions, page counts, guide cells equal one-pager cells
-- [x] V-SITE (orchestrator): the partner site's build gates against the committed tip
-
-## Final (orchestrator)
-
-- [x] Doc fixes
-- [x] `git fetch` (`main` did not move); every gate again on the final tip
-- [x] `bash tools/gen-checksums.sh`; `git status --porcelain` empty
-- [x] `tasks/` records: this plan ticked, review in `todo.md`, lessons, harnesses linted
-- [x] No Claude attribution in `main..tip`; subjects checked
-- [x] Push over SSH; one PR (#75); CI watched (24.04, 26.04 VM assertions, macOS): green on the
-      third run, after two test-only commits (below)
-
-## Commits (as they landed, no attribution)
-
-1. `fix(setup): take the chain configs from the pinned tag, not from main`
-2. `fix(edit-config): refresh installs the pinned chain configs instead of pulling`
-3. `feat(setup): check the hardware against the chosen network's tiers`
-4. `feat(ui): the setup preflight judges the hardware tiers of the wizard's network`
-5. `feat(aws): Validator preset c7i.2xlarge, a 500 GiB data volume at 15,000 IOPS`
-6. `fix(network): the mainnet chain id is 731`
-7. Fix commits from the verifiers' findings and the whole-diff review:
-   `fix(setup): chain-config helpers after verification`,
-   `fix(edit-config): menu 13 offers the clone and frees the lock before its prompts`,
-   `fix(ui): the preflight treats a measured zero as unmeasured and words logical CPUs as such`,
-   `fix(aws): say in the console what a c7i.2xlarge sustains to EBS`,
-   `fix(caddy): the mainnet gate names the chain it found and checks the public RPC's chain`,
-   `fix(edit-config): menu 13 uses the library's pre-checks`
-8. `docs: chain configs come from the pinned tag`
-9. `docs: hardware requirements per network`
-10. `docs: the mainnet chain id is 731`
-11. `docs(partner): guide 1.13, hardware per network, chain configs at the pinned tag, chain id 731`
-12. `docs(partner): node requirements one-pagers 1.3`
-13. `docs: corrections after verification`
-14. `chore(release): refresh the checksums`
-15. `tasks: plan, checkpoints and review of the requirements round`
-16. `test: accept git's wording for a repository it cannot read` and
-    `test: git's reason for an unreadable repository is any fatal line` (after the first CI run)
-17. `tasks: the CI fix in the records`
-
-## What changed against the plan
-
-- The user added the mainnet chain id (731) during wave 0: two more implementers, a verifier,
-  its own code commit and docs commit.
-- The fix round bumped the touched scripts once more (lib/common 2.2.5, setup-node 2.1.4,
-  edit-config 2.2.2, telcoin-ui 2.1.3, update-node 2.1.2, install-caddy 2.2.1), so the README
-  changelog has one entry per bump.
-- Two more verifier-driven packages than planned: the Caddy mainnet gate (V-CHAIN) and the seam
-  between menu 13 and the library (the whole-diff review).
-- The PDFs were built on Ubuntu 26.04 with pandoc 3.14 and WeasyPrint 70.0, not in the Debian 12
-  `tn-pdf-tools` container: the user asked for pandoc 3.14 in a container, and the Ubuntu 26.04
-  image turned out to rebuild main's PDFs byte for byte, while the Debian container breaks some
-  lines earlier whatever the pandoc version.
-- Two commit messages were corrected after the documents' verifier showed a claim in them was
-  wrong (what the old menu 13's pull did on a source install), so the branch was rebuilt with
-  the same trees; `tasks/spec-req-shared.md` section 8 maps the earlier commit ids, which the
-  verifier reports and checkpoints cite, to the final ones.
-- The testnet one-pager keeps the QLC advice inside its "Every node" bullet; the mainnet one
-  needed cuts 1 and 3 of the ranked list, not 2.
-- Not applied, recorded in `followup.md`: menu 13's second host-baseline refresh on a first
-  install, and the guide headings that sit alone on a page.
-
-## What stays with the user
-
-- Merge the PR.
-- Run the partner site's Publish workflow; then the orchestrator verifies run.telcoin.network.
-- Cut and sign the scripts release that carries the fix; until then `scripts-v2.1.0` users need
-  `--genesis-dir`.
-- The upstream hardware page in `telcoin-network` still shows the old single table.
+PR #76 (mainnet genesis readiness) and `TN_MAINNET_ENABLED`; Dependabot PR #77; the
+`v0.16.0-adiri` fallback image and the chain-config tag; the release-tool guard on key-set
+overlap (a follow-up PR).
