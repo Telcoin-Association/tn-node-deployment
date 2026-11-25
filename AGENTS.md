@@ -589,6 +589,10 @@ validator side. Rules:
 - The gateway's state lives only in `/etc/telcoin/gateway/gateway.meta` (root 0600,
   `GATEWAY_META_VERSION=1`), and `--refresh` renders the unit from it alone (on testnet and
   mainnet with the image the release pins).
+- `RATE_LIMIT_SUBMISSIONS` is the one optional `gateway.meta` key: a file scripts-v2.2.0 wrote
+  has no line, loads with the default (`GW_RATE_LIMIT_SUBMISSIONS_DEFAULT`, 300), and
+  `--refresh` writes the line and the `--rate-limit-submissions` flag. A flag added to the
+  unit goes into `GW_REQUIRED_FLAGS` too, so `gw_image_probe` refuses an image without it.
 - On a host with a gateway and no node, the firewall's state (`SSH_ALLOW_FROM`) lives in
   `gateway.meta` too: `firewall-setup.sh` writes it with `meta_set`, and `lib/gateway.sh` writes
   that file key by key (`meta_set`), so each keeps the other's keys.

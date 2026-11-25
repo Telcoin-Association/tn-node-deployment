@@ -49,7 +49,7 @@
 #
 # Version (tracked by update-scripts.sh). Plain, not readonly, so re-sourcing
 # common.sh cannot trip on a readonly redefinition.
-GATEWAY_VERSION="2.2.0"
+GATEWAY_VERSION="2.3.0"
 
 # Image trust (contract 3.4). Only <repository>@sha256:<64 lowercase hex>.
 # The package every signed telcoin-network release publishes its worker-gateway
@@ -70,20 +70,30 @@ GW_DEVNET_IMAGE_REPOS="us-docker.pkg.dev/telcoin-network/tn-public/worker-gatewa
 # the release is a tag of the network (tn_release_tag_ok). Set both or neither.
 # tools/check-gateway-pin.sh checks a set pin against the signed release in CI
 # and before an installer is published. Empty: no gateway on that network yet.
+# A pin's gateway must list every flag of GW_REQUIRED_FLAGS in its --help, or
+# gw_image_probe refuses it; --rate-limit-submissions came with worker-gateway
+# 0.18.0, the testnet pin's release.
 # The signed MANIFEST covers this file.
 # network-gated: the testnet pin and its release (vX.Y.Z-adiri); gw_image_allowed reads them for testnet only
 GW_TESTNET_IMAGE_PIN="ghcr.io/telcoin-association/tn-worker-gateway@sha256:efed742a8a32db4f71b397d17ac448bcd98dcc0d14083197c1f7cecbc72bcffb" GW_TESTNET_PIN_RELEASE="v0.18.0-adiri"
 # network-gated: the mainnet pin and its release (vX.Y.Z); gw_image_allowed reads them for mainnet only
 GW_MAINNET_IMAGE_PIN="" GW_MAINNET_PIN_RELEASE=""
 # Every flag the unit passes; gw_image_probe needs each in the image's --help.
-GW_REQUIRED_FLAGS="--listen-addr --probe-addr --metrics --upstream-rpc-url --upstream-readiness-url --worker-id --redirect-queries --trusted-proxies"
+GW_REQUIRED_FLAGS="--listen-addr --probe-addr --metrics --upstream-rpc-url --upstream-readiness-url --worker-id --redirect-queries --rate-limit-submissions --trusted-proxies"
 # docker for the unit text when `command -v docker` gives no absolute path.
 GW_DOCKER_FALLBACK="/usr/bin/docker"
+# Submissions a second the gateway keeps for single eth_sendRawTransaction calls
+# out of its global bucket (3000 a second by default): a query flood that
+# empties the global bucket still leaves this many submissions a second
+# through. The gateway's own default is 0, the reservation off;
+# setup-gateway.sh --rate-limit-submissions sets another value, 0 included.
+GW_RATE_LIMIT_SUBMISSIONS_DEFAULT="300"
 
 # Inputs the script sets (empty = not given).
 : "${GW_IN_MODE:=}" "${GW_IN_NETWORK:=}" "${GW_IN_IMAGE:=}" "${GW_IN_DOMAIN:=}" "${GW_IN_FRONT:=}"
 : "${GW_IN_UPSTREAM:=}" "${GW_IN_RPC_PORT:=}" "${GW_IN_HEALTH_PORT:=}" "${GW_IN_REDIRECT:=}"
 : "${GW_IN_LISTEN_PORT:=}" "${GW_IN_PROBE_PORT:=}" "${GW_IN_METRICS_PORT:=}" "${GW_IN_TRUSTED_PROXIES:=}"
+: "${GW_IN_RATE_LIMIT_SUBMISSIONS:=}"
 # install-caddy.sh's path; empty skips the Caddy step with a warning.
 : "${GW_CADDY_SCRIPT:=}"
 # Seconds gw_enable and gw_refresh wait for GET /health after a (re)start.
@@ -95,7 +105,8 @@ GW_DOCKER_FALLBACK="/usr/bin/docker"
 #   GW_APPLIED   space list of enabled refreshed caddy removed; "" = nothing changed
 #   GW_V_*       gw_validate_inputs (or gateway.meta): MODE NETWORK IMAGE DOMAIN
 #                FRONT UPSTREAM RPC_PORT HEALTH_PORT REDIRECT LISTEN_PORT
-#                PROBE_PORT METRICS_PORT TRUSTED_PROXIES, plus UPSTREAM_HOST
+#                PROBE_PORT METRICS_PORT TRUSTED_PROXIES RATE_LIMIT_SUBMISSIONS,
+#                plus UPSTREAM_HOST
 #   GW_ST_*      gw_status, one per status field: INSTALLED ENABLED ACTIVE
 #                IMAGE_HELD HEALTH READY READY_ANY (true|false); MODE FRONT DOMAIN
 #                IMAGE LISTEN PROBE METRICS UPSTREAM_RPC UPSTREAM_READINESS
@@ -105,7 +116,7 @@ GW_ERR=""
 GW_APPLIED=""
 GW_V_MODE="" GW_V_NETWORK="" GW_V_IMAGE="" GW_V_DOMAIN="" GW_V_FRONT="" GW_V_UPSTREAM=""
 GW_V_RPC_PORT="" GW_V_HEALTH_PORT="" GW_V_REDIRECT="" GW_V_LISTEN_PORT="" GW_V_PROBE_PORT=""
-GW_V_METRICS_PORT="" GW_V_TRUSTED_PROXIES="" GW_V_UPSTREAM_HOST=""
+GW_V_METRICS_PORT="" GW_V_TRUSTED_PROXIES="" GW_V_RATE_LIMIT_SUBMISSIONS="" GW_V_UPSTREAM_HOST=""
 GW_ST_INSTALLED="false" GW_ST_ENABLED="false" GW_ST_ACTIVE="false" GW_ST_MODE="" GW_ST_FRONT=""
 GW_ST_DOMAIN="" GW_ST_IMAGE="" GW_ST_IMAGE_HELD="false" GW_ST_LISTEN="" GW_ST_PROBE=""
 GW_ST_METRICS="" GW_ST_UPSTREAM_RPC="" GW_ST_UPSTREAM_READINESS="" GW_ST_REDIRECT_QUERIES=""
@@ -249,6 +260,13 @@ _gw_proxies_ok() {
     [[ "${1:-}" =~ $re ]]
 }
 
+# _gw_rate_ok N -- requests a second as a whole number: 0 (the reservation
+# off) or 1 to 999999; no sign, no leading zero.
+_gw_rate_ok() {
+    local re="^(0|[123456789][${_GW_DIGITS}]{0,5})$"
+    [[ "${1:-}" =~ $re ]]
+}
+
 # _gw_docker_ok -- docker installed and its daemon answering; rc 1 with GW_ERR.
 _gw_docker_ok() {
     if ! command -v docker >/dev/null 2>&1; then
@@ -331,7 +349,7 @@ gw_validate_inputs() {
     GW_ERR=""
     GW_V_MODE="" GW_V_NETWORK="" GW_V_IMAGE="" GW_V_DOMAIN="" GW_V_FRONT="" GW_V_UPSTREAM=""
     GW_V_RPC_PORT="" GW_V_HEALTH_PORT="" GW_V_REDIRECT="" GW_V_LISTEN_PORT="" GW_V_PROBE_PORT=""
-    GW_V_METRICS_PORT="" GW_V_TRUSTED_PROXIES="" GW_V_UPSTREAM_HOST=""
+    GW_V_METRICS_PORT="" GW_V_TRUSTED_PROXIES="" GW_V_RATE_LIMIT_SUBMISSIONS="" GW_V_UPSTREAM_HOST=""
     if node_meta_path >/dev/null 2>&1; then node=1; fi
 
     case "$GW_IN_MODE" in
@@ -436,6 +454,13 @@ gw_validate_inputs() {
         GW_V_TRUSTED_PROXIES="$GW_IN_TRUSTED_PROXIES"
     elif [[ "$GW_V_FRONT" == "caddy" ]]; then
         GW_V_TRUSTED_PROXIES="127.0.0.1/32"
+    fi
+
+    if [[ -n "$GW_IN_RATE_LIMIT_SUBMISSIONS" ]]; then
+        _gw_rate_ok "$GW_IN_RATE_LIMIT_SUBMISSIONS" || { _gw_refuse "--rate-limit-submissions takes a whole number of submissions a second (0 turns the reservation off)" "$fn" || return 1; }
+        GW_V_RATE_LIMIT_SUBMISSIONS="$GW_IN_RATE_LIMIT_SUBMISSIONS"
+    else
+        GW_V_RATE_LIMIT_SUBMISSIONS="$GW_RATE_LIMIT_SUBMISSIONS_DEFAULT"
     fi
 
     GW_V_IMAGE="$GW_IN_IMAGE"
@@ -587,7 +612,8 @@ gw_render_args() {
         " --metrics 127.0.0.1:${GW_V_METRICS_PORT}" \
         " --upstream-rpc-url http://${GW_V_UPSTREAM_HOST}:${GW_V_RPC_PORT}" \
         " --upstream-readiness-url http://${GW_V_UPSTREAM_HOST}:${GW_V_HEALTH_PORT}/health/workers" \
-        " --worker-id 0 --redirect-queries ${GW_V_REDIRECT}"
+        " --worker-id 0 --redirect-queries ${GW_V_REDIRECT}" \
+        " --rate-limit-submissions ${GW_V_RATE_LIMIT_SUBMISSIONS}"
     [[ -z "$GW_V_TRUSTED_PROXIES" ]] || printf ' --trusted-proxies %s' "$GW_V_TRUSTED_PROXIES"
     printf '\n'
 }
@@ -626,7 +652,8 @@ _gw_meta_lines() {
         "UPSTREAM_HOST=${GW_V_UPSTREAM_HOST}" "RPC_PORT=${GW_V_RPC_PORT}" \
         "HEALTH_PORT=${GW_V_HEALTH_PORT}" "LISTEN_PORT=${GW_V_LISTEN_PORT}" \
         "PROBE_PORT=${GW_V_PROBE_PORT}" "METRICS_PORT=${GW_V_METRICS_PORT}" \
-        "REDIRECT_QUERIES=${GW_V_REDIRECT}" "TRUSTED_PROXIES=${GW_V_TRUSTED_PROXIES}"
+        "REDIRECT_QUERIES=${GW_V_REDIRECT}" "TRUSTED_PROXIES=${GW_V_TRUSTED_PROXIES}" \
+        "RATE_LIMIT_SUBMISSIONS=${GW_V_RATE_LIMIT_SUBMISSIONS}"
 }
 
 # _gw_meta_diff -- the lines of _gw_meta_lines that gateway.meta does not hold
@@ -669,12 +696,24 @@ _gw_load_meta() {
         GW_ERR="${TN_GATEWAY_META} lacks ${missing}"
         return 1
     fi
+    # RATE_LIMIT_SUBMISSIONS is newer than the keys above: a gateway.meta that
+    # scripts-v2.2.0 or older wrote has no line, takes the default, and
+    # --refresh writes the line and the flag.
+    rc=0
+    v="$(tn_gateway_meta_get RATE_LIMIT_SUBMISSIONS "$_GW_ABSENT" 2>/dev/null)" || rc=$?
+    if [[ "$rc" -eq 2 ]]; then
+        GW_ERR="${TN_GATEWAY_META} holds RATE_LIMIT_SUBMISSIONS more than once"
+        return 2
+    fi
+    [[ "$rc" -eq 0 && "$v" != "$_GW_ABSENT" ]] || v="$GW_RATE_LIMIT_SUBMISSIONS_DEFAULT"
+    GW_V_RATE_LIMIT_SUBMISSIONS="$v"
     for v in "$GW_V_RPC_PORT" "$GW_V_HEALTH_PORT" "$GW_V_LISTEN_PORT" "$GW_V_PROBE_PORT" "$GW_V_METRICS_PORT"; do
         _gw_port_ok "$v" || { GW_ERR="${TN_GATEWAY_META} holds an invalid port (${v})"; return 1; }
     done
     if ! _gw_network_ok "$GW_V_NETWORK" || ! _tn_ipv4_strict "$GW_V_UPSTREAM_HOST" \
         || ! _gw_redirect_ok "$GW_V_REDIRECT" \
-        || { [[ -n "$GW_V_TRUSTED_PROXIES" ]] && ! _gw_proxies_ok "$GW_V_TRUSTED_PROXIES"; }; then
+        || { [[ -n "$GW_V_TRUSTED_PROXIES" ]] && ! _gw_proxies_ok "$GW_V_TRUSTED_PROXIES"; } \
+        || ! _gw_rate_ok "$GW_V_RATE_LIMIT_SUBMISSIONS"; then
         GW_ERR="${TN_GATEWAY_META} holds a value this release does not write"
         return 1
     fi
@@ -715,6 +754,7 @@ _gw_load_unit() {
     [[ "$GW_V_UPSTREAM_HOST" != "127.0.0.1" ]] || GW_V_MODE="same-host"
     GW_V_REDIRECT="$(_gw_unit_word "$f" --redirect-queries)"
     GW_V_TRUSTED_PROXIES="$(_gw_unit_word "$f" --trusted-proxies)"
+    GW_V_RATE_LIMIT_SUBMISSIONS="$(_gw_unit_word "$f" --rate-limit-submissions)"
     GW_V_IMAGE="$(awk '/^ExecStart=/ { for (i = 1; i < NF - 1; i++) if ($i == "--stop-timeout") { print $(i + 2); exit } }' "$f" 2>/dev/null)"
     GW_V_DOMAIN="" GW_V_NETWORK=""
     return 0

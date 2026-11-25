@@ -179,11 +179,12 @@ printf 'info: ports worker=%s health=%s query=%s listen=%s probe=%s metrics=%s\n
     GW_V_UPSTREAM_HOST="127.0.0.1" GW_V_RPC_PORT="$P_WORKER" GW_V_HEALTH_PORT="$P_HEALTH"
     GW_V_REDIRECT="http://127.0.0.1:${P_QUERY}" GW_V_LISTEN_PORT="$P_LISTEN"
     GW_V_PROBE_PORT="$P_PROBE" GW_V_METRICS_PORT="$P_METRICS" GW_V_TRUSTED_PROXIES="127.0.0.1/32"
+    GW_V_RATE_LIMIT_SUBMISSIONS="300"
 }
 GW_ARGS_LINE="$(gw_render_args)"
 printf 'info: gw_render_args: %s\n' "$GW_ARGS_LINE"
 check "gw_render_args: the contract 3.3 line for same-host, front caddy" \
-    "--listen-addr 127.0.0.1:${P_LISTEN} --probe-addr 127.0.0.1:${P_PROBE} --metrics 127.0.0.1:${P_METRICS} --upstream-rpc-url http://127.0.0.1:${P_WORKER} --upstream-readiness-url http://127.0.0.1:${P_HEALTH}/health/workers --worker-id 0 --redirect-queries http://127.0.0.1:${P_QUERY} --trusted-proxies 127.0.0.1/32" \
+    "--listen-addr 127.0.0.1:${P_LISTEN} --probe-addr 127.0.0.1:${P_PROBE} --metrics 127.0.0.1:${P_METRICS} --upstream-rpc-url http://127.0.0.1:${P_WORKER} --upstream-readiness-url http://127.0.0.1:${P_HEALTH}/health/workers --worker-id 0 --redirect-queries http://127.0.0.1:${P_QUERY} --rate-limit-submissions 300 --trusted-proxies 127.0.0.1/32" \
     "$GW_ARGS_LINE"
 SMOKE_OPTS=(--network=host --user 1101:1101 --read-only --cap-drop ALL
             --security-opt no-new-privileges --pull=never --stop-timeout 60)

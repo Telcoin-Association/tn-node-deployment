@@ -58,6 +58,10 @@
 #   --probe-port N               /health, /ready, /ready/any on 127.0.0.1, default 8656
 #   --metrics-port N             metrics on 127.0.0.1, default 9655
 #   --trusted-proxies CIDRS      default 127.0.0.1/32 with caddy, none with none
+#   --rate-limit-submissions N   submissions a second the gateway keeps for
+#                                eth_sendRawTransaction out of its global bucket,
+#                                so a query flood cannot starve them; default 300,
+#                                0 turns the reservation off
 # Other options:
 #   --image REF                  also with --refresh: run that digest (same rules)
 #   --yes                        with --enable, --refresh, --remove: do not ask.
@@ -87,7 +91,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="2.2.0"
+readonly SCRIPT_VERSION="2.3.0"
 
 # The run's settings, from the command line (sg_parse_args). The library inputs
 # GW_IN_* are set by sg_inputs_reset and sg_set_value.
@@ -593,6 +597,7 @@ sg_inputs_reset() {
     GW_IN_MODE="" GW_IN_NETWORK="" GW_IN_IMAGE="" GW_IN_DOMAIN="" GW_IN_FRONT=""
     GW_IN_UPSTREAM="" GW_IN_RPC_PORT="" GW_IN_HEALTH_PORT="" GW_IN_REDIRECT=""
     GW_IN_LISTEN_PORT="" GW_IN_PROBE_PORT="" GW_IN_METRICS_PORT="" GW_IN_TRUSTED_PROXIES=""
+    GW_IN_RATE_LIMIT_SUBMISSIONS=""
     GW_CADDY_SCRIPT="${SCRIPT_DIR}/install-caddy.sh"
 }
 
@@ -653,6 +658,7 @@ sg_set_value() {
         --upstream)         GW_IN_UPSTREAM="$2" ;;
         --redirect-queries) GW_IN_REDIRECT="$2" ;;
         --trusted-proxies)  GW_IN_TRUSTED_PROXIES="$2" ;;
+        --rate-limit-submissions) GW_IN_RATE_LIMIT_SUBMISSIONS="$2" ;;
     esac
     if [[ "$1" != "--image" ]]; then
         SG_ENABLE_FLAG="${SG_ENABLE_FLAG:-$1}"
@@ -682,7 +688,7 @@ sg_parse_args() {
                 SG_YES=true
                 shift
                 ;;
-            --mode|--image|--redirect-queries|--network|--domain|--front|--upstream|--rpc-port|--health-port|--listen-port|--probe-port|--metrics-port|--trusted-proxies)
+            --mode|--image|--redirect-queries|--network|--domain|--front|--upstream|--rpc-port|--health-port|--listen-port|--probe-port|--metrics-port|--trusted-proxies|--rate-limit-submissions)
                 # A value flag needs a value; the next option is not one.
                 if [[ $# -lt 2 || "$2" == --* ]]; then
                     arg_fail "$1 needs a value. Nothing was changed."
@@ -690,7 +696,7 @@ sg_parse_args() {
                 sg_set_value "$1" "$2"
                 shift 2
                 ;;
-            --mode=*|--image=*|--redirect-queries=*|--network=*|--domain=*|--front=*|--upstream=*|--rpc-port=*|--health-port=*|--listen-port=*|--probe-port=*|--metrics-port=*|--trusted-proxies=*)
+            --mode=*|--image=*|--redirect-queries=*|--network=*|--domain=*|--front=*|--upstream=*|--rpc-port=*|--health-port=*|--listen-port=*|--probe-port=*|--metrics-port=*|--trusted-proxies=*|--rate-limit-submissions=*)
                 sg_set_value "${1%%=*}" "${1#*=}"
                 shift
                 ;;
