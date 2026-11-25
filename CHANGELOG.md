@@ -7,6 +7,20 @@ For recent entries (v1.1.40 onwards), see the Changelog section of README.md.
 
 ## Unreleased
 
+### --p2p-committee auto follows the ConsensusRegistry, November 2026 -- firewall-setup 2.3.0, remove-node 2.2.1
+Not yet in a scripts release.
+`firewall-setup.sh --p2p-committee auto` reads the validator's status from the ConsensusRegistry
+(`node_stake_status` on the `VALIDATOR_ADDRESS` of `.node-meta`, through the local RPC) and runs
+`on` (PendingActivation, Active, PendingExit) or `off` (every other status, and no ConsensusNFT)
+to match, then installs `telcoin-p2p-committee.timer`, which runs it as root five minutes after
+boot and every thirty minutes through `/usr/local/libexec/telcoin/tn-p2p-committee-auto`. A status
+that cannot be read changes nothing and exits 1. The timer runs the checkout as root, so `auto`
+installs it only while `firewall-setup.sh`, `lib/common.sh` and `lib/fallback.sh` are root-owned,
+with no group or world write bit, in a root-owned directory, and the runner repeats that check
+before every run. `off` removes the timer, `status` ends with an `Auto:` line from the record in
+`/var/lib/telcoin-p2p-committee/last`, and remove-node removes the units, the runner and that
+directory with the last node (this repository's #85).
+
 ### Worker gateway submission reservation on, November 2026 -- setup-gateway 2.3.0, lib/gateway 2.3.0
 Not yet in a scripts release.
 `setup-gateway.sh --rate-limit-submissions N` sets the submissions a second the worker gateway

@@ -384,6 +384,8 @@ table below and reports any path that differs.
 | `/etc/systemd/system/telcoin.service` | root | 0644 | The unit |
 | `/etc/systemd/system/telcoin-heartbeat.service`, `telcoin-heartbeat.timer` | root | 0644 | The private alerts service and the timer that starts it every interval |
 | `/etc/systemd/system/telcoin-p2p-allow.service`, `telcoin-p2p-allow-sync.service`, `telcoin-p2p-allow-sync.timer` | root | 0644 | The allowlist's boot unit, sync service and timer, only while committee mode is on |
+| `/etc/systemd/system/telcoin-p2p-committee.service`, `telcoin-p2p-committee.timer` | root | 0644 | The service and timer of `--p2p-committee auto`, only while auto is installed |
+| `/usr/local/libexec/telcoin/tn-p2p-committee-auto`, `/var/lib/telcoin-p2p-committee/` | root | 0755 | The runner of `--p2p-committee auto` and the directory of its last-run record (`last`, 0644) |
 | `/var/lib/telcoin/` | service user | 0700 | The data directory: `node-keys/` (P2P and BLS keys; keep them backed up), `node-info.yaml`, `genesis/`, `parameters.yaml`, `network-config` (the node's network settings; see [Node admission settings](#node-admission-settings)), `db/`, `consensus-db/` (in `epochs/`, the consensus packs of finished epochs and the pack of the epoch in progress, `epoch-N`, open for append; the epoch database of the epoch in progress, peer records and batch caches in the MDBX databases `epoch/`, `kad/` and `cache/` on `v0.16.0-adiri` and in `tndb/` from the next release; `state_exports/epoch-N/` when state export is on) |
 | `/var/log/telcoin/` | root:telcoin-log | 0750 | `telcoin.log` and `telcoin-error.log` (root:telcoin-log, 0640), which systemd writes for the node with `--log-target file` |
 | `/var/log/telcoin/node/` | service user:telcoin-log | 2750 (setgid) | Logs the node writes itself, only with observability on (`NODE_LOG_DIR`); new files take group `telcoin-log` |
@@ -906,9 +908,10 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh --p2p-committee on      # tur
 sudo bash ~/telcoin-node-scripts/firewall-setup.sh --p2p-committee status  # what it holds now
 sudo bash ~/telcoin-node-scripts/firewall-setup.sh --p2p-committee sync    # bring it in step now
 sudo bash ~/telcoin-node-scripts/firewall-setup.sh --p2p-committee off     # the kill switch
+sudo bash ~/telcoin-node-scripts/firewall-setup.sh --p2p-committee auto    # follow the ConsensusRegistry, with a timer
 ```
 
-`--p2p-committee` goes alone: with `--json`, `--status`, `--enable`, `--reset` or `--port` it exits 1, and so does any verb but `on`, `off`, `sync` and `status`.
+`--p2p-committee` goes alone: with `--json`, `--status`, `--enable`, `--reset` or `--port` it exits 1, and so does any verb but `on`, `off`, `auto`, `sync` and `status`.
 It is a server task: the Node Manager UI shows the allowlist but cannot turn it on or off.
 
 **How it works.**
@@ -928,6 +931,7 @@ It is a server task: the Node Manager UI shows the allowlist but cannot turn it 
   Nothing flushes the sets on an error path.
   A key the snapshot lists without addresses keeps its last-known ones for 3 epochs, and a key an authoritative snapshot no longer lists goes on the second run in a row that omits it.
 - The timer (`telcoin-p2p-allow-sync.timer`) runs one sync two minutes after boot and five minutes after each run; the boot unit loads the last-good program before the node starts.
+- `--p2p-committee auto` reads the validator's status from the ConsensusRegistry through the local node (`getValidator` on the `VALIDATOR_ADDRESS` of `.node-meta`) and runs `on` (PendingActivation, Active, PendingExit) or `off` (every other status, and no ConsensusNFT) to match, then installs `telcoin-p2p-committee.timer`, which runs it five minutes after boot and every thirty minutes; a status that cannot be read changes nothing (exit 1), and the next run tries again. The timer runs the checkout as root, so `auto` installs it only while `firewall-setup.sh`, `lib/common.sh` and `lib/fallback.sh` are root-owned with no group or world write bit, in a root-owned directory (`sudo chown -R root:root <tree> && sudo chmod -R go-w <tree>`), and the runner `/usr/local/libexec/telcoin/tn-p2p-committee-auto` repeats that check before every run. `off` removes the timer; `auto`, not `on`, resumes the following. `status` ends with an `Auto:` line, from the record in `/var/lib/telcoin-p2p-committee/last` (OPERATOR.md section 2.10).
 
 **The verbs.**
 
@@ -976,6 +980,8 @@ No version file is written: the installed binary's own `--version` is what `on` 
 | `telcoin-p2p-allow.service` | Enabled oneshot, `After=ufw.service network-pre.target` and before the node unit: loads `/var/lib/telcoin-p2p-allow/current.nft` with `/usr/sbin/nft -f` (the nft the tool runs, written into the unit literally), and does nothing without that file (`ConditionPathExists=`). Stopping it deletes `table inet tn_p2p_allow`. `ProtectKernelModules=` stays off, because the first load after boot may need the kernel to load its nftables modules |
 | `telcoin-p2p-allow-sync.service` | One `tn-p2p-allow-sync sync`, after the node and the boot unit; no `[Install]`. `SuccessExitStatus=3 4`, so a stale or busy run is not a failed unit. It keeps `CAP_NET_ADMIN` alone, reaches `localhost` only (`IPAddressAllow=localhost`), writes its state dir only, reads `config` and `floor` read-only and cannot see `/etc/telcoin`, `/var/lib/telcoin` or a data dir elsewhere (`InaccessiblePaths=`). Its journal tag is `tn-p2p-allow` |
 | `telcoin-p2p-allow-sync.timer` | `OnBootSec=2min`, `OnUnitActiveSec=5min`, `RandomizedDelaySec=30s` |
+| `telcoin-p2p-committee.service` | One run of `/usr/local/libexec/telcoin/tn-p2p-committee-auto` as root, which checks the checkout's ownership and then runs `firewall-setup.sh --p2p-committee auto` from it; no `[Install]`. Written by `auto`, removed by `off` |
+| `telcoin-p2p-committee.timer` | `OnBootSec=5min`, `OnUnitActiveSec=30min`, `RandomizedDelaySec=2min` |
 
 **The state dir.**
 `/var/lib/telcoin-p2p-allow/` (root 0700) sits outside `/etc/telcoin`, so a sync every five minutes touches nothing auditd or AIDE watch.
@@ -1405,7 +1411,7 @@ The script automatically detects what is installed (including legacy per-role la
 - Log directory
 - Service user and group, and the `telcoin-log` group (asked separately when you keep the service user, which may still need it)
 - On a testnet host, the add-ons' leftovers (the VPN self-heal units and helper, the maintainer key files, the overlay SSH rules and the `telcoin-alloy` account); the Alloy ingest token file and `telcoin-alloy.env` are shredded first
-- With the last node unit on the host: the host baseline (the audit rules file, reloaded with `augenrules --load`, the AIDE config, both databases and every `HOST_BASELINE` line: `Host baseline removed. The auditd and aide packages stay installed; remove them with: sudo apt-get purge auditd aide`), the P2P new-flow limit (`telcoin-p2p-limit.service`, `/etc/telcoin/p2p-limit.nft`, the nftables table), and the [P2P committee allowlist](#p2p-committee-allowlist) without running `firewall-setup.sh` or the tool: `telcoin-p2p-allow-sync.timer` first, then `telcoin-p2p-allow-sync.service` and `telcoin-p2p-allow.service` with their unit files, the nftables table `inet tn_p2p_allow` (when nft lists it, or cannot list the tables while something else of the allowlist is there), `/usr/local/libexec/telcoin/tn-p2p-allow-sync` and last `/var/lib/telcoin-p2p-allow`, which stays when nft refused the delete so a later run tries again. It deletes the table and removes the state dir holding the tool's lock (`/var/lib/telcoin-p2p-allow/lock`, `flock -w 30`), as `off` does, so a sync in progress ends first; when a run holds the lock for 30 seconds, the lock cannot be opened or `flock` is missing, both stay for a later run, with a warning, and the tool binary still goes.
+- With the last node unit on the host: the host baseline (the audit rules file, reloaded with `augenrules --load`, the AIDE config, both databases and every `HOST_BASELINE` line: `Host baseline removed. The auditd and aide packages stay installed; remove them with: sudo apt-get purge auditd aide`), the P2P new-flow limit (`telcoin-p2p-limit.service`, `/etc/telcoin/p2p-limit.nft`, the nftables table), and the [P2P committee allowlist](#p2p-committee-allowlist) without running `firewall-setup.sh` or the tool: `telcoin-p2p-allow-sync.timer` first, then `telcoin-p2p-allow-sync.service` and `telcoin-p2p-allow.service` with their unit files, the nftables table `inet tn_p2p_allow` (when nft lists it, or cannot list the tables while something else of the allowlist is there), `/usr/local/libexec/telcoin/tn-p2p-allow-sync` and last `/var/lib/telcoin-p2p-allow`, which stays when nft refused the delete so a later run tries again. The units of `--p2p-committee auto` go the same way: `telcoin-p2p-committee.timer`, then `telcoin-p2p-committee.service` with their unit files, the runner `/usr/local/libexec/telcoin/tn-p2p-committee-auto` and `/var/lib/telcoin-p2p-committee`. It deletes the table and removes the state dir holding the tool's lock (`/var/lib/telcoin-p2p-allow/lock`, `flock -w 30`), as `off` does, so a sync in progress ends first; when a run holds the lock for 30 seconds, the lock cannot be opened or `flock` is missing, both stay for a later run, with a warning, and the tool binary still goes.
   While another node unit remains, all three are kept for it and the run says so.
   After removing one node of two, run `sudo ./setup-node.sh --host-baseline` again: the kept rules and AIDE config still name the removed unit.
 - Any container that runs a node image of the testnet repositories, of `ghcr.io/telcoin-association/tn-mainnet`, of `ghcr.io/telcoin-association/tn-dev` or of the old `ghcr.io/telcoin-association/telcoin-network` package, whatever its name, is offered for removal; each one asks first
@@ -1954,7 +1960,7 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 # Private alerts: a heartbeat to a monitor you own (every network)
 sudo bash ~/telcoin-node-scripts/setup-alerts.sh
 
-# P2P committee allowlist (validators): on, off, sync or status
+# P2P committee allowlist (validators): on, off, auto, sync or status
 sudo bash ~/telcoin-node-scripts/firewall-setup.sh --p2p-committee status
 ```
 
@@ -2144,6 +2150,13 @@ prints the exact fix command.
 > **Not released yet:** the entries from here down to `lib/common.sh v2.2.8` are on `main` only and
 > come with the next script release ([CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md)).
 > `scripts-v2.2.0` ends at `update-node v2.1.3` below.
+
+### firewall-setup v2.3.0 -- --p2p-committee auto follows the ConsensusRegistry
+
+- New `--p2p-committee auto`: reads the validator's status from the ConsensusRegistry (`getValidator` on the `VALIDATOR_ADDRESS` of `.node-meta`, through the local RPC) and runs `on` (PendingActivation, Active, PendingExit) or `off` (Undefined, Staked, Exited, retired, no ConsensusNFT) to match; a status that cannot be read changes nothing and exits 1, so the next run tries again. It records each run in `/var/lib/telcoin-p2p-committee/last` and installs `telcoin-p2p-committee.timer` and `.service`, which run it as root five minutes after boot and every thirty minutes through `/usr/local/libexec/telcoin/tn-p2p-committee-auto`. Without `VALIDATOR_ADDRESS` it refuses with exit 1 and changes nothing ([#85](https://github.com/Telcoin-Association/tn-node-deployment/issues/85)).
+- The timer runs the scripts checkout as root, so `auto` installs it only while `firewall-setup.sh`, `lib/common.sh` and `lib/fallback.sh` are root-owned, with no group or world write bit, in a root-owned directory, and the runner makes the same check before every run; the message names the `chown` and `chmod` to run.
+- `--p2p-committee off` also removes the timer, so an `off` run by hand holds until `auto` is run again; `--p2p-committee status` ends with an `Auto:` line (the timer, and the last run's status, action and exit code).
+- remove-node v2.2.1: the last node's removal stops and removes the two units, the runner and `/var/lib/telcoin-p2p-committee`, and the leftovers menu lists them.
 
 ### firewall-setup v2.2.1 — the kill switch opens the P2P ports, and the allowlist floor keeps the trusted hubs
 Fix for validators in P2P committee mode with a static source list: `--p2p-committee off` turned `P2P_ALLOW_FROM` back into per-source rules and cut off every committee peer outside it.

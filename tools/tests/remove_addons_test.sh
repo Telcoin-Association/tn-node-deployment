@@ -91,12 +91,14 @@ fixture() {
     : > "$CALLS"
 }
 present() { local f out=""; for f in "$@"; do [ -e "$R$f" ] && out="$out $f"; done; echo "${out# }"; }
-# The P2P committee allowlist stays too: it goes with the last node
-# (remove_node_host_files), never with the host-wide add-ons, which every node
-# removal runs.
+# The P2P committee allowlist, and the units of --p2p-committee auto, stay too:
+# they go with the last node (remove_node_host_files), never with the host-wide
+# add-ons, which every node removal runs.
 ALLOW="/etc/systemd/system/telcoin-p2p-allow.service /etc/systemd/system/telcoin-p2p-allow-sync.service
 /etc/systemd/system/telcoin-p2p-allow-sync.timer /var/lib/telcoin-p2p-allow/config
-/usr/local/libexec/telcoin/tn-p2p-allow-sync"
+/usr/local/libexec/telcoin/tn-p2p-allow-sync
+/etc/systemd/system/telcoin-p2p-committee.timer /etc/systemd/system/telcoin-p2p-committee.service
+/usr/local/libexec/telcoin/tn-p2p-committee-auto /var/lib/telcoin-p2p-committee/last"
 KEEP="$KEEP $ALLOW"
 
 # --- wg0.conf and the link gone, everything else left behind ------------------------------
@@ -139,6 +141,7 @@ check_has "full: de-enrol note" "yes" "$(grep -q 'de-enroll' "$T/out" && echo ye
 # shellcheck disable=SC2086
 check "full: the P2P committee allowlist stays (not an add-on)" "$(echo $ALLOW)" "$(present $ALLOW)"
 check_lacks "full: no allowlist unit stopped" "telcoin-p2p-allow" "$(cat "$CALLS")"
+check_lacks "full: no auto unit stopped" "telcoin-p2p-committee" "$(cat "$CALLS")"
 
 # --- nothing installed: nothing removed, no account touched --------------------------------
 fixture
