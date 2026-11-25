@@ -241,7 +241,16 @@ check "parser: --p2p-committee with --json exits 1" 1 "$PRC"
 check_in "parser: --p2p-committee with --json is refused" "goes alone" "$POUT"
 parse_run --p2p-committee
 check "parser: --p2p-committee without a verb exits 1" 1 "$PRC"
-check_in "parser: --p2p-committee without a verb is refused" "takes on, off, sync or status" "$POUT"
+check_in "parser: --p2p-committee without a verb is refused" "takes on, off, auto, sync or status" "$POUT"
+parse_run --p2p-committee follow
+check "parser: an unknown verb exits 1" 1 "$PRC"
+check_in "parser: an unknown verb is named with the five" "takes on, off, auto, sync or status (not follow)" "$POUT"
+parse_run --p2p-committee auto --json
+check "parser: auto with --json exits 1" 1 "$PRC"
+check_lacks "parser: auto is a verb" "takes on, off" "$POUT"
+check_in "parser: auto goes alone" "goes alone" "$POUT"
+parse_run --p2p-committee=auto --json
+check_lacks "parser: =auto is a verb" "takes on, off" "$POUT"
 
 # --- on: happy path -------------------------------------------------------------
 fixture
@@ -1138,6 +1147,9 @@ detect_installed_nodes() { echo "telcoin.service"; }
 fw_p2p_ports() { printf '49590 primary\n49594 worker-0\n'; }
 caddy_serves_public_edge() { return 1; }
 ip() { return 1; }
+# --p2p-committee auto: the registry read and the ownership test are stubs
+node_stake_status() { printf '%s\n' "${STAKE_LINE:-}"; return "${STAKE_RC:-0}"; }
+fw_auto_file_ok() { [[ "${OWN_OK:-true}" == true ]]; }
 if [[ -n "${OLDLIB:-}" ]]; then
     unset -f tn_p2p_allow_install
 fi
@@ -1564,5 +1576,206 @@ systemctl enable "$FW_ALLOW_TIMER" > /dev/null
 jstatus
 check "json committee on, timer unit file gone: timer false" '{"enabled":true,"persistent":false,"timer":false,"reason":null,'"${TOOL_LINE#\{}" "$PC"
 unset TN_P2P_STUB_OUT_STATUS_JSON
+
+# --- auto: off removes the timer, status reports it, auto reconciles ---------------------
+# node_stake_status and fw_auto_file_ok are stubs; the runner, the units and the
+# record go through the fixture's tn_write_root_file, so WRITES and the files
+# under $R show what auto wrote. STAKE_LINE, STAKE_RC and OWN_OK are exported
+# for the driver's stubs too.
+AUTOU="$R/etc/systemd/system/telcoin-p2p-committee.service"
+AUTOT="$R/etc/systemd/system/telcoin-p2p-committee.timer"
+AUTOR="$R/usr/local/libexec/telcoin/tn-p2p-committee-auto"
+AUTOD="$R/var/lib/telcoin-p2p-committee"
+STAKE_CALLS="$T/stake.calls"
+ADDR=0x1111111111111111111111111111111111111111
+export STAKE_LINE="" STAKE_RC=0 OWN_OK=true
+node_stake_status() { printf '%s\n' "$*" >> "$STAKE_CALLS"; printf '%s\n' "${STAKE_LINE:-}"; return "${STAKE_RC:-0}"; }
+fw_auto_file_ok() { [[ "${OWN_OK:-true}" == true ]]; }
+auto_present() { [[ -e "$AUTOU" || -e "$AUTOT" || -e "$AUTOR" || -e "$AUTOD" ]]; }
+auto_fixture() { fixture "$@"; rm -rf "$AUTOU" "$AUTOT" "$AUTOR" "$AUTOD"; : > "$STAKE_CALLS"; FW_AUTO_INFLIGHT=""; FW_AUTO_UNITS_REMOVED=false; STAKE_LINE=""; STAKE_RC=0; OWN_OK=true; }
+auto_units_put() { echo x > "$AUTOU"; echo x > "$AUTOT"; echo x > "$AUTOR"; mkdir -p "$AUTOD"; printf '2026-11-25T10:00:00Z Active on 0\n' > "$AUTOD/last"; }
+last_rec() { cut -d' ' -f2- "$AUTOD/last" 2>/dev/null; }
+
+# an operator's off removes the timer, its service, the runner and the record
+# (the fixture's copy of the sync binary counts as an allowlist leftover, so it
+# goes first and off has nothing else to do)
+auto_fixture
+auto_units_put
+rm -f "$TN_P2P_ALLOW_BIN"
+run fw_committee_off
+check_rc "off (auto installed, mode off): rc 0" 0 "$RC"
+check "off (auto installed, mode off): everything of auto gone" "no" "$(yn auto_present)"
+check_in "off (auto installed, mode off): says the timer went" "off already; the auto timer was removed" "$OUT"
+check "off (auto installed, mode off): systemctl order" "disable --now telcoin-p2p-committee.timer
+stop telcoin-p2p-committee.service
+daemon-reload" "$(grep -v '^is-' "$SYSTEMCTL_LOG")"
+# auto's own off keeps them
+auto_fixture
+auto_units_put
+rm -f "$TN_P2P_ALLOW_BIN"
+FW_AUTO_INFLIGHT=true
+run fw_committee_off
+FW_AUTO_INFLIGHT=""
+check_rc "off (auto in flight): rc 0" 0 "$RC"
+check "off (auto in flight): everything of auto kept" "yes" "$(yn auto_present)"
+check_in "off (auto in flight): nothing to do" "off already; nothing to do" "$OUT"
+check_lacks "off (auto in flight): the auto units not touched" "telcoin-p2p-committee" "$(cat "$SYSTEMCTL_LOG")"
+# the kill switch with the mode on: the allowlist goes, and so does auto
+auto_fixture
+run fw_committee_on
+simulate_apply
+auto_units_put
+: > "$SYSTEMCTL_LOG"
+run fw_committee_off
+check_rc "off (auto installed, mode on): rc 0" 0 "$RC"
+check "off (auto installed, mode on): everything of auto gone" "no" "$(yn auto_present)"
+check_has "off (auto installed, mode on): P2P_COMMITTEE=off" "P2P_COMMITTEE=off" "$(cat "$META")"
+check_has "off (auto installed, mode on): the auto timer stopped" "disable --now telcoin-p2p-committee.timer" "$(cat "$SYSTEMCTL_LOG")"
+
+# --- status: the Auto line --------------------------------------------------------------------
+auto_fixture
+run fw_committee_report
+check_rc "report (auto not installed): rc 0" 0 "$RC"
+check_in "report (auto not installed): how to install it" "Auto: not installed (sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee auto follows the ConsensusRegistry)" "$OUT"
+echo x > "$AUTOT"
+run fw_committee_report
+check_in "report (timer, no record): no run yet" "Auto: telcoin-p2p-committee.timer installed; no run recorded yet" "$OUT"
+mkdir -p "$AUTOD"; printf '2026-11-25T10:00:00Z Active on 0\n' > "$AUTOD/last"
+run fw_committee_report
+check_in "report (timer, a record): the last run" "Auto: telcoin-p2p-committee.timer installed; last run 2026-11-25T10:00:00Z: registry status Active, mode on, exit 0" "$OUT"
+printf '2026-11-25T10:30:00Z unreadable none 1\n' > "$AUTOD/last"
+run fw_committee_report
+check_in "report (timer, an unreadable run): mode unchanged" "last run 2026-11-25T10:30:00Z: registry status unreadable, mode unchanged, exit 1" "$OUT"
+
+# --- dispatch: auto, through main with the real on and off ------------------------------------
+auto_fixture "VALIDATOR_ADDRESS=$ADDR"
+STAKE_LINE="3 0 0 0"
+drun --p2p-committee auto
+check_rc "dispatch auto (Active): rc 0" 0 "$RC"
+check_has "dispatch auto (Active): P2P_COMMITTEE=on" "P2P_COMMITTEE=on" "$(cat "$META")"
+check "dispatch auto (Active): the runner and the units written" "yes" "$(yn test -f "$AUTOR" -a -f "$AUTOU" -a -f "$AUTOT")"
+check "dispatch auto (Active): the record" "Active on 0" "$(last_rec)"
+check_has "dispatch auto (Active): ownership migration first (fw_wants_meta_write auto)" "migrate" "$(cat "$WRITES")"
+check_in "dispatch auto (Active): summary" "P2P committee auto: registry status Active; mode on; timer installed; exit 0" "$OUT"
+simulate_apply
+STAKE_LINE="5 0 0 0"
+drun --p2p-committee=auto
+check_rc "dispatch --p2p-committee=auto (Exited): rc 0" 0 "$RC"
+check_has "dispatch auto (Exited): P2P_COMMITTEE=off" "P2P_COMMITTEE=off" "$(cat "$META")"
+check "dispatch auto (Exited): the allowlist gone, the auto units kept" "no yes" "$(yn allow_present) $(yn test -f "$AUTOT" -a -f "$AUTOU" -a -f "$AUTOR")"
+check "dispatch auto (Exited): the record" "Exited off 0" "$(last_rec)"
+check_in "dispatch auto (Exited): summary" "registry status Exited; mode off; timer installed; exit 0" "$OUT"
+
+# --- auto: reconcile (on and off are counted stubs from here on) ------------------------------
+ON_CALLS=0; OFF_CALLS=0; OFF_INFLIGHT=""; ON_RC=0
+fw_committee_on() {
+    ON_CALLS=$((ON_CALLS + 1))
+    if [[ "${ON_RC:-0}" -eq 0 ]] && ! grep -q '^P2P_COMMITTEE=on$' "$META"; then printf 'P2P_COMMITTEE=on\n' >> "$META"; fi
+    return "${ON_RC:-0}"
+}
+fw_committee_off() { OFF_CALLS=$((OFF_CALLS + 1)); OFF_INFLIGHT="$FW_AUTO_INFLIGHT"; return 0; }
+auto_case() { auto_fixture "VALIDATOR_ADDRESS=$ADDR" "$@"; ON_CALLS=0; OFF_CALLS=0; OFF_INFLIGHT=""; ON_RC=0; }
+for st in 2:PendingActivation 3:Active 4:PendingExit; do
+    auto_case
+    STAKE_LINE="${st%%:*} 0 0 0"
+    run fw_committee_auto
+    check_rc "auto (${st#*:}): rc 0" 0 "$RC"
+    check "auto (${st#*:}): on once, off never" "1 0" "$ON_CALLS $OFF_CALLS"
+    check "auto (${st#*:}): the record" "${st#*:} on 0" "$(last_rec)"
+    check "auto (${st#*:}): one stake read" "$ADDR" "$(cat "$STAKE_CALLS")"
+    check "auto (${st#*:}): the record, the runner and the units written" "${AUTOD}/last 0644
+${AUTOR} 0755
+${AUTOU} 0644
+${AUTOT} 0644" "$(grep 'p2p-committee' "$WRITES" | grep -v '^layout')"
+    check "auto (${st#*:}): the record dir laid out root 0755" "layout ${AUTOD} root 0755" "$(grep '^layout' "$WRITES")"
+    check "auto (${st#*:}): daemon-reload, then the timer enabled" "daemon-reload
+enable --now telcoin-p2p-committee.timer" "$(grep -v '^is-' "$SYSTEMCTL_LOG")"
+    check_in "auto (${st#*:}): summary" "P2P committee auto: registry status ${st#*:}; mode on; timer installed; exit 0" "$OUT"
+done
+for st in 5:Exited 0:Undefined 1:Staked 6:Retired none:NoConsensusNFT; do
+    auto_case
+    STAKE_LINE="${st%%:*} 0 0 0"
+    run fw_committee_auto
+    check_rc "auto (${st#*:}): rc 0" 0 "$RC"
+    check "auto (${st#*:}): off once with FW_AUTO_INFLIGHT, on never" "0 1 true" "$ON_CALLS $OFF_CALLS $OFF_INFLIGHT"
+    check "auto (${st#*:}): the record" "${st#*:} off 0" "$(last_rec)"
+    check "auto (${st#*:}): the timer installed" "yes" "$(yn test -f "$AUTOT")"
+    check_in "auto (${st#*:}): summary" "registry status ${st#*:}; mode unchanged; timer installed; exit 0" "$OUT"
+done
+# the status cannot be read: nothing changes, the timer still goes in, exit 1
+auto_case
+STAKE_LINE="unknown rpc-error 429 too many requests"; STAKE_RC=2
+run fw_committee_auto
+check_rc "auto (unreadable): rc 1" 1 "$RC"
+check "auto (unreadable): neither on nor off" "0 0" "$ON_CALLS $OFF_CALLS"
+check "auto (unreadable): the record" "unreadable none 1" "$(last_rec)"
+check_in "auto (unreadable): says so and tries again" "could not be read from the ConsensusRegistry over the local RPC (unknown rpc-error 429 too many requests); P2P committee mode stays as it is, and the next auto run tries again" "$OUT"
+check "auto (unreadable): the timer still installed" "yes" "$(yn test -f "$AUTOT")"
+check_in "auto (unreadable): summary" "registry status unreadable; mode unchanged; timer installed; exit 1" "$OUT"
+# a bad address: refused, nothing changed, no timer
+auto_case
+STAKE_LINE="unknown bad-address"; STAKE_RC=1
+run fw_committee_auto
+check_rc "auto (bad address): rc 1" 1 "$RC"
+check "auto (bad address): nothing called, nothing written" "0 0 no" "$ON_CALLS $OFF_CALLS $(yn auto_present)"
+check_in "auto (bad address): says so" "VALIDATOR_ADDRESS in .node-meta is not an address (${ADDR})" "$OUT"
+# no VALIDATOR_ADDRESS: refused before any read
+auto_fixture
+ON_CALLS=0; OFF_CALLS=0
+run fw_committee_auto
+check_rc "auto (no VALIDATOR_ADDRESS): rc 1" 1 "$RC"
+check "auto (no VALIDATOR_ADDRESS): no stake read, nothing called, nothing written" " 0 0 no" "$(cat "$STAKE_CALLS") $ON_CALLS $OFF_CALLS $(yn auto_present)"
+check_in "auto (no VALIDATOR_ADDRESS): says so" "VALIDATOR_ADDRESS is not in .node-meta (prepare-stake.sh writes it), so --p2p-committee auto has nothing to follow" "$OUT"
+auto_fixture "VALIDATOR_ADDRESS=$ADDR" "VALIDATOR_ADDRESS=$ADDR"
+run fw_committee_auto
+check_rc "auto (VALIDATOR_ADDRESS twice): rc 1" 1 "$RC"
+check_in "auto (VALIDATOR_ADDRESS twice): says so" "set more than once" "$OUT"
+# an older library: refused with 2
+auto_case
+unset -f node_stake_status
+run fw_committee_auto
+check_rc "auto (older library): rc 2" 2 "$RC"
+check_in "auto (older library): names the function" "lacks node_stake_status" "$OUT"
+node_stake_status() { printf '%s\n' "$*" >> "$STAKE_CALLS"; printf '%s\n' "${STAKE_LINE:-}"; return "${STAKE_RC:-0}"; }
+# the checkout fails the ownership test: the mode still follows, the timer does not go in
+auto_case
+STAKE_LINE="3 0 0 0"; OWN_OK=false
+run fw_committee_auto
+check_rc "auto (checkout not root-owned): rc 1" 1 "$RC"
+check "auto (checkout not root-owned): on still ran" "1 0" "$ON_CALLS $OFF_CALLS"
+check "auto (checkout not root-owned): no unit, no runner" "no" "$(yn test -e "$AUTOT" -o -e "$AUTOU" -o -e "$AUTOR")"
+check "auto (checkout not root-owned): the record" "Active on 0" "$(last_rec)"
+check_in "auto (checkout not root-owned): names the files and the fix" "The timer was not installed: ${SCRIPT_DIR}/firewall-setup.sh ${SCRIPT_DIR}/lib/common.sh ${SCRIPT_DIR}/lib/fallback.sh must be root-owned, with no group or world write bit, in a root-owned directory (sudo chown -R root:root ${SCRIPT_DIR} && sudo chmod -R go-w ${SCRIPT_DIR}); run this again after that." "$OUT"
+check_in "auto (checkout not root-owned): summary" "registry status Active; mode on; timer not installed; exit 1" "$OUT"
+# on fails: its code comes through, the timer still goes in
+auto_case
+STAKE_LINE="3 0 0 0"; ON_RC=2
+run fw_committee_auto
+check_rc "auto (on failed): rc 2" 2 "$RC"
+check "auto (on failed): the record" "Active on 2" "$(last_rec)"
+check_in "auto (on failed): summary" "registry status Active; mode unchanged; timer installed; exit 2" "$OUT"
+ON_RC=0
+# the runner and the units: what they hold; a second run rewrites nothing
+auto_case
+STAKE_LINE="3 0 0 0"
+run fw_committee_auto
+check "runner: bash -n" 0 "$(bash -n "$AUTOR" 2>/dev/null; echo $?)"
+check_has "runner: the checkout" "dir='${SCRIPT_DIR}'" "$(cat "$AUTOR")"
+check_has "runner: runs auto from it" 'exec /bin/bash "$dir/firewall-setup.sh" --p2p-committee auto' "$(cat "$AUTOR")"
+check_in "runner: the write-bit test" '*[2367]?|*[2367])' "$(cat "$AUTOR")"
+check_has "service: ExecStart" "ExecStart=/usr/local/libexec/telcoin/tn-p2p-committee-auto" "$(cat "$AUTOU")"
+check_has "service: Type" "Type=oneshot" "$(cat "$AUTOU")"
+check_lacks "service: no [Install]" "[Install]" "$(cat "$AUTOU")"
+check_has "timer: OnBootSec" "OnBootSec=5min" "$(cat "$AUTOT")"
+check_has "timer: OnUnitActiveSec" "OnUnitActiveSec=30min" "$(cat "$AUTOT")"
+check_has "timer: Unit" "Unit=telcoin-p2p-committee.service" "$(cat "$AUTOT")"
+check_has "timer: WantedBy" "WantedBy=timers.target" "$(cat "$AUTOT")"
+check_lacks "auto units: no fixture prefix" "$R" "$(cat "$AUTOU" "$AUTOT" "$AUTOR")"
+: > "$WRITES"; : > "$SYSTEMCTL_LOG"
+run fw_committee_auto
+check_rc "auto again: rc 0" 0 "$RC"
+check "auto again: only the record written" "${AUTOD}/last 0644" "$(grep -v '^layout' "$WRITES")"
+check "auto again: no daemon-reload, the timer enabled again" "enable --now telcoin-p2p-committee.timer" "$(grep -v '^is-' "$SYSTEMCTL_LOG")"
+check_in "auto again: summary" "registry status Active; mode unchanged; timer installed; exit 0" "$OUT"
 
 finish

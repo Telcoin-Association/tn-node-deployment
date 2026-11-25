@@ -755,16 +755,23 @@ _rm_p2p_limit() {
 # run held it for 30 seconds, it cannot be opened, or flock is missing), the
 # table and the state directory stay the same way, said, and the binary still
 # goes, as off removes it. With no state directory, or a symlink there, there is
-# no lock to take and the table is deleted without it. Never fails.
+# no lock to take and the table is deleted without it. The units of
+# --p2p-committee auto (telcoin-p2p-committee.timer, stopped first, and
+# telcoin-p2p-committee.service), its runner
+# /usr/local/libexec/telcoin/tn-p2p-committee-auto (never through a symlinked
+# libexec dir) and its record directory /var/lib/telcoin-p2p-committee (a real
+# directory only) go the same way, with no lock to take. Never fails.
 _rm_p2p_allow() {
     local r="$TN_RM_ROOT" u f any=false tables keep=false try=false held=false old_umask
     local dir=/var/lib/telcoin-p2p-allow bin=/usr/local/libexec/telcoin/tn-p2p-allow-sync
-    for u in telcoin-p2p-allow-sync.timer telcoin-p2p-allow-sync.service telcoin-p2p-allow.service; do
+    local adir=/var/lib/telcoin-p2p-committee abin=/usr/local/libexec/telcoin/tn-p2p-committee-auto
+    for u in telcoin-p2p-committee.timer telcoin-p2p-committee.service telcoin-p2p-allow-sync.timer telcoin-p2p-allow-sync.service telcoin-p2p-allow.service; do
         f="/etc/systemd/system/${u}"
         [[ -e "${r}${f}" || -L "${r}${f}" ]] || continue
         any=true
-        # the sync service has no [Install] section, so it is only stopped
-        if [[ "$u" == telcoin-p2p-allow-sync.service ]]; then
+        # the sync service and the auto service have no [Install] section, so
+        # they are only stopped
+        if [[ "$u" == telcoin-p2p-allow-sync.service || "$u" == telcoin-p2p-committee.service ]]; then
             systemctl stop "$u" >/dev/null 2>&1 || true
         else
             systemctl disable --now "$u" >/dev/null 2>&1 || true
@@ -825,6 +832,16 @@ _rm_p2p_allow() {
     if [[ ! -L "${r}/usr/local/libexec/telcoin" ]] && [[ -e "${r}${bin}" || -L "${r}${bin}" ]]; then
         rm -f -- "${r}${bin}" 2>/dev/null || true
         print_ok "Removed ${bin}"
+    fi
+    if [[ ! -L "${r}/usr/local/libexec/telcoin" ]] && [[ -e "${r}${abin}" || -L "${r}${abin}" ]]; then
+        rm -f -- "${r}${abin}" 2>/dev/null || true
+        print_ok "Removed ${abin}"
+    fi
+    if [[ -L "${r}${adir}" ]]; then
+        print_warn "${adir} is a symlink: it is left in place. Check where it points and remove it by hand."
+    elif [[ -d "${r}${adir}" ]]; then
+        rm -rf -- "${r}${adir}" 2>/dev/null || true
+        print_ok "Removed ${adir}"
     fi
     if [[ -L "${r}${dir}" ]]; then
         print_warn "${dir} is a symlink: it is left in place. Check where it points and remove it by hand."
@@ -943,6 +960,16 @@ rm_leftovers_present() {
         || [[ -d "${r}/var/lib/telcoin-p2p-allow" && ! -L "${r}/var/lib/telcoin-p2p-allow" ]]; then
         return 0
     fi
+    # so do the auto timer of --p2p-committee auto, its runner (under a real
+    # libexec dir) and its record directory (a real one)
+    if [[ -e "${r}/etc/systemd/system/telcoin-p2p-committee.timer" || -L "${r}/etc/systemd/system/telcoin-p2p-committee.timer" ]] \
+        || [[ -d "${r}/var/lib/telcoin-p2p-committee" && ! -L "${r}/var/lib/telcoin-p2p-committee" ]]; then
+        return 0
+    fi
+    if [[ -d "${r}/usr/local/libexec/telcoin" && ! -L "${r}/usr/local/libexec/telcoin" ]] \
+        && [[ -e "${r}/usr/local/libexec/telcoin/tn-p2p-committee-auto" || -L "${r}/usr/local/libexec/telcoin/tn-p2p-committee-auto" ]]; then
+        return 0
+    fi
     if [[ -d "${r}/usr/local/libexec/telcoin" && ! -L "${r}/usr/local/libexec/telcoin" ]]; then
         for m in source docker; do
             f="$(tn_start_script_path "$m")" || continue
@@ -1005,6 +1032,16 @@ remove_leftovers() {
     fi
     if [[ -d "${r}/var/lib/telcoin-p2p-allow" && ! -L "${r}/var/lib/telcoin-p2p-allow" ]]; then
         shown+=("/var/lib/telcoin-p2p-allow (the P2P committee allowlist's state)")
+    fi
+    if [[ -e "${r}/etc/systemd/system/telcoin-p2p-committee.timer" || -L "${r}/etc/systemd/system/telcoin-p2p-committee.timer" ]]; then
+        shown+=("/etc/systemd/system/telcoin-p2p-committee.timer (--p2p-committee auto, its service and its runner)")
+    fi
+    if [[ -d "${r}/usr/local/libexec/telcoin" && ! -L "${r}/usr/local/libexec/telcoin" ]] \
+        && [[ -e "${r}/usr/local/libexec/telcoin/tn-p2p-committee-auto" || -L "${r}/usr/local/libexec/telcoin/tn-p2p-committee-auto" ]]; then
+        shown+=("/usr/local/libexec/telcoin/tn-p2p-committee-auto (the runner of --p2p-committee auto)")
+    fi
+    if [[ -d "${r}/var/lib/telcoin-p2p-committee" && ! -L "${r}/var/lib/telcoin-p2p-committee" ]]; then
+        shown+=("/var/lib/telcoin-p2p-committee (the last-run record of --p2p-committee auto)")
     fi
     if [[ -e "${r}/etc/systemd/system/telcoin-p2p-limit.service" || -L "${r}/etc/systemd/system/telcoin-p2p-limit.service" ]]; then
         shown+=("/etc/systemd/system/telcoin-p2p-limit.service (the P2P new-flow limit, and its nftables table)")

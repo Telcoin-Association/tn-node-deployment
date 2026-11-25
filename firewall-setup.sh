@@ -7,13 +7,17 @@
 #
 # USAGE:
 #   sudo bash firewall-setup.sh
-#   sudo bash firewall-setup.sh --p2p-committee on|off|sync|status
+#   sudo bash firewall-setup.sh --p2p-committee on|off|auto|sync|status
 #       P2P committee allowlist: on lets only the sources the node's admission
 #       snapshot lists (plus the bootstrap floor and P2P_ALLOW_FROM) reach the P2P
 #       ports, and a timer keeps it in step with the committee; off is the kill
 #       switch: the P2P ports open to every source behind the new-flow limit,
 #       whatever P2P_ALLOW_FROM holds (--enable --p2p-from applies a list to ufw
-#       again); sync resyncs now; status prints its state.
+#       again); auto reads the validator's status from the ConsensusRegistry
+#       through the local node and turns the mode on or off to match, and
+#       installs a timer that runs it again every 30 minutes (off removes that
+#       timer; auto, not on, resumes the following); sync resyncs now; status
+#       prints its state.
 #   sudo bash firewall-setup.sh --p2p-committee sync --accept-floor-shrink
 #       A resync never drops an address from the allowlist floor on its own:
 #       one whose files no longer hold an address the floor has keeps the floor
@@ -75,6 +79,16 @@ readonly FW_ALLOW_TIMER="telcoin-p2p-allow-sync.timer"
 # default, /usr/sbin/nft, because neither its units nor the verbs pass --nft,
 # so `on` requires that path and the boot unit loads the table with it too.
 readonly FW_ALLOW_NFT="/usr/sbin/nft"
+# The units of --p2p-committee auto (fw_auto_units_install): the service that
+# runs the root-owned runner, which checks the ownership of this checkout and
+# then runs `firewall-setup.sh --p2p-committee auto` from it, and the timer that
+# starts that service. FW_AUTO_DIR holds "last", the record of the last auto run
+# (fw_auto_record), which --p2p-committee status prints.
+readonly FW_AUTO_SVC="telcoin-p2p-committee.service"
+readonly FW_AUTO_TIMER="telcoin-p2p-committee.timer"
+readonly FW_AUTO_RUNNER_PATH="/usr/local/libexec/telcoin/tn-p2p-committee-auto"
+readonly FW_AUTO_RUNNER="${TN_ROOT_PREFIX:-}${FW_AUTO_RUNNER_PATH}"
+readonly FW_AUTO_DIR="${TN_ROOT_PREFIX:-}/var/lib/telcoin-p2p-committee"
 
 # Source lists for this run: --ssh-from / --p2p-from (comma lists or a file), and
 # --ssh-anywhere / --p2p-anywhere (drop a stored list). Empty = not given.
@@ -90,7 +104,8 @@ FW_GW_NONE=false
 # Set by fw_load_network: true when no node is installed here (no .node-meta) but
 # a worker gateway is (tn_gateway_installed); NETWORK then comes from gateway.meta.
 FW_GW_ONLY=false
-# The --p2p-committee verb of this run (on, off, sync or status); empty without one.
+# The --p2p-committee verb of this run (on, off, auto, sync or status); empty
+# without one.
 FW_COMMITTEE_VERB=""
 # --accept-floor-shrink of this run: a resync may capture a floor without
 # addresses the saved floor has (fw_allow_capture_floor keep).
@@ -143,6 +158,12 @@ FW_COMMITTEE_ACTIVE=false
 # P2P_COMMITTEE=off is. fw_on_exit then takes committee mode off again, or
 # finishes taking it off (fw_allow_on_exit).
 FW_ALLOW_INFLIGHT=""
+# true while fw_committee_auto runs fw_committee_on or fw_committee_off, so that
+# an off from auto (or from the undo of an on that failed) keeps the auto timer;
+# an operator's off removes it (fw_auto_units_remove), which sets
+# FW_AUTO_UNITS_REMOVED=true when anything of auto was there.
+FW_AUTO_INFLIGHT=""
+FW_AUTO_UNITS_REMOVED=false
 # Set by fw_p2p_open, the kill switch's P2P rules: the ports whose open rule
 # ufw refused (space separated), and the per-source rules it could not delete
 # (one `ufw delete ...` command per line).
@@ -1473,7 +1494,7 @@ fw_allow_floor_warn() {
 }
 
 # -----------------------------------------------------------------------------
-# P2P committee allowlist (--p2p-committee on|off|sync|status)
+# P2P committee allowlist (--p2p-committee on|off|auto|sync|status)
 # -----------------------------------------------------------------------------
 # tn-p2p-allow-sync loads nftables table inet tn_p2p_allow from the node's
 # tn_admissionSnapshot: listed sources go on to ufw's P2P rules, every other
@@ -2314,8 +2335,11 @@ fw_committee_sync_run() {
 # new-flow limit first, then the units, the table, FW_ALLOW_DIR and the binary),
 # then P2P_COMMITTEE=off in .node-meta and the host baseline. P2P_ALLOW_FROM
 # stays for committee mode; --enable --p2p-from applies a list to ufw again. It
-# never runs tn-p2p-allow-sync, so it also works with an older library. Nothing
-# to do when P2P_COMMITTEE is off and nothing of the allowlist is on the host.
+# never runs tn-p2p-allow-sync, so it also works with an older library. It
+# removes the auto timer, its service, the runner and the last-run record
+# (fw_auto_units_remove) unless auto itself runs it (FW_AUTO_INFLIGHT), so an
+# operator's off holds until --p2p-committee auto is run again. Nothing to do
+# when P2P_COMMITTEE is off and nothing of the allowlist is on the host.
 # Until P2P_COMMITTEE=off is written a stop is finished by fw_allow_on_exit. A
 # P2P_ALLOW_FROM it cannot use (an invalid entry, the key set twice) does not
 # stop it, since it applies no list: the value stays as it is, and a warning
@@ -2338,8 +2362,15 @@ fw_committee_off() {
     if ! mode="$(addon_meta_get P2P_COMMITTEE off)"; then
         return 1
     fi
+    # An operator's off removes the auto timer, so the off holds until auto is
+    # run again; auto's own off (FW_AUTO_INFLIGHT) keeps it.
+    [[ "$FW_AUTO_INFLIGHT" == true ]] || fw_auto_units_remove
     if [[ "$mode" != "on" ]] && ! fw_allow_leftovers; then
-        print_info "P2P committee mode is off already; nothing to do."
+        if [[ "$FW_AUTO_UNITS_REMOVED" == true ]]; then
+            print_info "P2P committee mode is off already; the auto timer was removed."
+        else
+            print_info "P2P committee mode is off already; nothing to do."
+        fi
         return 0
     fi
     FW_ALLOW_INFLIGHT="off"
@@ -2423,7 +2454,339 @@ fw_allow_unit_why() {
     esac
 }
 
-# fw_committee_report -- the status screen's lines for the P2P committee
+# -----------------------------------------------------------------------------
+# --p2p-committee auto: the mode follows the ConsensusRegistry
+# -----------------------------------------------------------------------------
+# fw_committee_auto reads the validator's status (node_stake_status on
+# VALIDATOR_ADDRESS from .node-meta) and runs on or off to match, then installs
+# FW_AUTO_TIMER, which runs this verb again as root through FW_AUTO_RUNNER. The
+# timer runs this checkout as root, so the runner and auto both refuse a checkout
+# that is not root-owned with no group or world write bit (fw_auto_scripts_ok).
+
+# fw_auto_files -- the files of this checkout the runner and the timer install
+# test: this script, lib/common.sh and what it sources.
+fw_auto_files() {
+    printf '%s\n' "${SCRIPT_DIR}/firewall-setup.sh" "${SCRIPT_DIR}/lib/common.sh" "${SCRIPT_DIR}/lib/fallback.sh"
+}
+
+# fw_auto_file_ok FILE -- rc 0 when FILE is a regular file (not a symlink) owned
+# by uid 0, not group- or other-writable, in a directory that passes
+# tn_root_dir_ok (the test setup-vpn.sh applies to the VPN self-heal files).
+fw_auto_file_ok() {
+    local f="${1:-}" st
+    [[ "$f" == /* && -f "$f" && ! -L "$f" ]] || return 1
+    st="$(stat -c '%u %a' -- "$f" 2>/dev/null)" || return 1
+    [[ "${st%% *}" == 0 ]] || return 1
+    case "${st##* }" in
+        *[2367]?|*[2367]) return 1 ;;
+    esac
+    tn_root_dir_ok "${f%/*}"
+}
+
+# fw_auto_scripts_ok -- rc 0 when every file of fw_auto_files passes
+# fw_auto_file_ok; else rc 1 with FW_AUTO_BAD naming the files that do not
+# (space separated).
+fw_auto_scripts_ok() {
+    local f
+    FW_AUTO_BAD=""
+    while IFS= read -r f; do
+        fw_auto_file_ok "$f" || FW_AUTO_BAD="${FW_AUTO_BAD:+${FW_AUTO_BAD} }${f}"
+    done <<< "$(fw_auto_files)"
+    [[ -z "$FW_AUTO_BAD" ]]
+}
+
+# fw_auto_status_name STATUS -- one word for a ConsensusRegistry status
+# (node_stake_status's first word): the record and the status line use it.
+fw_auto_status_name() {
+    case "${1:-}" in
+        0) printf 'Undefined' ;;
+        1) printf 'Staked' ;;
+        2) printf 'PendingActivation' ;;
+        3) printf 'Active' ;;
+        4) printf 'PendingExit' ;;
+        5) printf 'Exited' ;;
+        6) printf 'Retired' ;;
+        none) printf 'NoConsensusNFT' ;;
+        *) printf '%s' "${1:-unknown}" ;;
+    esac
+}
+
+# fw_auto_record NAME DID RC -- write one line "<utc time> NAME DID RC" to
+# FW_AUTO_DIR/last (root 0644; FW_AUTO_DIR root 0755), the record
+# --p2p-committee status prints. A failure is a warning, never an error. rc 0.
+fw_auto_record() {
+    local line
+    line="$(date -u +%Y-%m-%dT%H:%M:%SZ) ${1} ${2} ${3}"
+    if [[ ! -d "$FW_AUTO_DIR" ]] && ! _tn_root_layout_dir "$FW_AUTO_DIR" root 0755 >/dev/null 2>&1; then
+        print_warn "${FW_AUTO_DIR#"${TN_ROOT_PREFIX:-}"} could not be made, so this auto run was not recorded for --p2p-committee status."
+        return 0
+    fi
+    if ! tn_write_root_file "${FW_AUTO_DIR}/last" 0644 <<< "$line"; then
+        print_warn "${FW_AUTO_DIR#"${TN_ROOT_PREFIX:-}"}/last could not be written, so this auto run was not recorded for --p2p-committee status."
+    fi
+    return 0
+}
+
+# fw_auto_runner_text -- FW_AUTO_RUNNER: checks that every file of fw_auto_files
+# and its directory are root-owned with no group or world write bit (the test of
+# fw_auto_file_ok, with stat), prints one line to stderr and exits 1 when one is
+# not, else runs this verb from this checkout.
+fw_auto_runner_text() {
+    local q="'" bs='\' dir
+    dir="${SCRIPT_DIR//$q/$q$bs$q$q}"
+    printf '%s\n' \
+        '#!/bin/bash' \
+        "# Written by firewall-setup.sh: ${FW_AUTO_SVC} runs this. It checks that the" \
+        '# scripts checkout is root-owned, with no group or world write bit, in' \
+        '# root-owned directories, then runs firewall-setup.sh --p2p-committee auto' \
+        '# from it. A checkout that fails the check is not run as root.' \
+        'set -u' \
+        "dir='${dir}'" \
+        'fix="sudo chown -R root:root ${dir} && sudo chmod -R go-w ${dir}"' \
+        'for f in "$dir/firewall-setup.sh" "$dir/lib/common.sh" "$dir/lib/fallback.sh"; do' \
+        '    if [ ! -f "$f" ] || [ -L "$f" ]; then' \
+        '        echo "tn-p2p-committee-auto: $f is not a regular file, so --p2p-committee auto was not run; run: $fix" >&2' \
+        '        exit 1' \
+        '    fi' \
+        '    for p in "$f" "${f%/*}"; do' \
+        '        st="$(stat -c '"'"'%u %a'"'"' -- "$p" 2>/dev/null)" || st=""' \
+        '        case "$st" in' \
+        '            "0 "*) ;;' \
+        '            *) echo "tn-p2p-committee-auto: $p is not root-owned, so --p2p-committee auto was not run; run: $fix" >&2; exit 1 ;;' \
+        '        esac' \
+        '        case "${st##* }" in' \
+        '            *[2367]?|*[2367]) echo "tn-p2p-committee-auto: $p is group- or world-writable, so --p2p-committee auto was not run; run: $fix" >&2; exit 1 ;;' \
+        '        esac' \
+        '    done' \
+        'done' \
+        'exec /bin/bash "$dir/firewall-setup.sh" --p2p-committee auto'
+}
+
+# fw_auto_unit_service_text -- telcoin-p2p-committee.service: one run of the
+# runner as root. No [Install]: the timer starts it.
+fw_auto_unit_service_text() {
+    printf '%s\n' \
+        "# Written by firewall-setup.sh: runs ${FW_AUTO_RUNNER_PATH} once, which makes" \
+        "# P2P committee mode follow the validator's ConsensusRegistry status." \
+        '[Unit]' \
+        'Description=Telcoin Network P2P committee mode follows the ConsensusRegistry' \
+        'After=network-online.target' \
+        'Wants=network-online.target' \
+        '' \
+        '[Service]' \
+        'Type=oneshot' \
+        '# Root-owned runner; it checks the ownership of the scripts checkout before it runs it.' \
+        "ExecStart=${FW_AUTO_RUNNER_PATH}"
+}
+
+# fw_auto_unit_timer_text -- telcoin-p2p-committee.timer: a run five minutes
+# after boot, then thirty minutes after each run, spread over two minutes. A
+# registry status changes at an epoch boundary with hours of lead, so a short
+# interval is not needed.
+fw_auto_unit_timer_text() {
+    printf '%s\n' \
+        "# Written by firewall-setup.sh: starts ${FW_AUTO_SVC} five minutes after" \
+        '# boot, then thirty minutes after each run.' \
+        '[Unit]' \
+        'Description=Telcoin Network P2P committee mode timer' \
+        '' \
+        '[Timer]' \
+        'OnBootSec=5min' \
+        'OnUnitActiveSec=30min' \
+        'AccuracySec=1min' \
+        'RandomizedDelaySec=2min' \
+        "Unit=${FW_AUTO_SVC}" \
+        '' \
+        '[Install]' \
+        'WantedBy=timers.target'
+}
+
+# fw_auto_units_install -- write the runner (root 0755, skipped when identical),
+# the service and the timer (fw_allow_unit_put), daemon-reload when a unit was
+# written, then enable and start the timer. rc 0; 2 a write, the reload or
+# systemctl failed (said).
+fw_auto_units_install() {
+    local dir="${FW_AUTO_RUNNER%/*}" text
+    FW_ALLOW_UNITS_CHANGED=false
+    if [[ ! -d "$dir" ]] && ! _tn_root_layout_dir "$dir" root 0755 >/dev/null 2>&1; then
+        fw_error "${FW_AUTO_RUNNER_PATH%/*} could not be made a root directory, so the P2P committee auto timer was not installed."
+        return 2
+    fi
+    text="$(fw_auto_runner_text)"
+    if [[ ! -f "$FW_AUTO_RUNNER" || -L "$FW_AUTO_RUNNER" || "$(cat -- "$FW_AUTO_RUNNER" 2>/dev/null)" != "$text" ]]; then
+        if ! tn_write_root_file "$FW_AUTO_RUNNER" 0755 <<< "$text"; then
+            fw_error "${FW_AUTO_RUNNER_PATH} could not be written, so the P2P committee auto timer was not installed."
+            return 2
+        fi
+    fi
+    fw_allow_unit_put "$FW_AUTO_SVC" "$(fw_auto_unit_service_text)" || return 2
+    fw_allow_unit_put "$FW_AUTO_TIMER" "$(fw_auto_unit_timer_text)" || return 2
+    if [[ "$FW_ALLOW_UNITS_CHANGED" == "true" ]] && ! systemctl daemon-reload >/dev/null 2>&1; then
+        fw_error "systemctl daemon-reload failed after the P2P committee auto units were written."
+        return 2
+    fi
+    if ! systemctl enable --now "$FW_AUTO_TIMER" >/dev/null 2>&1; then
+        fw_error "systemctl could not enable and start ${FW_AUTO_TIMER}."
+        return 2
+    fi
+    return 0
+}
+
+# fw_auto_units_remove -- stop the timer (disable --now) and the service (stop;
+# it has no [Install]) and remove their unit files, daemon-reload when one was
+# there, then remove the runner and FW_AUTO_DIR (a real directory only). Sets
+# FW_AUTO_UNITS_REMOVED=true when anything was removed. Never fails.
+fw_auto_units_remove() {
+    local u f any=false
+    FW_AUTO_UNITS_REMOVED=false
+    for u in "$FW_AUTO_TIMER" "$FW_AUTO_SVC"; do
+        f="$(fw_allow_unit_path "$u")"
+        [[ -e "$f" || -L "$f" ]] || continue
+        any=true
+        if [[ "$u" == "$FW_AUTO_SVC" ]]; then
+            systemctl stop "$u" >/dev/null 2>&1 || true
+        else
+            systemctl disable --now "$u" >/dev/null 2>&1 || true
+        fi
+        rm -f -- "$f" || true
+        print_ok "Removed ${f#"${TN_ROOT_PREFIX:-}"}"
+    done
+    if [[ "$any" == "true" ]]; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+    if [[ -e "$FW_AUTO_RUNNER" || -L "$FW_AUTO_RUNNER" ]]; then
+        rm -f -- "$FW_AUTO_RUNNER" || true
+        print_ok "Removed ${FW_AUTO_RUNNER_PATH}"
+        any=true
+    fi
+    if [[ -d "$FW_AUTO_DIR" && ! -L "$FW_AUTO_DIR" ]]; then
+        rm -rf -- "$FW_AUTO_DIR" || true
+        print_ok "Removed ${FW_AUTO_DIR#"${TN_ROOT_PREFIX:-}"}"
+        any=true
+    fi
+    FW_AUTO_UNITS_REMOVED="$any"
+    return 0
+}
+
+# fw_committee_auto -- firewall-setup.sh --p2p-committee auto: read the
+# validator's ConsensusRegistry status (node_stake_status on VALIDATOR_ADDRESS
+# from .node-meta, over the local RPC) and run on (PendingActivation, Active,
+# PendingExit) or off (Undefined, Staked, Exited, retired, no ConsensusNFT) to
+# match; on is a resync when the mode is on, off does nothing when it is off.
+# A status that cannot be read changes nothing, so the next run tries again.
+# Each run is recorded (fw_auto_record). Then, when this checkout passes
+# fw_auto_scripts_ok, the runner and the timer (fw_auto_units_install), which
+# runs this verb every 30 minutes. One summary line ends the run. rc 0
+# reconciled and the timer installed; 1 refused (no VALIDATOR_ADDRESS, or one
+# that is not an address: nothing changed), the status unreadable, or the timer
+# not installed (said); 2 and 3 as on and off (2 also an older library).
+fw_committee_auto() {
+    local addr line="" st name="" want="" did=none before="" after="" rc=0 arc=0 mrc=0 mode_word timer_word
+    addr="$(meta_get VALIDATOR_ADDRESS 2>/dev/null)" || mrc=$?
+    if [[ "$mrc" -eq 2 ]]; then
+        fw_error "VALIDATOR_ADDRESS is set more than once in .node-meta, so --p2p-committee auto has nothing to follow; correct it, or use on or off by hand. Nothing was changed."
+        return 1
+    fi
+    if [[ "$mrc" -ne 0 || -z "$addr" ]]; then
+        fw_error "VALIDATOR_ADDRESS is not in .node-meta (prepare-stake.sh writes it), so --p2p-committee auto has nothing to follow; use on or off by hand. Nothing was changed."
+        return 1
+    fi
+    if ! declare -F node_stake_status >/dev/null 2>&1; then
+        fw_error "lib/common.sh is older than this script (it lacks node_stake_status): run update-scripts.sh, then this again. Nothing was changed."
+        return 2
+    fi
+    line="$(node_stake_status "$addr" 2>/dev/null)" || arc=$?
+    st="${line%% *}"
+    if [[ "$arc" -eq 0 ]]; then
+        case "$st" in
+            2|3|4) want=on ;;
+            0|1|5|6|none) want=off ;;
+        esac
+    elif [[ "$arc" -eq 1 ]]; then
+        fw_error "VALIDATOR_ADDRESS in .node-meta is not an address (${addr}), so --p2p-committee auto has nothing to follow; correct it (prepare-stake.sh writes it), or use on or off by hand. Nothing was changed."
+        return 1
+    fi
+    before="$(addon_meta_get P2P_COMMITTEE off 2>/dev/null)" || before=""
+    if [[ -z "$want" ]]; then
+        name="unreadable"
+        fw_auto_record "$name" none 1
+        fw_error "The validator's status could not be read from the ConsensusRegistry over the local RPC (${line:-no answer}); P2P committee mode stays as it is, and the next auto run tries again."
+        rc=1
+    else
+        name="$(fw_auto_status_name "$st")"
+        # set around on too: an on that fails undoes itself through off
+        FW_AUTO_INFLIGHT=true
+        if [[ "$want" == "on" ]]; then
+            did=on
+            fw_committee_on || rc=$?
+        else
+            did=off
+            fw_committee_off || rc=$?
+        fi
+        FW_AUTO_INFLIGHT=""
+        fw_auto_record "$name" "$did" "$rc"
+    fi
+    after="$(addon_meta_get P2P_COMMITTEE off 2>/dev/null)" || after=""
+    if [[ "$before" == "$after" ]]; then
+        mode_word="unchanged"
+    else
+        mode_word="$after"
+    fi
+    timer_word="not installed"
+    if fw_auto_scripts_ok; then
+        if fw_auto_units_install; then
+            timer_word="installed"
+        else
+            [[ "$rc" -ne 0 ]] || rc=1
+        fi
+    else
+        fw_error "The timer was not installed: ${FW_AUTO_BAD} must be root-owned, with no group or world write bit, in a root-owned directory (sudo chown -R root:root ${SCRIPT_DIR} && sudo chmod -R go-w ${SCRIPT_DIR}); run this again after that."
+        [[ "$rc" -ne 0 ]] || rc=1
+    fi
+    if [[ "$rc" -eq 0 ]]; then
+        print_ok "P2P committee auto: registry status ${name}; mode ${mode_word}; timer ${timer_word}; exit ${rc}"
+    else
+        print_warn "P2P committee auto: registry status ${name}; mode ${mode_word}; timer ${timer_word}; exit ${rc}"
+    fi
+    return "$rc"
+}
+
+# fw_auto_report -- the status screen's auto line: whether FW_AUTO_TIMER is
+# installed and what the last run (FW_AUTO_DIR/last) read and did. rc 0.
+fw_auto_report() {
+    local f rec="${FW_AUTO_DIR}/last" d="" n="" did="" rc=""
+    f="$(fw_allow_unit_path "$FW_AUTO_TIMER")"
+    if [[ ! -e "$f" && ! -L "$f" ]]; then
+        print_info "Auto: not installed (sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee auto follows the ConsensusRegistry)"
+        return 0
+    fi
+    if [[ -f "$rec" && ! -L "$rec" ]]; then
+        read -r d n did rc < "$rec" 2>/dev/null || true
+    fi
+    if [[ -z "$d" || -z "$n" ]]; then
+        print_info "Auto: ${FW_AUTO_TIMER} installed; no run recorded yet"
+        return 0
+    fi
+    if [[ "$did" == "none" || -z "$did" ]]; then
+        did="unchanged"
+    fi
+    if [[ "$rc" == "0" ]]; then
+        print_ok "Auto: ${FW_AUTO_TIMER} installed; last run ${d}: registry status ${n}, mode ${did}, exit ${rc}"
+    else
+        print_warn "Auto: ${FW_AUTO_TIMER} installed; last run ${d}: registry status ${n}, mode ${did}, exit ${rc:-?}"
+    fi
+    return 0
+}
+
+# fw_committee_report -- firewall-setup.sh --p2p-committee status: the mode's
+# lines (fw_committee_mode_report), then the auto line (fw_auto_report). rc 0.
+fw_committee_report() {
+    fw_committee_mode_report
+    fw_auto_report
+    return 0
+}
+
+# fw_committee_mode_report -- the status screen's lines for the P2P committee
 # allowlist: off, an off that did not finish (fw_allow_off_unfinished: one error
 # line naming the rerun of off, never sync), or on with what the tool reports.
 # The tool's status file
@@ -2435,7 +2798,7 @@ fw_allow_unit_why() {
 # STALE_REASON named) and, when the status names none, a failed last run of the
 # sync unit (fw_allow_unit_why), both in check-node's words; any other reason
 # once the tool reports STALE=true.
-fw_committee_report() {
+fw_committee_mode_report() {
     local mode text="" live="" st="${FW_ALLOW_DIR}/status" bin loaded age stale result reason since acc drop why
     local fix="sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee sync"
     if ! mode="$(addon_meta_get P2P_COMMITTEE off 2>/dev/null)"; then
@@ -3281,7 +3644,7 @@ fw_persist_sources() {
 }
 
 # fw_wants_meta_write -- 0 when this run will change a stored source list, or
-# P2P_COMMITTEE (--p2p-committee on or off). On a host with a worker gateway and
+# P2P_COMMITTEE (--p2p-committee on, off or auto). On a host with a worker gateway and
 # no node (FW_GW_ONLY), only the SSH list, which gateway.meta keeps.
 fw_wants_meta_write() {
     if [[ "$FW_GW_ONLY" == "true" ]]; then
@@ -3290,7 +3653,7 @@ fw_wants_meta_write() {
     fi
     [[ -n "$FW_SSH_FROM" || -n "$FW_P2P_FROM" || "$FW_SSH_ANYWHERE" == "true" || "$FW_P2P_ANYWHERE" == "true" \
         || -n "$FW_GW_FROM" || "$FW_GW_NONE" == "true" \
-        || "$FW_COMMITTEE_VERB" == "on" || "$FW_COMMITTEE_VERB" == "off" ]] || return 1
+        || "$FW_COMMITTEE_VERB" == "on" || "$FW_COMMITTEE_VERB" == "off" || "$FW_COMMITTEE_VERB" == "auto" ]] || return 1
     node_meta_path >/dev/null 2>&1
 }
 
@@ -4259,7 +4622,7 @@ main_menu() {
 #   firewall-setup.sh --json --enable                         (recommended lockout-safe defaults)
 #   firewall-setup.sh --json --port <port>/<proto> <on|off>   (node ports only)
 #
-# The P2P committee allowlist (--p2p-committee on|off|sync|status) has no --json
+# The P2P committee allowlist (--p2p-committee on|off|auto|sync|status) has no --json
 # action: it is turned on and off on the server only, and --json --status reports
 # it in its "p2p_committee" object.
 # =============================================================================
@@ -4696,9 +5059,9 @@ main() {
     fi
     if [[ "$committee" == "true" ]]; then
         case "$FW_COMMITTEE_VERB" in
-            on|off|sync|status) ;;
+            on|off|auto|sync|status) ;;
             *)
-                print_error "--p2p-committee takes on, off, sync or status${FW_COMMITTEE_VERB:+ (not ${FW_COMMITTEE_VERB})}."
+                print_error "--p2p-committee takes on, off, auto, sync or status${FW_COMMITTEE_VERB:+ (not ${FW_COMMITTEE_VERB})}."
                 exit 1 ;;
         esac
         if [[ "$json_mode" == "true" || -n "$action" || "$reset_mode" == "true" || -n "$FW_SSH_FROM" || -n "$FW_P2P_FROM" \
@@ -4771,7 +5134,9 @@ main() {
 
     # --p2p-committee VERB: each verb takes the update lock itself, and its exit
     # code is the run's (on: 0 on, 1 refused, 2 undone or an older library, 3
-    # partial; off: 0, 1, 3; sync: 0 fresh, 1 refused, 2 failed or an older
+    # partial; off: 0, 1, 3; auto: 0 reconciled and the timer installed, 1
+    # refused, the status unreadable or the timer not installed, 2 and 3 as on
+    # and off; sync: 0 fresh, 1 refused, 2 failed or an older
     # library, 3 stale or busy, 4 synced with the saved floor, which keeps
     # addresses until --accept-floor-shrink, 5 refused because an off did not
     # finish; status: 0).
@@ -4783,6 +5148,7 @@ main() {
         case "$FW_COMMITTEE_VERB" in
             on)     fw_committee_on || rc=$? ;;
             off)    fw_committee_off || rc=$? ;;
+            auto)   fw_committee_auto || rc=$? ;;
             sync)   fw_committee_sync || rc=$? ;;
             status) fw_committee_report || rc=$? ;;
         esac
