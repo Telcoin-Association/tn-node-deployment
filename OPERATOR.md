@@ -7,6 +7,17 @@ It covers the scripts in this repository, run on the node itself, plus the `cast
 The README is the reference; this is the path.
 When you need every option of a script, follow the links into the [README](README.md).
 
+<!-- release: remove this block when the release that CHANGELOG/scripts-v2.3.0.md describes is cut -->
+> **Not in a script release yet.**
+> `firewall-setup.sh` 2.2.1, `setup-node.sh` 2.1.7, `edit-config.sh` 2.2.4 and `check-node.sh` 2.2.2 are on `main` only, and this runbook already describes them: sections 2.6, 2.7, 2.9, 2.10 and 2.12, and their rows in sections 4.3, 7 and 9.
+> [CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md) lists the changes.
+> On `scripts-v2.2.0`, which `update-scripts.sh` and the installer install today:
+>
+> - `--p2p-committee off` on a host with a stored `--p2p-from` list puts that list back as per-source rules and removes the open rules, which closes the P2P ports to every other source. To open them, run `sudo bash ~/telcoin-node-scripts/firewall-setup.sh --enable --p2p-anywhere` after it (on mainnet with `--ssh-from <list>` or `--ssh-anywhere`, unless an SSH source list is stored).
+> - The allowlist's floor is the bootstrap peers file alone, or the genesis `committee.yaml` when there is none: the trusted hubs are not in it, and there is no `--accept-floor-shrink`.
+> - Setup and `edit-config.sh` write any bootstrap peers map as `committee_peers`, and only `edit-config.sh` checks the shape of a trusted nodes file, so check both maps by hand (section 2.9).
+> - The mainnet keygen of section 2.12 is refused like every other mainnet run.
+
 Contents:
 
 - [0. Who this is for and vocabulary](#0-who-this-is-for-and-vocabulary)

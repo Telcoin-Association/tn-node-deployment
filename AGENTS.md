@@ -1103,6 +1103,19 @@ So after you edit any tracked file:
 `MANIFEST` on main stays the previous release's until the next release is cut; CI compares it
 with the tree only on a release change or a release tag.
 
+Between releases `main` runs ahead of the release, and hosts keep installing the tag `RELEASE`
+names: from `main` the updater reads only `RELEASE` and a HEAD probe of `README.md`, and
+everything else from the tag. A change merged after a tag goes into the pending note
+`CHANGELOG/scripts-v<next>.md` (titled "not released yet"), never into the note of a release
+that is already cut, and bumps each touched file's version above the released one. Its README
+changelog entries sit under the "Not released yet" marker at the top of the Changelog, and
+`OPERATOR.md` carries the same marker below its introduction, with what differs on the released
+scripts. Each marker follows a `<!-- release: remove ... -->` comment. The release change
+removes the three (`grep -rn 'release: remove' README.md OPERATOR.md CHANGELOG`), dates the note
+and updates the partner guide, which is published from `main` and so describes released
+scripts only. While a change is unreleased, do not touch `RELEASE`, `MANIFEST`, `MANIFEST.asc`
+or `install.sh`.
+
 `AGENTS.md` itself is intentionally untracked (docs are not shipped to nodes), so it
 has no sidecar and is absent from the updater arrays. Keep it that way.
 The same holds for the other docs and the maintainer tooling: `OPERATOR.md`, `followup.md`,

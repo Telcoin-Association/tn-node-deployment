@@ -2140,6 +2140,55 @@ prints the exact fix command.
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
 
+<!-- release: remove this block when the release that CHANGELOG/scripts-v2.3.0.md describes is cut -->
+> **Not released yet:** the entries from here down to `lib/common.sh v2.2.8` are on `main` only and
+> come with the next script release ([CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md)).
+> `scripts-v2.2.0` ends at `update-node v2.1.3` below.
+
+### firewall-setup v2.2.1 — the kill switch opens the P2P ports, and the allowlist floor keeps the trusted hubs
+Fix for validators in P2P committee mode with a static source list: `--p2p-committee off` turned `P2P_ALLOW_FROM` back into per-source rules and cut off every committee peer outside it.
+It now opens the P2P ports to every source behind the new-flow limit, keeps the list for the next `on` and records `P2P_PER_SOURCE=off`, so later runs keep them open until `--enable --p2p-from <list>`.
+An `off` that cannot finish exits 3 and says what is left; until a rerun of `off` finishes it, `--enable`, `--reset`, `sync` (exit 5) and `on` install and load nothing and say so.
+Fix for validators in P2P committee mode with trusted hubs: the allowlist's floor came from one file, and `trusted-nodes.yaml` was never part of it, so a hub the node stopped listing left the allowlist on the second sync without it.
+The floor is now the union of `bootstrap-peers.yaml`, the genesis `committee.yaml` and `trusted-nodes.yaml`, each one that exists.
+A resync never takes an address out of the floor on its own: it keeps the floor it had, names the addresses and exits 4, and `--p2p-committee sync --accept-floor-shrink` drops them on purpose.
+See [P2P committee allowlist](#p2p-committee-allowlist).
+Full release note: [CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md).
+
+### setup-node v2.1.7 — committee_peers only from a complete map, the trusted hubs checked before anything is written, mainnet keys before genesis
+Fix for validators set up with `--admission` and a `--bootstrap-peers` map that does not list the whole genesis committee (a map of hubs alone, or of the other validators without this node): setup wrote it as `committee_peers`, and the node then exited within a second of every start during epoch 0 (`Error: committee_peers: missing validator <key>`).
+Setup now writes `committee_peers` only from a map that lists every validator of the genesis `committee.yaml` at its first level, each key once, and holds this node's own network keys in this node's entry; any other map is left out of it with a warning naming the gap, and stays installed, dialed and in the allowlist floor.
+Fix for validators given a trusted hubs map the node cannot use: `--trusted-nodes` checked only the file, so a hub entry pasted from `node-info.yaml` (workers as a list), one without a `network_key` or one with a DNS name passed, and the node then refused to start, or started and never dialed the hub.
+Setup now runs edit-config's shape check, which also refuses `/dns*`, `/tcp` and malformed addresses, in the preflight; the bootstrap peers map gets the same address rule.
+Mainnet validators can generate their keys before the mainnet genesis exists: `--json --phase=keygen --network mainnet --install-method existing --binary-path <binary>` runs with a root-owned binary that has no build features, records `NETWORK=mainnet` before any key exists and gets no chain configs ([OPERATOR.md section 2.12](OPERATOR.md#212-generate-mainnet-keys-before-genesis)).
+Every other mainnet path stays refused, a host recorded for mainnet refuses a keygen, a finalize or an interactive install for another network, and a keygen over existing keys changes nothing and says what it compared.
+With P2P committee mode on, every re-run that completes resyncs the allowlist.
+It needs lib/common.sh 2.2.8 or later.
+Full release note: [CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md).
+
+### edit-config v2.2.4 — the same committee_peers and trusted hubs checks, and a resync after a trusted nodes edit
+The `admission`, `trusted_nodes` and `bootstrap_peers` edits write the bootstrap peers map as `committee_peers` only when it lists every validator of the genesis `committee.yaml` and its entry for this node holds this node's network keys, as setup-node v2.1.7 does; any other map is installed as before and left out of `committee_peers` with a warning, so the node starts at epoch 0.
+`--set trusted_nodes=` and `--set bootstrap_peers=` refuse a `network_address` that is a DNS name (`/dns`, `/dns4`, `/dns6`, `/dnsaddr`), uses TCP or is no multiaddr, naming the line and the entry: the node never dials such an address.
+`--set trusted_nodes=` also refuses worker ids other than those of the node's workers, and a map the installed release's parser rejects, quoting the node's reason.
+With P2P committee mode on, an edit that changed the trusted nodes map resyncs the allowlist once the node came back from its restart, as an edit of the bootstrap peers already did.
+It needs lib/common.sh 2.2.8 or later.
+Full release note: [CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md).
+
+### check-node v2.2.2 — an unfinished --p2p-committee off is reported with the command that finishes it
+With `P2P_COMMITTEE=on` in `.node-meta` and the allowlist timer's unit file gone, check-node reports one error, `P2P committee mode is on in .node-meta, but a --p2p-committee off did not finish (...)`, which says whether the table is still loaded, and names `firewall-setup.sh --p2p-committee off` as the fix.
+It checks nothing else of the allowlist then.
+Full release note: [CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md).
+
+### migrate-node-naming v2.0.1 — a source list the kill switch set aside stays aside
+A P2P source list that `--p2p-committee off` set aside (`P2P_PER_SOURCE=off`) is not turned into per-source rules when the migration opens the P2P ports: both ports open to every source.
+The warning after the migration's allowlist resync names the command that works: `--p2p-committee sync --accept-floor-shrink` after exit 4, `--p2p-committee off` after exit 5, else `--p2p-committee sync`.
+Full release note: [CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md).
+
+### lib/common.sh v2.2.8 — the map checks setup-node and edit-config share, and the mainnet keygen switch
+New `tn_committee_peers_check`, `tn_trusted_nodes_shape_ok` (moved here from edit-config), `tn_map_addr_check`, `tn_trusted_nodes_node_check` and `tn_local_worker_count`: setup-node and edit-config call them before they write `network-config`.
+New `TN_MAINNET_KEYGEN_ENABLED=1` and `tn_mainnet_keygen_enabled`, which open setup-node's mainnet keygen and nothing else while `TN_MAINNET_ENABLED` is 0, and `tn_keys_network_ok`, which refuses another network on a host recorded for mainnet.
+Full release note: [CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md).
+
 ### update-node v2.1.3 — v0.18.0-adiri is a one-way update
 `STORAGE_MIGRATION_FLOOR_TESTNET` lists `0.16.0 0.17.0 0.18.0`. `v0.18.0-adiri` moves the execution database (`db/mdbx.dat`) into tn-lmdb (`db/tn-lmdb.dat`) on its first start and deletes the MDBX files; `v0.17.0-adiri` refuses the migrated database. An update from v0.17.x or older is one-way: the warning, the snapshot question, the 600-second health window, no automatic rollback, and `"storage_migration":true` from `--check`. A downgrade from v0.18.x below 0.18.0 is refused with `"storage_downgrade":true`.
 Before the update, check that the data dir's filesystem has free space for the live pages of `db/mdbx.dat` plus a quarter plus 1 GiB: the node refuses to start with less, and update-node does not roll that back. Upstream does not support going back once a node has started v0.18.0-adiri, not even from a snapshot: fix forward.
@@ -2187,8 +2236,6 @@ With no repository checkout and no pinned files, menu 13 runs setup's checks for
 Declined or failed, it prints a manual `sudo git clone --branch <tag> ...` line and the three raw-file URLs; it no longer tells you to re-run `setup-node.sh`.
 After `Nothing to refresh: ...` a line points to `14) Restart node`, and a network this release pins nothing for (mainnet today) is refused before any prompt: `This script release pins no mainnet chain configs yet, so there is nothing to install. Chain configs unchanged.`
 The update lock is free at every "Press Enter", a git worktree checkout is read, and the AIDE baseline is made again whenever the refresh wrote under `/etc/telcoin/chain-configs/`, a reinstall that only corrects owner or modes included.
-The `admission`, `trusted_nodes` and `bootstrap_peers` edits write the bootstrap peers map as `committee_peers` only when it lists every validator of the genesis `committee.yaml` and its entry for this node holds this node's network keys, as setup-node v2.1.4 does; any other map is installed as before and left out of `committee_peers` with a warning, so the node starts at epoch 0.
-`--set trusted_nodes=` and `--set bootstrap_peers=` refuse a `network_address` that is a DNS name (`/dns`, `/dns4`, `/dns6`, `/dnsaddr`), uses TCP or is no multiaddr, naming the line and the entry: the node never dials such an address.
 Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
 
 ### lib/common.sh v2.2.5 — chain-config helpers after verification
@@ -2202,10 +2249,6 @@ Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
 ### setup-node v2.1.4 — "were refused", each directory once, a manual hint that names the tag
 A refused chain-config step reads `The <network> chain configs were refused (see above); nothing was copied.` instead of "not the pinned ones", which was wrong for a refused checkout.
 When the files cannot be found, the error lists each directory once, and the hint says where the files are at the tag and names `--genesis-dir <dir>`.
-Fix for validators set up with `--admission` and a `--bootstrap-peers` map that does not list the whole genesis committee (a map of hubs alone, or of the other validators without this node): setup wrote it as `committee_peers`, and the node then exited within a second of every start during epoch 0 (`Error: committee_peers: missing validator <key>`).
-Setup now writes `committee_peers` only from a map that lists every validator of the genesis `committee.yaml` at its first level, each key once, and holds this node's own network keys in this node's entry; any other map is left out of it with a warning naming the gap, and stays installed, dialed and in the allowlist floor.
-Fix for validators given a trusted hubs map the node cannot use: `--trusted-nodes` checked only the file, so a hub entry pasted from `node-info.yaml` (workers as a list), one without a `network_key` or one with a DNS name passed, and the node then refused to start, or started and never dialed the hub.
-Setup now runs edit-config's shape check, which also refuses `/dns*`, `/tcp` and malformed addresses, in the preflight; the bootstrap peers map gets the same address rule.
 Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
 
 ### update-node v2.1.2 — comment only: no git pull runs there
@@ -2340,8 +2383,6 @@ Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
 - `--json --status` gains `gateway_from`, and the status screen and the expected rules show two
   rows per gateway source. A Caddyfile with the gateway site counts as a public edge, so 80 and
   443 survive a `--reset`. `--enable` works on a host with a gateway and no node.
-- Fix for validators in P2P committee mode with a static source list: `--p2p-committee off` turned `P2P_ALLOW_FROM` back into per-source rules and cut off every committee peer outside it.
-  It now opens the P2P ports to every source behind the new-flow limit, keeps the list for the next `on` and records `P2P_PER_SOURCE=off`, so later runs keep them open until `--enable --p2p-from <list>`.
 
 Full release note: [CHANGELOG/scripts-v2.2.0.md](CHANGELOG/scripts-v2.2.0.md).
 
