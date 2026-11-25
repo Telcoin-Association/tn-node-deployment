@@ -49,7 +49,7 @@
 #
 # Version (tracked by update-scripts.sh). Plain, not readonly, so re-sourcing
 # common.sh cannot trip on a readonly redefinition.
-GATEWAY_VERSION="2.2.0"
+GATEWAY_VERSION="2.3.0"
 
 # Image trust (contract 3.4). Only <repository>@sha256:<64 lowercase hex>.
 # The package every signed telcoin-network release publishes its worker-gateway

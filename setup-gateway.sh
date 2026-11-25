@@ -91,7 +91,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="2.2.0"
+readonly SCRIPT_VERSION="2.3.0"
 
 # The run's settings, from the command line (sg_parse_args). The library inputs
 # GW_IN_* are set by sg_inputs_reset and sg_set_value.
