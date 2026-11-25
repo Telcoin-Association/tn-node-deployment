@@ -178,6 +178,23 @@ refused() {
     check "$1: tree byte-identical" "$before" "$(tree_sig)"
 }
 
+# The reinstall hint's two lines, as plain text.
+RI_HINT1="  ->  Re-install the scripts with the verified installer, then run the updater again:"
+RI_HINT2="  ->    curl --proto '=https' --tlsv1.2 -fsSL https://install.telcoin.network | bash"
+# ri_hint_count -- how often the last run printed each of the two hint lines.
+ri_hint_count() {
+    printf '%s %s\n' "$(plain "$OUT" | grep -cxF -- "$RI_HINT1")" \
+        "$(plain "$OUT" | grep -cxF -- "$RI_HINT2")"
+}
+# ri_hint_after PHRASE -- yes when the hint's first line comes after the first
+# line of the last run's output that contains PHRASE.
+ri_hint_after() {
+    plain "$OUT" | awk -v p="$1" -v h="$RI_HINT1" '
+        !a && index($0, p) {a = NR}
+        !b && $0 == h {b = NR}
+        END {print (a && b && a < b) ? "yes" : "no"}'
+}
+
 printf 'README\n' > "$RAW/main/README.md"
 
 # R1: serial 100. R2: serial 101, setup-node.sh 1.1.0, lib/new.env added,
@@ -270,6 +287,8 @@ publish "$W" scripts-v1.1.0
 install_release "$R1"
 refused "wrong signer"
 check_has "wrong signer: says why" "  [ERROR] The release manifest is not signed by a Telcoin release key (no release key in lib/release-keys made a good signature); nothing was changed." "$(plain "$OUT")"
+check "wrong signer: the reinstall hint, once" "1 1" "$(ri_hint_count)"
+check "wrong signer: the hint after the error" "yes" "$(ri_hint_after "[ERROR] The release manifest is not signed by a Telcoin release key")"
 
 # --- no MANIFEST.asc published -----------------------------------------------------
 NS="$SRC/nosig"; cp -R "$R2" "$NS"; rm -f "$NS/MANIFEST.asc"
@@ -287,6 +306,7 @@ install_release "$R1"
 printf 'local edit\n' >> "$INST/setup-node.sh"
 refused "tampered manifest"
 says "tampered manifest" "not signed by a Telcoin release key (the signature by key ${FPR1:24} does not match MANIFEST: one of the two was changed)"
+check "tampered manifest: no reinstall hint (a changed file, not a key problem)" "0 0" "$(ri_hint_count)"
 
 # --- tampered file whose forged sidecar matches it ------------------------------------
 F="$SRC/forged"; cp -R "$R2" "$F"
@@ -387,12 +407,14 @@ publish_signed() {   # publish_signed KEYNAME... -- K2 signed by these keys, ser
 publish_signed kexp
 refused "expired release key"
 says "expired release key" "(it is signed by release key $(fpr_of kexp | cut -c25-40), which has expired)"
+check "expired release key: the reinstall hint, once" "1 1" "$(ri_hint_count)"
 publish_signed key1 kexp
 refused "expired release key beside a good one"
 says "expired release key beside a good one" "which has expired"
 publish_signed krev
 refused "revoked release key"
 says "revoked release key" "(it is signed by release key $(fpr_of krev | cut -c25-40), which has been revoked)"
+check "revoked release key: the reinstall hint, once" "1 1" "$(ri_hint_count)"
 publish_signed key1 key3
 run_updater y
 check_rc "two release keys: exits 0" 0 "$RC"
@@ -727,6 +749,8 @@ printf 'serial=999\n' >> "$INST/MANIFEST"
 run_check
 check_rc "check, tampered record: exits 2" 2 "$RC"
 says "check, tampered record" "The release manifest is not signed by a Telcoin release key"
+check "check, tampered record: the reinstall hint, once" "1 1" "$(ri_hint_count)"
+check "check, tampered record: the hint after the record line" "yes" "$(ri_hint_after "That is the installed release record")"
 # The installed record verifies; the newest release (serial 101) is signed by a
 # key that is not a release key: --check fails the check, it reports no update.
 install_release "$R1"
@@ -738,6 +762,24 @@ check_has "check, newest signed by another key: says why" "  [ERROR] The release
 check_lacks "check, newest signed by another key: no newest line" "Newest:" "$(plain "$OUT")"
 check_lacks "check, newest signed by another key: no pending update" "Update pending" "$(plain "$OUT")"
 check "check, newest signed by another key: tree byte-identical" "$before" "$(tree_sig)"
+check "check, newest signed by another key: the reinstall hint, once" "1 1" "$(ri_hint_count)"
+check "check, newest signed by another key: the hint after the error" "yes" "$(ri_hint_after "[ERROR] The release manifest is not signed by a Telcoin release key")"
+# The installed record is signed by a key that is not a release key (NOSIG):
+# the hint once, after the line that names the record, not right after the error.
+install_release "$SRC/wrong"
+publish "$R2" scripts-v1.1.0
+run_check
+check_rc "check, installed record signed by another key: exits 2" 2 "$RC"
+says "check, installed record signed by another key" "(no release key in lib/release-keys made a good signature)"
+check "check, installed record signed by another key: the reinstall hint, once" "1 1" "$(ri_hint_count)"
+check "check, installed record signed by another key: the hint after the record line" "yes" "$(ri_hint_after "That is the installed release record")"
+# Both the installed record and the newest release are signed by that key: one hint.
+publish "$SRC/wrong" scripts-v1.1.0
+run_check
+check_rc "check, installed record and newest signed by another key: exits 2" 2 "$RC"
+check "check, installed record and newest signed by another key: two refusals" "2" "$(plain "$OUT" | grep -cF "[ERROR] The release manifest is not signed by a Telcoin release key")"
+check "check, installed record and newest signed by another key: the reinstall hint, once" "1 1" "$(ri_hint_count)"
+check "check, installed record and newest signed by another key: the hint after the record line" "yes" "$(ri_hint_after "That is the installed release record")"
 publish "$R2" scripts-v1.1.0
 install_release "$R2"
 install_release "$R2"
