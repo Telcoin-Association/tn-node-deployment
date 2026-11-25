@@ -19,35 +19,38 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
 
 ## Release prep
 
-- There is no `RELEASE`, `MANIFEST` or `MANIFEST.asc` on main yet, so the signed updater has
-  nothing to install. `scripts-v2.1.0` is the first signed release (serial 1), signed with
-  OpenPGP by the release key in `lib/release-keys/` that already signs node releases;
-  `scripts-v2.0.0` was never tagged. Closes at the first release ceremony: after PR #59 merges,
-  `bash tools/cut-release.sh prep scripts-v2.1.0 --serial 1`, merge the release pull request with
-  a merge commit, then `bash tools/cut-release.sh tag scripts-v2.1.0` (a tag without the key
-  files' `.sha256` sidecars cannot bootstrap hosts still on update-scripts 1.1.72 or older). From
-  then on, a release that changes `lib/release-keys/` must be signed by a key that is in both
-  the old and the new set.
 - Hosts that cloned main while update-scripts 2.0.0 (the SSH-signature flow) was there refuse
   `scripts-v2.1.0` ("has no MANIFEST.sig; nothing was changed.") and need the installer once.
   A leftover `lib/allowed_signers` stays on them, unused. Closes when those hosts have re-run
   the installer.
 - The release keys are copies of `keys/` in tn-release-signing (the submodule
   `vendor/tn-release-signing`, checked by `tools/check-release-keys.sh`). Their primaries
-  expire on 2028-11-16 (grantkee, `95A38484E1CBD31D773F6AF928FD56AD2F9FAE47`) and 2028-11-10
-  (MavenRain, `32F886ADE9C3A88218E4B67CA0A69159FC76DBFD`). The extended keys must ship in a
+  expire on 2028-11-16 (grantkee, `95A38484E1CBD31D773F6AF928FD56AD2F9FAE47`), 2028-11-10
+  (MavenRain, `32F886ADE9C3A88218E4B67CA0A69159FC76DBFD`) and 2028-11-19 (sstanfield,
+  `9D72ECBEE3AA983FA8671DA511423DE08DDE052C`). The extended keys must ship in a
   script release that hosts install before those dates, since only a release that verifies
   against the installed copy can renew them; hosts that miss it re-run the installer. Closes
   when the extended keys ship.
 - `scripts-v2.2.0` replaces grantkee's RSA key (`4E36D35A4AB61B589861D01AC7173F2377CA7573`)
-  with the ed25519 keys, so no key is in both the old and the new set, and the RSA key no
-  longer signs. Hosts on `scripts-v2.1.0` hold only the RSA key and refuse the release; they
-  re-run the installer once, whose embedded keys are the new ones. Closes when
-  `scripts-v2.2.0` is cut and the 2.1.0 hosts have re-run the installer.
-- telcoin-network main still lists the RSA key in `.github/maintainer-gpg-keys/grantkee.asc`.
-  From `scripts-v2.2.0` on the scripts accept a node release only when a tn-release-signing key
-  signed it, so the first telcoin-network release must be signed with one. Closes when
-  telcoin-network signs with the tn-release-signing keys.
+  with three ed25519 keys (grantkee, MavenRain and sstanfield), so no key is in both the old and
+  the new set, and the RSA key no longer signs. Hosts on `scripts-v2.1.0` hold only the RSA key
+  and refuse the release ("The release manifest is not signed by a Telcoin release key (no
+  release key in lib/release-keys made a good signature); nothing was changed."); they re-run
+  the installer once, whose embedded keys are the new ones. AWS stacks launched before 2.2.0 are
+  among them: their daily update association fails at `update-scripts.sh` until the operator runs
+  `sudo -u ubuntu -H bash -c "set -o pipefail; curl --proto '=https' --tlsv1.2 -fsSL https://install.telcoin.network | bash -s -- --yes"`
+  once in a Session Manager shell. The docs now give the installer one-liner keyed on that
+  refusal text, and 2.2.0's updater names the installer itself after such a refusal, so the next
+  key change explains itself. Closes when `scripts-v2.2.0` is cut and the 2.1.0 hosts have
+  re-run the installer.
+- `tools/release-scripts.sh` does not check that a new release verifies against the previous
+  release's key set (the keys in `lib/release-keys` at the previous `scripts-v*` tag), so a key
+  change that leaves no common key, as 2.2.0's did, passes unnoticed. It should refuse such a
+  release unless an explicit override is given. Closes when the check and its test are in.
+- The updater's installer hint and `install.sh` always install to `~/telcoin-node-scripts`
+  (`install.sh` `INSTALL_DIR`, fixed to `${HOME}/telcoin-node-scripts`). On a host whose scripts
+  live elsewhere, the hint's command makes a second copy there, and "run the updater again" runs
+  the old one. Closes when the hint names the directory, or `install.sh` takes one.
 - tn-release-signing's co-signer policy (KEYS.md) refuses a `SHA256SUMS.asc` that carries any
   signature not good by one of its keys; these scripts only warn on a signature by a key that
   is not shipped (`NO_PUBKEY`, `ERRSIG` code 9), and count distinct primary keys where it
@@ -59,10 +62,13 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   1 plus `require_last_push_approval` means a pull request needs an approval from an owner other
   than its last pusher. Closes when the ruleset is on with the contexts it should require. (The
   `github-pages` deployment policy for `scripts-v*` tags was set on 2026-11-04.)
-- Release signatures are 1-of-1: `lib/release-keys/` holds one key, and `TN_SIG_THRESHOLD` is 1
-  in the three verifiers (`update-scripts.sh`, `install.sh`, `tools/release-scripts.sh`). 2-of-N
-  signatures (#40) are deferred until a second release key exists; then the constant rises to the
-  number of distinct keys that must sign.
+- Release signatures are 1-of-3: `lib/release-keys/` holds three keys (grantkee, MavenRain and
+  sstanfield), and `TN_SIG_THRESHOLD` is still 1 in the three verifiers (`update-scripts.sh`,
+  `install.sh`, `tools/release-scripts.sh`), so any one of them signs a release. With three keys,
+  2-of-N signatures (#40) are now possible and remain a decision; if taken, the constant rises to
+  the number of distinct keys that must sign. When it rises, the updater's installer hint should
+  also cover the `THRESHOLD` verdict (a release co-signed by a key the host lacks). Closes when #40
+  is decided.
 - The `.sha256` sidecars stay for the transition. update-scripts 2.1.0 still checks a published
   sidecar against the signed manifest and needs the key files' sidecars to fetch the release keys
   the first time on a host that has none; older updaters use the sidecars as their only check.
@@ -70,13 +76,19 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   `tools/gen-checksums.sh` from the release steps, and the sidecar reads in `update-scripts.sh`
   (`fetch_published_sha`, `bootstrap_keys`).
 
-- The testnet fallbacks for a time without a signed release can go once `v0.17.0-adiri` is
-  published and installed everywhere: the legacy Artifact Registry tag listing in
-  `latest_docker_image`, the registry digest for a named tag whose release publishes no signed
-  files (`tn_docker_image_for_tag`), and `DEFAULT_DOCKER_IMAGE`/`DEFAULT_DOCKER_TAG` on the
-  legacy repository, which then move to the signed release's ghcr digest. Until then a tag a
-  user names (including `update-node.sh --check`'s `latest_ref` applied from the UI) can still
-  run by the registry's digest on testnet, with the warning.
+- `v0.18.0-adiri`, published on 2026-11-24, is the first signed testnet release;
+  `v0.16.0-adiri` and `v0.17.0-adiri` have none. The testnet fallbacks for a time without a
+  signed release can go once `v0.18.0-adiri` or a later release is installed everywhere: the
+  legacy Artifact Registry tag listing in `latest_docker_image`, the registry digest for a named
+  tag whose release publishes no signed files (`tn_docker_image_for_tag`), and
+  `DEFAULT_DOCKER_IMAGE`/`DEFAULT_DOCKER_TAG` on the legacy repository, which then move to the
+  signed release's ghcr digest. Until then they stay as fallbacks. The tag listing runs when the
+  Releases API cannot be read, or answers but lists no final testnet release; `DEFAULT_DOCKER_IMAGE`
+  is taken when that listing gives no image, and when the newest release's signed files cannot be
+  downloaded or checked. The registry digest runs for a named tag with no signed release, and when
+  no release key is installed, so a tag a user names (including `update-node.sh --check`'s
+  `latest_ref` applied from the UI) can still run by the registry's digest on testnet, with the
+  warning. `scripts-v2.2.0` removes none of them.
 - `tn_release_newest_tag` reads the first page of the Releases API only (100 releases). Closes
   when a channel's newest final can sit beyond that page: page, or filter the API by tag prefix.
 - Nothing tests GitHub's anonymous API rate limit (60 requests an hour per address), which the
@@ -779,10 +791,6 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   another account owns). They pass with git 2.49, 2.53 and the versions on the CI runners. A
   fourth such check failed on the runners, whose git words an unreadable repository differently,
   and now only requires a `fatal: ` line of git's. Closes when the other three do the same.
-- `README.md`, "Node releases", still describes the release key that script releases ship as
-  `grantkee.asc` with the earlier RSA key's fingerprint and expiry, while the update-scripts 2.2.0
-  changelog entry names the ed25519 key and adds `MavenRain.asc`. Closes when that sentence names
-  the keys `lib/release-keys/` holds.
 - `--help` gaps. `setup-node.sh --help` omits `--network`, `--binary-path`, `--docker-image`,
   `--address`, the `--external-*` and `--listener-*` flags, `--data-dir`, `--advertised-name`,
   `--service-user`, `--service-group`, `--genesis-dir` and `--enable-healthcheck-monitor`;
@@ -845,7 +853,8 @@ are pulled through the customer's own State Manager association. The account sid
   `aws-templates` (deployment refs limited to `scripts-v*` tags) and its variables
   `AWS_TEMPLATES_ROLE_ARN` and `AWS_TEMPLATES_BUCKET`, the outputs of the `tn-node-templates`
   account in ta-aws-infra (applied 2026-11-18, merged with its PR #3 on 2026-11-20). Until then,
-  the workflow fails on a `scripts-v*` tag.
+  the workflow fails on a `scripts-v*` tag. Its upload job will fail on the `scripts-v2.2.0` tag
+  until it is wired; that does not touch the installer, which `publish-installer.yml` publishes.
 - **The widget link.** The frontend's quick-create link names a pinned
   `templates/<tag>/node.yaml`. Move it with each scripts release that changes the template.
 - **Verify on a first real launch** (a sandbox account): Canonical's SSM parameter path resolves;

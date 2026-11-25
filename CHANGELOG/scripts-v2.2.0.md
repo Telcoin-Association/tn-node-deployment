@@ -5,9 +5,20 @@ telcoin-network's worker gateway: a public JSON-RPC front that sends transaction
 the worker of a node and proxies every other call to a query endpoint the operator names. The
 gateway runs next to a testnet or devnet node, or on a host of its own in front of a validator's
 private address, so the validator stays off the public internet. Six existing scripts and
-`lib/common.sh` change with it. No signed telcoin-network release with a worker-gateway image
-exists yet: devnet takes one by digest, and testnet and mainnet refuse the enable until a scripts
-release pins the image of a signed release.
+`lib/common.sh` change with it. On testnet the gateway takes the image this release pins, the
+`IMAGE_DIGEST-worker-gateway` of the signed telcoin-network `v0.18.0-adiri`; devnet takes one by
+digest; mainnet has no pin yet and refuses the enable.
+
+This is also the script release for telcoin-network `v0.18.0-adiri`, published on 2026-11-24 and
+the first signed release on the testnet channel. The scripts before it refuse that release:
+`scripts-v2.1.0` cannot check its signature (the RSA key is gone, see
+[The release keys](#the-release-keys)), and the chain-config pin did not match its
+`committee.yaml`, whose bootstrap servers moved into the binary. The committee pin now accepts
+that file beside the earlier one, and new testnet installs keep the earlier one, which names the
+bootstrap servers (see [lib/common 2.2.7](#libcommon-227)). `0.18.0` is a one-way floor: the
+execution database moves from MDBX to tn-lmdb on the release's first start (see
+[update-node 2.1.3](#update-node-213)). The exception for the unsigned `v0.17.0-adiri` is removed
+(see [lib/common 2.2.7](#libcommon-227)).
 
 One fix reaches every operator, gateway or not: `firewall-setup.sh` now compares the sources of
 `--ssh-from` and `--p2p-from` the way `ufw` stores them. Re-entering a source in another spelling
@@ -19,26 +30,36 @@ whose testnet `committee.yaml` stopped matching the pinned sha256 on 2026-11-14,
 Docker, signed-release and existing-binary installs have failed since then, at step 4 of 8, before
 any key is made. Setup and edit-config's menu 13
 now read the three files from the tag this release pins, `v0.16.0-adiri`, and never from a branch
-(see [lib/common 2.2.5](#libcommon-225)). Before a host takes this release, a testnet install on
+(see [lib/common 2.2.7](#libcommon-227)). Before a host takes this release, a testnet install on
 `scripts-v2.1.0` works with `--genesis-dir <dir>`, where `<dir>` holds the three files of
-`chain-configs/testnet` at `v0.16.0-adiri`.
+`chain-configs/testnet` at `v0.16.0-adiri`. The tag stays `v0.16.0-adiri` with `v0.18.0-adiri` out:
+a node these scripts start reads its bootstrap servers from its `committee.yaml`, and the file of
+`v0.18.0-adiri` lists none. The same release also prepares the tag's move to a
+telcoin-network release that keeps the testnet bootstrap servers in their own file,
+`bootstrap_servers.yaml`, instead of in `committee.yaml`: once a later scripts release pins that
+file, a new testnet node given no `--bootstrap-peers` map gets it as its map (see
+[setup-node 2.1.6](#setup-node-216)). While the tag is `v0.16.0-adiri` nothing changes.
 
 The hardware check compared every host with the mainnet figures, so it warned "below minimum" on
 the machines the testnet validators run on. It now compares the host with the tiers of the
 network chosen, and the testnet tiers follow those validators (see
-[lib/common 2.2.5](#libcommon-225)); the Node Manager UI's setup preflight does the same for the
+[lib/common 2.2.7](#libcommon-227)); the Node Manager UI's setup preflight does the same for the
 wizard's network. The check still only warns. The AWS one-click stack's `Validator` preset moves
 to `c7i.2xlarge`, and its data volume defaults to 500 GiB at 15,000 IOPS.
 
 The mainnet chain id is 731 (`0x2db`), as on telcoin-network main since #1716; it was 487, which
-upstream devnet genesis files use now (see [lib/common 2.2.5](#libcommon-225)). Mainnet has not
+upstream devnet genesis files use now (see [lib/common 2.2.7](#libcommon-227)). Mainnet has not
 launched and stays switched off, so no running node changes.
 
 The release keys change, for every operator. grantkee's RSA key, the only key of
-`scripts-v2.1.0`, is replaced by grantkee's new ed25519 key, and MavenRain's key is added. The keys now come
-from the maintainers' key allowlist, the tn-release-signing repository, and `tn-p2p-allow-sync`
-moves to v0.1.2, the first release signed with the new key. A host on `scripts-v2.1.0` takes this
-release by re-running the installer once (see [The release keys](#the-release-keys)).
+`scripts-v2.1.0`, is replaced by grantkee's new ed25519 key, and the keys of MavenRain and
+sstanfield are added. The keys now come from the maintainers' key allowlist, the
+tn-release-signing repository, and `tn-p2p-allow-sync` moves to v0.1.2, the first release signed
+with grantkee's ed25519 key (see [The release keys](#the-release-keys)). A host on
+`scripts-v2.1.0` cannot take this release with `update-scripts.sh`: run the installer once (see
+[Updating from scripts-v2.1.0](#updating-from-scripts-v210)). From this release on, the updater
+names the installer when no installed key signed a release (see
+[update-scripts 2.2.0](#update-scripts-220)).
 
 Ubuntu 26.04 LTS is the recommended OS; 24.04 stays supported. The systemd messages of
 `setup-node.sh` and `lib/common.sh` say so; what they check is unchanged (mainnet still needs
@@ -50,18 +71,70 @@ systemd 255).
 | lib/gateway (`GATEWAY_VERSION`) | 2.2.0 (new) |
 | firewall-setup, remove-node | 2.2.0 |
 | install-caddy, check-node | 2.2.1 |
-| edit-config | 2.2.2 |
+| edit-config | 2.2.3 |
 | update-scripts | 2.2.0 |
-| update-node | 2.1.2 |
-| setup-node | 2.1.4 |
-| lib/common (`COMMON_VERSION`) | 2.2.5 |
+| update-node | 2.1.3 |
+| setup-node | 2.1.6 |
+| lib/common (`COMMON_VERSION`) | 2.2.7 |
 | telcoin-ui (`UI_VERSION`) | 2.1.3 |
-| Release keys (`lib/release-keys/*.asc`) | grantkee `95A38484E1CBD31D773F6AF928FD56AD2F9FAE47` (replaces `4E36D35A4AB61B589861D01AC7173F2377CA7573`), MavenRain `32F886ADE9C3A88218E4B67CA0A69159FC76DBFD` (new) |
+| Release keys (`lib/release-keys/*.asc`) | grantkee `95A38484E1CBD31D773F6AF928FD56AD2F9FAE47` (replaces `4E36D35A4AB61B589861D01AC7173F2377CA7573`), MavenRain `32F886ADE9C3A88218E4B67CA0A69159FC76DBFD` (new), sstanfield `9D72ECBEE3AA983FA8671DA511423DE08DDE052C` (new) |
 | `tn-p2p-allow-sync` (pinned in lib/common) | v0.1.2 (was v0.1.1) |
 
 Every other script, library and UI file keeps its version. The runbook for the gateway is
 [OPERATOR.md section 4.15](../OPERATOR.md#415-worker-gateway). `aws/node.yaml` changed too (see
 [AWS one-click stack](#aws-one-click-stack)); it is not an updater entry.
+
+## Updating from scripts-v2.1.0
+
+A host on `scripts-v2.1.0` cannot take this release with `update-scripts.sh`. Its updater verifies
+a release against the keys the host already has, which is the RSA key alone, and no release is
+signed by that key any more (see [The release keys](#the-release-keys)). It prints its banner
+and `Latest release: scripts-v2.2.0` first; its output ends with these lines, and it exits 1:
+
+```
+a signature by key 28FD56AD2F9FAE47, which is not a release key, was not checked
+    gpgv: Signature made <date>
+    gpgv:                using EDDSA key 95A38484E1CBD31D773F6AF928FD56AD2F9FAE47
+    gpgv: Can't check signature: No public key
+  [ERROR] The release manifest is not signed by a Telcoin release key (no release key in lib/release-keys made a good signature); nothing was changed.
+```
+
+`28FD56AD2F9FAE47` is the long key id of grantkee's ed25519 key, which signs this release; a
+later release signed by another key names that key's id. The `gpgv:` lines come from gpgv. The
+message names no remedy. Nothing on the host changes and the node keeps running, and
+the same refusal meets every later release, so running `update-scripts.sh` again never helps.
+Run the installer once, as the user who owns `~/telcoin-node-scripts`:
+
+```
+curl --proto '=https' --tlsv1.2 -fsSL https://install.telcoin.network | bash -s -- --yes
+```
+
+It verifies the release with the keys embedded in the installer, replaces only
+`~/telcoin-node-scripts`, and puts the old tree back if anything fails. It does not touch the
+node, its data or its keys. Afterwards `bash ~/telcoin-node-scripts/update-scripts.sh --check`
+reports `scripts-v2.2.0`; where the Node Manager UI runs,
+`sudo bash ~/telcoin-node-scripts/ui/install-ui.sh --update` brings its copy of the scripts up to
+date. Later releases update with `update-scripts.sh` as usual.
+
+This applies to hosts installed or updated through the signed flow since 2026-11-10, and to any
+older host that carries the RSA `lib/release-keys/grantkee.asc`. On an older host the message
+can differ: one on update-scripts 2.0.0 (cloned from main before `scripts-v2.1.0`) stops with
+`Release scripts-v2.2.0 has no MANIFEST.sig; nothing was changed.`, and the remedy is the same
+installer run. A host on update-scripts 1.1.72 or older with no key file takes this release
+through the one-time key bootstrap, as before.
+
+AWS one-click stacks launched before `scripts-v2.2.0` installed `scripts-v2.1.0`: their daily
+update association fails at `update-scripts.sh` until the operator runs the installer once in a
+Session Manager shell. That shell runs as `ssm-user`, and the stack keeps the scripts in
+`/home/ubuntu/telcoin-node-scripts`, owned by `ubuntu`, so there the command is the form the
+stack's own user data runs:
+
+```
+sudo -u ubuntu -H bash -c "set -o pipefail; curl --proto '=https' --tlsv1.2 -fsSL https://install.telcoin.network | bash -s -- --yes"
+```
+
+The plain one-liner in a Session Manager shell would install a second tree in `ssm-user`'s home
+and leave the stack's scripts on `scripts-v2.1.0`.
 
 ## The release keys
 
@@ -69,14 +142,17 @@ Every other script, library and UI file keeps its version. The runbook for the g
 |---|---|---|
 | `lib/release-keys/grantkee.asc` | ed25519 `95A38484E1CBD31D773F6AF928FD56AD2F9FAE47` | 2028-11-16 |
 | `lib/release-keys/MavenRain.asc` | ed25519 `32F886ADE9C3A88218E4B67CA0A69159FC76DBFD` | 2028-11-10 |
+| `lib/release-keys/sstanfield.asc` | ed25519 `9D72ECBEE3AA983FA8671DA511423DE08DDE052C` | 2028-11-19 |
 
-- Either key may sign script releases, node releases and `tn-p2p-allow-sync` releases, under the
-  same `gpgv` status rules as before; one good signature is still enough (`TN_SIG_THRESHOLD` 1). The
-  RSA-2048 key `4E36D35A4AB61B589861D01AC7173F2377CA7573` is gone from `grantkee.asc` and
+- Any of the three keys may sign script releases, node releases and `tn-p2p-allow-sync` releases,
+  under the same `gpgv` status rules as before; one good signature is still enough
+  (`TN_SIG_THRESHOLD` 1). Each key is held on its holder's YubiKey, so losing one no longer
+  strands hosts: a release signed by either of the other two verifies against the installed set.
+  The RSA-2048 key `4E36D35A4AB61B589861D01AC7173F2377CA7573` is gone from `grantkee.asc` and
   verifies nothing from this release on.
 - The files are byte-for-byte copies of `keys/` in
   [tn-release-signing](https://github.com/Telcoin-Association/tn-release-signing) at the commit
-  this repository records for its submodule `vendor/tn-release-signing` (`813fcf4`). They still
+  this repository records for its submodule `vendor/tn-release-signing` (`172be74`). They still
   ship as ordinary files in `lib/release-keys/`, listed in `MANIFEST` and embedded in
   `install.sh`: the installer downloads GitHub's archive of the release tag, which never holds a
   submodule's files. For maintainers: `tools/check-release-keys.sh` fails when the copies differ
@@ -85,11 +161,8 @@ Every other script, library and UI file keeps its version. The runbook for the g
   `lib/release-keys/README` has the steps to move the pointer and copy the keys.
 - Hosts on `scripts-v2.1.0` hold only the RSA key, and the updater verifies a release against the
   keys a host already has. The RSA key no longer signs, so `scripts-v2.2.0` carries only the new
-  keys' signatures and a 2.1.0 host refuses it with `The release manifest is not signed by a
-  Telcoin release key (no release key in lib/release-keys made a good signature); nothing was
-  changed.` Re-run the installer once, whose embedded keys are the new ones:
-  `curl --proto '=https' --tlsv1.2 -fsSL https://install.telcoin.network | bash -s -- --yes`.
-  Later releases update with `update-scripts.sh` as usual.
+  keys' signatures and a 2.1.0 host refuses it. Such a host runs the installer once, whose
+  embedded keys are the new ones (see [Updating from scripts-v2.1.0](#updating-from-scripts-v210)).
 - The Node Manager UI runs its own copy of the scripts and keys: run
   `sudo bash ui/install-ui.sh --update` after the update, as for every script release, or its
   release checks keep the RSA key.
@@ -137,9 +210,12 @@ Every other script, library and UI file keeps its version. The runbook for the g
   image this release pins in `lib/gateway.sh` is taken: the image a signed telcoin-network
   release names in its `IMAGE_DIGEST-worker-gateway`, in
   `ghcr.io/telcoin-association/tn-worker-gateway`, with that release's tag on the same line
-  (`GW_TESTNET_PIN_RELEASE`, `GW_MAINNET_PIN_RELEASE`). This release pins none. Before it writes
-  anything, the enable pulls the digest when Docker does not hold it, runs the image's `--help`
-  under a time limit and refuses an image that lacks a flag the unit passes. For maintainers:
+  (`GW_TESTNET_PIN_RELEASE`, `GW_MAINNET_PIN_RELEASE`). This release pins the testnet image, the
+  `IMAGE_DIGEST-worker-gateway` of the signed `v0.18.0-adiri`:
+  `ghcr.io/telcoin-association/tn-worker-gateway@sha256:efed742a8a32db4f71b397d17ac448bcd98dcc0d14083197c1f7cecbc72bcffb`.
+  The mainnet pin is empty, so mainnet refuses the enable. Before it writes anything, the enable
+  pulls the digest when Docker does not hold it, runs the image's `--help` under a time limit and
+  refuses an image that lacks a flag the unit passes. For maintainers:
   `tools/check-gateway-pin.sh` checks each set pin against its release. The tag must be a release
   tag of that network, `SHA256SUMS-edge.asc` must verify against `lib/release-keys` under the rule
   node releases follow, `SHA256SUMS-edge` must list only that release's edge files, the worker
@@ -211,25 +287,11 @@ Every other script, library and UI file keeps its version. The runbook for the g
 - `--enable` works on a host with a gateway and no node: SSH, 80 and 443, no P2P and no health
   rule. Such a host keeps its SSH source list in the gateway's meta file, so a replaced list has
   its old sources removed and a plain `--enable` applies it again.
-- Fix for validators in P2P committee mode with a static source list.
-  `--p2p-committee off`, the kill switch, turned `P2P_ALLOW_FROM` back into per-source `ufw` rules and deleted the open rule, so every committee peer outside that list lost the P2P ports (seen on ufw and nftables: 3 of 3 datagrams before `off`, 0 of 3 after).
-  `off` now opens the P2P ports to every source behind the new-flow limit, whatever the list holds and whether or not the ports took only that list before committee mode.
-  The list stays in `.node-meta` for the next `on`, and the new key `P2P_PER_SOURCE=off` keeps later `--enable` and `--reset` runs from applying it to `ufw` until `--enable --p2p-from <list>` (or `--p2p-anywhere`) removes the key.
-  The undo of an unfinished `on` still puts the rules from before it back.
-  `off` also runs when `P2P_ALLOW_FROM` is not usable (an invalid entry, or the key set twice), and warns instead of refusing.
-  It adds the open rule of every P2P port before it deletes any per-source rule, carries on past a failed `ufw` call and names what is left, and it deletes the table even when another process holds the tool's lock.
-  An `off` that did not finish is no longer undone by the next `--enable`, `--reset`, `sync` or `on`, which reinstalled the allowlist without a word: they and `--p2p-committee status` now say that it did not finish, and a rerun of `off` finishes it.
-- Fix for validators in P2P committee mode with trusted hubs.
-  The allowlist's floor, the addresses it never drops, came from one file: `/etc/telcoin/bootstrap-peers.yaml`, or the genesis `committee.yaml` when there was no peers map.
-  `trusted-nodes.yaml` was never part of it, so a hub the node stopped listing left the allowlist on the second sync without it, and a peers map that held only part of the committee replaced `committee.yaml` as the floor.
-  The floor is now the union of all three files, each one that exists.
-  A floor with no address (a validator with neither map and a `committee.yaml` without addresses) is written with a warning that names the two `edit-config.sh --set` commands that fill it; `on` still goes ahead.
-  A resync never takes an address out of the floor on its own: when the files no longer hold an address the floor has (a hub taken out of the trusted nodes map, or a `committee.yaml` gone missing because the data dir's disk is not mounted), it keeps the floor it had, names the addresses and `firewall-setup.sh --p2p-committee sync --accept-floor-shrink`, which drops them on purpose, and finishes the resync with the old floor (`sync` exits 4), so a source list given with `--enable --p2p-from` meanwhile still reaches the table at once.
-  The hooks of `setup-node.sh`, `edit-config.sh` and `migrate-node-naming.sh` name that command after such a resync, and the rerun of `--p2p-committee off` after one refused because an `off` did not finish (`sync` exits 5 then); `check-node.sh` reports that unfinished `off` and its command too, instead of `sync`.
-  With neither `bootstrap-peers.yaml` nor the genesis `committee.yaml` the capture refuses, as it did before: `trusted-nodes.yaml` never stands in for the committee.
-  A symbolic link, directory or FIFO at one of the three refuses the capture too, now with a message that names what is there and the repair (`13) Refresh chain configs` for `committee.yaml`, `edit-config.sh --set` for a map).
 
-### edit-config 2.2.2
+### edit-config 2.2.3
+
+- Menu 13 tests the three files in the node's data dir with `tn_chain_config_pin_ok`, so a data
+  dir that holds either accepted testnet `committee.yaml` gets "Nothing to refresh", as before.
 
 - Menu 13, "Refresh chain configs", ran `git pull` in the repository checkout and copied
   `chain-configs/<network>` from it. On a source install, whose checkout is detached at a release
@@ -237,7 +299,7 @@ Every other script, library and UI file keeps its version. The runbook for the g
   installs, the pull moved the checkout to the branch's tip, and the copy was then refused because
   that branch no longer matches the pins.
   On a network with a pinned tag the menu now installs the pinned files through
-  `tn_chain_configs_from_tag` (see [lib/common 2.2.5](#libcommon-225)) and copies them from
+  `tn_chain_configs_from_tag` (see [lib/common 2.2.7](#libcommon-227)) and copies them from
   `/etc/telcoin/chain-configs/<network>/`; it runs no pull and no submodule command. The menu
   label reads "(pinned genesis/committee/parameters)".
 - When the node's data dir already holds the pinned files (hashed as the service user), the menu
@@ -251,15 +313,6 @@ Every other script, library and UI file keeps its version. The runbook for the g
   lock is free at every "Press Enter" prompt. The host baseline is made again whenever the helper
   wrote under the config directory, a reinstall that only corrects owners or modes included.
   Devnet still pulls; the copy, the chain-id guard and the restart path are unchanged.
-- With P2P committee mode on, an edit that changed the trusted nodes map (`--set trusted_nodes=`, or the menu) resyncs the allowlist once the node came back from its restart, as an edit of the bootstrap peers already did, so the floor holds the new hubs at once instead of after the next timer run.
-- Fix for the same `committee_peers` gap as in [setup-node 2.1.4](#setup-node-214): `--set admission=`, `--set trusted_nodes=` and `--set bootstrap_peers=` (and the menu items and the Node Manager UI path that reach them) write the bootstrap peers map as `committee_peers` only when it lists every validator of the genesis `committee.yaml`.
-  A map that lists fewer is installed and put on the start line as before, the edit goes on with a warning, and `network-config` gets no `committee_peers`, so the node starts instead of exiting at epoch 0.
-  As at setup, only the map's first-level keys count, and an entry for this node with other network keys than its `node-info.yaml` leaves the map out too.
-- `--set trusted_nodes=` refuses, besides the shapes it refused before, a `network_address` that is a DNS name (`/dns`, `/dns4`, `/dns6`, `/dnsaddr`), uses TCP or is no multiaddr, naming the line and the entry; the node would never dial a hub given by name, and stops at start on a malformed address.
-  It also refuses worker ids other than those of the node's workers, and a map the installed release's parser rejects, quoting the node's reason; a map with CRLF line ends or a byte order mark, which it refused before, is taken.
-  A quoted field name (`"primary":`) is taken, and UDP port 0, which the node never dials, is refused; so is a DNS name on the line after `network_address:` in a bootstrap peers map.
-  `--set bootstrap_peers=` (and the menu and the Node Manager UI path that reach it) refuses the same addresses before the node's parse check, which takes them.
-  The shape check now lives in `lib/common.sh`, shared with setup-node.
 - `--set gateway_upstream=<ipv4[,ipv4...]>` is for a validator whose gateway runs on another
   host. It binds the RPC and the health listener to every interface and adds none of the
   public-RPC limit flags. `off` puts both binds back; the `--healthcheck` value from before is kept
@@ -301,21 +354,76 @@ Every other script, library and UI file keeps its version. The runbook for the g
 
 ### update-scripts 2.2.0
 
-- Tracks `lib/release-keys/MavenRain.asc`, and ships the ed25519 `lib/release-keys/grantkee.asc`
-  (see [The release keys](#the-release-keys)).
+- Tracks `lib/release-keys/MavenRain.asc` and `lib/release-keys/sstanfield.asc`, and ships the
+  ed25519 `lib/release-keys/grantkee.asc` (see [The release keys](#the-release-keys)).
+- When it refuses a release with `The release manifest is not signed by a Telcoin release key
+  (<reason>); nothing was changed.` because no installed key made a good signature, or because
+  the signing key has expired, it now names the installer after the error, with the hint it
+  already printed for other refusals:
+
+  ```
+    ->  Re-install the scripts with the verified installer, then run the updater again:
+    ->    curl --proto '=https' --tlsv1.2 -fsSL https://install.telcoin.network | bash
+  ```
+
+  It does not print the hint for a signature that does not match the manifest (a changed file,
+  not a key problem), for an expired signature or when gpgv reports an error for a signature,
+  and never prints it twice in one run. It prints none for a revoked key either: a host holds a
+  revoked copy of a key only because a signed release shipped it, so a release signed by that
+  key is a mistake or a compromised key in use, and the installer verifies the same release
+  with the same key and refuses it too. Nor does it print one on the first signed run of a host
+  with no key file yet: its keys are the ones the release lists, and the installer embeds the
+  same files. A host on `scripts-v2.1.0` does not get the hint after this refusal, because its
+  updater predates the change (see
+  [Updating from scripts-v2.1.0](#updating-from-scripts-v210)); from this release on, the next
+  change of the key set explains itself.
 - Tracks `setup-gateway.sh` and `lib/gateway.sh`. When an update changes either on a host with
   `/etc/systemd/system/telcoin-gateway.service`, it prints `The worker gateway script or its
   library changed. Render the gateway again on the host:` and the `setup-gateway.sh --refresh`
   command. It never runs it: the unit is rendered from `gateway.meta`, and new copies take effect
   only once `--refresh` renders it again.
 
-### update-node 2.1.2
+### update-node 2.1.3
 
-- Comments only, no change in behaviour: the chain-id comments name 731 for mainnet, and the
-  comment on the update lock no longer names a `git pull`, since none runs in update-node.
+- `v0.18.0-adiri` is one way: `STORAGE_MIGRATION_FLOOR_TESTNET` is `0.16.0 0.17.0 0.18.0`. Its
+  first start copies `db/mdbx.dat` into `db/tn-lmdb.dat`, checks the copy, and deletes the MDBX
+  files; `v0.17.0-adiri` refuses the result at `db/database.version`. An update across 0.18.0
+  warns, asks about a snapshot, waits up to 600 seconds and never rolls back on its own; `--check`
+  reports `"storage_migration":true`; a downgrade below 0.18.0 is refused with
+  `"storage_downgrade":true`.
+- The disk warning before a one-way update still measures `consensus-db/epochs` only. For this
+  release, check by hand that the data dir's filesystem has the free space upstream asks for
+  (the live pages of `db/mdbx.dat` plus a quarter plus 1 GiB): with less, the node refuses to
+  start, nothing is migrated, and update-node still does not roll back.
+- Upstream does not support any way back once a node has started `v0.18.0-adiri`, a snapshot
+  restore included; the undo line update-node prints after a failed one-way check does not apply
+  to this release. Fix forward.
+- Comments: the chain-id comments name 731 for mainnet, and the comment on the update lock no
+  longer names a `git pull`, since none runs in update-node.
 
-### setup-node 2.1.4
+### setup-node 2.1.6
 
+- The check after the copy (`_setup_copied_configs_ok`) takes the same hashes as the check before
+  it (`tn_chain_config_pin_ok`); an exact comparison with the committee list would have removed
+  every copy.
+- A node given no bootstrap peers map gets the network's pinned bootstrap servers. From
+  telcoin-network #1848 on, a tag keeps the testnet bootstrap servers in
+  `chain-configs/testnet/bootstrap_servers.yaml` and its `committee.yaml` has
+  `bootstrap_servers: {}`; the node reads that file only when started with `--chain`, and these
+  scripts start it without, so a node set up from such a tag would dial no one. When
+  `lib/common.sh` pins the file (`TESTNET_BOOTSTRAP_SERVERS_SHA256`, empty in this release),
+  setup checks the copy beside the chain configs it copies (`/etc/telcoin/chain-configs/testnet/`
+  or `--genesis-dir`) against the pin, and installs it as `/etc/telcoin/bootstrap-peers.yaml`
+  through the `--bootstrap-peers` path: the release's parser checks it, `.node-meta` records it
+  as `BOOTSTRAP_PEERS_FILE`, and the start script passes `--bootstrap-peers "$(cat
+  /etc/telcoin/bootstrap-peers.yaml)"`. Setup says `Bootstrap peers: the testnet bootstrap
+  servers at <tag> (no --bootstrap-peers given)`. A missing or changed file, one other users
+  cannot read or one the release rejects stops setup before the chain configs are copied.
+  `--bootstrap-peers`, or a map the host recorded, wins: with a pin, an interactive re-run reads
+  the recorded map back with or without an admission mode. With an admission mode the default
+  map becomes `committee_peers`, as an operator's map does. Mainnet gets no default.
+- With the pin empty, as in this release, nothing changes: no default, no new message, and an
+  interactive re-run reads a recorded map back only with an admission mode, as before.
 - On a network with a pinned chain-config tag, setup searches
   `/etc/telcoin/chain-configs/<network>/` right after `--genesis-dir`, ahead of the repository
   checkout, whose default branch can carry files that no longer match the pins. Each directory is
@@ -330,46 +438,36 @@ Every other script, library and UI file keeps its version. The runbook for the g
   network. It still only warns, and a `--json` run logs its result as before.
 - `--help` names Ubuntu 26.04 as the recommended OS for mainnet (systemd 255 or later, so
   Ubuntu 24.04 or later).
-- With P2P committee mode on, every re-run that completes runs `firewall-setup.sh --p2p-committee sync` once the node is started and the update lock released, whether or not it changed the bootstrap peers or trusted nodes map (a run that installed one and then failed is caught up by the next); a failed sync is a warning naming that command.
-- Fix for validators set up with an admission mode and a bootstrap peers map that does not list the whole genesis committee.
-  Setup wrote that map into `network-config` as `committee_peers` without a word, and a node whose `committee_peers` misses a genesis validator exits within a second of every start while its chain is at epoch 0 (`Error: committee_peers: missing validator <key>`, in every admission mode): the first six hours on mainnet, and any time on a new data dir.
-  A map of the hubs alone, or of the other validators without this node, did exactly that.
-  Setup now checks the map against the validators of the data dir's genesis `committee.yaml` first and writes `committee_peers` only when every one of them, this node included, is a key of the map; keys beside them, such as hubs, are fine, and a complete map is written as before, byte for byte.
-  A map that lists fewer is left out of `committee_peers` with a warning naming how many validators are missing and the first three, and setup goes on: the map stays installed, on the start line (the node still dials it) and in the P2P committee allowlist's floor.
-  Only the map's first-level keys count, as the node reads them: a validator's block indented under another entry is a field of that entry to the node, which then exits the same way.
-  When the map has an entry for this node, that entry must carry the network keys of the node's `node-info.yaml`, because a node whose own entry names others exits at every start, at any epoch (`network key does not match node configuration`), as after keys made again once the map was shared; such a map is left out the same way, with a warning that names the entry.
-  A map that lists one key twice at its first level (a validator's block pasted twice) passed both the node's parse check and this check and was written into `committee_peers`, where the node cannot read it and exits at every start (`Error running node: bad yaml data`), although it takes the same map on its start line; such a map is now left out the same way, with a warning that names the key.
-- Fix for validators given trusted hubs with `--trusted-nodes`.
-  Setup checked only that the file existed, was readable and was small enough, so a hub entry pasted whole from `node-info.yaml` (workers as a list, beside `name` and the other fields), one without a `network_key` and one whose address was a DNS name were installed and written into `network-config` with exit 0.
-  The node then exited at start on the first two (`Error: bad yaml data`), and with a `/dns4/...` hub it started but never dialed it, saying so only at debug log level, while the P2P committee allowlist took no address from it.
-  Setup now runs edit-config's shape check on the map in its preflight, before key generation or any install step, on a map it reads back from `.node-meta` on a re-run, and again just before the install, and stops with `--trusted-nodes: <reason>.` naming the line and the entry; nothing is written and the node is not started.
-  The check holds the worker ids to those of the node's workers (`0` alone for one), and just before the install the release's own parser reads the map, so a bad BLS key, `network_key`, IP literal or peer id, a field given twice or a stray deeper line stops setup with the node's reason before `network-config` is written or a running node restarted.
-  The check also refuses an address that is not an IP address with UDP and QUIC v1 (a DNS name, TCP, a value that is no multiaddr): `the network_address of <key>... is a DNS name (...): the node does not resolve names, so it would never dial it. Give the IP address instead; ...`.
-  A `--bootstrap-peers` map is held to the same address rule before the release's parser, which accepts such an address.
-- Mainnet validators can generate their keys before the mainnet genesis exists (OPERATOR.md section 2.12).
-  `--json --phase=keygen --network mainnet` stopped at `Mainnet is not enabled in this script release ...` for every install method, and with only that switch on it still stopped before key generation, at the empty chain-config pins, after it had created the service user, the directories and `.node-meta`.
-  It now runs with `--install-method existing --binary-path <binary>`: a binary whose `--version` lists any build feature is refused before anything on the host changes, the chain configs are skipped, the keytool signs the proof of possession for `--address`, the passphrase is stored as an encrypted credential, and the run says to send `node-info.yaml` and never `node-keys/` or the passphrase.
-  `release`, `docker` and `source` are refused with a message that names this way.
-  Finalize, the interactive install and the Node Manager UI stay refused on mainnet with the message of before.
-- An existing binary on mainnet is held to the build-feature rule of mainnet releases and images (none), so a testnet or test build is refused.
-  The mainnet keygen ran the `--binary-path` file as root for its `--version` before it checked that the file is root-owned, and with no time limit.
-  It now runs it only once it is a root-owned file, not group- or other-writable, in root-owned directories (else `refusing <path>: the node binary must be a root-owned file, ...`, as on testnet), after every other input passed, and gives it 30 seconds (`... its --version did not finish within 30 seconds, ...`).
-- Keygen records `NETWORK` in `.node-meta` before it makes the keys, on every network; before, only finalize recorded it, so mainnet keys were finalized as a testnet node without a word.
-  On a host recorded for mainnet, a finalize, a keygen or an interactive install for any other network (a `--json` run without `--network` is a testnet run) is refused: `This host is recorded for mainnet (NETWORK=mainnet in <.node-meta>, written before keygen makes mainnet keys), and a mainnet BLS key must never be used on another network, ...`.
-  A `--json` finalize or keygen stops right after the root check, before anything on the host changes; an interactive install stops once the network is chosen, before it writes the node's keys, configuration or service.
-  A `--json` keygen over an existing `node-keys/` used to rewrite `NETWORK`, `INSTALL_METHOD` and `DATA_DIR` in `.node-meta` before it refused, and then said the keys and `node-info.yaml` were all in place to use without comparing them with the run: an operator correcting a mistyped address was told to send a proof of possession for the old one, and a host with testnet keys was relabelled mainnet.
-  It now refuses right after the root check, before anything is written, and compares: keys recorded for another network are not the run's, a `node-info.yaml` for another execution address names both addresses and the way to start over, a `node-info.yaml` with no execution address that can be read (empty, cut short or damaged, or a symbolic link) is not a file to send and gets the same start-over on every network, and only the same address and network get the message of before.
-  A host keyed by an older release, with no `NETWORK` before finalize, and every testnet or devnet record keep the behaviour of before.
-- A SIGHUP, SIGINT or SIGTERM that reached setup during the keytool call left the keys and a valid `node-info.yaml` with no stored passphrase, which a second keygen (`node-keys already exist ...`) and finalize (`No stored BLS passphrase recorded ...`) both refused without saying the way out.
-  New keys now get their stored passphrase before the keytool runs, the three signals are held until the keys are checked, and a keytool that fails or is stopped, or leaves no `node-info.yaml`, has what it wrote and the stored passphrase removed.
-  A keygen reports success, and names the file to send, only with the key, `node-info.yaml` and the stored passphrase all in place.
-  A second keygen over `node-keys/`, and a finalize without a stored passphrase over keys, say what they found and what to do (OPERATOR.md section 2.12).
-- The mainnet keygen also printed the onboarding steps of a testnet validator (governance approval, a ConsensusNFT, the stake it read from the mainnet RPC, `cast send`, `prepare-stake.sh`, re-registering with the Association), none of which applies to a genesis validator.
-  It now shows `node-info.yaml` and then only what a genesis validator does next: send `node-info.yaml`, never the keys or the passphrase, and finalize once the mainnet release and genesis are out; it reads no stake.
-- A `--json` keygen refuses the zero address before the root check (`--address is the zero address: ...`): the proof of possession is signed over the execution address, which receives the rewards.
 
-### lib/common 2.2.5
+### lib/common 2.2.7
 
+- The testnet `committee.yaml` pin accepts the file of `v0.18.0-adiri`: `TESTNET_COMMITTEE_SHA256`
+  lists `009b6d7b…f15ce`, the file through `v0.17.0-adiri`, and `886f016b…50cd1f`, the one in
+  `v0.18.0-adiri`. Only `committee.yaml` changed there: `bootstrap_servers` is `{}`
+  (telcoin-network #1848 moved the five servers, unchanged, into the binary); the validators,
+  their keys and addresses, `genesis.yaml` and `parameters.yaml` are the same. A release whose
+  `SHA256SUMS` gives `committee.yaml` either hash passes; any other hash is refused, and the
+  message names both. The new `tn_chain_config_pin_ok NETWORK FILE SHA256` tests a hash against
+  a pin; `tn_chain_configs_check` and the release check use it.
+- `TESTNET_CHAIN_CONFIGS_TAG` stays `v0.16.0-adiri`, so setup and menu 13 keep installing the
+  `committee.yaml` that names the five bootstrap servers. A node these scripts start has no
+  `--chain`, and without it the node dials only the servers its data dir's `committee.yaml`
+  names: a new node set up from the `v0.18.0-adiri` file would dial no one. Running nodes keep the
+  `committee.yaml` in their data dir; update-node never touches it.
+- The unsigned-release exception for `v0.17.0-adiri` (`TN_UNSIGNED_RELEASE_TAG`,
+  `tn_release_unsigned_ok`) is removed. A Docker update to that tag asks for a signed release
+  first and, on testnet, falls back to the registry's digest with a warning; a source build of it
+  warns that the tag is not verified, as for any unsigned testnet tag.
+- `TESTNET_BOOTSTRAP_SERVERS_SHA256` sits beside the chain-config pins and is empty while
+  `TESTNET_CHAIN_CONFIGS_TAG` (`v0.16.0-adiri`) keeps the bootstrap servers in `committee.yaml`.
+  It says what the tag carries: with a pin, `tn_chain_configs_from_tag` reads, checks and
+  installs `chain-configs/testnet/bootstrap_servers.yaml` with the three other files and refuses
+  a tag without it or a changed one; without a pin, it refuses a tag that carries the file
+  (`<tag> carries chain-configs/testnet/bootstrap_servers.yaml, but these scripts pin no sha256
+  for it; nothing was installed.`). To list the tag for that check, each fetch runs one more
+  read-only `git ls-tree`. Mainnet has no such pin and its file, a placeholder set until the
+  genesis ceremony, is never read. New helpers: `tn_bootstrap_servers_pin`,
+  `tn_bootstrap_servers_check`.
 - Fix for every new testnet install: the chain configs come from the telcoin-network tag this
   release pins (`TESTNET_CHAIN_CONFIGS_TAG`, `v0.16.0-adiri`), never from a branch.
   `ensure_chain_configs_available` cloned the default branch, or pulled an existing checkout, and
@@ -435,15 +533,6 @@ Every other script, library and UI file keeps its version. The runbook for the g
   holds both rules for each listed host (`tn_gateway_from_rules_ok`) and whether nobody else
   reaches the two ports (`tn_gateway_ports_private`).
 - Sources `lib/gateway.sh` at its end when the file is present, as it does `lib/alerts.sh`.
-- New `tn_committee_peers_check DATA_DIR MAP`: rc 0 when every validator under `authorities` in `DATA_DIR/genesis/committee.yaml` is a key of the top-level map of the peers map MAP (YAML in block or flow style, JSON included) and MAP's entry for this node, if it has one, carries the primary and worker network keys of `DATA_DIR/node-info.yaml`; else rc 1 with one line that names the gap (a count and the first three keys), the entry, the line it does not read, or why the check could not run.
-  It reads the files as the service user, since they sit in the data dir that user writes.
-  setup-node and edit-config call it before every render of `committee_peers` and list it in their library checks.
-- New `tn_trusted_nodes_shape_ok FILE`, the trusted nodes map's shape check, moved here from edit-config so setup-node runs the same one, and new `tn_map_addr_check FILE`, which it calls.
-  `tn_map_addr_check` refuses a `network_address` that is not `/ip4/<address>/udp/<port>/quic-v1` or the same with `/ip6`, with an optional `/p2p/<peer id>`: a DNS name (`/dns`, `/dns4`, `/dns6`, `/dnsaddr`), which the node keeps and never dials because it does not resolve names, a `/tcp` address, which it does not dial either, and a value the node stops on.
-  Each refusal names the line, the entry's BLS key shortened and the address; both scripts list the two functions in their library checks.
-- New `tn_trusted_nodes_node_check SPEC FILE`: the release of SPEC parses a trusted nodes map as a `--bootstrap-peers` value, its workers turned into a list; and `tn_local_worker_count DATA_DIR`, the number of workers `node-info.yaml` lists (1 before there is one), which `tn_trusted_nodes_shape_ok FILE [WORKERS]` now takes.
-- New `readonly TN_MAINNET_KEYGEN_ENABLED=1` and `tn_mainnet_keygen_enabled`: while `TN_MAINNET_ENABLED` is 0, they open setup-node's mainnet keygen and nothing else; at 0 that keygen is refused as before.
-- New `tn_keys_network_ok WANTED [META]`: rc 1 when `.node-meta` records `NETWORK=mainnet` and WANTED is another network (the reason on stderr), rc 2 when `NETWORK` is set more than once, else rc 0; setup-node lists it in its library check.
 
 ### Node Manager UI 2.1.3
 
@@ -462,10 +551,17 @@ Every other script, library and UI file keeps its version. The runbook for the g
   / ...` and the shell's sentence about the comparison follows. A missing RAM figure shows `?`.
 - The network tables (`NETWORKS`, `NETWORK_PUBLIC_RPC`) key mainnet by 731. Chain 487 is not
   listed, so a node on it is named through `.node-meta`, like a node on any unknown chain.
+- `ui/requirements.txt` pins `click` 8.5.1, up from 8.5.0 (Dependabot, pull request #63). Since
+  the requirements changed, `sudo bash ui/install-ui.sh --update` builds the UI's Python venv
+  again.
 
 ### AWS one-click stack
 
-`aws/node.yaml` carries no version.
+The stack is new since `scripts-v2.1.0` (pull request #71): `aws/node.yaml` is a CloudFormation
+template that launches a ready node host in the operator's own AWS account, where the operator
+runs `setup-node.sh` and `firewall-setup.sh` from a Session Manager shell
+([OPERATOR.md section 2.11](../OPERATOR.md#211-aws-one-click)). `aws/node.yaml` carries no
+version. Since pull request #71 it changed as follows.
 
 - The presets follow the recommended column of the testnet table for cores and RAM. `FullNode`
   (the default) and `Validator` are `c7i.2xlarge`, 4 cores (8 vCPU), 16 GiB; `PublicRPC` is
@@ -477,8 +573,12 @@ Every other script, library and UI file keeps its version. The runbook for the g
 - The `DataVolumeSize` description in the console says what each preset sustains: a `c7i.2xlarge`
   (`FullNode`, `Validator`) 12,000 IOPS to EBS and 15,000 in bursts, a `c7i.4xlarge`
   (`PublicRPC`) the full 15,000.
-- Existing stacks keep running as they are, and nothing in this release needs a change on them. Do
-  not update a stack to this template: once Canonical's image has moved, the update fails and its
+- Existing stacks keep running as they are, and nothing in this release needs a change to the
+  stack itself. Their scripts do: a stack launched before this release installed
+  `scripts-v2.1.0`, and its daily update association fails at `update-scripts.sh` until the
+  operator runs the installer once as the stack's `ubuntu` user (see
+  [Updating from scripts-v2.1.0](#updating-from-scripts-v210)). Do not update a stack to this
+  template: once Canonical's image has moved, the update fails and its
   rollback waits, possibly for hours, until the volume's IOPS change completes; if the image has
   not moved, a `Validator` stack's update stops and starts the instance outside the epoch-boundary
   wait. Raise the volume's IOPS or change the instance type in the EC2 console instead, as
@@ -491,6 +591,7 @@ Every other script, library and UI file keeps its version. The runbook for the g
 |---|---|
 | `setup-gateway.sh`, `lib/gateway.sh` | The worker gateway's script and library |
 | `lib/release-keys/MavenRain.asc` | MavenRain's release key (`32F886ADE9C3A88218E4B67CA0A69159FC76DBFD`) |
+| `lib/release-keys/sstanfield.asc` | sstanfield's release key (`9D72ECBEE3AA983FA8671DA511423DE08DDE052C`) |
 | `lib/release-keys/grantkee.asc` | Now grantkee's ed25519 key (`95A38484E1CBD31D773F6AF928FD56AD2F9FAE47`); the RSA key is gone |
 | `/etc/systemd/system/telcoin-gateway.service` | The gateway's unit |
 | `/etc/telcoin/gateway/gateway.meta` | The gateway's settings (`GATEWAY_META_VERSION=1`) |
@@ -506,8 +607,8 @@ Every other script, library and UI file keeps its version. The runbook for the g
 
 | Message (shortened) | What to do |
 |---|---|
-| `The release manifest is not signed by a Telcoin release key (no release key in lib/release-keys made a good signature)`, on a host on `scripts-v2.1.0` | Re-run the installer once (see [The release keys](#the-release-keys)). |
-| `this scripts release pins no worker-gateway image for <network> yet (...)` | Testnet and mainnet wait for a scripts release that pins the image of a signed telcoin-network release; `update-scripts.sh` brings it. |
+| `The release manifest is not signed by a Telcoin release key (no release key in lib/release-keys made a good signature)`, on a host on `scripts-v2.1.0`, after the warning `a signature by key <id>, which is not a release key, was not checked` (for this release `<id>` is `28FD56AD2F9FAE47`) | Run the installer once; `update-scripts.sh` cannot take this release there (see [Updating from scripts-v2.1.0](#updating-from-scripts-v210)). |
+| `this scripts release pins no worker-gateway image for mainnet yet (...)` | Mainnet only: this release pins the testnet image. Mainnet waits for a scripts release that pins the image of a signed telcoin-network release; `update-scripts.sh` brings it. |
 | `this scripts release's <network> worker-gateway pin cannot be used: ...` | A defect of the scripts release; a corrected one comes through `update-scripts.sh`. |
 | `on mainnet the gateway runs on its own host (use --mode standalone there)` | Run the gateway on a host of its own. |
 | `--reset is refused while GATEWAY_UPSTREAM is set` | Set `gateway_upstream=off` first; OPERATOR.md section 4.15 has the order. |
@@ -527,21 +628,33 @@ Every other script, library and UI file keeps its version. The runbook for the g
 | `Nothing to refresh: the node's data dir already holds the <network> chain configs this script release pins (<tag>), ...` (menu 13) | Nothing; use `14) Restart node` if the node was not restarted after those files were copied. |
 | `Clone the repository at <tag> into <dir> now?` (menu 13) | No checkout and no pinned files. Answer yes, or follow the manual clone command and the raw-file URLs it prints. |
 | `This script release pins no <network> chain configs yet, so there is nothing to install. Chain configs unchanged.` (menu 13) | Mainnet today: its chain configs come with a signed scripts release. |
-| `--install-method <method> cannot install a mainnet node yet: before genesis no mainnet release, image or source tag can be verified. ...` (mainnet keygen) | Generate the keys with `--install-method existing --binary-path <binary>` (OPERATOR.md section 2.12). |
-| `Refusing the node binary at <path>: it is not a mainnet build (This build has the features <features>; a mainnet build has none.) ...` | Build `telcoin-network` with no build features (`cargo build -p telcoin-network --bin telcoin-network --release --locked`) and pass that binary. |
-| `This host is recorded for mainnet (NETWORK=mainnet in <.node-meta>, written before keygen makes mainnet keys), and a mainnet BLS key must never be used on another network, so a <network> node is refused here. ...` | Finalize this host with `--network mainnet`; set up the testnet or devnet node on another host. |
+| `Release v0.18.0-adiri: SHA256SUMS is not verified: no good signature by a key in lib/release-keys ...`, on `scripts-v2.1.0` | Run the installer once (see [Updating from scripts-v2.1.0](#updating-from-scripts-v210)). |
+| `Release <tag>: chain-configs/testnet/committee.yaml has sha256 <x>, but these scripts pin 009b6d7b... or 886f016b...` | The release does not carry a testnet `committee.yaml` this script release accepts; report it. |
+| `One-way update: v0.18.0-adiri migrates ...` | Expected. Check free disk first; there is no way back once the node has started it (see [update-node 2.1.3](#update-node-213)). |
+| `Release v0.17.0-adiri has no signed image digest to read; using the digest the registry serves for <repo>:v0.17.0-adiri (testnet only).` | Expected: the exception for that tag is gone. |
+| `Tag v0.17.0-adiri is not verified (...); building it anyway because this is testnet.` | Expected: the exception for that tag is gone. |
 
 ## Left open
 
-- telcoin-network main still lists the RSA key (`.github/maintainer-gpg-keys/grantkee.asc`). From
-  this release on the scripts accept a node release only when a tn-release-signing key signed it,
-  so the first telcoin-network release must be signed with one.
+- `DEFAULT_DOCKER_IMAGE`, the testnet fallback image, is still `v0.16.0-adiri`.
+- When a later release needs the chain configs at a newer tag, new testnet installs need the
+  bootstrap servers from somewhere other than `committee.yaml` (`--bootstrap-peers`, or `--chain`),
+  because the files at `v0.18.0-adiri` and later list none.
+- update-node's one-way messages and its disk check were written for the consensus store; for
+  `v0.18.0-adiri` they say "consensus store" and measure `consensus-db/epochs`, not
+  `db/mdbx.dat`, and the undo line offers a snapshot restore that upstream does not support for
+  this release.
 - tn-release-signing refuses a `SHA256SUMS.asc` that carries any signature not good by one of its
   keys, and counts signatures per holder; these scripts only warn on a signature by a key they do
   not ship, and count distinct primary keys. The two policies are not reconciled yet.
-- No signed telcoin-network release with a worker-gateway image exists yet. Testnet and mainnet
-  refuse the gateway until a scripts release pins the image of a signed release in
-  `lib/gateway.sh` and `tools/check-gateway-pin.sh` passes on it; devnet takes one by digest from
-  the three repositories above.
+- The mainnet worker-gateway pin is empty: mainnet refuses the gateway until a scripts release pins
+  the image of a signed mainnet release in `lib/gateway.sh` and `tools/check-gateway-pin.sh`
+  passes on it.
 - The per-client limit (100 requests a second, 32 connections) is keyed on the client IP address,
   so a relay that forwards many users' transactions counts as one client.
+- Publishing the AWS template to S3 (`publish-aws-templates.yml`) is not wired yet: the
+  `aws-templates` environment and its variables do not exist, so that workflow's upload job fails
+  on the release tag. The installer is published by its own workflow and is not affected.
+- `tools/release-scripts.sh` does not yet check that a release verifies against the previous
+  release's key set, so a key change that strands hosts, as this one strands `scripts-v2.1.0`,
+  can pass unnoticed. A check that refuses such a release unless overridden is a follow-up.

@@ -25,7 +25,7 @@
 
 set -euo pipefail
 
-readonly TN_SCRIPTS_TAG="scripts-v2.1.0"   # written by tools/release-scripts.sh
+readonly TN_SCRIPTS_TAG="scripts-v2.2.0"   # written by tools/release-scripts.sh
 readonly TN_ARCHIVE_BASE="https://github.com/Telcoin-Association/tn-node-deployment/archive/refs/tags"
 readonly TN_INSTALLER_URL="https://install.telcoin.network"
 readonly INSTALL_DIR="${HOME}/telcoin-node-scripts"
@@ -279,6 +279,25 @@ YW51MiwyLjUrMS4xMiwwLDMCGwwFCQPCZwAACgkQKP1WrS+frkdZRgD/ZK3Ntq9L
 +3CeY8i6I0Yi2kZ9RZ/8Xh7KQT4MvPVW1jcBAICZSbs3Oo+r2NTr+62iuR41mn6u
 gKF3VKf/4RV0x7QN
 =qbf8
+-----END PGP PUBLIC KEY BLOCK-----
+-----BEGIN PGP PUBLIC KEY BLOCK-----
+
+mDMEawCtfhYJKwYBBAHaRw8BAQdATNaImtSz0C8MYq1uPkQ3G5oVRsxmbDQL5Ntc
+Hy4NSF20LlN0ZXZlbiBTdGFuZmllbGQgPHN0YW5maWVsZEBzY2FyZWNyb3d0ZWNo
+LmNvbT6ItQQTFgoAXRYhBJ1y7L7jqpg/qGcdpRFCPeCN3gUsBQJrAK1+GxSAAAAA
+AAQADm1hbnUyLDIuNSsxLjEyLDAsMwIbAwUJA8JnAAULCQgHAgIiAgYVCgkICwIE
+FgIDAQIeBwIXgAAKCRARQj3gjd4FLCg+AQC7ux+yPH/jp3E15903r92UxhM5cKIw
+Jn8JG15zoD3ChQEA0NXCmet+Bkficsj5Ep94IbN4wDlQUwxOkuq2Cz8vfQK4MwRr
+AK1+FgkrBgEEAdpHDwEBB0CQw0EfwKMxrHLIcQgQ/Xffu4hyE24QEgSLVcOoJYdi
+4oiaBBgWCgBCFiEEnXLsvuOqmD+oZx2lEUI94I3eBSwFAmsArX4bFIAAAAAABAAO
+bWFudTIsMi41KzEuMTIsMCwzAhsgBQkDwmcAAAoJEBFCPeCN3gUsINoA/judKe6X
+2+bDuAGQvSjkaMWOLEkskRM+lW2g5iRDBOmUAQDHA8kTwxR7yyzFbGsOMecv7THA
+SSTEeHqq+JTlnEqnALg4BGsArX4SCisGAQQBl1UBBQEBB0B2UMbpd5/W2epwsj1h
+KzRcet1ptR22PRTGTCxfiklceQMBCAeImgQYFgoAQhYhBJ1y7L7jqpg/qGcdpRFC
+PeCN3gUsBQJrAK1+GxSAAAAAAAQADm1hbnUyLDIuNSsxLjEyLDAsMwIbDAUJA8Jn
+AAAKCRARQj3gjd4FLFtDAQDHwDxD/3XCxuxqCr/gENnbV7aZdWhKFrcfX4DBSX4F
+cAEA0WNVvRyafC8U2vYDeXKLCxaWYxDbiZVXYmNEOI3jwg0=
+=+zyM
 -----END PGP PUBLIC KEY BLOCK-----
 TN_RELEASE_KEYS
 }

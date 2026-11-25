@@ -152,6 +152,20 @@ a pull to the testnet or mainnet path; devnet, which has no pins, still pulls.
 
 - `TESTNET_CHAIN_CONFIGS_TAG`, the three `TESTNET_*_SHA256` pins and the files in
   `tools/tests/genesis.d/testnet/` move together, in one change.
+- `TESTNET_BOOTSTRAP_SERVERS_SHA256` moves with them. It is empty while the tag keeps the bootstrap
+  servers in `committee.yaml` (`v0.16.0-adiri` does) and is the sha256 of
+  `chain-configs/testnet/bootstrap_servers.yaml` at a tag from telcoin-network #1848 on, which
+  keeps them in that file; a tag that carries the file with no pin, or a pin with a tag that does
+  not, is refused. With a pin, setup gives the file to a node that has no peers map
+  (`setup_default_bootstrap_peers`), because the scripts start the node without `--chain`, the only
+  way the node reads it. Mainnet has no such pin until its file holds the real servers.
+- A pin may list several hashes, space-separated; any of them passes
+  (`tn_chain_config_pin_ok`), and the first is the file at the tag. `TESTNET_COMMITTEE_SHA256`
+  lists the `committee.yaml` of `v0.16.0-adiri`, which names the five bootstrap servers, and the
+  one of `v0.18.0-adiri`, which lists none (they moved into the binary). The tag stays
+  `v0.16.0-adiri`: a node these scripts start has no `--chain` and dials only the bootstrap
+  servers its data dir's `committee.yaml` names. Compare a hash with a pin through
+  `tn_chain_config_pin_ok`, never with `==`.
 - Mainnet has neither a tag nor pins until the genesis ceremony, so a mainnet install stops at the
   chain-config check and menu 13 refuses mainnet before any prompt (see "The mainnet switch").
 - Menu 13 asks the library's own checks and clone (`_tn_chain_configs_dest_ok`,
@@ -559,7 +573,10 @@ validator side. Rules:
   `GW_TESTNET_IMAGE_PIN="..." GW_TESTNET_PIN_RELEASE="..."`, the same for mainnet. The tag is a
   release tag of that network (`tn_release_tag_ok`), and `_gw_pin_ok` refuses a pin of another
   form or one without such a tag. Set a pin and its release together in a `chore` commit of a
-  scripts release; `tools/check-gateway-pin.sh` must pass.
+  scripts release; `tools/check-gateway-pin.sh` must pass. From `scripts-v2.2.0` the testnet
+  pin is set (the image of the signed `v0.18.0-adiri` release; the line is in `lib/gateway.sh`)
+  and the mainnet pin is empty, so a mainnet enable refuses ("this scripts release pins no
+  worker-gateway image for mainnet yet").
 - The unit never pulls (`--pull=never`): `gw_image_ensure` pulls by digest before anything is
   written, and `gw_image_probe` needs every flag of `GW_REQUIRED_FLAGS` in the image's `--help`,
   so a flag added to the unit goes into that list too.
@@ -606,6 +623,9 @@ The fixture tests are `tools/tests/gateway_setup_test.sh`, `gateway_check_remove
 `gateway_remove_test.sh`, `gateway_validator_test.sh`, `gateway_upstream_test.sh`,
 `caddy_gateway_test.sh` and `gateway_pin_test.sh` (`tools/check-gateway-pin.sh`, with its
 fixture `tools/tests/gateway-pin.d/`);
+`gateway_setup_test.sh` first checks that each pin the tree ships and its release are set
+together and that a set pin passes `_gw_pin_ok`, then blanks both pins, so its cases run on the
+pins they set themselves, whatever the tree pins.
 `gateway_smoke.sh <image>` and `caddy_gateway_smoke.sh <image>` need Docker and are not run by
 `run.sh`.
 
@@ -955,15 +975,32 @@ the repository root, and `RELEASE` on main (one line, `<tag> <date>`) names the 
   removes or replaces a key must therefore be signed by a key that is in both the old and the
   new set. `scripts-v2.2.0` has none: it replaces grantkee's RSA key
   (`4E36D35A4AB61B589861D01AC7173F2377CA7573`, the only key of `scripts-v2.1.0`, removed from
-  tn-release-signing) with the ed25519 keys of grantkee and MavenRain. The RSA key no longer
-  signs, so a host on 2.1.0 refuses 2.2.0 and re-runs the installer, whose embedded keys are
-  the new ones.
+  tn-release-signing) with the ed25519 keys of grantkee, MavenRain and sstanfield. The RSA key
+  no longer signs, so a host on 2.1.0 refuses 2.2.0 ("The release manifest is not signed by a
+  Telcoin release key (no release key in lib/release-keys made a good signature); nothing was
+  changed.", with no remedy named) and re-runs the installer, whose embedded keys are the new
+  ones. With three keys held on separate YubiKeys, losing one no longer strands hosts: a
+  release signed by another key of the installed set verifies.
+- The reinstall hint: from `scripts-v2.2.0`, `verify_manifest` in `update-scripts.sh` follows
+  that "not signed by a Telcoin release key" error with `reinstall_hint` (the installer
+  one-liner) when the verdict is `NOSIG` or `EXPKEYSIG`, the two cases where the installer's
+  embedded keys can differ from the host's. It prints no hint for `REVKEYSIG`: a host holds a
+  revoked copy of a key only because a signed release shipped it, so a release signed by that
+  key is a mistake or a compromised key in use, and the installer verifies the same release with
+  the same key and refuses it too. None for `BADSIG` (a changed file, not a key problem),
+  `EXPSIG` or `ERRSIG` either, and none when the keys are the ones the one-time key bootstrap
+  fetched (`nohint`): those are the release's own keys, which its installer embeds too. A run
+  never prints the hint twice, the `--check` paths that print it themselves included. Keep it
+  that way: the hint cannot reach a 2.1.0 host, but it makes the next key change explain itself.
+  When `TN_SIG_THRESHOLD` rises above 1, a `THRESHOLD` verdict on a release co-signed by a key
+  the host lacks is a key-set problem too, and joins the hint's verdicts then.
 - Key expiry: the release keys' primaries expire on 2028-11-16 (grantkee,
-  `95A38484E1CBD31D773F6AF928FD56AD2F9FAE47`) and 2028-11-10 (MavenRain,
-  `32F886ADE9C3A88218E4B67CA0A69159FC76DBFD`). From that date `gpgv` reports `EXPKEYSIG` for
-  a key on a host whose installed copy is the old one, and that host refuses every later
-  release that key signed, script or node. Only a release that verifies against the installed
-  copy can renew it, so the extended key (re-exported with the new expiry into
+  `95A38484E1CBD31D773F6AF928FD56AD2F9FAE47`), 2028-11-10 (MavenRain,
+  `32F886ADE9C3A88218E4B67CA0A69159FC76DBFD`) and 2028-11-19 (sstanfield,
+  `9D72ECBEE3AA983FA8671DA511423DE08DDE052C`). From a key's expiry date `gpgv` reports
+  `EXPKEYSIG` for it on a host whose installed copy is the old one, and that host refuses
+  every later release that key signed, script or node. Only a release that verifies against
+  the installed copy can renew it, so the extended key (re-exported with the new expiry into
   tn-release-signing) must ship in a script release signed before that date. A host that has
   not installed that release by then re-runs the installer, whose embedded keys are the
   extended ones.
@@ -980,7 +1017,8 @@ the same command again carries on where a run stopped. The tool never sets `comm
 
 1. `bash tools/cut-release.sh prep scripts-vX.Y.Z [--serial N] [--key FPR] [--sig-from FILE] [--yes]`
    opens the release pull request. It fetches origin; checks the signing key (`--key`, else
-   `git config user.signingkey`, else the one key in `lib/release-keys/`) before it creates or
+   `git config user.signingkey`, else the one key in `lib/release-keys/`; with three keys there,
+   it refuses until `--key` or `user.signingkey` names one) before it creates or
    enters any branch: the key must be the primary key of a `lib/release-keys/*.asc` file of
    the branch to be (`origin/main` for a new one), else it refuses ("... is not a primary key of
    lib/release-keys/*.asc on origin/main") and creates nothing; creates
@@ -1208,7 +1246,8 @@ into a pass. The jobs:
   `tools/check-gateway-pin.sh` on every `scripts-v*` tag and every push to main, and on a pull
   request that changes `lib/gateway.sh`, `lib/common.sh`, `lib/release-keys/`, the tool, `ci.yml`,
   `publish-installer.yml`, `MANIFEST`, `MANIFEST.asc` or `RELEASE`; with both pins empty it
-  downloads nothing and passes.
+  downloads nothing and passes, and with the testnet pin set, as from `scripts-v2.2.0`, it
+  downloads that release's signed files and checks the pin against them.
 - `ui-tests` ("Node Manager UI tests"): on Python 3.10, installs `ui/requirements.txt` and
   `ui/tests/requirements-dev.txt` with `--require-hashes`, runs `python -m pytest -q ui` (there
   is no unittest fallback), then the three UI shell tests under bash 5. As the runner user,
@@ -1291,13 +1330,17 @@ line.
   `vm.d/P0-p2p-allow.sh` installs the pinned `tn-p2p-allow-sync` release from GitHub and drives the P2P committee allowlist on the runner's systemd and kernel; it reports SKIP while `lib/common.sh` pins no tarball sha256 or the release cannot be downloaded.
 - `tools/tests/genesis.d/testnet/` holds `genesis.yaml`, `committee.yaml` and
   `parameters.yaml` from telcoin-network at the pinned tag (`TESTNET_CHAIN_CONFIGS_TAG`),
-  unchanged. `genesis_hash_test.sh` checks them against the `TESTNET_*_SHA256` pins in
-  `lib/common.sh`; refresh the files, the pins and the tag together.
+  unchanged. `genesis_hash_test.sh` checks them against the first hash of each
+  `TESTNET_*_SHA256` pin in `lib/common.sh`, and derives the `v0.18.0-adiri` `committee.yaml`
+  from the fixture for the second committee hash; refresh the files, the pins and the tag together.
   `chain_configs_tag_test.sh` drives `tn_chain_configs_from_tag` and
   `ensure_chain_configs_available` with real git against a local bare origin whose tag holds
   these files while its `main` carries another `committee.yaml`, the shape of the 2026-11-14
   break; its git cases need git, so they skip in the `bash:3.2` image.
   `chain_configs_refresh_test.sh` covers edit-config's menu 13 (`refresh_chain_configs`).
+  `bootstrap_servers_test.sh` covers `TESTNET_BOOTSTRAP_SERVERS_SHA256`: the fetch and setup with
+  the empty pin as shipped, then with a pin (`tn_bootstrap_servers_pin` replaced) the file read,
+  installed and given to a node with no peers map, and each refusal.
 - `tools/tests/perl-interp.d/` holds the perl lint's fixtures, and `tools/tests/signing.sh`
   the OpenPGP release-signing helpers of `updater_manifest_test.sh`, `install_test.sh`,
   `release_scripts_test.sh`, `cut_release_test.sh`, `p2p_allow_install_test.sh` and `gateway_pin_test.sh`: `newkey NAME [EXPIRY|--expired|--revoked]`,

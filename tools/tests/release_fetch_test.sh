@@ -9,7 +9,8 @@
 # (REVKEYSIG), alone and beside a good signature; an expired key (EXPKEYSIG); an
 # unknown key alone (refused); a good signature plus one by an unknown key
 # (taken, one warning naming its key id); a BADSIG by a second listed key; a key
-# file with two primary keys; a chain-config line that differs from the pins; an
+# file with two primary keys; a chain-config line that differs from the pins;
+# either pinned committee.yaml hash (v0.17.0-adiri's, v0.18.0-adiri's); an
 # extra name; a missing file (rc 2); no keys; a bad tag (rc 3, nothing
 # downloaded); the staging dir is empty after every failure. The status-line
 # policy of _tn_release_sig_ok is also checked against a stubbed gpgv, for the
@@ -225,10 +226,11 @@ tar -czf "$REL/$TARBALL" -C "$T/tar" "telcoin-network-${TAG}-${TRIPLE}"
 D64="$(printf 'image' | sha256sum | cut -d' ' -f1)"
 printf '%s@sha256:%s\n' "$GAR_IMAGE_BASE" "$D64" > "$REL/IMAGE_DIGEST"
 h() { sha256sum < "$1" | cut -d' ' -f1; }
+# The committee hash defaults to the first pinned one, the file at the pinned tag.
 write_sums() { # [committee-hash]
     {
         printf '%s  %s\n' "$(h "$REL/IMAGE_DIGEST")" IMAGE_DIGEST
-        printf '%s  chain-configs/testnet/committee.yaml\n' "${1:-$TESTNET_COMMITTEE_SHA256}"
+        printf '%s  chain-configs/testnet/committee.yaml\n' "${1:-${TESTNET_COMMITTEE_SHA256%% *}}"
         printf '%s  chain-configs/testnet/genesis.yaml\n' "$TESTNET_GENESIS_SHA256"
         printf '%s  chain-configs/testnet/parameters.yaml\n' "$TESTNET_PARAMETERS_SHA256"
         printf '%s  %s\n' "$(h "$REL/$TARBALL")" "$TARBALL"
@@ -371,7 +373,26 @@ sign "$FA"
 fetch "$TAG"
 check_rc "chain-config mismatch refused" 1 "$RC"
 check_has "mismatch names the file" "1" "$(grep -c 'chain-configs/testnet/committee.yaml' "$T/err")"
+check_has "mismatch names the hash and both accepted committee hashes" \
+    "Release ${TAG}: chain-configs/testnet/committee.yaml has sha256 $(printf 'other' | sha256sum | cut -d' ' -f1), but these scripts pin 009b6d7b568f7d04734b657080d55621eed70f68ecefe1284dd8cdd0f42f15ce or 886f016b6ce8970f3019ec8f48c0847cf113950b6dc7a7d950e3be4aac50cd1f. Update the scripts (update-scripts.sh) before using this release." \
+    "$(cat "$T/err")"
 stage_empty "chain-config mismatch"
+
+# --- committee.yaml: either pinned file passes ----------------------------------------------
+# Through v0.17.0-adiri a release carries the committee.yaml that names the five
+# bootstrap servers (009b...); v0.18.0-adiri's lists none, the servers moved into the
+# binary (886f...). Both are pinned.
+for c in 009b6d7b568f7d04734b657080d55621eed70f68ecefe1284dd8cdd0f42f15ce:v0.17.0-adiri \
+    886f016b6ce8970f3019ec8f48c0847cf113950b6dc7a7d950e3be4aac50cd1f:v0.18.0-adiri; do
+    write_sums "${c%%:*}"
+    sign "$FA"
+    fetch "$TAG"
+    check_rc "committee.yaml of ${c#*:} (${c:0:8}...): taken" 0 "$RC"
+    check "committee.yaml of ${c#*:}: the line in the verified SHA256SUMS" "${c%%:*}" \
+        "$(_tn_release_sum "${OUT%/*}/SHA256SUMS" chain-configs/testnet/committee.yaml 2>/dev/null)"
+    [[ $RC -ne 0 ]] || _tn_release_cleanup "${OUT%/*}"
+    stage_empty "committee.yaml of ${c#*:}"
+done
 
 # --- an extra name / a missing chain-config line ----------------------------------------------
 write_sums

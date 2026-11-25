@@ -178,7 +178,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
         tn_network_config_render tn_node_supports_admission tn_committee_peers_check tn_gateway_from_rules_ok \
         tn_trusted_nodes_shape_ok tn_map_addr_check tn_trusted_nodes_node_check tn_local_worker_count \
         tn_chain_configs_tag tn_chain_configs_dir tn_chain_configs_from_tag \
-        _tn_chain_configs_clone tn_chain_config_pin _tn_chain_configs_dest_ok \
+        _tn_chain_configs_clone tn_chain_config_pin tn_chain_config_pin_ok _tn_chain_configs_dest_ok \
         _tn_chain_configs_clone_target _tn_chain_configs_in_place >/dev/null; then
     _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this edit-config.sh: run update-scripts.sh and try again."
     case " $* " in
@@ -189,7 +189,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
 fi
 unset _tn_old
 
-readonly SCRIPT_VERSION="2.2.2"
+readonly SCRIPT_VERSION="2.2.3"
 
 # The largest bootstrap peers file accepted. A map of a few dozen peers is a
 # few KiB, and the whole map travels as one command-line argument.
@@ -3624,7 +3624,7 @@ refresh_chain_configs() {
 
     local source_dir="${TN_ROOT_PREFIX:-}${TN_SOURCE_DIR}"
     local node_data_dir network subdir chain_config_src node_genesis node_id src_id rc
-    local tag was_in_place current f want got pin_dir clone
+    local tag was_in_place current f got pin_dir clone
     if ! node_data_dir="$(detect_data_dir)"; then
         print_error "Cannot tell the node's data dir: DATA_DIR is set more than once in .node-meta. Chain configs unchanged."
         echo ""
@@ -3671,12 +3671,11 @@ refresh_chain_configs() {
     if [[ -n "$tag" ]]; then
         current=true
         for f in genesis/genesis.yaml genesis/committee.yaml parameters.yaml; do
-            want="$(tn_chain_config_pin "$network" "${f##*/}")"
             # shellcheck disable=SC2016  # $1 expands in the child shell
             got="$(tn_as_service_user sh -c '[ -f "$1" ] && [ ! -L "$1" ] && exec sha256sum < "$1"' \
                 sh "${node_data_dir}/${f}" 2>/dev/null)" || got=""
             got="${got%% *}"
-            [[ -n "$want" && "$got" == "$want" ]] || current=false
+            tn_chain_config_pin_ok "$network" "${f##*/}" "$got" || current=false
         done
         if [[ "$current" == "true" ]]; then
             print_ok "Nothing to refresh: the node's data dir already holds the ${network} chain configs this script release pins (${tag}), so ${TARGET_SERVICE} was not restarted."

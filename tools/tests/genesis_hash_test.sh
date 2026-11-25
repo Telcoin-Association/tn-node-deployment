@@ -7,8 +7,10 @@
 # setup-node.sh's step_create_infrastructure words and ends a --json run on
 # each return code of the chain-config helper (refused, failed). The
 # testnet fixture files (genesis.d/testnet) are the repository's
-# chain-configs/testnet at the pinned tag and must match the TESTNET_*_SHA256
-# constants; a changed, missing or symlinked file is refused before anything
+# chain-configs/testnet at the pinned tag and must match the first hash of each
+# TESTNET_*_SHA256 constant; committee.yaml also takes the v0.18.0-adiri file
+# (derived here from the fixture: bootstrap_servers is {}), through
+# tn_chain_config_pin_ok; a changed, missing or symlinked file is refused before anything
 # is copied; the files are read from the fetched tag into the root-owned
 # chain-configs directory and the checkout is never moved; mainnet refuses
 # while its tag and pins are empty; the working directory is never searched.
@@ -109,15 +111,36 @@ has() { grep -qF -- "$1" "$T/out" && echo yes || echo no; }
 
 # ---- the pins and the fixture files -----------------------------------------------------
 check "pins: testnet tag recorded" "v0.16.0-adiri" "$TESTNET_CHAIN_CONFIGS_TAG"
+# committee.yaml: the file at v0.16.0-adiri (through v0.17.0-adiri), which names the five
+# bootstrap servers, first; then v0.18.0-adiri's, whose bootstrap_servers is {} (the
+# servers moved into the binary). The validators are the same in both.
+OLD_COMMITTEE=009b6d7b568f7d04734b657080d55621eed70f68ecefe1284dd8cdd0f42f15ce
+NEW_COMMITTEE=886f016b6ce8970f3019ec8f48c0847cf113950b6dc7a7d950e3be4aac50cd1f
+check "pins: testnet committee.yaml takes the v0.16.0-adiri file, then the v0.18.0-adiri one" \
+    "$OLD_COMMITTEE $NEW_COMMITTEE" "$TESTNET_COMMITTEE_SHA256"
 for f in genesis committee parameters; do
     got="$(sha256sum < "$FX/${f}.yaml" | cut -d' ' -f1)"
-    check "fixture ${f}.yaml has the pinned hash" "$(tn_chain_config_pin testnet "${f}.yaml")" "$got"
+    check "fixture ${f}.yaml has the first pinned hash (the file at the tag)" \
+        "$(tn_chain_config_pin testnet "${f}.yaml" | cut -d' ' -f1)" "$got"
 done
+check "fixture committee.yaml names the five bootstrap servers (ten multiaddrs)" 10 \
+    "$(grep -c '/quic-v1/p2p/' "$FX/committee.yaml")"
+# v0.18.0-adiri's committee.yaml is the fixture with bootstrap_servers emptied
+# (telcoin-network #1848, one hunk).
+mkdir -p "$T/v18"
+cp "$FX/genesis.yaml" "$FX/parameters.yaml" "$T/v18/"
+awk '/^bootstrap_servers:/ { print "bootstrap_servers: {}"; exit } { print }' "$FX/committee.yaml" > "$T/v18/committee.yaml"
+check "the v0.18.0-adiri committee.yaml: its hash, no bootstrap servers" "${NEW_COMMITTEE} 0" \
+    "$(sha256sum < "$T/v18/committee.yaml" | cut -d' ' -f1) $(grep -c '/quic-v1/p2p/' "$T/v18/committee.yaml")"
 check "mainnet genesis pin empty until the ceremony" "" "$MAINNET_GENESIS_SHA256"
 check "mainnet chain-config tag empty until the ceremony" "" "$MAINNET_CHAIN_CONFIGS_TAG"
 
 # ---- tn_chain_configs_check ---------------------------------------------------------------
 check_rc "testnet fixture passes" 0 "$(chk "$T/good" testnet)"
+check_rc "the v0.18.0-adiri committee.yaml passes" 0 "$(chk "$T/v18" testnet)"
+check_rc "changed committee refused" 1 "$(chk "$T/bad2" testnet)"
+check "changed committee: the line names both accepted values" yes \
+    "$(has "$T/bad2/committee.yaml: sha256 $(sha256sum < "$T/bad2/committee.yaml" | cut -d' ' -f1), expected ${OLD_COMMITTEE} or ${NEW_COMMITTEE} (testnet).")"
 check_rc "changed genesis refused" 1 "$(chk "$T/bad" testnet)"
 check "changed genesis: expected value printed" yes "$(has "expected ${TESTNET_GENESIS_SHA256}")"
 check "changed genesis: actual value printed" yes "$(has "sha256 $(sha256sum < "$T/bad/genesis.yaml" | cut -d' ' -f1)")"
@@ -133,6 +156,34 @@ check "mainnet: says the pins are not published" yes "$(has "no pinned sha256")"
 check_rc "devnet: no pins, warned, rc 0" 0 "$(chk "$T/good" devnet)"
 check_rc "unknown network refused" 1 "$(chk "$T/good" foo)"
 check_rc "empty network refused" 1 "$(chk "$T/good" "")"
+# One hash per file, as mainnet's pins will be after the ceremony: matched exactly,
+# and the line names that one value, as before the committee list.
+one_pin() {
+    case "${2:-}" in
+        genesis.yaml) printf '%s\n' "$TESTNET_GENESIS_SHA256" ;;
+        committee.yaml) printf '%s\n' "$OLD_COMMITTEE" ;;
+        parameters.yaml) printf '%s\n' "$TESTNET_PARAMETERS_SHA256" ;;
+    esac
+}
+check_rc "one pin per file: the matching files pass" 0 "$(tn_chain_config_pin() { one_pin "$@"; }; chk "$T/good" mainnet)"
+check_rc "one pin per file: another committee.yaml refused" 1 "$(tn_chain_config_pin() { one_pin "$@"; }; chk "$T/v18" mainnet)"
+check "one pin per file: the line names the one value" yes \
+    "$(has "$T/v18/committee.yaml: sha256 ${NEW_COMMITTEE}, expected ${OLD_COMMITTEE} (mainnet).")"
+
+# ---- tn_chain_config_pin_ok ---------------------------------------------------------------
+pok() { local rc=0; tn_chain_config_pin_ok "$@" || rc=$?; printf '%s\n' "$rc"; }
+check_rc "pin_ok: testnet committee.yaml, the v0.16.0-adiri file" 0 "$(pok testnet committee.yaml "$OLD_COMMITTEE")"
+check_rc "pin_ok: testnet committee.yaml, the v0.18.0-adiri file" 0 "$(pok testnet committee.yaml "$NEW_COMMITTEE")"
+check_rc "pin_ok: testnet committee.yaml, another hash" 1 \
+    "$(pok testnet committee.yaml "$(sha256sum < "$T/bad2/committee.yaml" | cut -d' ' -f1)")"
+check_rc "pin_ok: the whole list is not a hash" 1 "$(pok testnet committee.yaml "$TESTNET_COMMITTEE_SHA256")"
+check_rc "pin_ok: a prefix of a hash" 1 "$(pok testnet committee.yaml "${OLD_COMMITTEE:0:32}")"
+check_rc "pin_ok: an empty hash" 1 "$(pok testnet committee.yaml "")"
+check_rc "pin_ok: testnet genesis.yaml" 0 "$(pok testnet genesis.yaml "$TESTNET_GENESIS_SHA256")"
+check_rc "pin_ok: a committee hash is not a genesis pin" 1 "$(pok testnet genesis.yaml "$OLD_COMMITTEE")"
+check_rc "pin_ok: mainnet pins nothing yet" 1 "$(pok mainnet committee.yaml "$OLD_COMMITTEE")"
+check_rc "pin_ok: devnet pins nothing" 1 "$(pok devnet committee.yaml "$OLD_COMMITTEE")"
+check_rc "pin_ok: another file" 1 "$(pok testnet bootstrap_servers.yaml "$OLD_COMMITTEE")"
 
 # ---- tn_chain_configs_tag, tn_chain_configs_dir -------------------------------------------
 TAG="$TESTNET_CHAIN_CONFIGS_TAG"
@@ -202,7 +253,7 @@ sums() { (cd "$1" 2>/dev/null && sha256sum genesis.yaml committee.yaml parameter
 
 fresh
 check_rc "from_tag: the pinned tag is fetched and read" 0 "$(ft "$SRC" testnet)"
-check "from_tag: git runs fetch, one ref check and three blob reads" "fetch rev-parse cat-file cat-file cat-file" "$(verbs)"
+check "from_tag: git runs fetch, one ref check, three blob reads and the bootstrap_servers.yaml listing" "fetch rev-parse cat-file cat-file cat-file ls-tree" "$(verbs)"
 check "from_tag: the fetch allows https only" "fetch https" "$(cat "$REC/git.proto")"
 check_has "from_tag: the tag is fetched into refs/tn-remote-tags" \
     "-C $SRC fetch --quiet --no-tags origin +refs/tags/${TAG}:refs/tn-remote-tags/${TAG}" "$(argv)"
@@ -322,7 +373,7 @@ check "git cannot read the checkout: no blob read, nothing written" "fetch rev-p
 fresh; GIT_BLOBS="$T/bad2"
 check_rc "mismatch named by tag: rc 1" 1 "$(ft "$SRC" testnet pf)"
 check "mismatch named by tag: the line" \
-    "warn|chain-configs/testnet/committee.yaml at ${TAG}: sha256 $(sha256sum < "$T/bad2/committee.yaml" | cut -d' ' -f1), expected ${TESTNET_COMMITTEE_SHA256} (testnet)." \
+    "warn|chain-configs/testnet/committee.yaml at ${TAG}: sha256 $(sha256sum < "$T/bad2/committee.yaml" | cut -d' ' -f1), expected ${OLD_COMMITTEE} or ${NEW_COMMITTEE} (testnet)." \
     "$(grep -F 'committee.yaml' "$REC/pf")"
 check_lacks "mismatch named by tag: no staging path" "$T/stg" "$(cat "$REC/pf" "$T/out")"
 check_lacks "mismatch named by tag: no temp path" "$T/tmp" "$(cat "$REC/pf" "$T/out")"
@@ -378,7 +429,7 @@ check "entry in the way: the message" \
 # A git worktree checkout (.git is a file) is read like any checkout (V-FIX-S-08).
 fresh; mkdir -p "$T/wt"; printf 'gitdir: %s/.git/worktrees/wt\n' "$SRC" > "$T/wt/.git"
 check_rc "worktree: a checkout whose .git is a file is read" 0 "$(ft "$T/wt" testnet)"
-check "worktree: fetch and read through git -C" "fetch rev-parse cat-file cat-file cat-file|$(sums "$FX")" \
+check "worktree: fetch and read through git -C" "fetch rev-parse cat-file cat-file cat-file ls-tree|$(sums "$FX")" \
     "$(verbs)|$(sums "$DEST")"
 
 # The staging directory is tag.<pid>.XXXXXX under the release staging directory,
@@ -449,7 +500,7 @@ check "ensure: the clone is https, at the tag, without submodules" \
     "clone --quiet --branch ${TAG} -- ${TN_REPO} ${SRC}" "$(argv)"
 fresh; CONFIRM=yes
 check_rc "ensure: no checkout, clone accepted" 0 "$(en testnet)"
-check "ensure: clone, then fetch and read" "clone fetch rev-parse cat-file cat-file cat-file" "$(verbs)"
+check "ensure: clone, then fetch and read" "clone fetch rev-parse cat-file cat-file cat-file ls-tree" "$(verbs)"
 check "ensure: the clone and the fetch allow https only" "clone https
 fetch https" "$(cat "$REC/git.proto")"
 check "ensure: cloned, the pinned files installed" "$(sums "$FX")" "$(sums "$DEST")"
@@ -503,12 +554,12 @@ check_rc "ensure devnet: a non-empty source directory without .git: rc 1, no pro
 rm -rf "${SRC:?}"; mkdir -p "$SRC"
 fresh; CONFIRM=yes
 check_rc "ensure: an empty source directory is cloned into" 0 "$(en testnet)"
-check "ensure: empty source directory: asked, cloned, read" "asked|clone fetch rev-parse cat-file cat-file cat-file" \
+check "ensure: empty source directory: asked, cloned, read" "asked|clone fetch rev-parse cat-file cat-file cat-file ls-tree" \
     "$(cat "$REC/confirm")|$(verbs)"
 rm -rf "${SRC:?}"; mkdir -p "$SRC"; printf 'gitdir: %s/.git/worktrees/src\n' "$T/src.keep" > "$SRC/.git"
 fresh; CONFIRM=yes
 check_rc "ensure: a worktree checkout (.git a file) is read, not cloned" 0 "$(en testnet)"
-check "ensure: worktree: no prompt, fetch and read" "|fetch rev-parse cat-file cat-file cat-file" \
+check "ensure: worktree: no prompt, fetch and read" "|fetch rev-parse cat-file cat-file cat-file ls-tree" \
     "$(cat "$REC/confirm")|$(verbs)"
 # An entry in the way of the install is refused before the question (V-FIX-S-04).
 rm -rf "${SRC:?}"
@@ -573,8 +624,9 @@ copied() {
         printf '%s\n' "${got%% *}"
     done
 }
+# The copies setup makes from the pinned files: committee.yaml is the file at the tag.
 PINS="$TESTNET_GENESIS_SHA256
-$TESTNET_COMMITTEE_SHA256
+$OLD_COMMITTEE
 $TESTNET_PARAMETERS_SHA256"
 
 # The bug: the checkout is on a default branch whose committee.yaml moved on.
@@ -600,6 +652,11 @@ check "write: tampered --genesis-dir, it is what was checked" yes \
 check "write: tampered --genesis-dir, nothing copied" "no" "$([[ -e "$T/data/genesis/genesis.yaml" ]] && echo yes || echo no)"
 check_rc "write: a pinned --genesis-dir with the pinned directory present" 0 "$(wr "$T/good")"
 check "write: --genesis-dir comes first" yes "$(has "Found chain-configs at: $T/good")"
+# The check before the copy and the one after it take the same committee hashes.
+check_rc "write: a --genesis-dir with the v0.18.0-adiri committee.yaml" 0 "$(wr "$T/v18")"
+check "write: v0.18.0-adiri committee.yaml, copied and kept" "$TESTNET_GENESIS_SHA256
+$NEW_COMMITTEE
+$TESTNET_PARAMETERS_SHA256" "$(copied)"
 
 # Nothing anywhere: the --json run stops, and the hint names the tag to copy from.
 rm -rf "${T:?}/root$T/conf/chain-configs"

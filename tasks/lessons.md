@@ -832,3 +832,60 @@ check of text that comes from git, docker, systemd, curl or the kernel prints th
 when it fails. Both rules go into every brief that asks for a real-tool fixture, with the
 earlier lesson quoted, and the orchestrator greps new fixtures for literal tool messages
 before the first push: `grep -n "fatal: \|error: " tools/tests/<new>_test.sh`.
+
+## scripts-v2.2.0 release round (2026-11-24): measured output, the account a command runs as, a red test that was already red
+
+### A quoted message is measured, not read from the code
+
+**Symptom:** the approved plan said a host on `scripts-v2.1.0` prints "exactly two lines" when
+it refuses `scripts-v2.2.0`, and every doc was to be keyed on them. Running the real 2.1.0 tree
+(`git archive scripts-v2.1.0`, a `curl` stand-in, gpgv 2.4.8 in `ubuntu:26.04`) printed five:
+the warning, three `gpgv:` lines that gpgv writes to stderr, then the `[ERROR]` line. Three docs
+agents had the wrong text in their brief and were corrected mid-run. The same brief guessed an
+`[INFO]` tag for the hint; `print_info` writes `->`.
+
+**Rule:** before a plan or a doc quotes what a program prints, run that program at that version
+and paste from the run. A plan marks quoted output it has only read from code as "read, not
+run". Key a troubleshooting row on the line the script itself prints, and name what comes
+before it without counting lines: text between our lines can belong to another tool (see the
+lesson of 2026-11-21 on other tools' wording).
+
+### A remedy names the account it runs as, on every kind of host the doc addresses
+
+**Symptom:** the plan's remedy, `curl ... | bash -s -- --yes`, is right on an operator's own
+host. On an AWS one-click stack the Session Manager shell is `ssm-user` and the scripts belong
+to `ubuntu`, so the same line installs a second tree in `ssm-user`'s home and leaves the
+stack's scripts on 2.1.0. The plan said only "runs in a Session Manager shell".
+
+**Rule:** for each kind of host a remedy is written for, check which account the reader's
+shell is and which account owns the files the command writes (`aws/node.yaml` line 431 had the
+right form all along). Put the per-host form in the shared facts before any docs agent starts.
+
+### A red test in a container is compared with main before the branch is blamed
+
+**Symptom:** `bootstrap_servers_test.sh` failed in `bash:3.2`, `ubuntu:24.04` and
+`ubuntu:26.04` and passed on the host. An archive of `origin/main` failed the same check in the
+same container, so the branch was not the cause. The test sets `SERVICE_USER` to the current
+account so the root writers can write, then renders a start script; as root the renderer
+refuses, because the node never runs as root, and the test hid the warning with `2>/dev/null`.
+CI never saw it: both fixture jobs run as the runner's non-root user, and the pull request that
+added the test (#78) did not run the three containers on its final tip.
+
+**Rule:** `git archive origin/main | tar -x -C <scratch>` and one `docker run` of the single
+test give the baseline in a minute; do that before reading the branch's diff for a cause. A new
+fixture test that renders a unit or a start script runs as root in a container before it
+merges. A helper that discards stderr prints it when its check fails.
+
+### Small things that cost a round trip
+
+- zsh does not split `$files`: a lint loop passed 245 paths as one argument and "failed" with
+  `File name too long`. Run multi-file loops in `bash -c` with an array, or through
+  `git ls-files -z | xargs -0`.
+- `tools/tests/run.sh` takes paths (`tools/tests/x_test.sh`), not bare names. Two briefs said
+  names.
+- Two agents that edit one file run in sequence, and the first one's part is committed before
+  the second starts (the key row and the hint both live in `update-scripts.sh`). The commits
+  stay separable and neither agent's tests see the other's half-made change.
+- The worktree's `.git` file points at the main repository's `.git`: a container build of a
+  partner PDF in a worktree mounts that directory read-only at the same path, or the build
+  script cannot tell "toolchain drift" from a source change.

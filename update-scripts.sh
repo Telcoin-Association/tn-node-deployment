@@ -294,6 +294,7 @@ declare -a SCRIPTS=(
     "lib/release-keys/README:lib/release-keys/README:NONE"
     "lib/release-keys/grantkee.asc:lib/release-keys/grantkee.asc:NONE"
     "lib/release-keys/MavenRain.asc:lib/release-keys/MavenRain.asc:NONE"
+    "lib/release-keys/sstanfield.asc:lib/release-keys/sstanfield.asc:NONE"
 )
 
 # The web UI is shipped as a bundle gated on ui/server.py's UI_VERSION. When that
@@ -348,6 +349,8 @@ readonly KEYS_DIR="${SCRIPT_DIR}/${TN_KEYS_DIR}"
 STAGE="$ADOPTED_STAGE"
 # 1 while the install pass is moving files into place (for the exit message).
 INSTALLING=0
+# 1 once reinstall_hint has printed: a run prints the hint at most once.
+REINSTALL_HINTED=0
 
 # The verified manifest, filled by parse_manifest. Declared at top level so they
 # are globals on macOS /bin/bash 3.2, which has no `declare -g`.
@@ -531,7 +534,11 @@ fetch_published_sha() {
     printf '%s\n' "$sha"
 }
 
+# reinstall_hint -- the way out when this tree cannot verify or take a release:
+# the installer one-liner. Printed at most once per run (REINSTALL_HINTED).
 reinstall_hint() {
+    [[ $REINSTALL_HINTED -eq 0 ]] || return 0
+    REINSTALL_HINTED=1
     print_info "Re-install the scripts with the verified installer, then run the updater again:"
     print_info "  curl --proto '=https' --tlsv1.2 -fsSL ${TN_INSTALLER_URL} | bash"
 }
@@ -631,10 +638,17 @@ check_boot_keys() {
     done
 }
 
-# verify_manifest MANIFEST SIG KEYDIR [quiet] -- rc 0 when SIG holds good
-# signatures over MANIFEST by at least TN_SIG_THRESHOLD of the release keys in
-# KEYDIR/*.asc (see RELEASE SIGNATURES). Prints the fingerprints that signed
-# unless the 4th argument is quiet.
+# verify_manifest MANIFEST SIG KEYDIR [quiet] [nohint] -- rc 0 when SIG holds
+# good signatures over MANIFEST by at least TN_SIG_THRESHOLD of the release
+# keys in KEYDIR/*.asc (see RELEASE SIGNATURES). Prints the fingerprints that
+# signed unless the 4th argument is quiet. When it refuses because no release
+# key made a good signature (NOSIG) or the signing key has expired (EXPKEYSIG),
+# the key set on this host may be older than the installer's, so it prints
+# reinstall_hint after the error, unless the 5th argument is nohint (the caller
+# prints the hint itself, or KEYDIR holds the release's own keys, which its
+# installer embeds too). A revoked signing key (REVKEYSIG) gets no hint: the
+# installer verifies with the same key and refuses too. A signature that does
+# not match MANIFEST (BADSIG: a file was changed), EXPSIG and ERRSIG get none.
 verify_manifest() {
     local kr verdict err rc=0
     if ! command -v gpgv >/dev/null 2>&1; then
@@ -652,6 +666,11 @@ verify_manifest() {
     rm -f "$kr"
     if [[ $rc -ne 0 ]]; then
         print_error "The release manifest is not signed by a Telcoin release key ($(tn_sig_reason "$verdict")); nothing was changed."
+        if [[ "${5:-}" != "nohint" ]]; then
+            case "${verdict%% *}" in
+                NOSIG|EXPKEYSIG) reinstall_hint ;;
+            esac
+        fi
         return 1
     fi
     [[ "${4:-}" == "quiet" ]] || print_ok "Release manifest signed by release key ${verdict#GOOD }"
@@ -989,7 +1008,7 @@ warn_expired() {
 }
 
 run_update() {
-    local keys choice i ui_changed=false alerts_changed=false gateway_changed=false svc
+    local keys nohint="" choice i ui_changed=false alerts_changed=false gateway_changed=false svc
 
     print_info "Checking for a signed script release..."
     print_info "Repository: ${TN_REPO_RAW}"
@@ -1023,9 +1042,12 @@ run_update() {
         fi
         bootstrap_keys "$RELEASE_TAG" || exit 1
         keys="$BOOT_KEYS"
+        # The release's own keys, which its installer embeds too: re-installing
+        # cannot get past a refusal, so no reinstall hint.
+        nohint=nohint
     fi
 
-    verify_manifest "${STAGE}/MANIFEST" "${STAGE}/${TN_SIG_FILE}" "$keys" || exit 1
+    verify_manifest "${STAGE}/MANIFEST" "${STAGE}/${TN_SIG_FILE}" "$keys" "" "$nohint" || exit 1
     parse_manifest "${STAGE}/MANIFEST" || exit 1
     if [[ "$M_RELEASE" != "$RELEASE_TAG" ]]; then
         print_error "The manifest is for ${M_RELEASE}, but RELEASE names ${RELEASE_TAG}: refusing; nothing was changed."
@@ -1157,7 +1179,7 @@ check_release() {
         print_error "The installed release record cannot be verified: ${KEYS_DIR} holds no release key (*.asc) or ${INSTALLED_SIG} is missing."
         reinstall_hint
         installed=bad
-    elif ! verify_manifest "$INSTALLED_MANIFEST" "$INSTALLED_SIG" "$KEYS_DIR" quiet \
+    elif ! verify_manifest "$INSTALLED_MANIFEST" "$INSTALLED_SIG" "$KEYS_DIR" quiet nohint \
         || ! parse_manifest "$INSTALLED_MANIFEST"; then
         print_info "That is the installed release record ${INSTALLED_MANIFEST}."
         reinstall_hint

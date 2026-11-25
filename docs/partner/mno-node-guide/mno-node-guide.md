@@ -327,7 +327,7 @@ An argument setup does not recognise is reported on stderr as `Unknown argument:
 |---|---|---|---|
 | `1) Build from source` | `source` | Installs the build dependencies with apt, clones telcoin-network to `/opt/telcoin-source`, checks the release tag's signature, and builds it as the `tn-build` account with a pinned Rust toolchain (20 to 40 minutes). Every `tn-build` process is stopped after each build command, before root copies the output. Root only installs the result, as `/opt/telcoin/telcoin-network`. | `update-node.sh` |
 | `2) Signed release` | `release` | Downloads the release tarball with `SHA256SUMS` and `SHA256SUMS.asc`, checks the signature and the hashes, runs the binary's `--version` as `tn-build`, and installs `/opt/telcoin/telcoin-network`. | `update-node.sh` |
-| `3) Docker` | `docker` | Installs Docker if missing, from Docker's apt repository after checking its signing key, and turns on `live-restore`. Pulls the image by digest from the network's package, `ghcr.io/telcoin-association/tn-mainnet` or `ghcr.io/telcoin-association/tn-testnet` (on testnet also the older `us-docker.pkg.dev/telcoin-network/tn-public/adiri`), checks the pulled digest and checks that the image's build features fit the network. The default is the newest release published on GitHub, by the digest its signed release names. Until testnet has one (signed releases are planned to start with `v0.17.0-adiri`), the default is the newest image of the older repository, or `v0.16.0-adiri` if that cannot be read, with a warning. | `update-node.sh` |
+| `3) Docker` | `docker` | Installs Docker if missing, from Docker's apt repository after checking its signing key, and turns on `live-restore`. Pulls the image by digest from the network's package, `ghcr.io/telcoin-association/tn-mainnet` or `ghcr.io/telcoin-association/tn-testnet` (on testnet also the older `us-docker.pkg.dev/telcoin-network/tn-public/adiri`), checks the pulled digest and checks that the image's build features fit the network. The default is the newest release published on GitHub, by the digest its signed release names. When the release list cannot be read, the testnet default falls back to the newest image of the older repository, or to `v0.16.0-adiri` if that cannot be read either, with a warning. | `update-node.sh` |
 | `4) I already have it` | `existing` | Uses a `telcoin-network` binary you supply. | By hand (see [Update the node](#update-the-node)). |
 
 `--release-tag <tag>` picks the release for the first three; `--build-ref` is its older name.
@@ -654,11 +654,19 @@ A one-way update (see [One-way updates](#one-way-updates)) waits on every node: 
 Apply a waiting update when the node may restart by running the document the `ApplyUpdateDocument` output names from Systems Manager Run Command; it runs `update-node.sh --json --apply --yes`.
 The association never reinstalls the Node Manager UI or the private alerts runner: run the commands `update-scripts.sh` prints for those yourself.
 
+A stack launched before `scripts-v2.2.0` installed scripts that cannot verify later releases, so its daily update stops at the scripts update and the node stays on its release.
+Run the installer once in a Session Manager shell, as the `ubuntu` user who owns the scripts; the next daily run updates as described above:
+
+```bash
+sudo -u ubuntu -H bash -c "set -o pipefail; curl --proto '=https' \
+  --tlsv1.2 -fsSL https://install.telcoin.network | bash -s -- --yes"
+```
+
 Telcoin gets no access to your AWS account or your node.
 The stack creates no cross-account role, no Systems Manager hybrid activation and no Telcoin principal; the only principal it trusts is the EC2 service.
 Updates are pulled: Telcoin publishes signed releases, and your instance downloads and verifies them (see [How the scripts and releases are checked](#how-the-scripts-and-releases-are-checked)).
 
-A stack launched from an earlier template keeps running as it is; nothing in this scripts release needs a change on it.
+A stack launched from an earlier template keeps running as it is, and its resources need no change.
 Do not update a stack to a newer template.
 Every stack update reads the Ubuntu image parameter again.
 Once a newer image is out, the update tries to replace the instance, fails because the old instance holds the network interface, and rolls back.
@@ -844,7 +852,7 @@ What else to expect:
 The script does not update `existing` installs.
 For one, it stops, names the binary the node runs (recorded as `BINARY_PATH` in `.node-meta`), and prints how to check a release by hand.
 On the server, as your normal user (not root), in an empty directory, with the release you want as `TAG`.
-Signed releases are planned to start with `v0.17.0-adiri`; `v0.16.0-adiri` and older have no release page.
+Signed releases start with `v0.18.0-adiri`; `v0.17.0-adiri` and older have no signed release.
 
 ```bash
 TAG=vX.Y.Z-adiri   # a published release
@@ -1834,7 +1842,7 @@ The tables below group the common symptoms by area.
 | `systemd <N> cannot encrypt credentials (needs 250, Ubuntu 24.04) ...` | A testnet server below systemd 250. A warning: the passphrase stays in a root-only file. Encryption needs systemd 250 or newer; Ubuntu 24.04 ships 255. | Upgrade to systemd 250 or newer, such as Ubuntu 26.04, then encrypt the passphrase with `sudo bash ~/telcoin-node-scripts/edit-config.sh --migrate-credential`. |
 | `No usable TPM2 on this host: on mainnet pass --allow-no-tpm ...` | A mainnet server with no TPM the credential can use. | Give the server a TPM or vTPM, or accept the host key alone with `--allow-no-tpm` (see [How setup stores the passphrase](#how-setup-stores-the-passphrase)). |
 | `<tag> is not a testnet release tag ...` | A branch, a commit, `latest` or a mistyped tag. | Give a release tag such as `v0.16.0-adiri`. |
-| `No release signing key in <dir> (*.asc) ...`, or `Release <tag> did not verify (see above); nothing was installed.` | The scripts carry no key for the release (one added or renewed after your scripts release), or the release's `SHA256SUMS` signature or a hash did not check out. | Run `update-scripts.sh` for the current keys and try again. If it still fails, email devs@telcoin.org with the output and do not install that release. |
+| `No release signing key in <dir> (*.asc) ...`, or `Release <tag> did not verify (see above); nothing was installed.` | The scripts carry no key for the release (one added or renewed after your scripts release), or the release's `SHA256SUMS` signature or a hash did not check out. | Run `update-scripts.sh` for the current keys and try again; if it stops with `The release manifest is not signed by a Telcoin release key ...`, see [Scripts and updates](#scripts-and-updates). If it still fails, email devs@telcoin.org with the output and do not install that release. |
 | `mainnet has no pinned sha256 for genesis.yaml yet ...` | Mainnet has not launched, so the scripts have no pins for its chain configs. | Install on testnet (see [Networks and endpoints](#networks-and-endpoints)). |
 | `Mainnet is not enabled in this script release (lib/common.sh TN_MAINNET_ENABLED); nothing on this host was changed.` | Mainnet has not launched, and this scripts release does not offer it. | Install on testnet, and take the release that launches mainnet with `update-scripts.sh` when it comes (see [Networks and endpoints](#networks-and-endpoints)). |
 | `The host baseline was not made (see above); the node runs without it. ...` | A step of `--host-baseline` failed: no apt, the unit still holds the passphrase, or a package, write or AIDE step failed. The lines above it say which. | Fix that cause, then run `sudo bash ~/telcoin-node-scripts/setup-node.sh --host-baseline` (see [Host baseline (optional)](#host-baseline-optional)). |
@@ -1849,7 +1857,8 @@ The tables below group the common symptoms by area.
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `lib/common.sh <version> is older than this <script>: run update-scripts.sh and try again.` | The shared library is older than the script that needs it. | `bash ~/telcoin-node-scripts/update-scripts.sh`, then run the script again. |
-| `The release manifest is not signed by a Telcoin release key; nothing was changed.` | The downloaded manifest failed its signature check. | Nothing was installed. Try again later; if it keeps failing, email devs@telcoin.org. |
+| `The release manifest is not signed by a Telcoin release key (no release key in lib/release-keys made a good signature); nothing was changed.` | None of the release keys on this host signed the release. Scripts installed before `scripts-v2.2.0` hold only the earlier release key, which no longer signs releases. | Nothing was installed, and the node keeps running. Run the installer once (see [Get the scripts](#get-the-scripts)) and answer `y` to `Re-install and overwrite? [y/N]`: it checks the release with its own keys and replaces only `~/telcoin-node-scripts`. Then `bash ~/telcoin-node-scripts/update-scripts.sh --check` reports the installed release as the newest. Where the Node Manager UI runs, also run `sudo bash ~/telcoin-node-scripts/ui/install-ui.sh --update`. |
+| `The release manifest is not signed by a Telcoin release key (<another reason>); nothing was changed.` | The reason names the check that failed. The common one, `the signature by key <id> does not match MANIFEST`, means a download was changed or cut short. | Nothing was installed. Try again; if it keeps failing, email devs@telcoin.org with the output. |
 | `Release <tag> needs update-scripts.sh <version> or newer ...` | The release needs a newer updater than the one installed. | Run the installer command the message prints, then `update-scripts.sh` again. |
 | `an update is in progress (PID <N>); try again when it has finished` (`edit-config.sh`), or `Refused: an update is in progress ...` (`prepare-stake.sh --rotate-address`) | `update-node.sh` holds the update lock. | Wait for the update to finish, then run it again. |
 | `Invalid ref "<ref>": a ref cannot start with "-".`, or `<ref> is not a testnet release tag ...` | `update-node.sh` takes release tags only. | Use a release tag such as `v0.16.0-adiri`. |
