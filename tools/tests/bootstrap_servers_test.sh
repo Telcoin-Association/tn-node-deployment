@@ -191,7 +191,10 @@ interactive() { JSON_MODE=false; }
 gd() { rm -rf "$T/gd"; mkdir -p "$T/gd"; cp "$FX"/*.yaml "$T/gd/"; [[ -z "${1:-}" ]] || cp "$1" "$T/gd/bootstrap_servers.yaml"; }
 PEERS_LINE="--bootstrap-peers \"\$(cat ${CFG}/bootstrap-peers.yaml)\""
 start_line_peers() {  # the --bootstrap-peers value the start script renders for FLAGS
-    CONFIG_DIR="$CFG" _tn_start_script_text source /opt/telcoin/telcoin-network "--datadir ${DATA_DIR} --http --http.addr 127.0.0.1 $1" > "$T/tn-start" 2>/dev/null \
+    # SERVICE_USER is this account, so the root writers can write; as root (the
+    # Docker images) the renderer refuses it, since the node never runs as root.
+    # The text names no account in the source form, so render it for telcoin.
+    SERVICE_USER=telcoin SERVICE_GROUP=telcoin CONFIG_DIR="$CFG" _tn_start_script_text source /opt/telcoin/telcoin-network "--datadir ${DATA_DIR} --http --http.addr 127.0.0.1 $1" > "$T/tn-start" 2>/dev/null \
         && tn_launch_flag_get "$T/tn-start" --bootstrap-peers 2>/dev/null
 }
 
