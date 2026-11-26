@@ -9,7 +9,8 @@
 #              times stops it; a run after a fix formats nothing again and adds
 #              no second fstab line; a missing trusted nodes file stops it;
 #              setup-node.sh, firewall-setup.sh and the gateway scripts never run
-#   gateway    every step in order with its exact arguments; setup-gateway.sh
+#   gateway    every step in order with its exact arguments, each flag one the
+#              real script's argument parser in this tree names; setup-gateway.sh
 #              exit 1 is tried again (and three of them stop the boot), exit 3
 #              stops before the firewall, exit 0 without "ok":true stops; a
 #              name that never resolves does not stop the boot; a Docker
@@ -618,6 +619,44 @@ check_has "gateway: setup-gateway's events are in the log" \
     '{"event":"done","ok":true,"applied":["gateway:unit"],"network":"testnet","msg":"stand-in enabled"}' \
     "$(cat "$R/var/log/telcoin-first-boot.log")"
 check_lacks "gateway: no data disk step" "blkid" "$CALLS"
+
+echo "== gateway: the command lines against the real scripts' parsers"
+# The stand-ins take any argument, so this holds the lines asserted above to the
+# argument parsers of the scripts in this tree: a flag renamed or dropped there
+# fails here. install-caddy.sh and firewall-setup.sh skip an argument they do not
+# know, so nothing at boot would say why. check-node.sh is run with no flags.
+# parser_arms SCRIPT FUNC -- each pattern of the case arms in FUNC() of SCRIPT,
+# one a line: an arm --a|--b) gives --a and --b.
+parser_arms() {
+    awk -v fn="$2() {" '$0 == fn { f = 1; next } f && /^}/ { exit }
+        f && match($0, /^[[:space:]]*[^[:space:]()#|]+([|][^[:space:]()#|]+)*[)]/) {
+            s = substr($0, RSTART, RLENGTH - 1); gsub(/[[:space:]]/, "", s)
+            n = split(s, a, "|"); for (i = 1; i <= n; i++) print a[i] }' "${TN_TEST_REPO}/$1"
+}
+# takes SCRIPT FUNC LINE -- each --flag of LINE is an arm of FUNC's parser; a
+# --flag=value needs a --flag=* arm.
+takes() {
+    local arms w want
+    arms="$(parser_arms "$1" "$2")"
+    for w in $3; do
+        case "$w" in
+            --*=*) want="${w%%=*}=*" ;;
+            --*) want="$w" ;;
+            *) continue ;;
+        esac
+        check "${1} takes ${want}" yes "$(grep -qxF -- "$want" <<< "$arms" && echo yes || echo no)"
+    done
+}
+takes setup-gateway.sh sg_parse_args "$GW_SG"
+takes install-caddy.sh main "$GW_DNS"
+takes firewall-setup.sh main "$GW_FW"
+for v in standalone caddy testnet mainnet; do
+    check "setup-gateway.sh takes the value ${v}" yes \
+        "$(parser_arms setup-gateway.sh sg_set_value | grep -qxF -- "$v" && echo yes || echo no)"
+done
+check "install-caddy.sh has the phase gateway-check-dns" yes \
+    "$(parser_arms install-caddy.sh main | grep -qxF gateway-check-dns && echo yes || echo no)"
+check "check-node.sh is run with no flags" "check-node.sh" "$(grep '^check-node\.sh' <<< "$CALLS")"
 
 echo "== gateway: setup-gateway.sh exit 1, then 0"
 fresh g-retry
