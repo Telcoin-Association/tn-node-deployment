@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # =============================================================================
 # tools/tests/gateway_check_remove_test.sh -- the worker-gateway sections of
-# check-node.sh (check_gateway, check_gateway_upstream, the gateway-only host)
-# and of remove-node.sh (remove_gateway and its callers) on fixture trees, as a
-# normal user, over the REAL lib/common.sh and lib/gateway.sh (gw_status and its
+# check-node.sh (check_gateway, check_gateway_upstream, the gateway-only host,
+# report_public_rpc for an advertisement a worker gateway owns) and of
+# remove-node.sh (remove_gateway and its callers) on fixture trees, as a normal
+# user, over the REAL lib/common.sh and lib/gateway.sh (gw_status and its
 # GW_ST_* values, gw_unit_text for the fixture unit).
 #
 #   bash tools/tests/run.sh tools/tests/gateway_check_remove_test.sh
@@ -11,11 +12,13 @@
 #       bash tools/tests/run.sh tools/tests/gateway_check_remove_test.sh
 #
 # The check-node.sh functions are cut out of it (its HARDENING CHECKS section,
-# have_fns, detect_data_dir and the advertised-RPC readers); the gateway-only
-# host runs the whole script. remove-node.sh is sourced from a copy without its
-# common.sh source line (common is already loaded) and its `main "$@"` line.
-# systemctl, docker, curl, ss, ufw and id are PATH stubs; systemctl, docker and
-# ufw log their calls. TN_ROOT_PREFIX points every path at the fixture tree.
+# have_fns, detect_data_dir, the advertised-RPC readers and the public-RPC
+# report with its helpers); the gateway-only host runs the whole script.
+# remove-node.sh is sourced from a copy without its common.sh source line
+# (common is already loaded) and its `main "$@"` line.
+# systemctl, docker, curl, ss, ufw and id are PATH stubs; systemctl, docker,
+# curl and ufw log their calls. TN_ROOT_PREFIX points every path at the fixture
+# tree.
 # Maintainer tooling (not updater-tracked). bash 3.2 safe.
 # =============================================================================
 set -u
@@ -65,12 +68,15 @@ case "$1 ${2:-}" in
 esac
 exit 0
 STUB
-# curl: the probe listener's /health and /ready answer per GW_HEALTH / GW_READY.
+# curl: the probe listener's /health and /ready answer per GW_HEALTH / GW_READY;
+# a gateway's public https://<name>/health prints PUB_CODE and exits PUB_RC.
 cat > "$T/bin/curl" <<'STUB'
 #!/usr/bin/env bash
+printf 'curl %s\n' "$*" >> "${CALLS:?}"
 u=""
 for a in "$@"; do u="$a"; done
 case "$u" in
+    https://*/health) printf '%s' "${PUB_CODE:-200}"; exit "${PUB_RC:-0}" ;;
     */health)    [ "${GW_HEALTH:-1}" = 1 ] && exit 0 ;;
     */ready)     [ "${GW_READY:-1}" = 1 ] && exit 0 ;;
     */ready/any) [ "${GW_READY:-1}" = 1 ] && exit 0 ;;
@@ -94,13 +100,14 @@ chmod +x "$T/bin/"*
 PATH="$T/bin:$PATH"
 export PATH
 hash -r
-export GW_ENABLED=1 GW_ACTIVE=1 GW_HELD=1 GW_HEALTH=1 GW_READY=1
+export GW_ENABLED=1 GW_ACTIVE=1 GW_HELD=1 GW_HEALTH=1 GW_READY=1 PUB_RC=0 PUB_CODE=200
 SS_OK="LISTEN 0 4096 127.0.0.1:8655 0.0.0.0:*\nLISTEN 0 4096 127.0.0.1:8656 0.0.0.0:*\nLISTEN 0 4096 127.0.0.1:9655 0.0.0.0:*\n"
 export SS_LINES="$SS_OK" UFW_OUT="" DOCKER_PS=""
 
 # --- check-node.sh functions over the real libraries ----------------------------
 {
-    for f in have_fns detect_data_dir read_advertised_rpc advertised_rpc; do
+    for f in have_fns detect_data_dir read_advertised_rpc advertised_rpc lower ws_upgrade_status \
+             risky_api_modules report_public_rpc_gateway report_public_rpc; do
         sed -n "/^${f}() {/,/^}/p" "$CN"
     done
     awk '/^# HARDENING CHECKS/ { f = 1 } /^# REPORT HEADER/ { f = 0 } f' "$CN"
@@ -109,7 +116,8 @@ eval "$(tn_test_source_common)"
 # shellcheck source=/dev/null
 . "$T/fns.sh"
 check "functions cut out of check-node.sh, real gw_status loaded" "yes" \
-    "$(declare -F check_gateway check_gateway_upstream _cn_gw_listener advertised_rpc gw_status >/dev/null && echo yes)"
+    "$(declare -F check_gateway check_gateway_upstream _cn_gw_listener advertised_rpc gw_status \
+        report_public_rpc report_public_rpc_gateway >/dev/null && echo yes)"
 LAUNCH="$R/usr/local/libexec/telcoin/tn-start"
 tn_node_launch_target() { printf 'telcoin source %s\n' "$LAUNCH"; }
 detect_data_dir() { printf '%s\n' "$R/var/lib/telcoin"; }
@@ -131,6 +139,7 @@ fresh() {
              "$R/var/lib/telcoin"
     : > "$CALLS"
     GW_ENABLED=1 GW_ACTIVE=1 GW_HELD=1 GW_HEALTH=1 GW_READY=1 SS_LINES="$SS_OK" UFW_OUT="" DOCKER_PS=""
+    PUB_RC=0 PUB_CODE=200
     unset FAKE_UID
 }
 mknode() {  # mknode [META_LINE...] -- .node-meta and a source start script with NODE_FLAGS
@@ -282,9 +291,13 @@ ufw_rules() {  # ufw_rules "SRC PORT"... -- an active ufw (default deny incoming
     done
     UFW_OUT="$out"
 }
-nodeinfo() {  # nodeinfo HTTP [WS] -- node-info.yaml with worker 0's rpc
+# A protocol key of tools/tests/genesis.d/testnet/committee.yaml, as node-info.yaml
+# writes bls_public_key; its default RPC name is DEFNAME (tn_rpc_default_host).
+BLS='pDmpE29YEhr93MPVPCGkWx3BsCcow4oExmxv5viJz2GTjsaXwc3YwKxE1CFdVuTVSudsFDutFSVmtgF98Abs56JZPfGQs6GzbqXDFkGA1eZx2edkwfP2Q6eRLo8coLhvTNj'
+DEFNAME=vpdmpe.telcoin.network
+nodeinfo() {  # nodeinfo HTTP [WS] -- node-info.yaml with the BLS key and worker 0's rpc
     {
-        printf '%s\n' "name: v1" "p2p_info:" "  workers:" "    - rpc:" "        http: $1"
+        printf '%s\n' "name: v1" "bls_public_key: ${BLS}" "p2p_info:" "  workers:" "    - rpc:" "        http: $1"
         [[ -z "${2:-}" ]] || printf '        ws: %s\n' "$2"
     } > "$R/var/lib/telcoin/node-info.yaml"
 }
@@ -379,6 +392,88 @@ cd "$OLDPWD" || exit 1
 check "glob in GATEWAY_UPSTREAM: the value as written" yes "$(has "allow from 10.0.0.* to any port 8545" "$OUT")"
 check_lacks "glob in GATEWAY_UPSTREAM: not expanded to a file name" "10.0.0.9" "$OUT"
 echo "status: validator group done" >&2
+
+# =============================================================================
+# report_public_rpc: an advertisement the worker gateway owns
+# =============================================================================
+curls() { grep '^curl ' "$CALLS"; }
+# shellcheck disable=SC2034  # read by the check-node.sh functions: where they name install-caddy.sh
+SCRIPT_DIR="$TN_TEST_REPO"
+GWVIA=RPC_ADVERTISED_VIA=gateway
+PROBE="curl -q -sS -o /dev/null -w %{http_code} --proto =https --max-redirs 0 --connect-timeout 3 --max-time 5"
+
+fresh; mknode "PUBLIC_RPC_DOMAIN=${DEFNAME}" "PUBLIC_RPC_URL=https://${DEFNAME}" "$GWVIA"
+nodeinfo "https://${DEFNAME}/"
+PUB_RC=6 PUB_CODE=000 runc report_public_rpc
+check_has "default name, not resolving: no issue" "issues=0" "$OUT"
+check "default name: the owner line" yes \
+    "$(has "public RPC: https://${DEFNAME}/ (the worker gateway's, RPC_ADVERTISED_VIA=gateway; no Caddy site on this host)" "$OUT")"
+check "default name: the TAO creates the A record" yes \
+    "$(has "send ${DEFNAME} and the static public IP of your worker gateway host to the TAO, which creates the A record" "$OUT")"
+check "default name: the own-name route" yes \
+    "$(has "or use a name of your own: create its A record for the worker gateway's static IP, then run: sudo bash ${TN_TEST_REPO}/install-caddy.sh --phase=rpc-advertise --rpc-domain <name>" "$OUT")"
+check_lacks "default name: no rpc-enable" "rpc-enable" "$OUT"
+check_lacks "default name: no wss line" "wss" "$OUT"
+check_lacks "default name: the advertisement matches" "should advertise" "$OUT"
+check "default name: one probe, /health with the rpc-advertise options" "${PROBE} https://${DEFNAME}/health" "$(curls)"
+
+OUT="$(unset -f tn_rpc_default_host; PUB_RC=6 PUB_CODE=000 report_public_rpc 2>&1)"
+check "default name, older lib/common.sh: the A-record line" yes \
+    "$(has "fix: point the A record of ${DEFNAME} at your worker gateway's static IP" "$OUT")"
+check_lacks "default name, older lib/common.sh: no TAO line" "TAO" "$OUT"
+
+fresh; mknode PUBLIC_RPC_DOMAIN=rpc.example.org PUBLIC_RPC_URL=https://rpc.example.org "$GWVIA"
+nodeinfo https://rpc.example.org/
+PUB_RC=6 PUB_CODE=000 runc report_public_rpc
+check_has "own name, not resolving: no issue" "issues=0" "$OUT"
+check "own name, not resolving: the A-record line" yes \
+    "$(has "fix: point the A record of rpc.example.org at your worker gateway's static IP" "$OUT")"
+check_lacks "own name, not resolving: no TAO line" "TAO" "$OUT"
+check_lacks "own name, not resolving: no rpc-enable" "rpc-enable" "$OUT"
+
+: > "$CALLS"
+runc report_public_rpc
+check_has "own name, 200: no issue" "issues=0" "$OUT"
+check "own name, 200: OK" yes "$(has 'public RPC: OK (GET https://rpc.example.org/health answered 200)' "$OUT")"
+check_lacks "own name, 200: no warning" "WARN" "$OUT"
+check "own name, 200: no wss probe" "${PROBE} https://rpc.example.org/health" "$(curls)"
+
+PUB_RC=0 PUB_CODE=502 runc report_public_rpc
+check_has "gateway answers 502: no issue" "issues=0" "$OUT"
+check "gateway answers 502: said" yes "$(has 'public RPC: WARN -- GET https://rpc.example.org/health got HTTP 502 instead of 200' "$OUT")"
+check "gateway answers 502: names setup-gateway.sh --status" yes \
+    "$(has 'fix: on the worker gateway host, run: bash setup-gateway.sh --status' "$OUT")"
+check_lacks "gateway answers 502: no rpc-enable" "rpc-enable" "$OUT"
+
+nodeinfo https://rpc.example.org/ wss://rpc.example.org/
+runc report_public_rpc
+check_has "ws URL advertised too: no issue" "issues=0" "$OUT"
+check "ws URL advertised too: the mismatch" yes \
+    "$(has 'node-info.yaml advertises http=https://rpc.example.org/ ws=wss://rpc.example.org/; behind the worker gateway it should advertise https://rpc.example.org/ and no ws URL' "$OUT")"
+check "ws URL advertised too: names rpc-advertise" yes \
+    "$(has "fix: sudo bash ${TN_TEST_REPO}/install-caddy.sh --phase=rpc-advertise --rpc-domain rpc.example.org" "$OUT")"
+check_lacks "ws URL advertised too: not OK" "public RPC: OK" "$OUT"
+check_lacks "ws URL advertised too: no rpc-enable" "rpc-enable" "$OUT"
+
+fresh; mknode PUBLIC_RPC_URL=https://rpc.example.org:8443 "$GWVIA"
+nodeinfo https://rpc.example.org:8443/
+runc report_public_rpc
+check_has "no PUBLIC_RPC_DOMAIN: no issue" "issues=0" "$OUT"
+check "no PUBLIC_RPC_DOMAIN: not probed, said" yes "$(has 'no PUBLIC_RPC_DOMAIN, so the gateway' "$OUT")"
+check_lacks "no PUBLIC_RPC_DOMAIN: not a private node" "private node" "$OUT"
+check "no PUBLIC_RPC_DOMAIN: nothing probed" "" "$(curls)"
+
+fresh; mknode PUBLIC_RPC_DOMAIN=rpc.example.org
+nodeinfo https://rpc.example.org/ wss://rpc.example.org/
+runc report_public_rpc
+check_has "no owner key: no issue" "issues=0" "$OUT"
+check "no owner key: the Caddy-site report" yes "$(has 'public RPC: rpc.example.org (from .node-meta)' "$OUT")"
+check "no owner key: wss probed" yes "$(has 'wss: FAIL' "$OUT")"
+check "no owner key: the rpc-enable fix" yes \
+    "$(has "fix: sudo bash ${TN_TEST_REPO}/install-caddy.sh --phase=rpc-enable --rpc-domain rpc.example.org" "$OUT")"
+check_lacks "no owner key: no gateway line" "the worker gateway's" "$OUT"
+check_lacks "no owner key: no /health probe" "/health" "$(curls)"
+echo "status: public RPC group done" >&2
 
 # =============================================================================
 # remove-node.sh

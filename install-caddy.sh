@@ -58,7 +58,9 @@
 #     fingerprint (CADDY_APT_KEY_FPR); any other key stops the install before apt-get
 #     update.
 #   - Dashboard and public RPC are refused on a staked mainnet validator (and on a
-#     mainnet node whose stake cannot be read).
+#     mainnet node whose stake cannot be read). On mainnet the public RPC site is also
+#     refused on a node running admission closed (a validator: its worker gateway
+#     serves its RPC) and on a node fronted by a worker gateway (GATEWAY_UPSTREAM set).
 #   - Hostnames are normalised first (trimmed, lowercased, one trailing dot dropped) and
 #     must pass the UI's rule (two or more labels, at most 253 characters, not an IP
 #     address: Caddy needs a DNS name for the certificate); only the normalised name is
@@ -156,7 +158,7 @@ die() {
     exit 1
 }
 
-readonly SCRIPT_VERSION="2.2.1"
+readonly SCRIPT_VERSION="2.2.2"
 # basic_auth (the dashboard block) and heredocs (the RPC block page) need Caddy 2.8.0.
 readonly CADDY_MIN_VERSION="2.8.0"
 # Timestamped Caddyfile backups kept by caddy_prune_backups.
@@ -2761,23 +2763,50 @@ caddy_operation_reset() {
 }
 
 # Refusals for an rpc-enable, checked before anything is written (and, in a --json
-# run, before any step is announced): a tn-gateway block on this host (run
+# run, before any step is announced): on mainnet a node running admission closed (a
+# validator, whose RPC its worker gateway serves), a tn-gateway block on this host (run
 # gateway-disable first), a gateway advertisement in node-info.yaml (RPC_ADVERTISED_VIA=
-# gateway: run rpc-unadvertise first), <domain> and <move_to> (both normalised) and the
-# one-hostname-per-site rule. Sets CADDY_DASH_FROM (the dashboard's current hostname,
-# '' when none) and CADDY_DASH_MOVE (true when the dashboard sits on <domain> and moves
-# to <move_to> in the same swap + reload).
+# gateway: run rpc-unadvertise first), on mainnet a node fronted by a worker gateway
+# (GATEWAY_UPSTREAM set: gateway_upstream=off first), <domain> and <move_to> (both
+# normalised) and the one-hostname-per-site rule. The closed-admission refusal comes
+# before the advertisement one, whose advice (rpc-unadvertise) would only strip a
+# validator's URL; when .node-meta records that URL it names it, since the gateway is
+# then already advertised and only its name can change. Sets CADDY_DASH_FROM (the dashboard's current hostname, '' when
+# none) and CADDY_DASH_MOVE (true when the dashboard sits on <domain> and moves to
+# <move_to> in the same swap + reload).
 CADDY_DASH_FROM=""
 CADDY_DASH_MOVE=false
 caddy_rpc_enable_precheck() {
-    local domain="$1" move_to="${2:-}" clash rc via
+    local domain="$1" move_to="${2:-}" clash rc via url net adm up
     caddy_require_domain "$domain" "RPC domain"
+    net="$(addon_meta_get NETWORK "")" || die "NETWORK is set more than once in .node-meta; fix the file first. Nothing was changed."
+    if [[ "$net" == "mainnet" ]]; then
+        adm="$(addon_meta_get ADMISSION_MODE "")" || die "ADMISSION_MODE is set more than once in .node-meta; fix the file first. Nothing was changed."
+        if [[ "$adm" == "closed" ]]; then
+            via="$(addon_meta_get RPC_ADVERTISED_VIA "" 2>/dev/null)" || via=""
+            url="$(addon_meta_get PUBLIC_RPC_URL "" 2>/dev/null)" || url=""
+            # A bare host is named with its /, as node-info.yaml holds it; a path as recorded.
+            [[ -z "$url" || "${url#*://}" == */?* ]] || url="${url%/}/"
+            if [[ "$via" == "gateway" && -n "$url" ]]; then
+                die "This mainnet node runs admission closed, as a validator does. A mainnet validator's RPC is served by its worker gateway, never by a Caddy site on the validator. node-info.yaml already advertises ${url} for the worker gateway; --phase=rpc-advertise --rpc-domain <name> changes the name. Nothing was changed."
+            fi
+            die "This mainnet node runs admission closed, as a validator does. A mainnet validator's RPC is served by its worker gateway, never by a Caddy site on the validator. Advertise the gateway with --phase=rpc-advertise --rpc-domain <name>. Nothing was changed."
+        fi
+    fi
     if caddy_gateway_block_present; then
         die "A worker gateway site ($(caddy_current_gateway_domain)) is configured in ${CADDYFILE}; the public RPC site and the worker gateway are not served from one host. Run --phase=gateway-disable first. Nothing was changed."
     fi
     via="$(addon_meta_get RPC_ADVERTISED_VIA "")" || die "RPC_ADVERTISED_VIA is set more than once in .node-meta; fix the file first. Nothing was changed."
     if [[ "$via" == "gateway" ]]; then
-        die "node-info.yaml advertises a worker gateway (RPC_ADVERTISED_VIA=gateway in .node-meta, written by rpc-advertise). Run --phase=rpc-unadvertise first. Nothing was changed."
+        url="$(addon_meta_get PUBLIC_RPC_URL "" 2>/dev/null)" || url=""
+        [[ -z "$url" || "${url#*://}" == */?* ]] || url="${url%/}/"
+        die "node-info.yaml advertises ${url:+${url} for }a worker gateway (RPC_ADVERTISED_VIA=gateway, written by key generation on mainnet or by rpc-advertise). Run --phase=rpc-unadvertise first to serve a public RPC site here. Nothing was changed."
+    fi
+    if [[ "$net" == "mainnet" ]]; then
+        up="$(addon_meta_get GATEWAY_UPSTREAM "")" || die "GATEWAY_UPSTREAM is set more than once in .node-meta; fix the file first. Nothing was changed."
+        if [[ -n "$up" ]]; then
+            die "GATEWAY_UPSTREAM=${up}: a worker gateway fronts this node, and on mainnet a node is fronted by a gateway or by this host's public RPC site, not both. Run edit-config.sh --set gateway_upstream=off first. Nothing was changed."
+        fi
     fi
     CADDY_DASH_MOVE=false
     CADDY_DASH_FROM="$(caddy_current_dashboard_domain)"
@@ -3242,9 +3271,16 @@ caddy_gateway_url_check() {
 # (the guarded restart checks the node on it), a public RPC site on this host
 # (rpc-enable's advertisement is rpc-disable's to clear), and for rpc-advertise a
 # https://<domain>/health that does not answer 200 from here (caddy_gateway_url_check;
-# no flag skips it). Sets CADDY_RPC_PORT.
+# no flag skips it). A mainnet host (NETWORK=mainnet in .node-meta) with no node
+# service yet (keys made before genesis) only warns about that URL: nothing can answer
+# before the node and its gateway run, and no node restart is at stake. Off mainnet,
+# or when NETWORK cannot be read, that URL is refused as on a running node. The
+# warning sets CADDY_GW_URL_EXCUSED to <domain>, so a --json run, which comes here
+# before its step list and again in do_rpc_advertise, asks and warns once. Sets
+# CADDY_RPC_PORT.
+CADDY_GW_URL_EXCUSED=""
 caddy_rpc_node_precheck() {
-    local phase="$1" domain="${2:-}" rc=0
+    local phase="$1" domain="${2:-}" rc=0 net
     caddy_node_host || die "${phase} edits node-info.yaml of the node on this host, and this host has no telcoin node (no .node-meta). Run it on the node whose record should name the gateway. Nothing was changed."
     if [[ "$phase" == "rpc-advertise" ]]; then
         caddy_require_domain "$domain" "RPC domain"
@@ -3258,7 +3294,13 @@ caddy_rpc_node_precheck() {
     addon_meta_get RPC_ADVERTISED_VIA "" >/dev/null || die "RPC_ADVERTISED_VIA is set more than once in .node-meta; fix the file first. Nothing was changed."
     CADDY_RPC_PORT="$(caddy_node_port --http.port RPC_PORT 8545)" || rc=$?
     [[ "$rc" -eq 0 ]] || die "no usable reth HTTP port to check the node with after its restart (see above). Nothing was changed."
-    if [[ "$phase" == "rpc-advertise" ]] && ! caddy_gateway_url_check "$domain"; then
+    if [[ "$phase" == "rpc-advertise" && "$CADDY_GW_URL_EXCUSED" != "$domain" ]] && ! caddy_gateway_url_check "$domain"; then
+        net="$(addon_meta_get NETWORK "" 2>/dev/null)" || net=""
+        if [[ "$net" == "mainnet" ]] && ! tn_resolve_service >/dev/null 2>&1; then
+            caddy_say warn "https://${domain}/ is not verified: GET https://${domain}/health from this host got ${CADDY_GW_URL_GOT} instead of 200, and this mainnet host has no node service yet, so nothing can answer before the node and its gateway run. The record is written anyway; check-node.sh verifies it later."
+            CADDY_GW_URL_EXCUSED="$domain"
+            return 0
+        fi
         die "rpc-advertise was asked to advertise https://${domain}/, and GET https://${domain}/health from this host got ${CADDY_GW_URL_GOT} instead of 200 (a certificate error counts as a failure). A wrong URL in a validator's record breaks transaction forwarding to it until the record is fixed and the node restarted again, so the record was not edited and the node not restarted. Start the gateway first (setup-gateway.sh --enable on its host) and check the name. Nothing was changed."
     fi
     return 0
@@ -3277,6 +3319,9 @@ do_rpc_advertise() {
     caddy_operation_reset
     caddy_rpc_node_precheck rpc-advertise "$domain"
     caddy_meta_ready || die "the update lock or the ownership migration stopped this run (see above). Nothing was changed."
+    if [[ "$CADDY_GW_URL_EXCUSED" == "$domain" ]]; then
+        caddy_note "https://${domain}/ not verified"
+    fi
     CADDY_LOCK_NOTE="Nothing was changed."
     caddy_node_info_advertise set "$domain" false
     caddy_meta_record_gateway "$domain"
@@ -3286,14 +3331,24 @@ do_rpc_advertise() {
 
 # The inverse of rpc-advertise: clear worker 0's rpc in node-info.yaml (guarded
 # restart; nothing when already clear) and remove the four .node-meta keys. No Caddy
-# file is read or written. Refused on a host with no node.
+# file is read or written. Refused on a host with no node. On a mainnet node running
+# admission closed (a validator) it warns that other nodes can no longer forward
+# transactions to it, unless the clear failed and node-info.yaml still holds the URL
+# (caddy_node_info_advertise has said so then).
 do_rpc_unadvertise() {
+    local net adm
     caddy_operation_reset
     caddy_rpc_node_precheck rpc-unadvertise
     caddy_meta_ready || die "the update lock or the ownership migration stopped this run (see above). Nothing was changed."
     CADDY_LOCK_NOTE="Nothing was changed."
     caddy_node_info_advertise clear
     caddy_meta_record_gateway ""
+    net="$(addon_meta_get NETWORK "" 2>/dev/null)" || net=""
+    adm="$(addon_meta_get ADMISSION_MODE "" 2>/dev/null)" || adm=""
+    if [[ "$net" == "mainnet" && "$adm" == "closed" \
+          && "; ${CADDY_DONE_NOTES}; " != *"; node-info.yaml still advertises the endpoint; "* ]]; then
+        caddy_say warn "This validator now advertises no RPC URL, so other nodes cannot forward transactions to it until one is set again (--phase=rpc-advertise --rpc-domain <name>)."
+    fi
     caddy_baseline_refresh
     caddy_node_unlock
 }

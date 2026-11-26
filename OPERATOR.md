@@ -9,7 +9,7 @@ When you need every option of a script, follow the links into the [README](READM
 
 <!-- release: remove this block when the release that CHANGELOG/scripts-v2.3.0.md describes is cut -->
 > **Not in a script release yet.**
-> `firewall-setup.sh` 2.2.1, `setup-node.sh` 2.1.7, `edit-config.sh` 2.2.4 and `check-node.sh` 2.2.2 are on `main` only, and this runbook already describes them: sections 2.6, 2.7, 2.9, 2.10 and 2.12, and their rows in sections 4.3, 7 and 9.
+> `firewall-setup.sh` 2.2.1, `setup-node.sh` 2.1.7, `edit-config.sh` 2.2.4, `check-node.sh` 2.2.2 and `install-caddy.sh` 2.2.2 are on `main` only, and this runbook already describes them: sections 2.6, 2.7, 2.9, 2.10 and 2.12, the worker gateway's advertisement and the public RPC rules for mainnet in sections 4.15, 5 and 6.1, and their rows in sections 4.3, 7 and 9.
 > [CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md) lists the changes.
 > On `scripts-v2.2.0`, which `update-scripts.sh` and the installer install today:
 >
@@ -17,6 +17,7 @@ When you need every option of a script, follow the links into the [README](READM
 > - The allowlist's floor is the bootstrap peers file alone, or the genesis `committee.yaml` when there is none: the trusted hubs are not in it, and there is no `--accept-floor-shrink`.
 > - Setup and `edit-config.sh` write any bootstrap peers map as `committee_peers`, and only `edit-config.sh` checks the shape of a trusted nodes file, so check both maps by hand (section 2.9).
 > - The mainnet keygen of section 2.12 is refused like every other mainnet run.
+> - On a node that advertises a worker gateway (`RPC_ADVERTISED_VIA=gateway`), `check-node.sh` probes the Caddy site of section 5, which the node does not have, and names `rpc-enable`, which refuses there; check the gateway with `setup-gateway.sh --status` on its host. A setup run that writes the service over such a node rewrites `PUBLIC_RPC_DOMAIN`, `PUBLIC_RPC_URL` and `PUBLIC_WS_URL` from its own flags, so run `rpc-advertise` again after it.
 
 Contents:
 
@@ -184,10 +185,10 @@ It changes nothing, prints one `ok`, `warn` or `info` line per item and exits 1 
 | 49594 | UDP | Everywhere, inbound | Worker P2P (QUIC). Every node. |
 | 443 | TCP | Everywhere, inbound | Caddy, only when it serves public RPC or the dashboard. |
 | 80 | TCP | Everywhere, inbound | Caddy certificate issuance and the http-to-https redirect. Recommended with Caddy. |
-| 8545 | TCP | Loopback only | HTTP JSON-RPC. Never open it. |
+| 8545 | TCP | Loopback only; on a validator behind a standalone worker gateway, the gateway host only | HTTP JSON-RPC. Never open it to the internet. `firewall-setup.sh --gateway-from` opens it to the gateway host alone (section 4.15). |
 | 8546 | TCP | Loopback only | WebSocket JSON-RPC. Never open it. |
 | 9101 | TCP | Loopback only | Prometheus metrics. |
-| 43174 | TCP | 104.155.184.201/32 (plus any monitoring hosts you add) | Health-check endpoint, an add-on of testnet and devnet. The node listens on it only when you enable the health monitor. On `v0.16.0-adiri` it listens on every interface; from the next release the bare port the scripts pass listens on `127.0.0.1` only, out of the monitor's reach (section 4.6). |
+| 43174 | TCP | 104.155.184.201/32 (plus any monitoring hosts you add); on a validator behind a standalone worker gateway, the gateway host | Health-check endpoint, an add-on of testnet and devnet. The node listens on it only when you enable the health monitor. On `v0.16.0-adiri` it listens on every interface; from the next release the bare port the scripts pass listens on `127.0.0.1` only, out of the monitor's reach (section 4.6). A worker gateway reads the node's readiness from it, and `firewall-setup.sh --gateway-from` opens it to the gateway host alone, never to the internet (section 4.15). |
 | 22 (or your SSH port) | TCP | Your admin IPs | SSH. |
 | 443 (or your monitor's port) | TCP | Outbound only, to your monitor | Private alerts (section 4.14), when you enable them. No inbound port opens for them. |
 
@@ -897,6 +898,7 @@ You need:
 ```bash
 ARGS=(--network mainnet --install-method existing --binary-path /usr/local/bin/telcoin-network
   --address 0xYOUR_VALIDATOR_SAFE
+  --admission closed --trusted-nodes /home/admin/hubs.yaml
   --external-primary /ip4/203.0.113.10/udp/49590/quic-v1
   --external-worker  /ip4/203.0.113.10/udp/49594/quic-v1
   --listener-primary /ip4/10.0.0.5/udp/49590/quic-v1
@@ -905,6 +907,11 @@ read -rs PASS
 printf '%s\n' "$PASS" | sudo bash ~/telcoin-node-scripts/setup-node.sh --json --phase=keygen --passphrase-stdin "${ARGS[@]}"
 unset PASS
 ```
+
+A validator passes `--admission closed`, the mode mainnet validators run (section 2.9).
+On mainnet it is also what tells these scripts that the node is a validator, whose public RPC is its worker gateway (see the advertised RPC URL below); keygen records it as `ADMISSION_MODE=closed` in `.node-meta`, and finalize reads it back, so a finalize that does not repeat `--admission` still gets a validator's RPC texts and refusals from its first line (section 7.2).
+`--trusted-nodes <file>` gives the trusted hubs map with it, when you have that file.
+Without it keygen warns `Admission closed without --trusted-nodes: ...` and goes on; give the map later to the finalize, which takes `--trusted-nodes <file>` with the mode keygen recorded, or on a running node with `edit-config.sh --set trusted_nodes=<file>` (section 2.9).
 
 The run checks the binary's build features before anything on the host changes, and runs it for that (`--version`, as root, given 30 seconds) only once it is a root-owned file, not group- or other-writable, in root-owned directories; then it runs the preflight, creates the service user and the directories, records the install and `NETWORK=mainnet` in `.node-meta`, has the keytool generate the keys and the proof of possession for the Safe address, and stores the passphrase as an encrypted credential.
 It gets no chain configs (`Mainnet chain configs are not published before genesis: keygen goes on without them. ...`), writes no unit and starts nothing.
@@ -936,9 +943,47 @@ A run killed outright (KILL, a power loss) can still stop between two steps; a s
 Before anything on the host changes, `--install-method release`, `docker` or `source` stops with `--install-method <method> cannot install a mainnet node yet: before genesis no mainnet release, image or source tag can be verified. Generate the mainnet keys with --phase=keygen --install-method existing --binary-path <...>`, and a binary with build features with `Refusing the node binary at <path>: it is not a mainnet build (This build has the features <features>; a mainnet build has none.)`.
 
 Send `node-info.yaml` from the data directory (`/var/lib/telcoin/node-info.yaml` by default; the run prints the path, and its `done` event carries the file in `node_info`).
-It is public: the node's name, BLS public key, primary and worker addresses and network keys, the execution address and the proof of possession.
+It is public: the node's name, BLS public key, primary and worker addresses and network keys, the advertised RPC URL, the execution address and the proof of possession.
 Never send or copy anywhere `node-keys/` (`bls.kw` is the BLS private key, wrapped with the passphrase) or the passphrase.
 Back both up offline now (section 2.5): together they are the identity the genesis registers, and losing either one loses it.
+
+The advertised RPC URL.
+Other nodes forward the transactions they receive to the RPC URL a committee member advertises in `node-info.yaml` (section 6.1), and on mainnet a validator's public RPC is its worker gateway, on a host of its own (section 4.15); no public RPC site runs on the validator.
+A mainnet keygen that is given no RPC URL (no `--rpc-domain`, no `--rpc-http`) gives worker 0 the node's default name, `https://v<label>.telcoin.network/`, where `<label>` is the first five characters of the `bls_public_key` that `node-info.yaml` holds, lowercased: a key that starts `pDmpE` gives `https://vpdmpe.telcoin.network/`.
+It is this node's default name, and its fallback name while it has no name of your own.
+Once the keys exist, the keytool's `set-rpc` writes it into `node-info.yaml` with no WebSocket URL (it reads no passphrase), and keygen records it in `.node-meta` as the worker gateway's: `PUBLIC_RPC_DOMAIN=v<label>.telcoin.network`, `PUBLIC_RPC_URL=https://v<label>.telcoin.network` and `RPC_ADVERTISED_VIA=gateway`, with no `PUBLIC_WS_URL`.
+Finalize keeps that record as it is and enables no public RPC site for it.
+The run's `done` event carries `"advertised_rpc":{"http":"https://v<label>.telcoin.network/","via":"gateway","default":true}`, and the run says what the URL is and what makes it answer:
+
+```
+Advertised RPC URL: https://vpdmpe.telcoin.network/ (worker 0 in node-info.yaml, no WebSocket URL). It is this node's default name: v and the first five characters of its BLS public key, lowercased. It belongs to your worker gateway (RPC_ADVERTISED_VIA=gateway in .node-meta), which serves it over HTTPS. No public RPC site runs on this host.
+To make it answer, send vpdmpe.telcoin.network and the static public IP of your worker gateway host to the Telcoin Association (TAO), which creates the A record. Then run your gateway with --domain vpdmpe.telcoin.network (OPERATOR.md 4.15).
+You are encouraged to use a name of your own: create its A record for the gateway's static IP, then run: sudo bash /home/admin/telcoin-node-scripts/install-caddy.sh --phase=rpc-advertise --rpc-domain <name>. Before key generation, a validator passes --admission closed --rpc-domain <name>, and no default is set.
+```
+
+To make the default name answer, send it and the static public IP of your worker gateway host to the Telcoin Association (TAO), which creates its A record, then run the gateway with `--domain v<label>.telcoin.network` (section 4.15).
+The last line is the way to a name of your own, the same on every mainnet node; the way a node that is not a validator gets its own public RPC site is at the end of this block.
+
+You are encouraged to use a name of your own instead, in a domain you control.
+Create its A record for the gateway host's static public IP, then either pass `--admission closed --rpc-domain <name>` to this keygen, or switch later with `sudo bash ~/telcoin-node-scripts/install-caddy.sh --phase=rpc-advertise --rpc-domain <name>` (section 4.15).
+On a mainnet validator `--rpc-domain <name>` (or `--rpc-http <url>`) names the worker gateway: `node-info.yaml` advertises `https://<name>/` (or that URL) and no WebSocket URL, `.node-meta` records it with `RPC_ADVERTISED_VIA=gateway`, no default is set, and the run says `To make it answer, create the A record of <name> for the static public IP of your worker gateway host, then run your gateway with --domain <name> (OPERATOR.md 4.15).`
+For a `--rpc-http` URL whose host is an IP address it says `To make it answer, run your worker gateway on the host with that IP address (OPERATOR.md 4.15).` instead, and for one with a port other than 443 or a path `To make it answer, point its name at the static public IP of your worker gateway host and run your gateway for it (OPERATOR.md 4.15).`
+The URL is recorded as the keytool stores it, with the scheme and host lowercased, no default port and `/` as the path when it has none, so `--rpc-http https://GW.Example.org:443` records `https://gw.example.org/`, as `--rpc-domain GW.Example.org` does.
+When the keytool stores the URL in yet another form, as it does with a port written with a leading zero, an IPv6 address not in canonical form or dot segments in a path, the URL worker 0 reads back is the one recorded, and the run says so (a `log` event in `--json` mode): `--rpc-http https://gw.example.org:08443/` gives `The keytool stored https://gw.example.org:08443/ as https://gw.example.org:8443/, so that is the URL recorded for your worker gateway.`
+A `--rpc-http` URL there must be `https://`: an `http://` URL is refused before anything on the host changes (`--rpc-http <url> is refused: a mainnet validator's RPC URL (admission closed) is its worker gateway's, and must be https://. Pass --rpc-http https://<name>/ or --rpc-domain <name>. Nothing on this host was changed.`).
+A `--rpc-ws` given there is dropped with a warning (`--rpc-ws <url> is dropped: on a mainnet validator (admission closed) the RPC URL names its worker gateway, which serves HTTPS only, so node-info.yaml advertises no WebSocket URL.`).
+Before the node exists, `rpc-advertise` on mainnet records the name even though nothing answers at `https://<name>/health` yet, and warns that it is not verified.
+
+A failure to write the default never stops key generation: the run still ends `"ok":true` with the keys in place, no worker gateway record is written (one left in `.node-meta` by earlier keys is removed), there is no `advertised_rpc` in the `done` event, and the warning names the `rpc-advertise` command that sets a URL later:
+
+- `Could not derive the default RPC name from bls_public_key in <node-info.yaml> (no bls_public_key could be read from it), so node-info.yaml advertises no RPC URL. The keys are fine. Set one with: ...`, or the same with `(it is not a base58 key of 131 or 132 characters)`: the `node-info.yaml` the keytool wrote has no BLS public key these scripts can read, so there is no label to take.
+- `keytool set-rpc failed (rc <n>: <its first line>), so node-info.yaml advertises no RPC URL. The keys are fine. Set one with: ...`: the binary's keytool did not write the URL, as with a build that has no `set-rpc` (`error: unrecognized subcommand 'set-rpc'`). When `set-rpc` succeeds but worker 0 then reads back no https URL, or a WebSocket URL beside it, the warning is `After keytool set-rpc, worker 0 of <node-info.yaml> reads '<what>' instead of '<url> none', so no RPC URL is recorded for your worker gateway. ...` instead.
+- `Could not record <url> for your worker gateway: <key> in <.node-meta> could not be updated, so no owner is recorded. node-info.yaml advertises it and the keys are fine. Record it with: ...`: `node-info.yaml` holds the URL, but `.node-meta` could not be written.
+
+The default is for a validator.
+On mainnet, `--rpc-domain` or `--rpc-http` without `--admission closed` sets the node up as one that is not a validator, and key generation prints a note that a validator must pass `--admission closed`: `This mainnet node is set up as a non-validator (no --admission): https://<name>/ is advertised with a WebSocket URL for a public RPC site on this host. A validator must pass --admission closed, so the name is recorded for its worker gateway.` (with another mode, `(admission <mode>)`).
+That is the way for an observer or RPC node that is to serve its own public RPC site (section 5): with `--rpc-domain <name>`, `node-info.yaml` advertises `https://<name>/` and `wss://<name>/` for the Caddy site finalize enables on this host, as on testnet.
+A mainnet node that is not a validator and kept the default name gets its own site in two steps, which a finalize or re-run given `--rpc-domain <name>` names for it: `sudo bash ~/telcoin-node-scripts/install-caddy.sh --phase=rpc-unadvertise`, then `sudo bash ~/telcoin-node-scripts/install-caddy.sh --phase=rpc-enable --rpc-domain <name>` (section 5.3); `rpc-enable` refuses while `RPC_ADVERTISED_VIA=gateway` is recorded (section 4.15).
 
 The proof of possession signs the BLS key and the Safe address only, with no chain ID or genesis hash, so it stays valid for whatever genesis is built.
 Once the mainnet release and genesis are published, update the scripts (section 4.1) to the release that enables mainnet and run `setup-node.sh --json --phase=finalize` with the same arguments on this host, as that release's notes say; it uses these keys as they are.
@@ -1227,7 +1272,7 @@ sudo bash ~/telcoin-node-scripts/edit-config.sh
 | `1) Listener addresses` | `PRIMARY_LISTENER_MULTIADDR` and `WORKER_LISTENER_MULTIADDR` in `/etc/telcoin/node.env`. An older install that kept them in the unit is converted on the first edit, with backups. |
 | `2) Metrics address` | The `--metrics` address; `off` removes the flag. Only `127.0.0.1` is taken unless you start the script with `--allow-public-metrics` (interactive, as root). |
 | `3) Log verbosity` | `-v` to `-vvvvv`. |
-| `4) RPC access` | Not for public RPC (see the cautions below). Binding to `0.0.0.0` is refused on mainnet. |
+| `4) RPC access` | Not for public RPC (see the cautions below). Binding to `0.0.0.0` is refused on mainnet, with the way a validator's RPC goes public instead: its worker gateway on a separate host, then on this host `firewall-setup.sh --enable --gateway-from <gateway IP>` and `--set gateway_upstream=<gateway IP>` (section 4.15). |
 | `5) BLS passphrase` | `1) Change the stored passphrase`, then `2) Seal the credential again (TPM or PCR change)` on a credential install, or `2) Move it to an encrypted credential` on a host that keeps the root-only file. It never re-encrypts the keys. |
 | `6) P2P ports` | The P2P listener ports. |
 | `7) Docker image` | The image a Docker install runs: a release tag, which the script resolves to its digest, or the network's image by digest. `latest` and other tags that are not release tags are refused, and so is a release older than the network's oldest supported one (`... The image is not changed.`). On mainnet a digest alone is taken only for a mainnet release this node has installed: give the release tag. |
@@ -2080,6 +2125,8 @@ On the gateway host, which runs no node:
    Mainnet and testnet each have one chain id, and a devnet is any other.
    When the validator does not answer within 3 seconds, it warns `The network could not be confirmed` and goes on with the network given; `--status` checks it again once the validator answers.
    The DNS record and the ports 80 and 443 of the same-host steps apply to this host.
+   On mainnet the name is either the validator's default name, `v<label>.telcoin.network` (section 2.12), whose A record the Telcoin Association (TAO) creates once you send it the name and this host's static public IP, or a name of your own, whose A record you create for that IP.
+   Give the gateway that name with `--domain`.
    The gateway reaches the validator at `http://10.0.0.12:8545` and reads its readiness from `http://10.0.0.12:43174/health/workers`; give `--rpc-port` or `--health-port` when the validator uses other ports.
    With `--front none` there is no Caddy and no DNS step; leave out `--domain`.
 4. Turn on this host's firewall:
@@ -2093,6 +2140,7 @@ On the gateway host, which runs no node:
    It keeps the SSH source list as `SSH_ALLOW_FROM` in `gateway.meta`, so `--ssh-from` is given once: a plain `--enable` applies the stored list again, and removing the gateway removes the list with `gateway.meta`.
    On mainnet, as on a node host, `--enable` is refused until it has an SSH source list, given or stored, or `--ssh-anywhere`.
 5. On the validator, advertise the gateway in its record (below) only now, with the gateway, its DNS record and its certificate in place: `rpc-advertise` refuses until `https://gw.example.org/health` answers 200 from the validator.
+   A mainnet validator keyed as in section 2.12 already advertises its default name, or the name it gave with `--rpc-domain`, for the gateway, so it runs `rpc-advertise` only to switch to another name.
 
 To undo it, go in the reverse order:
 
@@ -2100,7 +2148,7 @@ To undo it, go in the reverse order:
 # on the gateway host
 sudo bash ~/telcoin-node-scripts/setup-gateway.sh --remove
 # on the validator
-sudo bash ~/telcoin-node-scripts/install-caddy.sh --phase=rpc-unadvertise    # only if you advertised the gateway
+sudo bash ~/telcoin-node-scripts/install-caddy.sh --phase=rpc-unadvertise    # only if the node advertises the gateway (RPC_ADVERTISED_VIA=gateway)
 sudo bash ~/telcoin-node-scripts/edit-config.sh --set gateway_upstream=off
 sudo bash ~/telcoin-node-scripts/firewall-setup.sh --enable --gateway-from none
 ```
@@ -2125,24 +2173,37 @@ Each `gateway_upstream` change restarts a running node under the guards of step 
 Advertise the gateway in the node's record.
 Other nodes forward the transactions they receive to the RPC URL that committee members advertise in `node-info.yaml` (section 6.1).
 To have them send transactions to the gateway, advertise its URL on the node host: this host in same-host mode, the validator in standalone mode.
+On mainnet, key generation has done that already (section 2.12): a validator's `node-info.yaml` advertises its default name, `https://v<label>.telcoin.network/`, or the name given with `--rpc-domain`, recorded with `RPC_ADVERTISED_VIA=gateway`.
+There `rpc-advertise` is needed only to switch to a name of your own, as operators are encouraged to do.
 
 ```bash
 sudo bash ~/telcoin-node-scripts/install-caddy.sh --phase=rpc-advertise --rpc-domain gw.example.org
 ```
 
 It first asks for `https://gw.example.org/health` from this host and refuses unless the answer is 200 with a certificate valid for that name: `rpc-advertise was asked to advertise https://gw.example.org/, and GET https://gw.example.org/health from this host got <what> instead of 200`.
-No flag skips the check: a wrong URL in a validator's record breaks transaction forwarding to it until the record is fixed and the node restarted again.
+On testnet and devnet, and on a mainnet host with a node service, no flag skips the check: a wrong URL in a validator's record breaks transaction forwarding to it until the record is fixed and the node restarted again.
 So the gateway, its DNS record and its certificate come first, and in standalone mode the validator must resolve the gateway's name and reach it over HTTPS.
+A mainnet host with no node service yet, such as one with only the keys of section 2.12, writes the record anyway, because nothing can answer before the node and its gateway run and no node restart is at stake.
+It warns `https://gw.example.org/ is not verified: GET https://gw.example.org/health from this host got <what> instead of 200, and this mainnet host has no node service yet, so nothing can answer before the node and its gateway run. The record is written anyway; check-node.sh verifies it later.`, and the run ends with `Open items: https://gw.example.org/ not verified (see the warnings above).` (in `--json` mode its `done` message ends `(https://gw.example.org/ not verified)`).
 It writes `https://gw.example.org/` and no WebSocket URL into `node-info.yaml`, sets `PUBLIC_RPC_DOMAIN`, `PUBLIC_RPC_URL` and `RPC_ADVERTISED_VIA=gateway` in `.node-meta`, removes `PUBLIC_WS_URL`, and touches no Caddy file.
 The node signs its record at start, so this restarts the node once, after the quorum check and the epoch wait; when `node-info.yaml` already holds that URL, there is no restart.
 It ends with `Worker gateway advertisement set: https://gw.example.org/ (no WebSocket URL).`
 The URL is always `https`, so advertise only a gateway that serves TLS: one behind Caddy, or behind a load balancer that terminates TLS for that name.
 `--phase=rpc-unadvertise` clears the RPC entry from `node-info.yaml`, unsets the four keys and restarts the node the same way (`Worker gateway advertisement removed.`).
+It does not put the default name back.
+On a mainnet node running admission closed it warns `This validator now advertises no RPC URL, so other nodes cannot forward transactions to it until one is set again (--phase=rpc-advertise --rpc-domain <name>).`
 
-While `RPC_ADVERTISED_VIA=gateway` is set, `rpc-disable` removes only a public RPC site and leaves `node-info.yaml` and the keys alone, and `rpc-enable` refuses until you run `rpc-unadvertise`.
+While `RPC_ADVERTISED_VIA=gateway` is set, `rpc-disable` removes only a public RPC site and leaves `node-info.yaml` and the keys alone, and `rpc-enable` refuses until you run `rpc-unadvertise`: `node-info.yaml advertises https://gw.example.org/ for a worker gateway (RPC_ADVERTISED_VIA=gateway, written by key generation on mainnet or by rpc-advertise). Run --phase=rpc-unadvertise first to serve a public RPC site here. Nothing was changed.`
 `gateway-enable` refuses while a public RPC site is configured.
 `rpc-advertise` and `rpc-unadvertise` refuse while this host serves a public RPC site, whose advertisement is `rpc-disable`'s to clear.
 A public RPC site and a gateway are never served from one host.
+
+On mainnet a node is also fronted by its worker gateway or by its own public RPC site (section 5), never both, and a validator only by its gateway.
+Each refusal changes nothing and names the command that resolves it:
+
+- `rpc-enable` on a node running admission closed: `This mainnet node runs admission closed, as a validator does. A mainnet validator's RPC is served by its worker gateway, never by a Caddy site on the validator. Advertise the gateway with --phase=rpc-advertise --rpc-domain <name>. Nothing was changed.` When `.node-meta` already records the gateway's URL (`RPC_ADVERTISED_VIA=gateway` and `PUBLIC_RPC_URL`), as after the keygen of section 2.12, `node-info.yaml already advertises https://gw.example.org/ for the worker gateway; --phase=rpc-advertise --rpc-domain <name> changes the name.` takes the place of the `Advertise the gateway ...` sentence. It is checked before the refusal over a gateway advertisement above, whose advice, `rpc-unadvertise`, would only take the validator's URL away.
+- `rpc-enable` on a node with `GATEWAY_UPSTREAM` in `.node-meta`: `GATEWAY_UPSTREAM=10.0.0.20: a worker gateway fronts this node, and on mainnet a node is fronted by a gateway or by this host's public RPC site, not both. Run edit-config.sh --set gateway_upstream=off first. Nothing was changed.`
+- `edit-config.sh --set gateway_upstream=<list>` on a host whose `/etc/caddy/Caddyfile` holds the public RPC site: `this host serves the public RPC site (install-caddy.sh rpc-enable), and on mainnet a node is fronted by that site or by a worker gateway, not both: run sudo bash ~/telcoin-node-scripts/install-caddy.sh --phase=rpc-disable first`. Nothing is written. `gateway_upstream=off` is never refused for it. On every network a list is also refused while `NETWORK` is set more than once in `.node-meta` (`NETWORK is set more than once in .node-meta; remove the extra lines first`).
 
 Status and logs.
 
@@ -2176,6 +2237,15 @@ It reports `/ready` without counting it.
 On a host with a gateway and no node it says `No Telcoin node on this server, only a worker gateway: the node sections are skipped.`
 On a validator with `GATEWAY_ALLOW_FROM` or `GATEWAY_UPSTREAM` in `.node-meta`, a section `Checking the gateway upstream (validator side)...` checks the `ufw` rules for each listed host, that the RPC and `--healthcheck` listen on `0.0.0.0` exactly when `GATEWAY_UPSTREAM` is set, and that `node-info.yaml` advertises an `https` URL and no WebSocket URL.
 When they listen on `0.0.0.0`, it also reports a firewall that lets more than the gateways reach them.
+
+On a node whose `.node-meta` says `RPC_ADVERTISED_VIA=gateway`, the public RPC block of `check-node.sh` checks the gateway's name instead of a Caddy site, and never probes `wss://` or suggests `rpc-enable`:
+
+- It prints `public RPC: https://<name>/ (the worker gateway's, RPC_ADVERTISED_VIA=gateway; no Caddy site on this host)` and what `node-info.yaml` advertises, and warns when worker 0 advertises anything but `https://<name>/` and no WebSocket URL, with `fix: sudo bash ~/telcoin-node-scripts/install-caddy.sh --phase=rpc-advertise --rpc-domain <name>`.
+- It asks `GET https://<name>/health` once from this host, with the options `rpc-advertise` uses, and reports `public RPC: OK (GET https://<name>/health answered 200)` when the answer is 200 and the advertisement is right.
+- When the name does not resolve and is this node's default name, it warns `public RPC: WARN -- v<label>.telcoin.network does not resolve from this host. It is this node's default name, and its A record is created by the Telcoin Association (TAO).`, then prints the TAO handoff and the own-name route of section 2.12. Another name that does not resolve gets `fix: point the A record of <name> at your worker gateway's static IP`.
+- Any other answer (a refused connection, a timeout, a certificate error, an HTTP status other than 200) gets `public RPC: WARN -- GET https://<name>/health got <what> instead of 200` and `fix: on the worker gateway host, run: bash setup-gateway.sh --status`.
+
+These are warnings: none of them counts as a health issue or changes the exit code.
 
 The gateway logs to the journal through its unit, and Docker keeps the container's output while it runs (the container is removed when it stops):
 
@@ -2248,7 +2318,7 @@ The files:
 | `/etc/systemd/system/telcoin-gateway.service` | root 0644 | Runs `docker run --rm --name telcoin-gateway --network=host --user 1101:1101 --read-only --cap-drop ALL --security-opt no-new-privileges --pull=never --stop-timeout 60 <image> <flags>`, with `Restart=on-failure` and `TimeoutStopSec=75`. |
 | The `tn-gateway` block of `/etc/caddy/Caddyfile` | | With front `caddy` only; `install-caddy.sh` writes and removes it. |
 | `GATEWAY_ALLOW_FROM`, `GATEWAY_UPSTREAM`, `GATEWAY_PREV_HEALTHCHECK` in the validator's `.node-meta` | | Written by `firewall-setup.sh --gateway-from` and `edit-config.sh --set gateway_upstream` in standalone mode. |
-| `RPC_ADVERTISED_VIA=gateway` in the node's `.node-meta` | | Written by `rpc-advertise`, removed by `rpc-unadvertise`. |
+| `RPC_ADVERTISED_VIA=gateway` in the node's `.node-meta` | | Written by a mainnet key generation (section 2.12) and by `rpc-advertise`, removed by `rpc-unadvertise`. When setup writes the service (finalize, or an interactive install over such a record), it leaves this key, `PUBLIC_RPC_DOMAIN`, `PUBLIC_RPC_URL` and `PUBLIC_WS_URL` as they are. |
 
 Enable, refresh and remove take the update lock, so each refuses while another script holds it; `--status` takes none.
 On a host with the host baseline (section 4.13), a change that went through makes the baseline again.
@@ -2277,7 +2347,11 @@ Troubleshooting.
 | `firewall-setup.sh --reset` is refused with `--reset is refused while GATEWAY_UPSTREAM is set` | A reset turns `ufw` off while it applies the rules again, and the node's RPC listens on every interface. | The four commands the message names, in order (the reset steps after the undo steps above). A plain `--enable` is allowed. |
 | `setup-gateway.sh --enable` or `--refresh` is refused with `the upstream http://... is on chain ..., and the network given is ...` | `--network`, or `NETWORK` in `gateway.meta`, is another network than the validator runs. | Run `--enable` again with the validator's network as `--network`. |
 | `setup-gateway.sh --refresh` says `Moving the worker gateway from ...` | On testnet and mainnet a refresh moves the gateway to the image this scripts release pins. | Nothing: that is the only image the release allows there. `--status` shows the new image. |
-| `install-caddy.sh --phase=rpc-advertise` is refused with `GET https://<name>/health from this host got ... instead of 200` | The gateway, its DNS record or its certificate is not in place, or this host cannot reach the name. | Enable the gateway first, then run `curl -sS https://<name>/health` from this host; run `rpc-advertise` again when it answers. |
+| `install-caddy.sh --phase=rpc-advertise` is refused with `GET https://<name>/health from this host got ... instead of 200` | The gateway, its DNS record or its certificate is not in place, or this host cannot reach the name. On a mainnet host with no node service yet the run writes the record and warns instead. | Enable the gateway first, then run `curl -sS https://<name>/health` from this host; run `rpc-advertise` again when it answers. |
+| `check-node.sh` warns `v<label>.telcoin.network does not resolve from this host. It is this node's default name, ...` | The TAO has not created the A record of the default name yet. | Send the name and the gateway host's static public IP to the TAO (section 2.12), or advertise a name of your own with `rpc-advertise --rpc-domain <name>`. |
+| `install-caddy.sh --phase=rpc-enable` is refused with `This mainnet node runs admission closed, as a validator does. ...` | A mainnet validator's public RPC is its worker gateway, never a Caddy site on the validator. | Run a gateway on its own host and advertise it (`rpc-advertise --rpc-domain <name>`); serve a public RPC site from a node that is not a validator. |
+| `install-caddy.sh --phase=rpc-enable` is refused with `GATEWAY_UPSTREAM=<list>: a worker gateway fronts this node, ...` | On mainnet a node is fronted by a gateway or by its own public RPC site, not both. | `edit-config.sh --set gateway_upstream=off` first, if this node is to serve the site. |
+| `edit-config.sh --set gateway_upstream=<list>` is refused with `this host serves the public RPC site (install-caddy.sh rpc-enable), ...` | The same rule, from the other side. | `install-caddy.sh --phase=rpc-disable` first. |
 | `firewall-setup.sh --gateway-from ...` runs without error, but `--json --status` has no `gateway_from` | Scripts older than this release ignore flags they do not know. | Update the scripts (section 4.1), then run it again. |
 | `setup-gateway.sh` exits 2 | The libraries are older than the script. | Update the scripts (section 4.1). |
 
@@ -2290,7 +2364,11 @@ Caddy holds the TLS certificate on port 443 and proxies to reth on loopback.
 It is a deliberate choice.
 The Caddy site has no authentication and no rate limiting, so anyone can send requests to it.
 It suits observers that are meant to serve the public.
-The upstream validator guidance is to keep a validator's RPC off the public internet; read the appendix before you turn this on for a validator.
+The upstream validator guidance is to keep a validator's RPC off the public internet; read the appendix before you turn this on for a testnet validator.
+
+On mainnet this site is for nodes that are not validators.
+A mainnet validator's public RPC is its worker gateway, on a host of its own (section 4.15), and its keys already advertise the gateway's name (section 2.12).
+`rpc-enable` refuses a mainnet node that runs admission closed, as a validator does, and a mainnet node fronted by a worker gateway (`GATEWAY_UPSTREAM` in `.node-meta`).
 
 A host serves either this site or a worker gateway's site (section 4.15), not both.
 The README section [Public RPC endpoint](README.md#public-rpc-endpoint-https--wss) covers the internals; the steps are below.
@@ -2323,6 +2401,7 @@ Or answer `2) Public` at the RPC access prompt.
 With a domain, key generation writes `https://<domain>/` and `wss://<domain>/` into `node-info.yaml` when the release's keytool supports advertising RPC (`--rpc-http`, present since `v0.12.0-adiri`).
 After the node starts, setup checks DNS and runs `install-caddy.sh --phase=rpc-enable`, which does not restart the node when `node-info.yaml` already holds those URLs.
 If DNS is not ready, setup finishes anyway and prints the command to run later.
+On a mainnet validator (`--admission closed`) `--rpc-domain` names its worker gateway instead, with no WebSocket URL and no site on the host, and a mainnet node given no domain advertises its default name for the gateway (section 2.12): clear that with `rpc-unadvertise` before you enable this site on a node that is not a validator.
 
 `--no-public-rpc` keeps RPC private without asking.
 It cannot be combined with `--rpc-domain` or `--rpc-public`; setup stops with an error (an `error` event in `--json` mode).
@@ -2340,7 +2419,7 @@ sudo bash ~/telcoin-node-scripts/install-caddy.sh --phase=rpc-enable --rpc-domai
 
 `rpc-check-dns` changes nothing and exits 0 only when the name reaches this server.
 `rpc-enable` first shows what the endpoint exposes and asks you to agree; from a script, pass `--yes` (without a terminal and without `--yes` it stops: `public RPC needs your consent to the exposure above: run again with --yes (or from a terminal). Nothing was changed.`).
-On mainnet, Caddy is not offered to validators: the dashboard and public RPC are refused on a staked validator, on a node whose stake status cannot be read, and on a node with no `VALIDATOR_ADDRESS` in `.node-meta`. The stake is read from the local node, and from `https://rpc.telcoin.network` only when that endpoint answers with chain 731. A node whose network cannot be told (no `NETWORK` in `.node-meta`, and a genesis that cannot be read or is on neither 731 nor 2017, such as a chain-487 genesis) is refused too, with what was found: `The network of this node cannot be told (no NETWORK in .node-meta, and the chain id of /var/lib/telcoin/genesis/genesis.yaml (487) is neither 731 nor 2017), so this run cannot confirm it is not a staked mainnet validator. ...`. Serve public RPC from a separate RPC node and the dashboard over the SSH tunnel.
+On mainnet, Caddy is not offered to validators: a validator's public RPC is its worker gateway (section 4.15). Before the stake is read, `rpc-enable` refuses a node that runs admission closed (`This mainnet node runs admission closed, as a validator does. A mainnet validator's RPC is served by its worker gateway, never by a Caddy site on the validator. ...`) and a node fronted by a worker gateway (`GATEWAY_UPSTREAM=<list>: a worker gateway fronts this node, ...`). Then the dashboard and public RPC are refused on a staked validator, on a node whose stake status cannot be read, and on a node with no `VALIDATOR_ADDRESS` in `.node-meta`. The stake is read from the local node, and from `https://rpc.telcoin.network` only when that endpoint answers with chain 731. A node whose network cannot be told (no `NETWORK` in `.node-meta`, and a genesis that cannot be read or is on neither 731 nor 2017, such as a chain-487 genesis) is refused too, with what was found: `The network of this node cannot be told (no NETWORK in .node-meta, and the chain id of /var/lib/telcoin/genesis/genesis.yaml (487) is neither 731 nor 2017), so this run cannot confirm it is not a staked mainnet validator. ...`. Serve public RPC from a separate RPC node and the dashboard over the SSH tunnel.
 `rpc-enable` writes the Caddy site and reloads Caddy, adds `ufw` rules for 80 and 443 (also while `ufw` is off, so they are in place when you turn it on), makes sure reth serves WebSocket, and sets the advertised URLs in `node-info.yaml` (the first worker's entry) with the node's own `keytool set-rpc`.
 It restarts the node once, and only if `node-info.yaml` or the launch command changed; it first runs the committee quorum check (section 4.11; `TN_ALLOW_QUORUM_RISK=1` overrides a refusal), and on a committee node it waits for the epoch boundary (section 4.2), which `TN_SKIP_EPOCH_WAIT=1` skips.
 If the check refuses, or the run is stopped before the restart, `node-info.yaml` and the launch command are put back.
@@ -2420,7 +2499,7 @@ ADDR=0xYOUR_EXECUTION_ADDRESS
 - Hardware at the validator tier of the network's table (section 1.1).
 - The node's P2P ports reachable from the internet (section 1.3).
 - A synced node (section 3).
-- A publicly routable RPC URL advertised in `node-info.yaml` (section 5). Other nodes forward user transactions to the committee's advertised URLs and skip private addresses. Only a private network, such as a devnet, can lift that with `allow_private_forward_targets: true` in `parameters.yaml` (section 4.3); testnet and mainnet refuse `true`.
+- A publicly routable RPC URL advertised in `node-info.yaml`. Other nodes forward user transactions to the committee's advertised URLs and skip private addresses. On mainnet that is the URL of the validator's worker gateway (section 4.15), which key generation sets to the node's default name or to the name given with `--rpc-domain` (section 2.12); on testnet a worker gateway or this host's public RPC site (section 5). Only a private network, such as a devnet, can lift that with `allow_private_forward_targets: true` in `parameters.yaml` (section 4.3); testnet and mainnet refuse `true`.
 - The execution address funded with the stake plus gas. The stake is 1,000,000 TEL on testnet today; `prepare-stake.sh` reads the current amount.
 - Foundry's `cast` on the wallet machine, and the wallet holding your execution address.
 
@@ -2736,6 +2815,7 @@ sudo bash ~/telcoin-node-scripts/setup-node.sh --json --phase=finalize "${ARGS[@
 - The passphrase comes from standard input with `--passphrase-stdin` (`printf` is a shell builtin, so the value never reaches a command line), or from `TN_BLS_PASSPHRASE` passed with `sudo --preserve-env=TN_BLS_PASSPHRASE`; giving both is an error.
 - Each phase prints one JSON object per line on stdout, with `event` set to `step`, `log`, `error` or `done`. Every run ends with exactly one `{"event":"done","ok":true|false,...}`, and a failed run's `done` carries the reason in `msg`. Human-readable output goes to stderr.
 - Finalize's `done` adds `operator_guide` (the URL of this runbook) and `public_rpc` (`enabled`, `domain`, `http`, `ws`).
+- A mainnet keygen's `done` adds `advertised_rpc` (`http`, `via`, which is `gateway`, and `default`, true for the default name) when it recorded a URL for the worker gateway (section 2.12); a testnet or devnet keygen's `done` has no such field.
 - The inputs are checked before anything runs as root. A flag with no value, an unknown phase, network or install method, a malformed URL, an image that is not the network's repository by digest, a ref that is not a release tag of the network, and a relative `--binary-path` each stop the run with an `error` event.
 - `--data-dir`, the four multiaddr flags, `--address`, `--passphrase-method`, `--service-user` and `--service-group` are checked before root too, and a `--json` keygen without `--address`, or with the zero address, stops with an error that names it.
 - `--network` takes `testnet` (or `adiri`), `mainnet` or `devnet`. A mainnet install stops until the mainnet values in section 1.5 are set; only the mainnet keygen of section 2.12 runs before that.
@@ -2756,11 +2836,29 @@ sudo bash ~/telcoin-node-scripts/setup-node.sh --json --phase=finalize "${ARGS[@
 | `--public-ws-url <url>` | `.node-meta` `PUBLIC_WS_URL` | `wss://<d>` |
 
 An explicit flag wins and is used as given.
-`--rpc-http` and `--public-rpc-url` take an `http://` or `https://` URL, `--rpc-ws` and `--public-ws-url` a `ws://` or `wss://` one.
+`--rpc-http` and `--public-rpc-url` take an `http://` or `https://` URL (on a mainnet validator `--rpc-http` takes `https://` only, below), `--rpc-ws` and `--public-ws-url` a `ws://` or `wss://` one.
 Setup stops on a malformed URL, and warns when a URL or `--rpc-domain` points at a private address or name (loopback, RFC 1918, `.local`, `.internal`) that wallets on the internet cannot reach.
 An invalid `--public-ip` is ignored with a warning.
 Derived URLs reach key generation only when the keytool supports `--rpc-http`; otherwise they are written when `rpc-enable` runs.
 If an explicit URL differs from the domain, setup warns that `rpc-enable` will replace it.
+
+On a mainnet validator (`--admission closed`) these flags name its worker gateway, and no `rpc-enable` runs (section 4.15); `setup-node.sh --help` describes both meanings:
+
+- `--rpc-domain <d>` advertises `https://<d>/` and no WebSocket URL, and `--rpc-http <url>` advertises that URL, which must be `https://`: an `http://` URL is refused before anything on the host changes.
+- The URL is recorded as the keytool stores it, with the scheme and host lowercased, no default port and `/` as the path when it has none: `--rpc-http https://GW.Example.org:443` and `--rpc-domain GW.Example.org` both record `https://gw.example.org/`.
+  When the keytool stores the URL in yet another form (a port written with a leading zero, an IPv6 address not in canonical form, dot segments in a path), the URL worker 0 reads back after `set-rpc` is recorded, with the info line `The keytool stored <given> as <stored>, so that is the URL recorded for your worker gateway.`; only a read-back with no https URL, or with a WebSocket URL, is a warning that records no owner (section 2.12).
+  `.node-meta` gets `PUBLIC_RPC_URL` (the URL without its trailing slash), `RPC_ADVERTISED_VIA=gateway` and no `PUBLIC_WS_URL`, plus `PUBLIC_RPC_DOMAIN` when the URL is exactly `https://<host>/` and `<host>` is a DNS name: a URL with an IP address, a port other than 443 or a path records none.
+- `--rpc-ws <url>` is dropped with a warning (`--rpc-ws <url> is dropped: on a mainnet validator (admission closed) the RPC URL names its worker gateway, which serves HTTPS only, so node-info.yaml advertises no WebSocket URL.`).
+- An `--rpc-http` that differs from the `--rpc-domain` URL once both are normalised as above is advertised as given, with a warning (`--rpc-http <url> differs from --rpc-domain <d>: on a mainnet validator (admission closed) both name its worker gateway, and keygen advertises <url> for it, as given.`); one that only spells it another way, such as `--rpc-http https://GW.Example.org:443` with `--rpc-domain gw.example.org`, gets none.
+- `--rpc-public` with no domain warns `Public RPC not enabled: <reason> -- a mainnet validator's RPC is served by its worker gateway, not by this host.` and names `--rpc-domain <name>` or, once the keys exist, `install-caddy.sh --phase=rpc-advertise --rpc-domain <name>`.
+- A keytool without `--rpc-http` makes the keys without the URL, and `keytool set-rpc` writes it once they exist (`..., so keytool set-rpc writes https://<d>/ to node-info.yaml once the keys exist.`).
+- A finalize given `--rpc-domain <d>` on a validator with no gateway record warns that no public RPC site for `<d>` runs on the host, and names `install-caddy.sh --phase=rpc-advertise --rpc-domain <d>`.
+- A run that is not given `--admission`, such as `--json --phase=finalize` or an interactive re-run over an installed node, takes the mode `.node-meta` records, and an interactive run also takes the recorded network until its network menu sets one, so a validator gets these texts and the `http://` refusal from the first line, before anything on the host changes.
+  A flag given on the command line wins.
+
+With none of them, a mainnet keygen advertises the node's default name for the gateway, on every mainnet node (section 2.12).
+On mainnet with admission closed neither given nor, on a finalize or re-run, recorded in `.node-meta`, `--rpc-domain` or `--rpc-http` sets the node up as one that is not a validator: the name is advertised with a WebSocket URL for a public RPC site on this host, as on testnet, and key generation prints a note that a validator must pass `--admission closed`.
+On every network, a finalize given `--rpc-domain <d>` over a record the gateway owns (`RPC_ADVERTISED_VIA=gateway`) keeps that record and enables no site: it says `https://<d>/ is advertised for your worker gateway ...` when the record holds that URL, and otherwise warns that the record is kept and names the way to `<d>`: on a validator, and on testnet and devnet, `install-caddy.sh --phase=rpc-advertise --rpc-domain <d>`; on a mainnet node that is not a validator `install-caddy.sh --phase=rpc-unadvertise`, then `--phase=rpc-enable --rpc-domain <d>`, which the closing summary of an interactive run repeats.
 
 ### 7.3 Other scripts
 
@@ -2957,7 +3055,7 @@ The operating systems row is not part of that branch.
 | `stake` / `unstake` | `stake(bytes,(bytes))` with the amount from `stakeConfig(getCurrentStakeVersion())`, and `unstake(address,bool)` | `stake(bytes,(bytes,bytes))` with the amount from `getCurrentStakeConfig()`, and `unstake(address)` | The deployed contracts, which match this runbook (section 6.10). |
 | Staking errors | `InvalidTokenId` means no ConsensusNFT; `InvalidProofOfPossession` means re-sign the proof of possession (section 6.6); `DuplicateBLSPubkey` means the key is already staked from another address (section 6.5) | `RequiresConsensusNFT` for a missing NFT, and new keys for the other two (with `--force` for `DuplicateBLSPubkey`) | This repo. The registry never releases a registered BLS key, so new keys are a new validator identity. |
 | `node-info.yaml` workers | `p2p_info.workers:`, a list, which `v0.15.0-adiri` and later write; the scripts also read the older single `worker:` map | `p2p_info.worker:`, one map, in the CLI README | Your node's own file. These scripts handle both shapes. |
-| RPC exposure | Any node can serve public RPC through Caddy and advertise it, and the committee's advertised URLs are where other nodes forward transactions. | Keep validator RPC off the public internet; serve the public from observers. | Both hold: a validator must advertise a reachable URL to receive forwarded transactions, so choose deliberately and protect it. Section 5 keeps reth on loopback behind a TLS proxy. |
+| RPC exposure | On testnet any node can serve public RPC through Caddy and advertise it. On mainnet a validator advertises its worker gateway, on a host of its own, and the Caddy site is for nodes that are not validators. The committee's advertised URLs are where other nodes forward transactions. | Keep validator RPC off the public internet; serve the public from observers. | Both hold: a validator must advertise a reachable URL to receive forwarded transactions. On mainnet the worker gateway is that URL, and the validator's RPC answers only the gateway host (section 4.15). On testnet choose deliberately and protect it: section 5 keeps reth on loopback behind a TLS proxy. |
 | Chain configs | The files in telcoin-network's `chain-configs/testnet/` at the pinned tag, `v0.16.0-adiri`, are the live Adiri genesis, and setup installs them from that tag. On `main`, `committee.yaml` no longer matches the testnet pins. | The `chain-configs` README calls them placeholders, not the actual network configs. | This repo for testnet. Do not edit those files; the mainnet ones are placeholders until launch. |
 | Operating systems | Ubuntu 26.04 recommended. Mainnet: Ubuntu 24.04 or later (systemd 255+). Testnet and devnet: systemd 247+, so Ubuntu 22.04+, Debian 12+, RHEL 9+ | Debian 11+, Ubuntu 20.04+, RHEL 8 | This repo for `setup-node.sh`; older systems fail its systemd check. |
 | Contact | support@telcoin.org for everything | Two addresses, used for different things on different pages | Section 10. |

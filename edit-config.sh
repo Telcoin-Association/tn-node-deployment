@@ -143,10 +143,14 @@
 #                                     which is the guard on every network.
 #                                     Refused too when the RPC is already
 #                                     public (made so with the RPC access
-#                                     item). The list must name the
-#                                     --gateway-from entries as written (a
-#                                     CIDR there does not cover an address
-#                                     here). Not the public
+#                                     item), and on mainnet when this host
+#                                     serves the public RPC site
+#                                     (install-caddy.sh rpc-enable; run
+#                                     --phase=rpc-disable first). off is
+#                                     never refused for that. The list must
+#                                     name the --gateway-from entries as
+#                                     written (a CIDR there does not cover
+#                                     an address here). Not the public
 #                                     RPC: no RPC limits, no --http.api, and
 #                                     the WebSocket bind is left alone. off
 #                                     puts --http.addr back on 127.0.0.1 and
@@ -2651,7 +2655,7 @@ set_rpc_addr() {
         127.0.0.1) ;;
         0.0.0.0)
             if [[ "$(meta_get NETWORK 2>/dev/null || true)" == "mainnet" ]]; then
-                edit_error "a mainnet node keeps its RPC on 127.0.0.1; public RPC goes through install-caddy.sh"
+                edit_error "a mainnet node keeps its RPC on 127.0.0.1. A mainnet validator's public RPC is its worker gateway: run setup-gateway.sh on a separate host, then on this host sudo bash ${SCRIPT_DIR}/firewall-setup.sh --enable --gateway-from <gateway IP> (gateway_upstream is refused until ufw lets the gateway host in) and then sudo bash ${SCRIPT_DIR}/edit-config.sh --set gateway_upstream=<gateway IP>. install-caddy.sh serves a public RPC site only for a node that is not a validator"
                 return 1
             fi
             ;;
@@ -2704,14 +2708,16 @@ edit_rpc_addr_env() {
 # (default deny or reject, no allow from Anywhere to either port),
 # tn_gateway_ports_private: the guard on every network, mainnet included. Also
 # refused when the RPC is already public (--http.addr a wildcard with no
-# GATEWAY_UPSTREAM), which off would take away. Unlike the public RPC bind
-# (set_rpc_addr) it sets no RPC limits and
+# GATEWAY_UPSTREAM), which off would take away, on mainnet when this host
+# serves the public RPC site (the tn-rpc block in /etc/caddy/Caddyfile), and when
+# NETWORK is set more than once in .node-meta. Unlike
+# the public RPC bind (set_rpc_addr) it sets no RPC limits and
 # no --http.api, and leaves --ws.addr alone. off: --http.addr 127.0.0.1,
 # --healthcheck back to GATEWAY_PREV_HEALTHCHECK (removed for none), both keys
 # unset; off on a node with no GATEWAY_UPSTREAM changes nothing. run_set leaves
 # a node that was stopped stopped. rc as for the other setters.
 set_gateway_upstream() {
-    local value="$1" meta up prev cur ip rest url rport hport miss rc=0
+    local value="$1" meta up prev cur ip rest url rport hport miss net rc=0
     meta="$(node_meta_path 2>/dev/null)" || meta=""
     if [[ -z "$meta" ]]; then
         edit_error "no .node-meta to record GATEWAY_UPSTREAM in"
@@ -2758,6 +2764,21 @@ set_gateway_upstream() {
             return 1
         fi
     done
+    # On mainnet a node is fronted by this host's public RPC site or by a worker
+    # gateway, never both. The site's block is found as install-caddy.sh and
+    # check-node.sh find it, and a NETWORK with no single value is refused rather
+    # than read as another network.
+    rc=0
+    net="$(meta_get NETWORK 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        edit_error "NETWORK is set more than once in .node-meta; remove the extra lines first"
+        return 1
+    fi
+    if [[ "$net" == "mainnet" ]] \
+        && grep -qF "# >>> tn-rpc >>>" "${TN_ROOT_PREFIX:-}/etc/caddy/Caddyfile" 2>/dev/null; then
+        edit_error "this host serves the public RPC site (install-caddy.sh rpc-enable), and on mainnet a node is fronted by that site or by a worker gateway, not both: run sudo bash ${SCRIPT_DIR}/install-caddy.sh --phase=rpc-disable first"
+        return 1
+    fi
     url="$(tn_local_rpc_url 2>/dev/null)" || url=""
     rport="${url##*:}"
     rport="${rport%%/*}"

@@ -7,7 +7,9 @@
 # proof of possession for the --address it is given, gets no chain configs, starts
 # nothing and says what to send. The release, docker and source methods are refused
 # with a message that names the way that works; finalize is refused as before; with
-# TN_MAINNET_KEYGEN_ENABLED=0 the keygen is refused as before.
+# TN_MAINNET_KEYGEN_ENABLED=0 the keygen is refused as before. A mainnet keygen with no
+# RPC URL gives worker 0 its default name (keytool set-rpc), recorded for the worker
+# gateway; every failure on that path is a warning.
 #
 # The refusals run the real script in a child bash: each one stops before the root
 # check, so nothing under the fixture root is written. The keygen itself runs from a
@@ -36,31 +38,107 @@ check "the switch-off copy sets TN_MAINNET_KEYGEN_ENABLED=0" yes \
     "$(grep -qx 'readonly TN_MAINNET_KEYGEN_ENABLED=0' "$T/off/lib/common.sh" && echo yes || echo no)"
 
 # Stub node binaries. --version prints one "Build Features:" line holding the
-# features in <stub>.features; any other call is the keytool: it records its argv
-# and stdin and writes an encrypted-looking key and node-info.yaml in --datadir, the
-# latter naming the --address it was given, as the real keytool's does.
+# features in <stub>.features; a call ending in --help prints clap help that lists
+# the RPC options (with STUB_OLD_KEYTOOL, not --rpc-http and --rpc-ws, as a keytool
+# from before them); any other call is the keytool. keytool set-rpc records its argv and
+# stdin on their own (keytool.argv stays the key generation's) and sets worker 0's rpc,
+# unless SETRPC_RC makes it fail with that status or SETRPC_SKIPWRITE makes it say OK
+# and write nothing. Any other keytool call records its argv and stdin and writes an
+# encrypted-looking key and node-info.yaml in --datadir, the latter naming the
+# --address it was given and the BLS public key STUB_BLS, with worker 0 advertising the
+# --rpc-http and --rpc-ws it was given, as the real keytool's does. Both keytool calls
+# store a URL as url::Url writes it: the scheme and host in lower case, no default port,
+# and / for an empty path. url::Url rewrites more than that (a port with leading zeros,
+# an IPv6 address, dot segments): STUB_STORE='FROM TO' stores FROM, in that form, as TO.
+# SETRPC_WS makes set-rpc advertise that WebSocket URL too.
 cat > "$T/bin/stub" <<'STUB'
 #!/bin/sh
 if [ "$1" = "--version" ]; then
     printf 'telcoin-network\nVersion: 0.18.0\nCommit SHA: 0000000\nBuild Features: %s\n' "$(cat "$0.features")"
     exit 0
 fi
+for a in "$@"; do last="$a"; done
+if [ "$last" = "--help" ]; then
+    printf 'Usage: telcoin keytool generate validator [OPTIONS]\n\nOptions:\n'
+    for f in --rpc-http --rpc-ws --rpc.max-blocks-per-filter --rpc.max-logs-per-response \
+             --rpc.max-subscriptions-per-connection --rpc.max-request-size --http.api; do
+        case "${STUB_OLD_KEYTOOL:-}:$f" in
+            ?*:--rpc-http|?*:--rpc-ws) continue ;;
+        esac
+        printf '      %s <VALUE>\n' "$f"
+    done
+    exit 0
+fi
+# norm URL -- URL as url::Url stores it.
+norm() {
+    s="$(printf '%s' "${1%%://*}" | tr 'A-Z' 'a-z')"
+    r="${1#*://}"
+    a="${r%%[/?]*}"
+    p="${r#"$a"}"
+    a="$(printf '%s' "$a" | tr 'A-Z' 'a-z')"
+    case "$s:$a" in
+        https:*:443|wss:*:443) a="${a%:443}" ;;
+        http:*:80|ws:*:80) a="${a%:80}" ;;
+    esac
+    case "$p" in /*) ;; *) p="/$p" ;; esac
+    o="$s://$a$p"
+    if [ -n "${STUB_STORE:-}" ] && [ "$o" = "${STUB_STORE%% *}" ]; then
+        o="${STUB_STORE#* }"
+    fi
+    printf '%s' "$o"
+}
+# rpc FILE HTTP WS -- FILE with worker 0 (its last entry) advertising HTTP and WS.
+rpc() {
+    awk '/^      rpc:/ { exit } { print }' "$1" > "$1.new"
+    if [ -n "$2" ]; then
+        printf '      rpc:\n        http: %s\n' "$(norm "$2")" >> "$1.new"
+        [ -z "$3" ] || printf '        ws: %s\n' "$(norm "$3")" >> "$1.new"
+    else
+        printf '      rpc: null\n' >> "$1.new"
+    fi
+    mv "$1.new" "$1"
+}
+dd=""
+addr=""
+http=""
+ws=""
+prev=""
+case " $* " in
+    *" set-rpc "*)
+        for a in "$@"; do
+            printf '%s\n' "$a" >> "$REC/setrpc.argv"
+            [ "$prev" = "--datadir" ] && dd="$a"
+            [ "$prev" = "--http" ] && http="$a"
+            [ "$prev" = "--ws" ] && ws="$a"
+            prev="$a"
+        done
+        cat > "$REC/setrpc.stdin"
+        if [ -n "${SETRPC_RC:-}" ]; then
+            printf "error: unrecognized subcommand 'set-rpc'\n\nUsage: telcoin keytool <COMMAND>\n" >&2
+            exit "$SETRPC_RC"
+        fi
+        [ -n "${SETRPC_SKIPWRITE:-}" ] || rpc "$dd/node-info.yaml" "$http" "${ws:-${SETRPC_WS:-}}"
+        echo OK
+        exit 0
+        ;;
+esac
 : > "$REC/keytool.argv"
 # What .node-meta held when the keys were made.
 [ -f "$REC/meta.log" ] && cp "$REC/meta.log" "$REC/meta.at-keytool"
-dd=""
-addr=""
-prev=""
 for a in "$@"; do
     printf '%s\n' "$a" >> "$REC/keytool.argv"
     [ "$prev" = "--datadir" ] && dd="$a"
     [ "$prev" = "--address" ] && addr="$a"
+    [ "$prev" = "--rpc-http" ] && http="$a"
+    [ "$prev" = "--rpc-ws" ] && ws="$a"
     prev="$a"
 done
 cat > "$REC/keytool.stdin"
 mkdir -p "$dd/node-keys"
 : > "$dd/node-keys/bls.kw"
-printf 'name: stub\nexecution_address: %s\n' "$addr" > "$dd/node-info.yaml"
+printf 'name: stub\nbls_public_key: %s\nexecution_address: %s\np2p_info:\n  primary:\n    network_address: /ip4/203.0.113.10/udp/49590/quic-v1\n  workers:\n    - network_address: /ip4/203.0.113.10/udp/49594/quic-v1\n      rpc: null\n' \
+    "${STUB_BLS:-}" "$addr" > "$dd/node-info.yaml"
+rpc "$dd/node-info.yaml" "$http" "$ws"
 STUB
 for n in tn-main tn-adiri tn-testutils; do
     cp "$T/bin/stub" "$T/bin/$n"
@@ -75,6 +153,11 @@ cp "$T/bin/systemctl" "$T/bin/docker"
 chmod 0755 "$T/bin/systemctl" "$T/bin/docker"
 PATH="$T/bin:$PATH"
 
+# A BLS public key of the shape keytool writes (132 characters of base58, starting
+# with 2): the default RPC name is v and its first five characters, lowercased.
+STUB_BLS="2Xq7Y$(printf '%0127d' 0 | tr 0 a)"
+export STUB_BLS
+H="v2xq7y.telcoin.network"
 ADDR="0x000000000000000000000000000007310005eed3"
 PASS="a-mainnet-passphrase-20b"
 MK=(--json --phase=keygen --network mainnet --address "$ADDR"
@@ -168,6 +251,12 @@ child "$T/sn" "${MK[@]/$ADDR/0x0000000000000000000000000000000000000000}" --inst
 refused "the zero address" "--address is the zero address: the proof of possession is signed over the node's execution address, which receives its rewards; give that address."
 child "$T/sn" "${MK[@]}" --install-method existing --binary-path "$T/bin/tn-main" --passphrase-method stdin
 refused "the passphrase in a root-only file" "--passphrase-method stdin is not taken on mainnet: the passphrase is kept only as an encrypted credential there."
+# A mainnet validator's RPC URL is its worker gateway's, which serves HTTPS only.
+HTTP_REFUSED="is refused: a mainnet validator's RPC URL (admission closed) is its worker gateway's, and must be https://. Pass --rpc-http https://<name>/ or --rpc-domain <name>."
+child "$T/sn" "${MK[@]}" --install-method existing --binary-path "$T/bin/tn-main" --admission closed --rpc-http http://gw8.example.org:8655/
+refused "validator --rpc-http http://" "--rpc-http http://gw8.example.org:8655/ ${HTTP_REFUSED} Nothing on this host was changed."
+child "$T/sn" "${MK[@]}" --install-method existing --binary-path "$T/bin/tn-main" --admission Closed --rpc-http http://gw8.example.org/
+refused "validator (--admission Closed) --rpc-http http://" "--rpc-http http://gw8.example.org/ ${HTTP_REFUSED} Nothing on this host was changed."
 PASS_SAVED="$PASS"
 PASS="abcdefghijklmno"
 child "$T/sn" "${MK[@]}" --install-method existing --binary-path "$T/bin/tn-main"
@@ -213,14 +302,18 @@ create_directories() {
     if [[ "$(id -u)" == 0 ]]; then chown nobody "$DATA_DIR"; fi
 }
 tn_install_logrotate() { return 0; }
+# A key named in META_FAIL cannot be written or removed (rc 2, as a failed rewrite).
 write_node_meta() { printf '%s\n' "$@" >> "$REC/meta.log"; }
-meta_unset() { printf 'unset %s\n' "$1" >> "$REC/meta.log"; }
+meta_set() { [[ "$1" != "${META_FAIL:-}" ]] || return 2; printf '%s=%s\n' "$1" "$2" >> "$REC/meta.log"; }
+meta_unset() { [[ "$1" != "${META_FAIL:-}" ]] || return 2; printf 'unset %s\n' "$1" >> "$REC/meta.log"; }
 ensure_chain_configs_available() { : > "$REC/chain-configs"; return 1; }
 tn_as_service_user() { "$@"; }
 tn_store_credential() { printf '%s %s\n' "$1" "$2" > "$REC/credential"; }
 _tn_shred() { :; }
 display_node_info() { : > "$REC/display-node-info"; }
 step_write_config() { : > "$REC/write-config"; }
+# The real step_create_service is kept for the .node-meta write a finalize makes.
+eval "real_step_create_service() $(declare -f step_create_service | sed 1d)"
 step_create_service() { : > "$REC/create-service"; }
 
 # keygen ARGS... -- main in a subshell, the passphrase on stdin: JSON in $T/out,
@@ -274,6 +367,372 @@ check "closing text: no onboarding or staking steps (display_node_info)" no "$([
 check "closing text: node-info.yaml shown" yes "$(has "$(cat "$T/err")" "Your node-info.yaml has been generated at:")"
 check_lacks "closing text: no re-registering with the Association" "re-register with the Association" "$(cat "$T/err")"
 
+# ---- the advertised RPC URL ------------------------------------------------------------
+# With no RPC URL given, worker 0 gets the default name, written by keytool set-rpc (no
+# passphrase reaches it) and recorded in .node-meta as the worker gateway's.
+setrpc="$(cat "$REC/setrpc.argv" 2>/dev/null)"
+# shellcheck disable=SC2086  # the argv lines joined with spaces
+check "default name: keytool set-rpc writes it" yes "$(has "$(printf '%s ' $setrpc)" "keytool set-rpc --http https://${H}/ ")"
+check "default name: no WebSocket URL" "no https://${H}/ none" "$(has "$setrpc" "--ws") $(tn_node_info_rpc "$T/data/node-info.yaml")"
+check "default name: set-rpc reads no passphrase" "" "$(cat "$REC/setrpc.stdin" 2>/dev/null)"
+check_lacks "default name: no passphrase source for set-rpc" "--bls-passphrase-source" "$setrpc"
+check_lacks "default name: the passphrase in no set-rpc argv" "$PASS" "$setrpc"
+for kv in "PUBLIC_RPC_DOMAIN=${H}" "PUBLIC_RPC_URL=https://${H}" RPC_ADVERTISED_VIA=gateway "unset PUBLIC_WS_URL"; do
+    check_has "default name: .node-meta ${kv}" "$kv" "$meta"
+done
+check_lacks "default name: no PUBLIC_WS_URL recorded" "PUBLIC_WS_URL=" "$meta"
+# Set apart: bash 3.2 misreads a } inside "$(...)" nested in double quotes.
+ADV_FIELD="\"advertised_rpc\":{\"http\":\"https://${H}/\",\"via\":\"gateway\",\"default\":true},\"msg\":\"mainnet keys generated"
+check "default name: the done event names it" yes "$(has "$(tail -n 1 "$T/out")" "$ADV_FIELD")"
+check "default name: set-rpc's OK line is not on the JSON stream" no "$(grep -qx OK "$T/out" && echo yes || echo no)"
+ADV_CMD="sudo bash $T/sn/install-caddy.sh --phase=rpc-advertise --rpc-domain"
+check_has "default name: said, as a log event" \
+    "{\"event\":\"log\",\"msg\":\"Advertised RPC URL: https://${H}/ (worker 0 in node-info.yaml, no WebSocket URL). It is this node's default name: v and the first five characters of its BLS public key, lowercased. It belongs to your worker gateway (RPC_ADVERTISED_VIA=gateway in .node-meta), which serves it over HTTPS. No public RPC site runs on this host.\"}" \
+    "$(cat "$T/out")"
+check_has "default name: the TAO handoff" \
+    "{\"event\":\"log\",\"msg\":\"To make it answer, send ${H} and the static public IP of your worker gateway host to the Telcoin Association (TAO), which creates the A record. Then run your gateway with --domain ${H} (OPERATOR.md 4.15).\"}" \
+    "$(cat "$T/out")"
+check_has "default name: the own-name route" \
+    "{\"event\":\"log\",\"msg\":\"You are encouraged to use a name of your own: create its A record for the gateway's static IP, then run: ${ADV_CMD} <name>. Before key generation, a validator passes --admission closed --rpc-domain <name>, and no default is set.\"}" \
+    "$(cat "$T/out")"
+check "default name: said on stderr too" yes "$(has "$(cat "$T/err")" "Advertised RPC URL: https://${H}/")"
+check_lacks "default name: no non-validator note" "set up as a non-validator" "$(cat "$T/out")"
+
+# Each failure is a warning: keygen still ends ok, and no owner is recorded.
+no_owner() {  # no_owner NAME -- the last keygen ended ok and recorded no gateway owner
+    local m
+    m="$(cat "$REC/meta.log" 2>/dev/null)"
+    check "$1: done ok" yes "$(has "$(tail -n 1 "$T/out")" "\"event\":\"done\",\"ok\":true,\"phase\":\"keygen\"")"
+    check "$1: no owner recorded, an earlier one removed" "no yes" \
+        "$(has "$m" "RPC_ADVERTISED_VIA=gateway") $(has "$m" "unset RPC_ADVERTISED_VIA")"
+    check "$1: no advertised_rpc in done, no TAO handoff" "no no" \
+        "$(has "$(tail -n 1 "$T/out")" "advertised_rpc") $(has "$(cat "$T/out")" "Telcoin Association (TAO)")"
+}
+STUB_BLS_SAVED="$STUB_BLS"
+STUB_BLS="not-a-key"
+check_rc "a malformed BLS key: rc 0" 0 "$(keygen "${KGM[@]}")"
+check_has "a malformed BLS key: warned" \
+    "{\"event\":\"log\",\"msg\":\"WARNING: Could not derive the default RPC name from bls_public_key in $T/data/node-info.yaml (it is not a base58 key of 131 or 132 characters), so node-info.yaml advertises no RPC URL. The keys are fine. Set one with: ${ADV_CMD} <name>\"}" \
+    "$(cat "$T/out")"
+check "a malformed BLS key: no set-rpc" no "$([[ -e "$REC/setrpc.argv" ]] && echo yes || echo no)"
+no_owner "a malformed BLS key"
+STUB_BLS=""
+check_rc "no BLS key: rc 0" 0 "$(keygen "${KGM[@]}")"
+check "no BLS key: warned" yes "$(has "$(cat "$T/out")" "(no bls_public_key could be read from it), so node-info.yaml advertises no RPC URL.")"
+no_owner "no BLS key"
+STUB_BLS="$STUB_BLS_SAVED"
+export SETRPC_RC=2
+check_rc "set-rpc rc 2: rc 0" 0 "$(keygen "${KGM[@]}")"
+unset SETRPC_RC
+check_has "set-rpc rc 2: warned with its first line" \
+    "{\"event\":\"log\",\"msg\":\"WARNING: keytool set-rpc failed (rc 2: error: unrecognized subcommand 'set-rpc'), so node-info.yaml advertises no RPC URL. The keys are fine. Set one with: ${ADV_CMD} ${H}\"}" \
+    "$(cat "$T/out")"
+check "set-rpc rc 2: worker 0 advertises nothing" "none none" "$(tn_node_info_rpc "$T/data/node-info.yaml")"
+no_owner "set-rpc rc 2"
+export SETRPC_SKIPWRITE=1
+check_rc "set-rpc writes nothing: rc 0" 0 "$(keygen "${KGM[@]}")"
+unset SETRPC_SKIPWRITE
+check_has "set-rpc writes nothing: the read-back warns" \
+    "{\"event\":\"log\",\"msg\":\"WARNING: After keytool set-rpc, worker 0 of $T/data/node-info.yaml reads 'none none' instead of 'https://${H}/ none', so no RPC URL is recorded for your worker gateway. The keys are fine. Set one with: ${ADV_CMD} ${H}\"}" \
+    "$(cat "$T/out")"
+no_owner "set-rpc writes nothing"
+# So is a .node-meta key that cannot be written or removed once the keys exist.
+META_FAIL=PUBLIC_WS_URL
+check_rc "PUBLIC_WS_URL cannot be removed: rc 0" 0 "$(keygen "${KGM[@]}")"
+META_FAIL=""
+check_has "PUBLIC_WS_URL cannot be removed: warned" \
+    "{\"event\":\"log\",\"msg\":\"WARNING: Could not record https://${H}/ for your worker gateway: PUBLIC_WS_URL in $CONFIG_DIR/.node-meta could not be updated, so no owner is recorded. node-info.yaml advertises it and the keys are fine. Record it with: ${ADV_CMD} ${H}\"}" \
+    "$(cat "$T/out")"
+no_owner "PUBLIC_WS_URL cannot be removed"
+STALE_OWNER="{\"event\":\"log\",\"msg\":\"WARNING: Could not remove RPC_ADVERTISED_VIA, which earlier keys recorded, from $CONFIG_DIR/.node-meta. The keys are fine; remove that line once the file can be written.\"}"
+META_FAIL=RPC_ADVERTISED_VIA
+check_rc "RPC_ADVERTISED_VIA cannot be written: rc 0" 0 "$(keygen "${KGM[@]}")"
+META_FAIL=""
+check "RPC_ADVERTISED_VIA cannot be written: done ok, no owner, no advertised_rpc" "yes no no" \
+    "$(has "$(tail -n 1 "$T/out")" "\"event\":\"done\",\"ok\":true,\"phase\":\"keygen\"") $(has "$(cat "$REC/meta.log")" "RPC_ADVERTISED_VIA=gateway") $(has "$(tail -n 1 "$T/out")" "advertised_rpc")"
+check "RPC_ADVERTISED_VIA cannot be written: both warnings" "yes yes" \
+    "$(has "$(cat "$T/out")" "WARNING: Could not record https://${H}/ for your worker gateway: RPC_ADVERTISED_VIA in $CONFIG_DIR/.node-meta could not be updated, so no owner is recorded.") $(has "$(cat "$T/out")" "$STALE_OWNER")"
+META_FAIL=RPC_ADVERTISED_VIA
+check_rc "a non-validator's old owner cannot be removed: rc 0" 0 "$(keygen "${KGM[@]}" --admission open --rpc-domain node7.example.org)"
+META_FAIL=""
+check "a non-validator's old owner cannot be removed: done ok, warned" "yes yes" \
+    "$(has "$(tail -n 1 "$T/out")" "\"event\":\"done\",\"ok\":true,\"phase\":\"keygen\"") $(has "$(cat "$T/out")" "$STALE_OWNER")"
+# An Open node with --rpc-domain keeps the behaviour of before: keygen advertises
+# https and wss for the Caddy site rpc-enable serves later, and records no owner.
+check_rc "--rpc-domain, admission open: rc 0" 0 "$(keygen "${KGM[@]}" --admission open --rpc-domain node7.example.org)"
+argv="$(cat "$REC/keytool.argv" 2>/dev/null)"
+# shellcheck disable=SC2086  # the argv lines joined with spaces
+check "--rpc-domain, admission open: keygen advertises https and wss as before" yes \
+    "$(has "$(printf '%s ' $argv)" "--rpc-http https://node7.example.org/ --rpc-ws wss://node7.example.org/ ")"
+check "--rpc-domain, admission open: no set-rpc" no "$([[ -e "$REC/setrpc.argv" ]] && echo yes || echo no)"
+no_owner "--rpc-domain, admission open"
+# A mainnet node given a URL outside the validator posture is told so once, at key
+# generation: a validator that left out --admission closed sees what it got.
+NONVAL="is advertised with a WebSocket URL for a public RPC site on this host. A validator must pass --admission closed, so the name is recorded for its worker gateway."
+check_has "--rpc-domain, admission open: the non-validator note" \
+    "{\"event\":\"log\",\"msg\":\"This mainnet node is set up as a non-validator (admission open): https://node7.example.org/ ${NONVAL}\"}" \
+    "$(cat "$T/out")"
+check_rc "--rpc-domain, no --admission: rc 0" 0 "$(keygen "${KGM[@]}" --rpc-domain gw7.example.org)"
+check "--rpc-domain, no --admission: the note, once" 1 \
+    "$(grep -c "This mainnet node is set up as a non-validator (no --admission): https://gw7.example.org/ ${NONVAL}" "$T/out")"
+check "--rpc-domain, no --admission: said on stderr too" yes "$(has "$(cat "$T/err")" "This mainnet node is set up as a non-validator (no --admission)")"
+no_owner "--rpc-domain, no --admission"
+check_rc "--rpc-http, no --admission: rc 0" 0 "$(keygen "${KGM[@]}" --rpc-http https://node7.example.org/)"
+check_has "--rpc-http, no --admission: the note, no WebSocket URL" \
+    "{\"event\":\"log\",\"msg\":\"This mainnet node is set up as a non-validator (no --admission): https://node7.example.org/ is advertised for a public RPC site on this host. A validator must pass --admission closed, so the name is recorded for its worker gateway.\"}" \
+    "$(cat "$T/out")"
+# The interactive RPC choice names the default on mainnet only.
+DEFAULT_PROMPT="Enter accepts the default name v<first five characters of the BLS key>.telcoin.network, shown after key generation."
+check "prompt, mainnet: Enter takes the default name" yes "$(has "$( (NETWORK=mainnet; prompt_public_rpc) <<< "" 2>&1 )" "$DEFAULT_PROMPT")"
+check_lacks "prompt, testnet: as before" "$DEFAULT_PROMPT" "$( (NETWORK=testnet; prompt_public_rpc) <<< "" 2>&1 )"
+# On a validator the choice names the worker gateway: no Caddy site, no wss, no A record
+# for this server, no inbound IP. Elsewhere it is the Caddy site of before.
+GW_ACCESS="gw7.example.org is the name of your worker gateway, advertised as https://gw7.example.org/ only (no WebSocket URL): no public RPC site runs on this host. Its A record points at the static public IP of your worker gateway host."
+out="$( (NETWORK=mainnet; RPC_VIA_GATEWAY=true; prompt_public_rpc; echo "domain=${PUBLIC_RPC_DOMAIN} public=${ENABLE_PUBLIC_RPC}") <<< $'2\ngw7.example.org' 2>&1 )"
+check "prompt, validator: the gateway's name" "yes yes yes domain=gw7.example.org public=true" \
+    "$(has "$out" "2) Gateway name      -- https://<domain>/, the name of your worker gateway,") $(has "$out" "Enter the DNS name of your worker gateway.") $(has "$out" "RPC access: ${GW_ACCESS}") $(printf '%s\n' "$out" | tail -n 1)"
+check "prompt, validator: no wss, no 80 + 443, no inbound IP" "no no no" \
+    "$(has "$out" "wss://") $(has "$out" "80 + 443") $(has "$out" "Inbound public IP")"
+out="$( (NETWORK=mainnet; RPC_VIA_GATEWAY=true; prompt_public_rpc) <<< $'2\n' 2>&1 )"
+check "prompt, validator, no name: the default" yes "$(has "$out" "No name entered -- key generation advertises the default name.")"
+out="$( (NETWORK=mainnet; prompt_public_rpc) <<< $'2\nnode7.example.org\n' 2>&1 )"
+check "prompt, non-validator: the Caddy site of before" "yes yes yes" \
+    "$(has "$out" "80 + 443") $(has "$out" "Inbound public IP") $(has "$out" "RPC access: public -- https://node7.example.org/ + wss://node7.example.org/")"
+# The interactive configuration step says the same of a validator's --rpc-domain.
+out="$( (NETWORK=mainnet; RPC_VIA_GATEWAY=true; PUBLIC_RPC_DOMAIN=gw7.example.org; ADVERTISE_RPC_HTTP=https://gw7.example.org/; JSON_MODE=false
+         print_header() { :; }; prompt_port() { :; }; confirm() { return 0; }; step_config) <<< "" 2>&1 )"
+check "step_config, validator --rpc-domain: the gateway's name, no wss" "yes no" \
+    "$(has "$out" "RPC access (--rpc-domain): ${GW_ACCESS}") $(has "$out" "wss://")"
+
+# ---- a mainnet validator (admission closed): its RPC is its worker gateway's -------------
+# --rpc-domain and --rpc-http name the gateway: https, no ws, recorded as the gateway's;
+# --rpc-ws is dropped with a warning. With no URL it gets the default like any node.
+GW="gw7.example.org"
+owner() {  # owner NAME URL DOMAIN_LINE -- the last keygen recorded URL as the gateway's
+    local m adv
+    m="$(cat "$REC/meta.log" 2>/dev/null)"
+    adv="\"advertised_rpc\":{\"http\":\"$2\",\"via\":\"gateway\",\"default\":false},\"msg\":"
+    check "$1: worker 0 advertises it, no ws" "$2 none" "$(tn_node_info_rpc "$T/data/node-info.yaml")"
+    check_has "$1: .node-meta ${3}" "$3" "$m"
+    check_has "$1: PUBLIC_RPC_URL without the slash" "PUBLIC_RPC_URL=${2%/}" "$m"
+    check "$1: owner gateway, no PUBLIC_WS_URL" "yes yes no" \
+        "$(has "$m" "RPC_ADVERTISED_VIA=gateway") $(has "$m" "unset PUBLIC_WS_URL") $(has "$m" "PUBLIC_WS_URL=")"
+    check "$1: done ok, advertised_rpc not the default" "yes yes" \
+        "$(has "$(tail -n 1 "$T/out")" "\"event\":\"done\",\"ok\":true") $(has "$(tail -n 1 "$T/out")" "$adv")"
+    check_has "$1: said, as a log event" \
+        "{\"event\":\"log\",\"msg\":\"Advertised RPC URL: $2 (worker 0 in node-info.yaml, no WebSocket URL). It belongs to your worker gateway (RPC_ADVERTISED_VIA=gateway in .node-meta), which serves it over HTTPS. No public RPC site runs on this host.\"}" \
+        "$(cat "$T/out")"
+    check_lacks "$1: no TAO handoff" "Telcoin Association (TAO)" "$(cat "$T/out")"
+}
+VAL=("${KGM[@]}" --admission closed)
+check_rc "validator --rpc-domain: rc 0" 0 "$(keygen "${VAL[@]}" --rpc-domain "$GW")"
+argv="$(cat "$REC/keytool.argv" 2>/dev/null)"
+# shellcheck disable=SC2086  # the argv lines joined with spaces
+check "validator --rpc-domain: keygen advertises https, no ws" "yes no" \
+    "$(has "$(printf '%s ' $argv)" "--rpc-http https://${GW}/ ") $(has "$argv" "--rpc-ws")"
+check "validator --rpc-domain: no set-rpc over what keygen wrote" no "$([[ -e "$REC/setrpc.argv" ]] && echo yes || echo no)"
+owner "validator --rpc-domain" "https://${GW}/" "PUBLIC_RPC_DOMAIN=${GW}"
+check_has "validator --rpc-domain: the A record for the gateway" \
+    "{\"event\":\"log\",\"msg\":\"To make it answer, create the A record of ${GW} for the static public IP of your worker gateway host, then run your gateway with --domain ${GW} (OPERATOR.md 4.15).\"}" \
+    "$(cat "$T/out")"
+check_rc "validator --rpc-ws: rc 0" 0 "$(keygen "${VAL[@]}" --rpc-domain "$GW" --rpc-ws wss://ws.example.org/)"
+check_has "validator --rpc-ws: dropped with a warning" \
+    "{\"event\":\"log\",\"msg\":\"WARNING: --rpc-ws wss://ws.example.org/ is dropped: on a mainnet validator (admission closed) the RPC URL names its worker gateway, which serves HTTPS only, so node-info.yaml advertises no WebSocket URL.\"}" \
+    "$(cat "$T/out")"
+check_lacks "validator --rpc-ws: not given to keygen" "--rpc-ws" "$(cat "$REC/keytool.argv" 2>/dev/null)"
+owner "validator --rpc-ws" "https://${GW}/" "PUBLIC_RPC_DOMAIN=${GW}"
+# Every text of the run names the gateway: no Caddy site here, no wss, no rpc-enable, and
+# no note that the node is a non-validator.
+check "validator --rpc-ws: the RPC access line names the gateway" yes \
+    "$(has "$(cat "$T/err")" "RPC access:  ${GW_ACCESS}")"
+check "validator --rpc-ws: no wss, no rpc-enable, no non-validator note" "no no no" \
+    "$(has "$(cat "$T/out") $(cat "$T/err")" "wss://${GW}") $(has "$(cat "$T/out")" "rpc-enable") $(has "$(cat "$T/out")" "set up as a non-validator")"
+check_rc "validator --rpc-http and --rpc-domain: rc 0" 0 "$(keygen "${VAL[@]}" --rpc-domain "$GW" --rpc-http https://other.example.org/)"
+check_has "validator --rpc-http and --rpc-domain: both name the gateway" \
+    "{\"event\":\"log\",\"msg\":\"WARNING: --rpc-http https://other.example.org/ differs from --rpc-domain ${GW}: on a mainnet validator (admission closed) both name its worker gateway, and keygen advertises https://other.example.org/ for it, as given.\"}" \
+    "$(cat "$T/out")"
+check_lacks "validator --rpc-http and --rpc-domain: no rpc-enable" "rpc-enable" "$(cat "$T/out")"
+owner "validator --rpc-http and --rpc-domain" "https://other.example.org/" "PUBLIC_RPC_DOMAIN=other.example.org"
+check_rc "validator --rpc-public, no domain: rc 0" 0 "$(keygen "${VAL[@]}" --rpc-public)"
+check_has "validator --rpc-public, no domain: the gateway, not rpc-enable" \
+    "{\"event\":\"log\",\"msg\":\"public RPC not enabled: no public RPC domain given (--rpc-public without --rpc-domain <hostname>) -- a mainnet validator's RPC is served by its worker gateway, not by this host. To name your worker gateway, pass --rpc-domain <name>; once the keys exist, run: ${ADV_CMD} <name>\"}" \
+    "$(cat "$T/out")"
+check "validator --rpc-public, no domain: no rpc-enable; the default name" "no yes" \
+    "$(has "$(cat "$T/out")" "rpc-enable") $(has "$(tail -n 1 "$T/out")" "$ADV_FIELD")"
+check_rc "validator --rpc-http with a path: rc 0" 0 "$(keygen "${VAL[@]}" --rpc-http https://gw8.example.org/rpc/)"
+owner "validator --rpc-http with a path" "https://gw8.example.org/rpc/" "unset PUBLIC_RPC_DOMAIN"
+check_lacks "validator --rpc-http with a path: no PUBLIC_RPC_DOMAIN" "PUBLIC_RPC_DOMAIN=" "$(cat "$REC/meta.log")"
+# The keytool stores the URL as url::Url writes it. The read-back and the record take
+# that form, so every spelling of one URL records the owner with it.
+for u in https://GW8.Example.org https://gw8.example.org:443 https://gw8.example.org; do
+    check_rc "validator --rpc-http ${u}: rc 0" 0 "$(keygen "${VAL[@]}" --rpc-http "$u")"
+    owner "validator --rpc-http ${u}" "https://gw8.example.org/" "PUBLIC_RPC_DOMAIN=gw8.example.org"
+    check "validator --rpc-http ${u}: no set-rpc over what keygen wrote" no "$([[ -e "$REC/setrpc.argv" ]] && echo yes || echo no)"
+done
+# Only a DNS name with no port is PUBLIC_RPC_DOMAIN. A host:port or an IP address is
+# recorded by its URL alone, and no A record is advised for it.
+check_rc "validator --rpc-http host:port: rc 0" 0 "$(keygen "${VAL[@]}" --rpc-http https://gw8.example.org:8443/)"
+owner "validator --rpc-http host:port" "https://gw8.example.org:8443/" "unset PUBLIC_RPC_DOMAIN"
+check "validator --rpc-http host:port: no PUBLIC_RPC_DOMAIN, no A record advised" "no no" \
+    "$(has "$(cat "$REC/meta.log")" "PUBLIC_RPC_DOMAIN=") $(has "$(cat "$T/out")" "A record")"
+check_has "validator --rpc-http host:port: its name points at the gateway" \
+    "{\"event\":\"log\",\"msg\":\"To make it answer, point its name at the static public IP of your worker gateway host and run your gateway for it (OPERATOR.md 4.15).\"}" \
+    "$(cat "$T/out")"
+check_rc "validator --rpc-http IP: rc 0" 0 "$(keygen "${VAL[@]}" --rpc-http https://203.0.113.9/)"
+owner "validator --rpc-http IP" "https://203.0.113.9/" "unset PUBLIC_RPC_DOMAIN"
+check "validator --rpc-http IP: no PUBLIC_RPC_DOMAIN, no A record, no name advised" "no no no" \
+    "$(has "$(cat "$REC/meta.log")" "PUBLIC_RPC_DOMAIN=") $(has "$(cat "$T/out")" "A record") $(has "$(cat "$T/out")" "point its name")"
+check_has "validator --rpc-http IP: the gateway runs on that address" \
+    "{\"event\":\"log\",\"msg\":\"To make it answer, run your worker gateway on the host with that IP address (OPERATOR.md 4.15).\"}" \
+    "$(cat "$T/out")"
+# The keytool may store a URL in a form setup does not predict. Once set-rpc succeeded, an
+# https URL with no WebSocket URL is what node-info.yaml advertises: that is recorded, and
+# said once.
+stored() {  # stored NAME GIVEN STORED DOMAIN_LINE -- a validator keygen whose keytool stores GIVEN as STORED
+    export STUB_STORE="$2 $3"
+    check_rc "$1: rc 0" 0 "$(keygen "${VAL[@]}" --rpc-http "$2")"
+    unset STUB_STORE
+    owner "$1" "$3" "$4"
+    check_has "$1: the stored form said" \
+        "{\"event\":\"log\",\"msg\":\"The keytool stored $2 as $3, so that is the URL recorded for your worker gateway.\"}" \
+        "$(cat "$T/out")"
+    check "$1: no read-back warning, no owner removed" "no no" \
+        "$(has "$(cat "$T/out")" "After keytool set-rpc") $(has "$(cat "$REC/meta.log")" "unset RPC_ADVERTISED_VIA")"
+}
+stored "validator --rpc-http, a port with a leading zero" https://gw8.example.org:0443/ https://gw8.example.org/ "PUBLIC_RPC_DOMAIN=gw8.example.org"
+stored "validator --rpc-http, a port 08443" https://gw8.example.org:08443/ https://gw8.example.org:8443/ "unset PUBLIC_RPC_DOMAIN"
+stored "validator --rpc-http, an IPv6 address not in canonical form" "https://[2001:0db8::0001]/" "https://[2001:db8::1]/" "unset PUBLIC_RPC_DOMAIN"
+check_has "validator --rpc-http, IPv6: the gateway runs on that address" \
+    "{\"event\":\"log\",\"msg\":\"To make it answer, run your worker gateway on the host with that IP address (OPERATOR.md 4.15).\"}" \
+    "$(cat "$T/out")"
+stored "validator --rpc-http, dot segments in the path" https://gw8.example.org/rpc/../ https://gw8.example.org/ "PUBLIC_RPC_DOMAIN=gw8.example.org"
+stored "validator --rpc-http, a dot segment kept in a path" https://gw8.example.org/./rpc https://gw8.example.org/rpc "unset PUBLIC_RPC_DOMAIN"
+# A stored form that is not https, or that carries a WebSocket URL, is not the gateway's:
+# warned, and no owner is recorded.
+export STUB_STORE="https://gw8.example.org:0443/ http://gw8.example.org/"
+check_rc "validator, the keytool stores http: rc 0" 0 "$(keygen "${VAL[@]}" --rpc-http https://gw8.example.org:0443/)"
+check_has "validator, the keytool stores http: the read-back warns" \
+    "{\"event\":\"log\",\"msg\":\"WARNING: After keytool set-rpc, worker 0 of $T/data/node-info.yaml reads 'http://gw8.example.org/ none' instead of 'https://gw8.example.org:0443/ none', so no RPC URL is recorded for your worker gateway. The keys are fine. Set one with: ${ADV_CMD} <name>\"}" \
+    "$(cat "$T/out")"
+no_owner "validator, the keytool stores http"
+export STUB_STORE="https://gw8.example.org:0443/ https://gw8.example.org/" SETRPC_WS=wss://gw8.example.org/
+check_rc "validator, set-rpc adds a WebSocket URL: rc 0" 0 "$(keygen "${VAL[@]}" --rpc-http https://gw8.example.org:0443/)"
+unset STUB_STORE SETRPC_WS
+check "validator, set-rpc adds a WebSocket URL: the read-back warns" yes \
+    "$(has "$(cat "$T/out")" "reads 'https://gw8.example.org/ wss://gw8.example.org/' instead of 'https://gw8.example.org:0443/ none', so no RPC URL is recorded for your worker gateway.")"
+no_owner "validator, set-rpc adds a WebSocket URL"
+# The same URL in another spelling is not another URL: no warning that the two differ.
+check_rc "validator --rpc-domain and --rpc-http in capitals: rc 0" 0 \
+    "$(keygen "${VAL[@]}" --rpc-domain gw8.example.org --rpc-http https://GW8.example.org:443)"
+check_lacks "validator --rpc-domain and --rpc-http in capitals: no differs warning" "differs from --rpc-domain" "$(cat "$T/out")"
+owner "validator --rpc-domain and --rpc-http in capitals" "https://gw8.example.org/" "PUBLIC_RPC_DOMAIN=gw8.example.org"
+# Where the network or the admission mode is known later (an interactive run, a finalize),
+# the same check refuses an http:// URL, before any key exists.
+rc=0
+out="$( (NETWORK=mainnet; ADMISSION_MODE=closed; ADVERTISE_RPC_HTTP=http://gw8.example.org/; JSON_MODE=false; setup_rpc_gateway_posture) 2>&1 )" || rc=$?
+check "posture, http:// once the network is known: refused" "1 yes" "$rc $(has "$out" "--rpc-http http://gw8.example.org/ ${HTTP_REFUSED}")"
+check_lacks "posture, interactive: no claim that nothing on the host changed" "Nothing on this host was changed." "$out"
+# Outside the posture an http:// --rpc-http is taken as before.
+check_rc "open node --rpc-http http://: rc 0" 0 "$(keygen "${KGM[@]}" --admission open --rpc-http http://gw8.example.org:8655/)"
+check "open node --rpc-http http://: advertised as given, no owner" "http://gw8.example.org:8655/ none no" \
+    "$(tn_node_info_rpc "$T/data/node-info.yaml") $(has "$(cat "$REC/meta.log")" "RPC_ADVERTISED_VIA=gateway")"
+# A keytool from before --rpc-http: keygen goes ahead without the URL, and set-rpc writes
+# the operator's name afterwards, never the default over it.
+export STUB_OLD_KEYTOOL=1
+check_rc "validator, old keytool: rc 0" 0 "$(keygen "${VAL[@]}" --rpc-domain "$GW")"
+check_has "validator, old keytool: set-rpc writes it later" \
+    "{\"event\":\"log\",\"msg\":\"WARNING: This telcoin release's keytool cannot advertise RPC at keygen (it has no --rpc-http), so keytool set-rpc writes https://${GW}/ to node-info.yaml once the keys exist.\"}" \
+    "$(cat "$T/out")"
+setrpc="$(cat "$REC/setrpc.argv" 2>/dev/null)"
+# shellcheck disable=SC2086  # the argv lines joined with spaces
+check "validator, old keytool: keygen without the URL, set-rpc with it" "no yes" \
+    "$(has "$(cat "$REC/keytool.argv")" "--rpc-http") $(has "$(printf '%s ' $setrpc)" "keytool set-rpc --http https://${GW}/ ")"
+owner "validator, old keytool" "https://${GW}/" "PUBLIC_RPC_DOMAIN=${GW}"
+check_rc "open node, old keytool: rc 0" 0 "$(keygen "${KGM[@]}" --admission open --rpc-domain "$GW")"
+check "open node, old keytool: rpc-enable advertises it later, as before; no default over it" "yes no" \
+    "$(has "$(cat "$T/out")" "so https://${GW}/ + wss://${GW}/ reach node-info.yaml when public RPC is enabled after the node starts (install-caddy.sh --phase=rpc-enable).") $([[ -e "$REC/setrpc.argv" ]] && echo yes || echo no)"
+no_owner "open node, old keytool"
+unset STUB_OLD_KEYTOOL
+check_rc "validator, no URL: rc 0" 0 "$(keygen "${VAL[@]}")"
+check "validator, no URL: the default name" yes "$(has "$(tail -n 1 "$T/out")" "$ADV_FIELD")"
+
+# Finalize keeps a record the gateway owns (on any network), where it wrote the run's
+# own, empty, PUBLIC_RPC_* before; without one it writes them as before.
+csm() {  # csm NETWORK META_LINE... -- the real step_create_service with --rpc-domain node9.example.org over that .node-meta: the PUBLIC_RPC_*/PUBLIC_WS_URL it writes
+    local net="$1"
+    shift
+    printf '%s\n' "$@" > "$CONFIG_DIR/.node-meta"
+    command rm -f "$REC/meta.log"
+    ( tn_write_node_env() { :; }; tn_write_start_script() { :; }; tn_write_node_unit() { :; }
+      tn_install_journald_dropin() { :; }; setup_start_script_dir() { :; }; prepare_node_extra_flags() { :; }
+      systemctl() { :; }; write_node_meta_runner() { :; }; tn_precreate_log_files() { :; }; confirm() { return 1; }
+      INSTALL_METHOD=existing; BINARY_PATH="$T/bin/tn-main"
+      NETWORK="$net"; PUBLIC_RPC_DOMAIN=node9.example.org; PUBLIC_RPC_URL=https://node9.example.org; PUBLIC_WS_URL=wss://node9.example.org
+      real_step_create_service ) > /dev/null 2>&1
+    printf '%s %s\n' "$(grep -c '^OWNERSHIP_LAYOUT=2$' "$REC/meta.log" 2>/dev/null)" \
+        "$(grep -E '^PUBLIC_(RPC_|WS_)' "$REC/meta.log" 2>/dev/null | tr '\n' ' ')"
+}
+check "finalize over a gateway record (mainnet): PUBLIC_RPC_* kept" "1 " "$(csm mainnet RPC_ADVERTISED_VIA=gateway)"
+check "finalize over a gateway record (testnet): kept too" "1 " "$(csm testnet RPC_ADVERTISED_VIA=gateway)"
+check "finalize with no gateway record: written as before" \
+    "1 PUBLIC_RPC_DOMAIN=node9.example.org PUBLIC_RPC_URL=https://node9.example.org PUBLIC_WS_URL=wss://node9.example.org " "$(csm testnet)"
+# --rpc-domain where the gateway serves the RPC: no Caddy site, the record stays. A
+# validator is given the command that advertises the name for its gateway; a node that
+# is not one, the way to a public RPC site of its own on this host.
+spr() {  # spr ADMISSION META_LINE... -- step_public_rpc on mainnet (SPR_NET: another network) with --rpc-domain node9.example.org; its output, then its state
+    local adm="$1"
+    shift
+    printf '%s\n' "$@" > "$CONFIG_DIR/.node-meta"
+    ( public_rpc_node_info() { printf '%s' "$T/data/node-info.yaml"; }
+      NETWORK="${SPR_NET:-mainnet}"; ADMISSION_MODE="$adm"; PUBLIC_RPC_DOMAIN=node9.example.org; NODE_STARTED=true; JSON_MODE=false
+      setup_rpc_gateway_posture; step_public_rpc; echo "state=${PUBLIC_RPC_STATE}" ) 2>&1
+}
+NINE_CMD="${ADV_CMD} node9.example.org"
+UNADV_CMD="sudo bash $T/sn/install-caddy.sh --phase=rpc-unadvertise"
+ENABLE_CMD="sudo bash $T/sn/install-caddy.sh --phase=rpc-enable --rpc-domain node9.example.org"
+KEPT="node-info.yaml advertises https://${H}/ for your worker gateway (RPC_ADVERTISED_VIA=gateway in .node-meta), and that record is kept: no public RPC site for node9.example.org runs on this host."
+out="$(spr open RPC_ADVERTISED_VIA=gateway)"
+check "public RPC over a gateway record, not a validator: kept, no Caddy, the way to its own site" "yes no state=gateway" \
+    "$(has "$out" "${KEPT} To serve https://node9.example.org/ from this host instead, run: ${UNADV_CMD}, then: ${ENABLE_CMD}") $(has "$out" "rpc-advertise") $(printf '%s\n' "$out" | tail -n 1)"
+out="$(spr closed RPC_ADVERTISED_VIA=gateway)"
+check "public RPC over a gateway record, a validator: kept, the rpc-advertise command" "yes no state=gateway" \
+    "$(has "$out" "${KEPT} To advertise https://node9.example.org/ for the gateway instead, run: ${NINE_CMD}") $(has "$out" "rpc-enable") $(printf '%s\n' "$out" | tail -n 1)"
+# A testnet record is the gateway's only through rpc-advertise: the advice stays that.
+out="$(SPR_NET=testnet spr open RPC_ADVERTISED_VIA=gateway)"
+check "public RPC over a gateway record, testnet: kept, the rpc-advertise command" "yes no state=gateway" \
+    "$(has "$out" "${KEPT} To advertise https://node9.example.org/ for the gateway instead, run: ${NINE_CMD}") $(has "$out" "rpc-enable") $(printf '%s\n' "$out" | tail -n 1)"
+out="$(spr closed)"
+check "public RPC on a validator with no record: no Caddy, the rpc-advertise command" "yes no state=gateway" \
+    "$(has "$out" "no public RPC site for node9.example.org runs on this host. To advertise https://node9.example.org/ for the gateway, run: ${NINE_CMD}") $(has "$out" "rpc-enable") $(printf '%s\n' "$out" | tail -n 1)"
+out="$(spr open)"
+check "public RPC on an open node with no record: on to Caddy, as before" "yes state=pending" \
+    "$(has "$out" "install-caddy.sh is missing") $(printf '%s\n' "$out" | tail -n 1)"
+# The closing summary of an interactive install shows the gateway's URL, never wss or rpc-enable.
+printf 'RPC_ADVERTISED_VIA=gateway\n' > "$CONFIG_DIR/.node-meta"
+out="$( (NETWORK=mainnet; DATA_DIR="$T/data"; PUBLIC_RPC_DOMAIN=""; step_final_summary) 2>&1 )"
+check "summary, the gateway's default: its URL, no wss, no rpc-enable" "yes yes no no" \
+    "$(has "$out" "Public RPC (served by your worker gateway, not by this host):") $(has "$out" "    https://${H}/") $(has "$out" "wss://") $(has "$out" "rpc-enable")"
+out="$( (NETWORK=mainnet; DATA_DIR="$T/data"; PUBLIC_RPC_DOMAIN=node9.example.org; step_final_summary) 2>&1 )"
+check "summary, the gateway's default and --rpc-domain, not a validator: the way to its own site" "yes yes yes no" \
+    "$(has "$out" "To serve https://node9.example.org/ from this host instead, run:") $(has "$out" "    ${UNADV_CMD}") $(has "$out" "    ${ENABLE_CMD}") $(has "$out" "rpc-advertise")"
+# shellcheck disable=SC2030  # each subshell sets its own
+out="$( (NETWORK=mainnet; DATA_DIR="$T/data"; PUBLIC_RPC_DOMAIN=node9.example.org; RPC_VIA_GATEWAY=true; step_final_summary) 2>&1 )"
+check "summary, the gateway's default and --rpc-domain, a validator: no way to a site here" "yes no" \
+    "$(has "$out" "    https://${H}/") $(has "$out" "rpc-enable")"
+out="$( (NETWORK=testnet; DATA_DIR="$T/data"; PUBLIC_RPC_DOMAIN=node9.example.org; step_final_summary) 2>&1 )"
+check "summary, a testnet gateway record and --rpc-domain: as before, no way to a site here" "yes no" \
+    "$(has "$out" "    https://${H}/") $(has "$out" "rpc-enable")"
+printf 'RPC_ADVERTISED_VIA=other\n' > "$CONFIG_DIR/.node-meta"
+out="$( (NETWORK=mainnet; DATA_DIR="$T/data"; PUBLIC_RPC_DOMAIN=""; step_final_summary) 2>&1 )"
+check "summary, no gateway record and no domain: no public RPC block, as before" no "$(has "$out" "Public RPC")"
+command rm -f "$CONFIG_DIR/.node-meta"
+# --help gives the mainnet validator's meaning of the RPC flags, and the default name.
+out="$( (main --help) 2>&1 )"
+check "--help: a validator's --rpc-domain, --rpc-http and --rpc-ws; the default name" "yes yes yes yes" \
+    "$(has "$out" "On a mainnet validator (--admission closed) it is the name") $(has "$out" "gateway's URL, https:// only.") $(has "$out" "A mainnet validator advertises none: it is dropped,") $(has "$out" "A mainnet node given no RPC URL advertises https://v<label>.telcoin.network/")"
+check "--help: --public-ip lines up with the other public-RPC options" "27 27" \
+    "$(printf '%s\n' "$out" | awk '/^  --rpc-domain / { print index($0, "Public RPC") - 1 }') $(printf '%s\n' "$out" | awk '/^  --public-ip / { print index($0, "Inbound") - 1 }')"
+
 # Over existing keys: refused, the keytool does not run again.
 mkdir -p "$T/data/node-keys"
 command rm -f "$REC/keytool.argv"
@@ -297,6 +756,8 @@ check_rc "testnet keygen: rc 0" 0 "$(keygen "${KGT[@]}")"
 check "testnet keygen: the done message of before" yes \
     "$(has "$(tail -n 1 "$T/out")" "\"msg\":\"keys generated -- BACK THEM UP before finalizing\"}")"
 check_lacks "testnet keygen: no mainnet next steps" "genesis ceremony" "$(cat "$T/out")"
+check "testnet keygen: no set-rpc, no RPC owner either way, no advertised_rpc" "no no no" \
+    "$([[ -e "$REC/setrpc.argv" ]] && echo yes || echo no) $(has "$(cat "$REC/meta.log" 2>/dev/null)" RPC_ADVERTISED_VIA) $(has "$(cat "$T/out")" advertised_rpc)"
 check "testnet keygen: the onboarding steps of before" yes "$([[ -e "$REC/display-node-info" ]] && echo yes || echo no)"
 ensure_chain_configs_available() { : > "$REC/chain-configs"; return 1; }
 rc="$( tn_mainnet_enabled() { return 0; }; keygen "${KGM[@]}" )"
@@ -378,6 +839,88 @@ rc="$( tn_mainnet_enabled() { return 0; }; over_keys --json --phase=finalize --n
 check_lacks "mainnet finalize over mainnet keys: not refused for the network" "recorded for mainnet" "$(cat "$T/out")"
 check "mainnet finalize over mainnet keys: goes on to the config and the service" "yes yes" \
     "$([[ -e "$REC/write-config" ]] && echo yes || echo no) $([[ -e "$REC/create-service" ]] && echo yes || echo no)"
+# Keygen recorded the default for the worker gateway: a finalize with --rpc-domain enables
+# no public RPC site and keeps the record. Not a validator (no admission mode), it is told
+# the way to its own site: rpc-unadvertise, then rpc-enable.
+check_has "keys network: keygen recorded the gateway's default" "RPC_ADVERTISED_VIA=gateway" "$(cat "$T/meta.keygen")"
+rc="$( tn_mainnet_enabled() { return 0; }; over_keys --json --phase=finalize --network mainnet "${LST[@]}" --rpc-domain node9.example.org )"
+check "mainnet finalize --rpc-domain over the gateway's record: done ok, no enable step, the record kept" "yes no yes" \
+    "$(has "$(tail -n 1 "$T/out")" '"event":"done","ok":true,"phase":"finalize"') $(has "$(cat "$T/out")" '"msg":"Enabling public RPC') $(has "$(cat "$T/out")" "and that record is kept: no public RPC site for node9.example.org runs on this host. To serve https://node9.example.org/ from this host instead, run: sudo bash $T/sn/install-caddy.sh --phase=rpc-unadvertise, then: sudo bash $T/sn/install-caddy.sh --phase=rpc-enable --rpc-domain node9.example.org")"
+# A validator's keys (admission closed recorded): a finalize or an interactive re-run that
+# passes no --admission is a validator's from its first line, by what .node-meta records.
+awk '!/^ADMISSION_MODE=/' "$T/meta.keygen" > "$T/meta.val"
+printf 'ADMISSION_MODE=closed\n' >> "$T/meta.val"
+cp "$T/meta.val" "$CONFIG_DIR/.node-meta"
+rc="$( tn_mainnet_enabled() { return 0; }; over_keys --json --phase=finalize --network mainnet "${LST[@]}" --rpc-public )"
+check "validator finalize --rpc-public: done ok, the gateway notice, no rpc-enable" "yes yes no" \
+    "$(has "$(tail -n 1 "$T/out")" '"event":"done","ok":true,"phase":"finalize"') $(has "$(cat "$T/out")" "{\"event\":\"log\",\"msg\":\"public RPC not enabled: no public RPC domain given (--rpc-public without --rpc-domain <hostname>) -- a mainnet validator's RPC is served by its worker gateway, not by this host. To name your worker gateway, pass --rpc-domain <name>; once the keys exist, run: ${ADV_CMD} <name>\"}") $(has "$(cat "$T/out")" "rpc-enable")"
+rc="$( tn_mainnet_enabled() { return 0; }; over_keys --json --phase=finalize --network mainnet "${LST[@]}" --rpc-domain gw9.example.org --rpc-ws wss://x.example.org/ )"
+check "validator finalize --rpc-domain --rpc-ws: done ok, ws dropped once, no Caddy site or rpc-enable" "yes 1 no no" \
+    "$(has "$(tail -n 1 "$T/out")" '"event":"done","ok":true,"phase":"finalize"') $(grep -c "WARNING: --rpc-ws wss://x.example.org/ is dropped: on a mainnet validator (admission closed)" "$T/out") $(has "$(cat "$T/out")" "rpc-enable") $(has "$(cat "$T/out")" '"msg":"Enabling public RPC')"
+check "validator finalize --rpc-domain --rpc-ws: the gateway's record kept, the rpc-advertise command" yes \
+    "$(has "$(cat "$T/out")" "and that record is kept: no public RPC site for gw9.example.org runs on this host. To advertise https://gw9.example.org/ for the gateway instead, run: ${ADV_CMD} gw9.example.org")"
+check "validator finalize --rpc-domain --rpc-ws: the ws warning before the lock" yes \
+    "$(awk '/is dropped: on a mainnet validator/ && !w { w = NR } /layout to migrate/ && !s { s = NR } END { print (w && s && w < s) ? "yes" : "no" }' "$T/out")"
+rc="$( tn_mainnet_enabled() { return 0; }; over_keys --json --phase=finalize --network mainnet "${LST[@]}" --rpc-http http://gw8.example.org/ )"
+check "validator finalize --rpc-http http://: refused, nothing written" \
+    "1 $(done_false "--rpc-http http://gw8.example.org/ ${HTTP_REFUSED} Nothing on this host was changed.") same no no" \
+    "${rc} $(tail -n 1 "$T/out") $(cmp -s "$T/meta.val" "$CONFIG_DIR/.node-meta" && echo same || echo changed) $([[ -e "$REC/root-reached" ]] && echo yes || echo no) $([[ -e "$T/update.lock" || -e "$REC/meta.log" ]] && echo yes || echo no)"
+# An interactive re-run: the http:// refusal before the welcome screen, and the RPC choice
+# names the gateway.
+rc=0
+command rm -f "${REC:?}"/*
+( step_welcome() { : > "$REC/welcome"; exit 0; }; NETWORK=""; main --rpc-http http://gw8.example.org/ ) < /dev/null > "$T/out" 2> "$T/err" || rc=$?
+check "interactive re-run --rpc-http http://: refused before the welcome screen" "1 yes no no" \
+    "${rc} $(has "$(cat "$T/err")" "--rpc-http http://gw8.example.org/ ${HTTP_REFUSED} Nothing on this host was changed.") $([[ -e "$REC/welcome" ]] && echo yes || echo no) $([[ -e "$REC/root-reached" ]] && echo yes || echo no)"
+command rm -f "$REC/welcome"
+rerun() {  # rerun ARGS... -- an interactive re-run's flag check, the network chosen, then step_config: its output
+    ( JSON_MODE=false; NETWORK=""; ADMISSION_MODE=""
+      print_header() { :; }; prompt_port() { :; }; confirm() { return 0; }
+      while [[ $# -gt 0 ]]; do
+          case "$1" in
+              --rpc-domain) PUBLIC_RPC_DOMAIN="$2"; RPC_DOMAIN_GIVEN=true; shift 2 ;;
+              --rpc-ws) ADVERTISE_RPC_WS="$2"; shift 2 ;;
+              --admission) ADMISSION_MODE="$2"; shift 2 ;;
+          esac
+      done
+      init_public_rpc_flags
+      echo "--- welcome"
+      NETWORK=mainnet
+      setup_rpc_gateway_posture
+      step_config
+      # shellcheck disable=SC2031  # set by the posture in this same subshell
+      echo "via=${RPC_VIA_GATEWAY}" ) 2>&1
+}
+out="$(rerun <<< $'2\ngw7.example.org\n')"
+check "interactive re-run: the gateway's name in the prompt and the RPC access line" "yes yes yes via=true" \
+    "$(has "$out" "2) Gateway name      -- https://<domain>/, the name of your worker gateway,") $(has "$out" "Enter the DNS name of your worker gateway.") $(has "$out" "RPC access: ${GW_ACCESS}") $(printf '%s\n' "$out" | tail -n 1)"
+check "interactive re-run: no Caddy site, no wss, no inbound IP" "no no no" \
+    "$(has "$out" "80 + 443") $(has "$out" "wss://") $(has "$out" "Inbound public IP")"
+out="$(rerun --rpc-domain gw7.example.org --rpc-ws wss://x.example.org/ <<< $'\n')"
+check "interactive re-run --rpc-domain --rpc-ws: the gateway's name, ws dropped after the welcome screen, once" "yes 1 no" \
+    "$(has "$out" "RPC access (--rpc-domain): ${GW_ACCESS}") $(printf '%s\n' "$out" | awk 'f; /^--- welcome$/ { f = 1 }' | grep -c "WARN.* --rpc-ws wss://x.example.org/ is dropped") $(printf '%s\n' "$out" | awk '/^--- welcome$/ { exit } { print }' | grep -q "is dropped" && echo yes || echo no)"
+out="$(rerun --admission open <<< $'2\nnode7.example.org\n')"
+check "interactive re-run --admission open: the flag wins, the Caddy site of before" "yes via=false" \
+    "$(has "$out" "RPC access: public -- https://node7.example.org/ + wss://node7.example.org/") $(printf '%s\n' "$out" | tail -n 1)"
+# The posture's inputs alone: a network or a mode given wins over the record; a --json
+# keygen, which records the mode it is given, goes by its flags.
+pv() {  # pv JSON PHASE NETWORK ADMISSION -- RPC_VIA_GATEWAY after the posture over that .node-meta
+    ( JSON_MODE="$1"; JSON_PHASE="$2"; JSON_NETWORK_INPUT=testnet; NETWORK="$3"; ADMISSION_MODE="$4"
+      setup_rpc_gateway_posture > /dev/null 2>&1
+      # shellcheck disable=SC2031  # set by the posture in this same subshell
+      echo "$RPC_VIA_GATEWAY" )
+}
+check "posture from the record: interactive, the network chosen" true "$(pv false "" mainnet "")"
+check "posture from the record: interactive, before the menu" true "$(pv false "" "" "")"
+check "posture from the record: interactive, another network chosen" false "$(pv false "" testnet "")"
+check "posture from the record: --admission open given" false "$(pv false "" mainnet open)"
+check "posture from the record: --json finalize" true "$(pv true finalize mainnet "")"
+check "posture from the record: --json keygen goes by its flags" false "$(pv true keygen mainnet "")"
+sed 's/^NETWORK=.*/NETWORK=testnet/' "$T/meta.val" > "$CONFIG_DIR/.node-meta"
+check "posture from the record: a testnet record, before the menu" false "$(pv false "" "" "")"
+cp "$T/meta.keygen" "$CONFIG_DIR/.node-meta"
+check "posture from the record: no mode recorded" false "$(pv false "" mainnet "")"
+cp "$T/meta.val" "$CONFIG_DIR/.node-meta"
 # A host keyed by an older release (no NETWORK): a testnet finalize goes on as before.
 grep -v '^NETWORK=' "$T/meta.keygen" > "$CONFIG_DIR/.node-meta"
 over_keys --json --phase=finalize --network testnet "${LST[@]}" > /dev/null
@@ -480,13 +1023,17 @@ command rm -rf "$T/data" "$CONFIG_DIR/.node-meta" "$CONFIG_DIR/bls-passphrase.cr
 # stored passphrase. tn-sig is the keytool as the operator's SSH drop meets it: it sends
 # setup HUP after it wrote everything (sig.mode after: a HUP to setup alone), or after
 # bls.kw only and then dies of it (mid: a HUP to the whole process group), or it writes
-# no node-info.yaml at all (noinfo).
+# no node-info.yaml at all (noinfo). Its node-info.yaml carries a BLS key the default
+# RPC name comes from; a keytool set-rpc call only leaves setrpc.ran.
 cat > "$T/bin/tn-sig" <<'STUB'
 #!/bin/sh
 if [ "$1" = "--version" ]; then
     printf 'telcoin-network\nVersion: 0.18.0\nCommit SHA: 0000000\nBuild Features: \n'
     exit 0
 fi
+case " $* " in
+    *" set-rpc "*) : > "$REC/setrpc.ran"; exit 0 ;;
+esac
 dd=""
 addr=""
 prev=""
@@ -504,7 +1051,8 @@ case "$mode" in
     noinfo) exit 0 ;;
     mid) kill -HUP "$(cat "$REC/setup.pid")"; exit 129 ;;
 esac
-printf 'name: stub\nexecution_address: %s\n' "$addr" > "$dd/node-info.yaml"
+printf 'name: stub\nbls_public_key: %s\nexecution_address: %s\np2p_info:\n  workers:\n    - network_address: /ip4/203.0.113.10/udp/49594/quic-v1\n      rpc: null\n' \
+    "$STUB_BLS" "$addr" > "$dd/node-info.yaml"
 [ "$mode" = after ] && kill -HUP "$(cat "$REC/setup.pid")"
 exit 0
 STUB
@@ -534,6 +1082,8 @@ check "HUP to setup during the keytool: the credential stored before the keytool
 check "HUP to setup during the keytool: no success reported" \
     "$(done_false "setup stopped by SIGHUP (rc=129)")" "$(tail -n 1 "$T/out")"
 check_lacks "HUP to setup during the keytool: no file to send named" "Send $T/data/node-info.yaml" "$(cat "$T/out")"
+check "HUP to setup during the keytool: no set-rpc, no RPC owner either way" "no no" \
+    "$([[ -e "$REC/setrpc.ran" ]] && echo yes || echo no) $(has "$(cat "$REC/meta.log" 2>/dev/null)" RPC_ADVERTISED_VIA)"
 # A re-run over what that run left says it is all there.
 awk '/^unset /{next} { k = $0; sub(/=.*/, "", k); v[k] = $0; if (!(k in seen)) { seen[k] = 1; o[++n] = k } }
      END { for (i = 1; i <= n; i++) print v[o[i]] }' "$REC/meta.log" > "$CONFIG_DIR/.node-meta"

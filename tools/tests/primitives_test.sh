@@ -690,4 +690,39 @@ for m in foo "" binary existing; do
     check "start_script_path '${m}' prints nothing" "" "$OUT"
 done
 
+# ---- tn_rpc_default_host ---------------------------------------------------------------
+# Two protocol keys of tools/tests/genesis.d/testnet/committee.yaml: a base58 BLS
+# public key is 131 characters, or 132 when it starts with 2.
+K131='pDmpE29YEhr93MPVPCGkWx3BsCcow4oExmxv5viJz2GTjsaXwc3YwKxE1CFdVuTVSudsFDutFSVmtgF98Abs56JZPfGQs6GzbqXDFkGA1eZx2edkwfP2Q6eRLo8coLhvTNj'
+K132='24JaKrebALhvhXxsAabjd5ZK22k1W4zKwGepKD5pcobQwBkZyiruYyhRM3hkLap8Ssc4qUdcRUJSrs2389hUoV7G83HKYrmkz2pTzCJiQURV5vtkrh8gFRKBQWKFTWLWah9s'
+check "rpc_default_host: the sample keys are 131 and 132 characters" "131 132" "${#K131} ${#K132}"
+# name|key|expected name
+rpc_host_ok() {
+    run tn_rpc_default_host "$2"
+    check_rc "rpc_default_host rc 0: $1" 0 "$RC"
+    check "rpc_default_host: $1" "$3" "$OUT"
+    check "rpc_default_host prints nothing on stderr: $1" "" "$ERR"
+}
+rpc_host_ok '131 characters, mixed-case prefix lowercased' "$K131"         'vpdmpe.telcoin.network'
+rpc_host_ok '132 characters starting with 2'                "$K132"         'v24jak.telcoin.network'
+rpc_host_ok 'upper-case prefix lowercased'                  "PDMPE${K131:5}" 'vpdmpe.telcoin.network'
+# name|key
+rpc_host_refused() {
+    run tn_rpc_default_host "$2"
+    check_rc "rpc_default_host refuses: $1" 1 "$RC"
+    check "rpc_default_host prints nothing: $1" "" "$OUT$ERR"
+}
+rpc_host_refused '132 characters starting with 3' "3${K132:1}"
+rpc_host_refused '130 characters'                 "${K131:0:130}"
+rpc_host_refused '133 characters'                 "${K132}a"
+rpc_host_refused 'a 0 in the key'                 "${K131:0:60}0${K131:61}"
+rpc_host_refused 'an O in the key'                "${K131:0:60}O${K131:61}"
+rpc_host_refused 'an I in the key'                "${K131:0:60}I${K131:61}"
+rpc_host_refused 'an l in the key'                "${K131:0:60}l${K131:61}"
+rpc_host_refused 'a space in the key'             "${K131:0:60} ${K131:61}"
+rpc_host_refused 'empty key'                      ''
+run tn_rpc_default_host
+check_rc "rpc_default_host refuses: no argument" 1 "$RC"
+check "rpc_default_host prints nothing: no argument" "" "$OUT$ERR"
+
 finish

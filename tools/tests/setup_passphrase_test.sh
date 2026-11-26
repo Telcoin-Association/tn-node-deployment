@@ -31,6 +31,7 @@ ln -s "$TN_TEST_REPO/lib" "$T/sn/lib"
 # Recording stubs: the node binary (keytool) and two package tools.
 cat > "$T/bin/telcoin-network" <<'STUB'
 #!/bin/sh
+printf '%s\n' "$*" >> "$REC/keytool.calls"
 : > "$REC/keytool.argv"
 dd=""
 prev=""
@@ -44,7 +45,9 @@ env > "$REC/keytool.env"
 mkdir -p "$dd/node-keys"
 : > "$dd/node-keys/bls.kw"
 [ -z "${STUB_CLEARTEXT:-}" ] || : > "$dd/node-keys/bls.key"
-printf 'name: stub\n' > "$dd/node-info.yaml"
+# A BLS public key of the shape keytool writes, so a mainnet keygen can derive its
+# default RPC name from it.
+printf 'name: stub\nbls_public_key: 2Xq7Y%s\n' "$(printf '%0127d' 0 | tr 0 a)" > "$dd/node-info.yaml"
 STUB
 printf '#!/bin/sh\nenv > "$REC/$(basename "$0").env"\n' > "$T/bin/apt-get"
 cp "$T/bin/apt-get" "$T/bin/cargo"
@@ -126,6 +129,10 @@ check_lacks "stdin: passphrase in no child env" "$PASS" "$(all_child_env)"
 check "stdin: three children recorded an env" "3" "$(ls "$REC"/*.env | wc -l | tr -d ' ')"
 check "stdin: passphrase file content" "$PASS" "$(cat "$T/written/bls-passphrase")"
 check_has "stdin: PASSPHRASE_METHOD=stdin recorded" "PASSPHRASE_METHOD=stdin" "$(cat "$REC/meta.log" 2>/dev/null)"
+# Only a mainnet keygen gives worker 0 a default RPC name: testnet runs no set-rpc and
+# records no RPC owner.
+check "stdin: a testnet keygen runs no keytool set-rpc" "no" "$(grep -q 'set-rpc' "$REC/keytool.calls" && echo yes || echo no)"
+check_lacks "stdin: a testnet keygen records no RPC owner" "RPC_ADVERTISED_VIA" "$(cat "$REC/meta.log" 2>/dev/null)"
 
 check "stdin: wrapped key kept" "yes no" \
     "$([[ -f "$T/data/node-keys/bls.kw" ]] && echo yes || echo no) $([[ -e "$T/data/node-keys/bls.key" ]] && echo yes || echo no)"

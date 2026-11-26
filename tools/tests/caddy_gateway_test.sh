@@ -5,8 +5,10 @@
 # handlers, ports), every writer keeping the third block, teardown only when the
 # last block goes, gateway-enable's no-op / rewrite / rollback, its refusals and its
 # gate, rpc-advertise / rpc-unadvertise and rpc-disable / rpc-enable next to a
-# gateway advertisement, and the new phases through main (--json and human, both
-# forms of the three new flags, usage errors, the older-library refusal).
+# gateway advertisement, rpc-enable's mainnet refusals (admission closed,
+# GATEWAY_UPSTREAM), rpc-unadvertise's warning on a mainnet validator, rpc-advertise
+# on a host with no node service yet, and the new phases through main (--json and
+# human, both forms of the three new flags, usage errors, the older-library refusal).
 #
 #   bash tools/tests/run.sh tools/tests/caddy_gateway_test.sh
 #   docker run --rm -v "$PWD:/w" -w /w bash:3.2 bash tools/tests/caddy_gateway_test.sh
@@ -124,6 +126,10 @@ adv_stubs() {
         echo '{"result":"0x7e1"}'
     }
 }
+
+# The library's tn_resolve_service (a unit file under TN_ROOT_PREFIX), for the cases
+# that put it back after adv_stubs.
+eval "lib_$(declare -f tn_resolve_service)"
 
 CF="$RP/etc/caddy/Caddyfile"
 NIF="$RP/data/node-info.yaml"
@@ -452,6 +458,7 @@ before="$(tree_sum)"
 ( main --json --phase=rpc-enable --rpc-domain rpc.example.org --yes ) >"$T/ev" 2>"$T/out"
 check_rc "rpc-enable while RPC_ADVERTISED_VIA=gateway: refused" 1 $?
 check "rpc-enable refusal names rpc-unadvertise" yes "$(grep -q 'rpc-unadvertise first' "$T/ev" && echo yes)"
+check "rpc-enable refusal names the advertised URL" yes "$(grep -qF 'advertises https://gw1.example.org/ for a worker gateway' "$T/ev" && echo yes)"
 check "rpc-enable refusal: tree byte-identical" same "$([[ "$(tree_sum)" == "$before" ]] && echo same)"
 
 fresh "${NMD}PUBLIC_RPC_DOMAIN=rpc.example.org\nPUBLIC_RPC_URL=https://rpc.example.org\n"
@@ -461,6 +468,121 @@ printf 'original\n' > "$NIF"
 check_rc "rpc-disable without the key: rc 0" 0 $?
 check "rpc-disable without the key: clears node-info" yes "$(grep -qx 'edit clear none none' "$ORDER" && echo yes)"
 check "rpc-disable without the key: PUBLIC_RPC_DOMAIN removed" absent "$(meta_has PUBLIC_RPC_DOMAIN)"
+
+# --- mainnet: rpc-enable refuses a validator and a node a gateway fronts ----------------
+NMM='NETWORK=mainnet\nOWNERSHIP_LAYOUT=2\nRPC_PORT=8545\nDATA_DIR=/data\nVALIDATOR_ADDRESS=0x1111111111111111111111111111111111111111\n'
+GWMETA='PUBLIC_RPC_DOMAIN=gw1.example.org\nPUBLIC_RPC_URL=https://gw1.example.org\nRPC_ADVERTISED_VIA=gateway\n'
+rpc_enable_refused() { # rpc_enable_refused NAME META EXPECTED-TEXT
+    fresh "$2"
+    printf 'original\n' > "$NIF"
+    before="$(tree_sum)"
+    ( main --json --phase=rpc-enable --rpc-domain rpc.example.org --yes ) >"$T/ev" 2>"$T/out"
+    check_rc "rpc-enable, ${1}: refused (rc 1)" 1 $?
+    check "rpc-enable, ${1}: says why" yes "$(grep -qF -- "$3" "$T/ev" && echo yes)"
+    check "rpc-enable, ${1}: tree byte-identical, Caddy not reloaded" "same 0" \
+        "$([[ "$(tree_sum)" == "$before" ]] && echo same) $(applies)"
+}
+rpc_enable_refused "mainnet, admission closed" "${NMM}ADMISSION_MODE=closed\n" \
+    "This mainnet node runs admission closed, as a validator does."
+check "rpc-enable, mainnet closed: names rpc-advertise" yes "$(grep -qF -- 'Advertise the gateway with --phase=rpc-advertise --rpc-domain <name>.' "$T/ev" && echo yes)"
+check "rpc-enable, mainnet closed, nothing recorded: no recorded URL named" 0 "$(grep -c 'already advertises' "$T/ev")"
+rpc_enable_refused "mainnet closed, advertised via a gateway" "${NMM}ADMISSION_MODE=closed\n${GWMETA}" "runs admission closed"
+check "rpc-enable, mainnet closed via a gateway: never told to rpc-unadvertise" 0 "$(grep -c 'rpc-unadvertise first' "$T/ev")"
+check "rpc-enable, mainnet closed via a gateway: names the recorded URL and how to change the name" "yes 0" \
+    "$(grep -qF -- 'node-info.yaml already advertises https://gw1.example.org/ for the worker gateway; --phase=rpc-advertise --rpc-domain <name> changes the name.' "$T/ev" && echo yes) $(grep -c 'Advertise the gateway with' "$T/ev")"
+# A recorded URL with a path is named as recorded: no / is added to it.
+GWPATH='PUBLIC_RPC_URL=https://gw8.example.org/rpc\nRPC_ADVERTISED_VIA=gateway\n'
+rpc_enable_refused "mainnet closed, a gateway URL with a path" "${NMM}ADMISSION_MODE=closed\n${GWPATH}" \
+    "node-info.yaml already advertises https://gw8.example.org/rpc for the worker gateway;"
+check "rpc-enable, mainnet closed, a gateway URL with a path: no / added" 0 "$(grep -c 'gw8.example.org/rpc/' "$T/ev")"
+rpc_enable_refused "mainnet open, a gateway URL with a path" "${NMM}ADMISSION_MODE=open\n${GWPATH}" \
+    "node-info.yaml advertises https://gw8.example.org/rpc for a worker gateway"
+check "rpc-enable, mainnet open, a gateway URL with a path: no / added" 0 "$(grep -c 'gw8.example.org/rpc/' "$T/ev")"
+rpc_enable_refused "mainnet, GATEWAY_UPSTREAM set" "${NMM}ADMISSION_MODE=open\nGATEWAY_UPSTREAM=10.0.0.9\n" \
+    "GATEWAY_UPSTREAM=10.0.0.9: a worker gateway fronts this node"
+check "rpc-enable, mainnet upstream: names gateway_upstream=off" yes "$(grep -qF -- '--set gateway_upstream=off first' "$T/ev" && echo yes)"
+rpc_enable_refused "mainnet open, advertised via a gateway" "${NMM}ADMISSION_MODE=open\n${GWMETA}" "rpc-unadvertise first"
+rpc_enable_refused "mainnet, ADMISSION_MODE twice" "${NMM}ADMISSION_MODE=open\nADMISSION_MODE=closed\n" \
+    "ADMISSION_MODE is set more than once"
+# Off mainnet neither refusal applies; on mainnet a node that is neither reaches the stake gate.
+fresh "${NMD}ADMISSION_MODE=closed\nGATEWAY_UPSTREAM=10.0.0.9\n"
+( caddy_rpc_enable_precheck rpc.example.org "" ) >"$T/out" 2>&1
+check_rc "rpc-enable, testnet closed with GATEWAY_UPSTREAM: not refused" 0 $?
+fresh "${NMM}ADMISSION_MODE=open\n"
+( caddy_rpc_enable_precheck rpc.example.org "" ) >"$T/out" 2>&1
+check_rc "rpc-enable, mainnet open, no upstream, not staked: not refused" 0 $?
+( NSV_RC=0; caddy_rpc_enable_precheck rpc.example.org "" ) >"$T/out" 2>&1
+check_rc "rpc-enable, mainnet open, staked: the stake gate refuses" 1 $?
+check "rpc-enable, mainnet open, staked: says so" yes "$(said 'is a staked validator')"
+
+# --- rpc-unadvertise on a mainnet validator warns that nothing forwards to it -------------
+NOFWD='This validator now advertises no RPC URL, so other nodes cannot forward transactions to it'
+for c in "closed 1" "open 0"; do
+    adm="${c% *}"
+    fresh "${NMM}ADMISSION_MODE=${adm}\n${GWMETA}"
+    printf 'original\n' > "$NIF"
+    ( adv_stubs; NI_CUR="https://gw1.example.org/ none"; do_rpc_unadvertise ) >"$T/out" 2>&1
+    check_rc "rpc-unadvertise, mainnet ${adm}: rc 0" 0 $?
+    check "rpc-unadvertise, mainnet ${adm}: cleared, keys gone" "yes absent" \
+        "$(grep -qx 'edit clear none none' "$ORDER" && echo yes) $(meta_has RPC_ADVERTISED_VIA)"
+    check "rpc-unadvertise, mainnet ${adm}: the no-forwarding warning" "${c#* }" "$(grep -cF -- "$NOFWD" "$T/out")"
+done
+fresh "${NMM}ADMISSION_MODE=closed\n${GWMETA}"
+printf 'original\n' > "$NIF"
+( adv_stubs; caddy_node_info_can_edit() { return 1; }; NI_CUR="https://gw1.example.org/ none"; do_rpc_unadvertise ) >"$T/out" 2>&1
+check_rc "rpc-unadvertise, mainnet closed, node-info.yaml not editable: rc 0" 0 $?
+check "rpc-unadvertise, not editable: says the URL is still there, not the warning" "yes 0" \
+    "$(said 'still advertises the removed endpoint') $(grep -cF -- "$NOFWD" "$T/out")"
+
+# --- rpc-advertise before the node's service exists ---------------------------------------
+# No node unit on mainnet: nothing can answer /health yet, so a failure is a warning
+# and the record is written. Off mainnet, with NETWORK unreadable, or with a unit the
+# refusal is unchanged.
+for c in "testnet|${NMD}" "NETWORK twice|NETWORK=mainnet\n${NMD}"; do
+    fresh "${c#*|}"
+    printf 'original\n' > "$NIF"
+    before="$(tree_sum)"
+    ( adv_stubs; tn_resolve_service() { lib_tn_resolve_service "$@"; }
+      GW_URL_CODE=000; GW_URL_RC=6; main --phase=rpc-advertise --rpc-domain gw9.example.org ) >"$T/out" 2>&1
+    check_rc "rpc-advertise, ${c%%|*}, no node unit, /health fails: refused" 1 $?
+    check "rpc-advertise, ${c%%|*}, no node unit: the refusal, not the warning" "yes 0" \
+        "$(said 'breaks transaction forwarding') $(grep -c 'is not verified' "$T/out")"
+    check "rpc-advertise, ${c%%|*}, no node unit: tree byte-identical, no edit" "same " \
+        "$([[ "$(tree_sum)" == "$before" ]] && echo same) $(cat "$ORDER")"
+done
+fresh "${NMM}ADMISSION_MODE=closed\n"
+printf 'original\n' > "$NIF"
+( adv_stubs; tn_resolve_service() { lib_tn_resolve_service "$@"; }
+  GW_URL_CODE=000; GW_URL_RC=6; main --phase=rpc-advertise --rpc-domain gw9.example.org ) >"$T/out" 2>&1
+check_rc "rpc-advertise, no node unit, /health fails: rc 0" 0 $?
+check "rpc-advertise, no node unit: warns not verified, why, and who checks later" "yes yes yes yes" \
+    "$(said 'https://gw9.example.org/ is not verified') $(said 'got the name does not resolve') \
+$(said 'nothing can answer before the node and its gateway run') $(said 'check-node.sh verifies it later')"
+check "rpc-advertise, no node unit: https://<host>/ written, no ws URL, no restart" "edit set https://gw9.example.org/ none" \
+    "$(grep -v '^systemctl is-' "$ORDER" | paste -sd'|' -)"
+check "rpc-advertise, no node unit: the three .node-meta keys" "gw9.example.org https://gw9.example.org gateway" \
+    "$(addon_meta_get PUBLIC_RPC_DOMAIN '') $(addon_meta_get PUBLIC_RPC_URL '') $(addon_meta_get RPC_ADVERTISED_VIA '')"
+check "rpc-advertise, no node unit: open items name the URL and the restart" "yes yes" \
+    "$(said 'Open items: https://gw9.example.org/ not verified; node not restarted') $(said 'Worker gateway advertisement set: https://gw9.example.org/')"
+fresh "${NMM}ADMISSION_MODE=closed\n"
+printf 'original\n' > "$NIF"
+( adv_stubs; tn_resolve_service() { lib_tn_resolve_service "$@"; }
+  GW_URL_CODE=000; GW_URL_RC=6; main --json --phase=rpc-advertise --rpc-domain gw9.example.org ) >"$T/ev" 2>"$T/out"
+check_rc "json rpc-advertise, no node unit, /health fails: rc 0" 0 $?
+check "json rpc-advertise, no node unit: the warning once, done ok naming it" "1 1" \
+    "$(grep -c '"event":"warn","msg":"https://gw9.example.org/ is not verified' "$T/ev") \
+$(grep '"event":"done","ok":true' "$T/ev" | grep -c 'https://gw9.example.org/ not verified')"
+fresh "${NMM}ADMISSION_MODE=closed\n"
+printf 'original\n' > "$NIF"
+: > "$RP/etc/systemd/system/telcoin.service"
+cp "$NIF" "$T/nif.before"; cp "$RP/etc/telcoin/.node-meta" "$T/nm.before"
+( adv_stubs; tn_resolve_service() { lib_tn_resolve_service "$@"; }
+  GW_URL_CODE=000; GW_URL_RC=6; do_rpc_advertise gw9.example.org ) >"$T/out" 2>&1
+check_rc "rpc-advertise, node unit, /health fails: refused" 1 $?
+check "rpc-advertise, node unit: the refusal, not the warning" "yes 0" \
+    "$(said 'breaks transaction forwarding') $(grep -c 'is not verified' "$T/out")"
+check "rpc-advertise, node unit: node-info.yaml and .node-meta byte-identical, no edit" "same same " \
+    "$(cmp -s "$NIF" "$T/nif.before" && echo same) $(cmp -s "$RP/etc/telcoin/.node-meta" "$T/nm.before" && echo same) $(cat "$ORDER")"
 
 # --- main: --json ----------------------------------------------------------------------
 GS_RE='^\{"installed":(true|false),"running":(true|false),"enabled":(true|false),"domain":"[^"]*","port":([0-9]+|null),"probe_port":([0-9]+|null),"block_stale":(true|false)\}$'

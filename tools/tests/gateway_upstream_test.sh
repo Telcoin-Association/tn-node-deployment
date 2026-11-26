@@ -29,6 +29,14 @@
 #                  either port, or a default policy that is not deny: refused;
 #                  the monitor's own health rule is fine;
 #   public RPC     an RPC already on 0.0.0.0 without GATEWAY_UPSTREAM: refused;
+#   RPC site       on mainnet, a host whose Caddyfile holds the public RPC site
+#                  block (tn-rpc, a CR or space after its marker included):
+#                  refused, nothing written, the message names
+#                  install-caddy.sh --phase=rpc-disable; off is not refused,
+#                  nor is testnet, nor mainnet with only the dashboard block;
+#                  NETWORK set twice: refused;
+#   public bind    on mainnet the 0.0.0.0 RPC bind (set_rpc_addr) is refused and
+#                  names firewall-setup.sh --gateway-from before gateway_upstream;
 #   PREV lost      setting again does not record the gateway's wildcard;
 #   lib/common.sh  tn_gateway_ports_private, tn_gateway_src_canon, and
 #                  kuma_extra_remove keeping a rule a gateway source needs.
@@ -170,6 +178,12 @@ if [ -n "${ECA_RENDER:-}" ]; then
     tn_write_start_script() { printf '#!/bin/bash\nexec %s %s\n' "$2" "$3" > "$TARGET_LAUNCH_FILE"; }
 fi
 NO_EPOCH_WAIT=true
+# ECA_CALL=<function>: call it with the arguments instead of run_set (a setter the
+# menu reaches, with no --set field).
+if [ -n "${ECA_CALL:-}" ]; then
+    "$ECA_CALL" "$@"
+    exit $?
+fi
 EDIT_SET_PAIR="$1"
 run_set
 DRV
@@ -353,6 +367,80 @@ done
 fixture " --healthcheck ${KP}"
 drv "gateway_upstream="
 check "an empty value: rc 1, files byte-identical" "1 same" "$RC $(same)"
+
+# ---- mainnet: this host's public RPC site or a worker gateway, never both ---------------
+CADDYFILE="$FX/etc/caddy/Caddyfile"
+mkdir -p "${CADDYFILE%/*}"
+# caddyfile dash|rpc [TAIL] -- the managed Caddyfile with the dashboard block and,
+# for rpc, the public RPC site block after it, its opening marker line ending in TAIL.
+caddyfile() {
+    {
+        printf '# >>> tn-dashboard >>>\nstatus.example.com {\n    reverse_proxy 127.0.0.1:3001\n}\n# <<< tn-dashboard <<<\n'
+        if [[ "$1" == rpc ]]; then
+            printf '\n# >>> tn-rpc >>>%s\nrpc.example.com {\n    reverse_proxy 127.0.0.1:8545\n}\n# <<< tn-rpc <<<\n' "${2:-}"
+        fi
+    } > "$CADDYFILE"
+}
+fixture " --healthcheck ${KP}" mainnet
+ufw_status on 10.0.0.7
+caddyfile rpc
+drv gateway_upstream=10.0.0.7
+check "mainnet with the RPC site: rc 1, files byte-identical, no restart" "1 same 0" "$RC $(same) $(starts)"
+check "mainnet with the RPC site: done ok:false" yes "$(has '"ok":false' "$(done_line)")"
+check "mainnet with the RPC site: names rpc-disable" yes \
+    "$(has "install-caddy.sh --phase=rpc-disable first" "$(done_line)")"
+check "mainnet with the RPC site: says nothing was changed" yes "$(has "nothing was changed" "$(done_line)")"
+# The marker is found as install-caddy.sh and check-node.sh find it: a carriage
+# return or a space after it does not hide the site.
+for c in "CR|"$'\r' "space| "; do
+    fixture " --healthcheck ${KP}" mainnet
+    ufw_status on 10.0.0.7
+    caddyfile rpc "${c#*|}"
+    drv gateway_upstream=10.0.0.7
+    check "mainnet with the RPC site, ${c%%|*} after the marker: rc 1, files byte-identical, no restart" "1 same 0" \
+        "$RC $(same) $(starts)"
+    check "mainnet with the RPC site, ${c%%|*} after the marker: names rpc-disable" yes \
+        "$(has "install-caddy.sh --phase=rpc-disable first" "$(done_line)")"
+done
+# NETWORK twice has no single value: refused, as GATEWAY_UPSTREAM twice is, never
+# read as "not mainnet".
+fixture " --healthcheck ${KP}" mainnet
+printf 'NETWORK=testnet\n' >> "$META"
+cp -p "$META" "$T/meta.orig"
+ufw_status on 10.0.0.7
+caddyfile rpc
+drv gateway_upstream=10.0.0.7
+check "NETWORK twice: rc 1, files byte-identical, no restart" "1 same 0" "$RC $(same) $(starts)"
+check "NETWORK twice: says so" yes \
+    "$(has "NETWORK is set more than once in .node-meta; remove the extra lines first" "$(done_line)")"
+fixture " --healthcheck ${KP}" mainnet
+caddyfile dash
+drv gateway_upstream=10.0.0.7
+check "mainnet with only the dashboard: rc 0, flags set, one restart" "0 yes 1" \
+    "$RC $(has " --http.addr 0.0.0.0 " "$(nodeline)") $(restarts)"
+check "mainnet with only the dashboard: the two meta keys" \
+    "GATEWAY_UPSTREAM=10.0.0.7 GATEWAY_PREV_HEALTHCHECK=${KP}" "$(gwkeys)"
+# The site added while the gateway is set: off still takes the gateway away.
+caddyfile rpc
+drv gateway_upstream=off
+check_rc "mainnet off with the RPC site: rc 0" 0 "$RC"
+check "mainnet off with the RPC site: launch file byte-identical to before the set" same "$(launch_same)"
+check "mainnet off with the RPC site: both keys unset" "" "$(gwkeys)"
+fixture " --healthcheck ${KP}" testnet
+drv gateway_upstream=10.0.0.7
+check "testnet with the RPC site: rc 0, flags set" "0 yes" "$RC $(has " --http.addr 0.0.0.0 " "$(nodeline)")"
+rm -f "$CADDYFILE"
+
+# ---- mainnet: the public RPC bind points at the gateway, the firewall step first ----------
+fixture " --healthcheck ${KP}" mainnet
+ECA_CALL=set_rpc_addr drv 0.0.0.0
+check "mainnet public RPC bind: rc 1, files byte-identical, no restart" "1 same 0" "$RC $(same) $(starts)"
+# (no case inside $(...): bash 3.2 cannot parse it)
+ordered=no
+case "$(cat "$T/events")" in
+    *"then on this host sudo bash "*"/firewall-setup.sh --enable --gateway-from <gateway IP> (gateway_upstream is refused until ufw lets the gateway host in) and then sudo bash "*"/edit-config.sh --set gateway_upstream=<gateway IP>."*) ordered=yes ;;
+esac
+check "mainnet public RPC bind: firewall-setup.sh --gateway-from first, then gateway_upstream" yes "$ordered"
 
 # ---- another key on a stopped node: as before this change (it restarts) -----------------
 fixture "" testnet inactive
