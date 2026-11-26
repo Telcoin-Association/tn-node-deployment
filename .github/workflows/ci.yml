@@ -303,3 +303,22 @@ jobs:
         run: cfn-guard validate --rules aws/rules --data aws/node.yaml --show-summary fail
       - name: cfn-guard rule tests
         run: cfn-guard test --dir aws/rules
+
+  # The Terraform tree (terraform/): fmt, validate and terraform test with mocked
+  # providers per root, then tflint and checkov, each from the image
+  # tools/check-terraform.sh pins by digest. No cloud credentials. Not a required check.
+  terraform:
+    name: terraform static checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # tflint --init downloads the pinned rulesets from GitHub releases; the
+      # job's read-only token keeps that download clear of the anonymous rate limit.
+      - name: Static checks of terraform/
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bash tools/check-terraform.sh
