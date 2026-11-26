@@ -35,8 +35,8 @@
 # Exit status:
 #   0  every check passed
 #   1  a check failed; each failure is named in the summary on stderr
-#   2  the checks cannot run: a usage error, no docker, a --root that is not a
-#      directory of the repository
+#   2  the checks cannot run: a usage error, no docker or a Docker daemon that
+#      does not answer, a --root that is not a directory of the repository
 #
 # Maintainer tooling: update-scripts.sh does not track tools/ and this file has
 # no .sha256 sidecar. bash 3.2 safe.
@@ -175,6 +175,12 @@ done
 
 if ! command -v docker >/dev/null 2>&1; then
     printf 'check-terraform: docker is required: every tool runs from a pinned image.\n' >&2
+    exit 2
+fi
+# A daemon that does not answer would fail every step below as if each check
+# had failed.
+if ! docker info >/dev/null 2>&1; then
+    printf 'check-terraform: the Docker daemon does not answer (docker info failed). Start it, or point DOCKER_HOST at one, and run this again. Nothing was checked.\n' >&2
     exit 2
 fi
 

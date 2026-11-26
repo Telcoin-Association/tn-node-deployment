@@ -309,6 +309,10 @@ jobs:
   # tools/check-terraform.sh pins by digest. No cloud credentials. Not a required check.
   terraform:
     name: terraform static checks
+    # Pull requests and branch pushes only: the job fetches providers and
+    # rulesets from public registries, and an outage there must not mark a
+    # release tag's run as failed.
+    if: github.ref_type != 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: read

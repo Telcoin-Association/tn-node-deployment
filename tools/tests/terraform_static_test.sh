@@ -1572,6 +1572,11 @@ check "fixture: a different fingerprint is told apart" "no" \
 check "fixture: a gzip budget below the size fails" "no" \
     "$([[ "$(gz_bytes "$TF/first-boot/first-boot-lib.sh")" -lt 1000 ]] && echo yes || echo no)"
 
+# No daemon answers on this socket; without a docker CLI the tool stops
+# earlier, with the same status.
+DOCKER_HOST="unix://$T/no-daemon.sock" "${BASH:-bash}" "$CHECK_TF" --only fmt > "$T/no-daemon.out" 2>&1
+check_rc "check-terraform.sh: a Docker daemon that does not answer means cannot run (exit 2)" 2 "$?"
+
 # The env file contract on a small library, two role scripts and a host-plan
 # whose keys match; then one break at a time.
 EC="$T/fx/contract"
