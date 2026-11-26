@@ -20,7 +20,7 @@ Telcoin Association (TAO), which creates the A record; a name of one's own, give
 `install-caddy.sh --phase=rpc-advertise`, is encouraged. A failure to write the default is a
 warning, never a failed keygen. On a mainnet node that runs admission closed, `--rpc-domain` and
 `--rpc-http` name the gateway: https only (an `http://` `--rpc-http` is refused), stored as the
-keytool stores it (lowercase host, no default port, a trailing slash), no Caddy site. Without
+keytool stores it (lowercase host, no default port, `/` for an empty path), no Caddy site. Without
 `--admission closed` they set up a node that is not a validator, with a WebSocket URL for a public
 RPC site on the host, and key generation notes that a validator must pass `--admission closed`.
 On mainnet `rpc-enable` refuses a node that runs admission closed and a node with
