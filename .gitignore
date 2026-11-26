@@ -9,8 +9,15 @@ __pycache__/
 # Partner document scratch output (tools/build-partner-pdf.sh)
 docs/partner/*/build/
 
-# Terraform working directories and saved plans (.terraform.lock.hcl is committed)
+# Terraform working directories, saved plans, state, local variable files and
+# crash logs (.terraform.lock.hcl and terraform.tfvars.example are committed)
 .terraform/
 *.tfplan
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+*.auto.tfvars
+crash.log
+crash.*.log
 
 **/.DS_Store
