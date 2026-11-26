@@ -48,7 +48,7 @@ resource "azurerm_linux_virtual_machine" "gateway" {
   network_interface_ids           = [azurerm_network_interface.gateway[0].id]
   admin_username                  = var.admin_username
   disable_password_authentication = true
-  custom_data                     = base64gzip(module.plan.gateway_user_data)
+  custom_data                     = base64gzip(module.host_plan.gateway_user_data)
   secure_boot_enabled             = true
   vtpm_enabled                    = true
   encryption_at_host_enabled      = var.encryption_at_host_enabled
@@ -82,8 +82,8 @@ resource "azurerm_linux_virtual_machine" "gateway" {
 
   lifecycle {
     precondition {
-      condition     = module.plan.gateway_user_data_gzip_bytes <= local.custom_data_max_bytes
-      error_message = "The gateway's user data is ${module.plan.gateway_user_data_gzip_bytes} bytes gzipped, over the ${local.custom_data_max_bytes} bytes Azure takes as custom data."
+      condition     = module.host_plan.gateway_user_data_gzip_bytes <= local.custom_data_max_bytes
+      error_message = "The gateway's user data is ${module.host_plan.gateway_user_data_gzip_bytes} bytes gzipped, over the ${local.custom_data_max_bytes} bytes Azure takes as custom data."
     }
   }
 }

@@ -1,15 +1,16 @@
 # Copy to terraform.tfvars and edit. Every value here is public: nothing in
 # this deployment is secret, and the BLS passphrase never passes through it.
+# Addresses below are documentation examples, not real hosts.
 
-# Where both hosts run. Null picks the first zone, in name order, that
-# offers both instance types.
+# Where both hosts run. Null availability_zone picks the first zone, in name
+# order, that offers every instance type in use.
 region = "eu-central-1"
 # availability_zone = "eu-central-1a"
 
 # testnet or mainnet.
 network = "testnet"
 
-# Starts every resource name.
+# Starts every resource name, and tags them all as Deployment.
 name_prefix = "telcoin"
 
 # The validator's execution address (on mainnet its Safe), printed into the
@@ -29,13 +30,14 @@ rpc_domain = ""
 # gateway_enabled = true
 
 # Shells go through Session Manager by default, with no port open. List IPv4
-# networks here to open TCP 22 to them as well (documentation range shown).
+# networks here to open TCP 22 of both hosts to them as well.
 admin_ssh_cidrs = []
 # admin_ssh_cidrs = ["198.51.100.7/32"]
 
 # The trusted hubs map, written to the validator at first boot. Leave empty to
-# copy it to the host yourself; next_steps names the path. Instance user data
-# holds 16 KiB gzipped, so a large map has to go by hand.
+# copy it to the host yourself; next_steps names the path. It travels in the
+# instance user data, which holds 16 KiB gzipped, so a large map
+# has to go by hand.
 # trusted_nodes_file = "trusted-nodes.yaml"
 
 # Mainnet seals the passphrase credential to a TPM2. Either boot an image
@@ -43,22 +45,32 @@ admin_ssh_cidrs = []
 # ami_id       = "ami-0123456789abcdef0"
 # allow_no_tpm = true
 
-# Null takes the per-network defaults: m7i.2xlarge and 500 GiB / 15000 IOPS /
-# 300 MiB/s on testnet, m7i.4xlarge and 2000 GiB / 20000 IOPS / 300 MiB/s on
-# mainnet; the gateway is an m7i.large.
+# Null takes the per-network defaults: m7i.2xlarge on testnet, m7i.4xlarge on
+# mainnet (8 cores, 64 GiB: twice the 32 GiB floor), m7i.large for the worker
+# gateway.
 # validator_instance_type = "m7i.4xlarge"
 # gateway_instance_type   = "m7i.large"
-# data_disk_size_gb       = 2000
-# data_disk_iops          = 20000
-# data_disk_throughput    = 300
+
+# Null takes the per-network defaults, 500 GiB / 15000 IOPS / 300 MiB/s on
+# testnet and 2000 GiB / 20000 IOPS / 300 MiB/s on mainnet. The floors are
+# 350 GiB / 15000 IOPS / 240 MiB/s and 2000 GiB / 20000 IOPS / 300 MiB/s.
+# data_disk_size_gb    = 2000
+# data_disk_iops       = 20000
+# data_disk_throughput = 300
 
 # A KMS key of your own for every volume, instead of the AWS managed key.
-# kms_key_id = "arn:aws:kms:eu-central-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab"
+# disk_kms_key = "arn:aws:kms:eu-central-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab"
 
 # Ubuntu Server LTS: 26.04 (default) or 24.04.
 # ubuntu_version = "26.04"
 
 # The private network. The validator takes the subnet's 10th address and the
-# gateway its 20th.
+# worker gateway its 20th.
 # vpc_cidr    = "10.42.0.0/16"
 # subnet_cidr = "10.42.1.0/24"
+
+# The worker gateway sends queries to the network's public RPC unless this
+# names another, and keeps this many submissions a second for
+# eth_sendRawTransaction (0 turns the reservation off).
+# redirect_queries_url           = ""
+# gateway_rate_limit_submissions = 300

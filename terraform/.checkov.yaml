@@ -32,8 +32,7 @@ skip-check:
   - CKV_GCP_106
   # A customer-supplied key is a raw or RSA-wrapped key held in the
   # configuration and the state, and nothing here is secret. Compute Engine
-  # encrypts every disk, and the data disk takes a Cloud KMS key
-  # (data_disk_kms_key).
+  # encrypts every disk, and every disk takes a Cloud KMS key (disk_kms_key).
   - CKV_GCP_38
   # Azure. Managed disks are always encrypted at rest with platform-managed
   # keys; a customer-managed key needs a Key Vault and a disk encryption set,

@@ -182,7 +182,6 @@ run "no_gateway" {
 
   variables {
     gateway_enabled = false
-    rpc_domain      = "rpc.example.org"
   }
 
   assert {
@@ -190,7 +189,7 @@ run "no_gateway" {
       length(google_compute_instance.gateway) == 0 && length(google_compute_address.gateway_public) == 0 &&
       length(google_compute_address.gateway_internal) == 0 && length(terraform_data.gateway_cfg) == 0
     )
-    error_message = "gateway_enabled false builds no gateway resources, whatever rpc_domain says."
+    error_message = "gateway_enabled false builds no gateway resources."
   }
 
   assert {

@@ -51,17 +51,17 @@ run "testnet_hosts" {
       google_compute_disk.data.type == "hyperdisk-balanced" &&
       google_compute_disk.data.size == 500 &&
       google_compute_disk.data.provisioned_iops == 15000 &&
-      google_compute_disk.data.provisioned_throughput == 240 &&
+      google_compute_disk.data.provisioned_throughput == 300 &&
       google_compute_disk.data.zone == "us-central1-a"
     )
-    error_message = "The testnet data disk is Hyperdisk Balanced at the floors: 500 GiB, 15000 IOPS, 240 MiB/s, in the hosts' zone."
+    error_message = "The testnet data disk is Hyperdisk Balanced at the defaults: 500 GiB, 15000 IOPS, 300 MiB/s, in the hosts' zone."
   }
 
   # Compute Engine encrypts every disk; what the module controls is that no
   # customer-supplied key (which would sit in state) is ever configured.
   assert {
     condition     = length(google_compute_disk.data.disk_encryption_key) == 0
-    error_message = "Without data_disk_kms_key the data disk uses Google's key, and never a raw or RSA-wrapped key."
+    error_message = "Without disk_kms_key the data disk uses Google's key, and never a raw or RSA-wrapped key."
   }
 
   assert {
@@ -176,7 +176,7 @@ run "bigger_disk_and_cmek" {
     data_disk_size_gb    = 4000
     data_disk_iops       = 40000
     data_disk_throughput = 1000
-    data_disk_kms_key    = "projects/tn-test-project/locations/us-central1/keyRings/tn/cryptoKeys/data"
+    disk_kms_key         = "projects/tn-test-project/locations/us-central1/keyRings/tn/cryptoKeys/data"
     ubuntu_version       = "24.04"
   }
 
@@ -186,8 +186,12 @@ run "bigger_disk_and_cmek" {
   }
 
   assert {
-    condition     = google_compute_disk.data.disk_encryption_key[0].kms_key_self_link == "projects/tn-test-project/locations/us-central1/keyRings/tn/cryptoKeys/data"
-    error_message = "data_disk_kms_key encrypts the data disk with the operator's Cloud KMS key."
+    condition = alltrue([for k in [
+      google_compute_disk.data.disk_encryption_key[0].kms_key_self_link,
+      google_compute_instance.validator.boot_disk[0].kms_key_self_link,
+      google_compute_instance.gateway[0].boot_disk[0].kms_key_self_link,
+    ] : k == var.disk_kms_key])
+    error_message = "disk_kms_key encrypts the data disk and both boot disks with the operator's Cloud KMS key."
   }
 
   assert {

@@ -60,7 +60,7 @@ resource "azurerm_linux_virtual_machine" "validator" {
   network_interface_ids           = [azurerm_network_interface.validator.id]
   admin_username                  = var.admin_username
   disable_password_authentication = true
-  custom_data                     = base64gzip(module.plan.validator_user_data)
+  custom_data                     = base64gzip(module.host_plan.validator_user_data)
   secure_boot_enabled             = true
   vtpm_enabled                    = true
   encryption_at_host_enabled      = var.encryption_at_host_enabled
@@ -100,8 +100,8 @@ resource "azurerm_linux_virtual_machine" "validator" {
     ignore_changes  = [custom_data, source_image_reference]
 
     precondition {
-      condition     = module.plan.validator_user_data_gzip_bytes <= local.custom_data_max_bytes
-      error_message = "The validator's user data is ${module.plan.validator_user_data_gzip_bytes} bytes gzipped, over the ${local.custom_data_max_bytes} bytes Azure takes as custom data: the hubs file is too large for it. Leave trusted_nodes_file empty and copy the file to the host by hand, at the path next_steps names."
+      condition     = module.host_plan.validator_user_data_gzip_bytes <= local.custom_data_max_bytes
+      error_message = "The validator's user data is ${module.host_plan.validator_user_data_gzip_bytes} bytes gzipped, over the ${local.custom_data_max_bytes} bytes Azure takes as custom data: the hubs file is too large for it. Leave trusted_nodes_file empty and copy the file to the host by hand, at the path next_steps names."
     }
   }
 }

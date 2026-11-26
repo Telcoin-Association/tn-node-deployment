@@ -25,7 +25,7 @@ resource "aws_instance" "gateway" {
     volume_type           = "gp3"
     volume_size           = 30
     encrypted             = true
-    kms_key_id            = var.kms_key_id
+    kms_key_id            = local.kms_key_id
     delete_on_termination = true
 
     tags = {

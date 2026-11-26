@@ -144,22 +144,21 @@ run "disk_under_the_mainnet_floor" {
   expect_failures = [var.data_disk_size_gb]
 }
 
-run "iops_under_premium_v2_minimum" {
+run "iops_below_floor" {
   command = plan
 
   variables {
-    data_disk_iops = 2000
+    data_disk_iops = 10000
   }
 
   expect_failures = [var.data_disk_iops]
 }
 
-run "throughput_over_the_iops_allowance" {
+run "throughput_over_premium_v2" {
   command = plan
 
   variables {
-    data_disk_iops       = 3000
-    data_disk_throughput = 800
+    data_disk_throughput = 2500
   }
 
   expect_failures = [var.data_disk_throughput]
@@ -223,4 +222,75 @@ run "missing_hubs_file" {
   }
 
   expect_failures = [var.trusted_nodes_file]
+}
+
+run "domain_without_gateway" {
+  command = plan
+
+  variables {
+    gateway_enabled = false
+    rpc_domain      = "rpc.example.org"
+  }
+
+  expect_failures = [var.rpc_domain]
+}
+
+run "admin_cidr_ipv6" {
+  command = plan
+
+  variables {
+    admin_ssh_cidrs = ["2001:db8::/32"]
+  }
+
+  expect_failures = [var.admin_ssh_cidrs]
+}
+
+run "vpc_with_host_bits" {
+  command = plan
+
+  variables {
+    vpc_cidr = "10.42.0.5/16"
+  }
+
+  expect_failures = [var.vpc_cidr]
+}
+
+run "zero_validator_address" {
+  command = plan
+
+  variables {
+    validator_address = "0x0000000000000000000000000000000000000000"
+  }
+
+  expect_failures = [var.validator_address]
+}
+
+run "mainnet_release_tag_on_testnet" {
+  command = plan
+
+  variables {
+    node_release_tag = "v0.18.0"
+  }
+
+  expect_failures = [var.node_release_tag]
+}
+
+run "redirect_not_a_url" {
+  command = plan
+
+  variables {
+    redirect_queries_url = "rpc.example.org"
+  }
+
+  expect_failures = [var.redirect_queries_url]
+}
+
+run "rate_limit_not_whole" {
+  command = plan
+
+  variables {
+    gateway_rate_limit_submissions = 1.5
+  }
+
+  expect_failures = [var.gateway_rate_limit_submissions]
 }

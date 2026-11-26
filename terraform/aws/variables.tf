@@ -21,6 +21,8 @@ locals {
   }
 }
 
+# --- Where -------------------------------------------------------------------
+
 variable "region" {
   description = "The AWS region both hosts run in, such as eu-central-1."
   type        = string
@@ -42,6 +44,8 @@ variable "availability_zone" {
   }
 }
 
+# --- What --------------------------------------------------------------------
+
 variable "network" {
   description = "testnet or mainnet."
   type        = string
@@ -55,7 +59,7 @@ variable "network" {
 }
 
 variable "name_prefix" {
-  description = "Starts the name of every resource, and tags them as Deployment."
+  description = "Starts the name of every resource, and tags them all as Deployment."
   type        = string
   default     = "telcoin"
   nullable    = false
@@ -91,37 +95,41 @@ variable "rpc_domain" {
   }
 }
 
+# --- Admin access ------------------------------------------------------------
+
 variable "admin_ssh_cidrs" {
-  description = "IPv4 CIDRs that may reach TCP 22 on both hosts. Empty (the default) opens no SSH port: Session Manager needs none."
+  description = "IPv4 networks that may reach TCP 22 of both hosts, such as [\"198.51.100.7/32\"]. Empty (the default) opens no public SSH port: Session Manager needs none."
   type        = list(string)
   default     = []
   nullable    = false
 
-  # The network has no IPv6, and a security group rule takes only a network
-  # address, so 198.51.100.7/24 is refused rather than widened silently.
+  # The network has no IPv6, and a firewall rule takes only a network address,
+  # so 198.51.100.7/24 is refused rather than widened silently.
   validation {
     condition     = alltrue([for c in var.admin_ssh_cidrs : can(regex(local.re.ipv4_cidr, c)) && try(cidrhost(c, 0) == split("/", c)[0], false)])
     error_message = "Each admin_ssh_cidrs entry must be an IPv4 network in CIDR form, such as 198.51.100.7/32 or 198.51.100.0/24."
   }
 }
 
+# --- Private network ---------------------------------------------------------
+
 variable "vpc_cidr" {
-  description = "The VPC's private range. The validator's RPC and health ports admit only the gateway's address inside it."
+  description = "The VPC's private range, which holds subnet_cidr. The worker gateway's own firewall lets SSH in from it."
   type        = string
   default     = "10.42.0.0/16"
   nullable    = false
 
-  # AWS takes a VPC from /16 to /28; the subnet below needs a /27 at least.
+  # AWS takes a VPC from /16 to /28; the subnet needs a /27 at least.
   validation {
     condition = can(regex(local.re.private_cidr, var.vpc_cidr)) && try(
       cidrhost(var.vpc_cidr, 0) == split("/", var.vpc_cidr)[0] && tonumber(split("/", var.vpc_cidr)[1]) >= 16 && tonumber(split("/", var.vpc_cidr)[1]) <= 27,
     false)
-    error_message = "vpc_cidr must be a network from /16 to /27 inside 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 or 100.64.0.0/10, such as 10.42.0.0/16."
+    error_message = "vpc_cidr must be a network from /16 to /27 inside 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 or 100.64.0.0/10, such as 10.42.0.0/16: the worker gateway's upstream must be a private address."
   }
 }
 
 variable "subnet_cidr" {
-  description = "The subnet both hosts sit in, inside vpc_cidr. The validator takes its 10th address and the gateway its 20th."
+  description = "The subnet both hosts sit in, inside vpc_cidr. The validator takes its 10th address and the worker gateway its 20th."
   type        = string
   default     = "10.42.1.0/24"
   nullable    = false
@@ -130,7 +138,7 @@ variable "subnet_cidr" {
     condition = can(regex(local.re.private_cidr, var.subnet_cidr)) && try(
       cidrhost(var.subnet_cidr, 0) == split("/", var.subnet_cidr)[0] && tonumber(split("/", var.subnet_cidr)[1]) <= 27,
     false)
-    error_message = "subnet_cidr must be a network of /27 or larger inside 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 or 100.64.0.0/10, such as 10.42.1.0/24: the gateway takes its 20th address, and AWS keeps the last."
+    error_message = "subnet_cidr must be a network of /27 or larger inside 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 or 100.64.0.0/10, such as 10.42.1.0/24, so its 10th and 20th addresses are usable."
   }
 
   validation {
@@ -142,8 +150,10 @@ variable "subnet_cidr" {
   }
 }
 
+# --- Machines and disks ------------------------------------------------------
+
 variable "validator_instance_type" {
-  description = "The validator's EC2 type, an x86_64 Nitro type. Null means m7i.2xlarge on testnet (4 cores, 32 GiB) and m7i.4xlarge on mainnet (8 cores, 64 GiB)."
+  description = "The validator's EC2 type, an x86_64 Nitro type. Null means m7i.2xlarge on testnet (4 cores, 32 GiB) and m7i.4xlarge on mainnet (8 cores, 64 GiB). Mainnet refuses less than 8 physical cores and 32 GiB, the node scripts' validator floor; the default doubles the memory because a 32 GiB VM reports a little less to the host, which the scripts' hardware check reads as under that floor."
   type        = string
   default     = null
 
@@ -201,16 +211,19 @@ variable "data_disk_throughput" {
   }
 }
 
-variable "kms_key_id" {
-  description = "The ARN of a KMS key of your own for every volume. Null encrypts them with the account's AWS managed EBS key."
+variable "disk_kms_key" {
+  description = "The ARN of a KMS key of your own for every volume: both root volumes and the data volume. Empty encrypts them with the account's AWS managed EBS key."
   type        = string
-  default     = null
+  default     = ""
+  nullable    = false
 
   validation {
-    condition     = var.kms_key_id == null || can(regex("^arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:key/[A-Za-z0-9-]+$", var.kms_key_id))
-    error_message = "kms_key_id must be null or a KMS key ARN, such as arn:aws:kms:eu-central-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab (not an alias)."
+    condition     = var.disk_kms_key == "" || can(regex("^arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:key/[A-Za-z0-9-]+$", var.disk_kms_key))
+    error_message = "disk_kms_key must be empty or a KMS key ARN, such as arn:aws:kms:eu-central-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab (not an alias)."
   }
 }
+
+# --- Image -------------------------------------------------------------------
 
 variable "ubuntu_version" {
   description = "The Ubuntu Server LTS release both hosts boot: 26.04 (recommended) or 24.04, the mainnet floor."
@@ -236,8 +249,48 @@ variable "ami_id" {
   }
 }
 
+# The GCP and Azure roots turn a vTPM on for every host and have no such
+# input. Here the image or the instance type may lack NitroTPM.
+variable "allow_no_tpm" {
+  description = "Accept a mainnet host whose image or instance type has no NitroTPM: key generation then gets --allow-no-tpm and keeps the passphrase credential encrypted with the host key alone."
+  type        = bool
+  default     = false
+  nullable    = false
+}
+
+# --- Key generation ----------------------------------------------------------
+
+variable "validator_address" {
+  description = "The validator's execution address (on mainnet its Safe), filled into the printed key generation command. Empty prints a placeholder."
+  type        = string
+  default     = ""
+  nullable    = false
+
+  validation {
+    condition     = var.validator_address == "" || (can(regex("^0[xX][0-9a-fA-F]{40}$", var.validator_address)) && !can(regex("^0[xX]0{40}$", var.validator_address)))
+    error_message = "validator_address must be empty or 0x followed by 40 hex digits, and not the zero address."
+  }
+}
+
+variable "node_release_tag" {
+  description = "The testnet node release the printed key generation installs, such as v0.18.0-adiri. Empty prints a placeholder. Mainnet key generation takes an existing binary and does not use it."
+  type        = string
+  default     = ""
+  nullable    = false
+
+  validation {
+    condition     = var.node_release_tag == "" || can(regex("^v[0-9]+\\.[0-9]+\\.[0-9]+(-adiri)?(-rc[0-9]+)?$", var.node_release_tag))
+    error_message = "node_release_tag must be empty or a release tag such as v0.18.0-adiri."
+  }
+
+  validation {
+    condition     = var.node_release_tag == "" || var.network != "testnet" || can(regex("-adiri(-rc[0-9]+)?$", var.node_release_tag))
+    error_message = "On testnet node_release_tag must be a testnet release, vX.Y.Z-adiri (or a release candidate, vX.Y.Z-adiri-rcN)."
+  }
+}
+
 variable "trusted_nodes_file" {
-  description = "A local path to the trusted hubs map, written to the validator at first boot. Empty means you copy it to the host yourself; next_steps names the path."
+  description = "A local path to the trusted hubs map (public data), written to the validator at first boot as /etc/telcoin-first-boot/trusted-nodes.yaml; it travels in the instance user data. Empty means you copy it to the host yourself; next_steps names the path."
   type        = string
   default     = ""
   nullable    = false
@@ -248,21 +301,18 @@ variable "trusted_nodes_file" {
   }
 }
 
-# The variables below pass straight to host-plan, which validates them, so each
-# rule is written once.
-
-variable "validator_address" {
-  description = "The validator's execution address (on mainnet its Safe), filled into the printed key generation command. Empty prints a placeholder."
-  type        = string
-  default     = ""
-  nullable    = false
-}
+# --- Worker gateway ----------------------------------------------------------
 
 variable "redirect_queries_url" {
   description = "The public RPC the worker gateway sends queries to. Empty means the network's own."
   type        = string
   default     = ""
   nullable    = false
+
+  validation {
+    condition     = var.redirect_queries_url == "" || can(regex("^https?://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._/-]*)?$", var.redirect_queries_url))
+    error_message = "redirect_queries_url must be empty or an http(s):// URL of letters, digits and . _ / - only."
+  }
 }
 
 variable "gateway_rate_limit_submissions" {
@@ -270,18 +320,9 @@ variable "gateway_rate_limit_submissions" {
   type        = number
   default     = 300
   nullable    = false
-}
 
-variable "allow_no_tpm" {
-  description = "Accept a mainnet host whose image or instance type has no NitroTPM: key generation then gets --allow-no-tpm and keeps the passphrase credential encrypted with the host key alone."
-  type        = bool
-  default     = false
-  nullable    = false
-}
-
-variable "node_release_tag" {
-  description = "The testnet node release the printed key generation installs, such as v0.18.0-adiri. Empty prints a placeholder."
-  type        = string
-  default     = ""
-  nullable    = false
+  validation {
+    condition     = var.gateway_rate_limit_submissions >= 0 && var.gateway_rate_limit_submissions <= 999999 && floor(var.gateway_rate_limit_submissions) == var.gateway_rate_limit_submissions
+    error_message = "gateway_rate_limit_submissions must be a whole number from 0 to 999999."
+  }
 }

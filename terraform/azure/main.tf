@@ -18,21 +18,17 @@ locals {
   }
 
   # Dsv5 runs two vCPUs on each physical core: Standard_D8s_v5 is 4 cores and
-  # 32 GiB, Standard_D16s_v5 8 cores and 64 GiB. RAM is doubled over the
-  # floors because check_hardware rounds MemTotal down.
+  # 32 GiB, Standard_D16s_v5 8 cores and 64 GiB. The mainnet size has twice
+  # the memory floor, for the reason validator_instance_type gives.
   validator_size = coalesce(var.validator_instance_type, var.network == "mainnet" ? "Standard_D16s_v5" : "Standard_D8s_v5")
   gateway_size   = coalesce(var.gateway_instance_type, "Standard_D2s_v5")
 
   # Standard_D8s_v5 sustains 12800 uncached IOPS and 290 MB/s, a little under
   # the testnet disk's 15000 and 300; it bursts to 20000 for up to 30 minutes.
-  disk_default = {
-    testnet = { size = 500, iops = 15000, mbps = 300 }
-    mainnet = { size = 2000, iops = 20000, mbps = 300 }
-  }
   disk = {
     size = coalesce(var.data_disk_size_gb, local.disk_default[var.network].size)
     iops = coalesce(var.data_disk_iops, local.disk_default[var.network].iops)
-    mbps = coalesce(var.data_disk_throughput, local.disk_default[var.network].mbps)
+    mbps = coalesce(var.data_disk_throughput, local.disk_default[var.network].throughput)
   }
 
   # Canonical's Gen2 x64 images, which Trusted Launch needs.
@@ -59,13 +55,13 @@ locals {
   ]) }
   session_commands = {
     validator = var.enable_bastion ? local.bastion_ssh.validator : "ssh ${var.admin_username}@${azurerm_public_ip.validator.ip_address}"
-    gateway = !var.gateway_enabled ? "" : (
+    gateway = !local.gateway_vm ? "" : (
       var.enable_bastion ? local.bastion_ssh.gateway : "ssh ${var.admin_username}@${azurerm_public_ip.gateway[0].ip_address}"
     )
   }
 }
 
-module "plan" {
+module "host_plan" {
   source = "../modules/host-plan"
 
   role_set                       = { validator = true, gateway = var.gateway_enabled }
@@ -84,7 +80,6 @@ module "plan" {
   redirect_queries_url           = var.redirect_queries_url
   gateway_rate_limit_submissions = var.gateway_rate_limit_submissions
   validator_address              = var.validator_address
-  allow_no_tpm                   = var.allow_no_tpm
   session_commands               = local.session_commands
   node_release_tag               = var.node_release_tag
 }

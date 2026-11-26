@@ -57,7 +57,7 @@ run "own_kms_key" {
   command = plan
 
   variables {
-    kms_key_id = "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab"
+    disk_kms_key = "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab"
   }
 
   assert {
@@ -65,8 +65,8 @@ run "own_kms_key" {
       aws_ebs_volume.data.kms_key_id,
       aws_instance.validator.root_block_device[0].kms_key_id,
       aws_instance.gateway[0].root_block_device[0].kms_key_id,
-    ] : k == var.kms_key_id])
-    error_message = "kms_key_id must encrypt the data volume and both root volumes."
+    ] : k == var.disk_kms_key])
+    error_message = "disk_kms_key must encrypt the data volume and both root volumes."
   }
 }
 

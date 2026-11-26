@@ -9,25 +9,25 @@ mock_provider "azurerm" {
 override_resource {
   target          = azurerm_public_ip.validator
   override_during = plan
-  values          = { ip_address = "203.0.113.10", id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/tn-rg/providers/Microsoft.Network/publicIPAddresses/tn-validator-ip" }
+  values          = { ip_address = "203.0.113.10", id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/telcoin-rg/providers/Microsoft.Network/publicIPAddresses/telcoin-validator-ip" }
 }
 
 override_resource {
   target          = azurerm_public_ip.gateway
   override_during = plan
-  values          = { ip_address = "203.0.113.20", id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/tn-rg/providers/Microsoft.Network/publicIPAddresses/tn-gateway-ip" }
+  values          = { ip_address = "203.0.113.20", id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/telcoin-rg/providers/Microsoft.Network/publicIPAddresses/telcoin-gateway-ip" }
 }
 
 override_resource {
   target          = azurerm_subnet.hosts
   override_during = plan
-  values          = { id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/tn-rg/providers/Microsoft.Network/virtualNetworks/tn-vnet/subnets/tn-hosts" }
+  values          = { id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/telcoin-rg/providers/Microsoft.Network/virtualNetworks/telcoin-vnet/subnets/telcoin-hosts" }
 }
 
 override_resource {
   target          = azurerm_network_security_group.hosts
   override_during = plan
-  values          = { id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/tn-rg/providers/Microsoft.Network/networkSecurityGroups/tn-hosts-nsg" }
+  values          = { id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/telcoin-rg/providers/Microsoft.Network/networkSecurityGroups/telcoin-hosts-nsg" }
 }
 
 variables {
@@ -220,6 +220,7 @@ run "no_gateway_rules_without_a_gateway" {
 
   variables {
     gateway_enabled = false
+    rpc_domain      = ""
   }
 
   assert {

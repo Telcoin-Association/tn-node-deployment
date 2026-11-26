@@ -1,5 +1,7 @@
 locals {
   ami_id = var.ami_id != "" ? var.ami_id : data.aws_ssm_parameter.ubuntu[0].insecure_value
+  # Null lets EBS use the account's AWS managed key.
+  kms_key_id = var.disk_kms_key != "" ? var.disk_kms_key : null
 
   disk = {
     size       = coalesce(var.data_disk_size_gb, local.disk_default[var.network].size)
@@ -80,7 +82,7 @@ resource "aws_ebs_volume" "data" {
   iops              = local.disk.iops
   throughput        = local.disk.throughput
   encrypted         = true
-  kms_key_id        = var.kms_key_id
+  kms_key_id        = local.kms_key_id
 
   tags = {
     Name = "${var.name_prefix}-data"
@@ -114,7 +116,7 @@ resource "aws_instance" "validator" {
     volume_type           = "gp3"
     volume_size           = 50
     encrypted             = true
-    kms_key_id            = var.kms_key_id
+    kms_key_id            = local.kms_key_id
     delete_on_termination = true
 
     tags = {
@@ -146,8 +148,8 @@ resource "aws_instance" "validator" {
     }
 
     precondition {
-      condition     = var.network != "mainnet" || (local.validator_hw.default_cores >= 8 && local.validator_hw.memory_size > 32768)
-      error_message = "On mainnet the validator needs at least 8 physical cores and more than 32 GiB of memory (the host reads a 32 GiB VM as 31 GiB, under the floor). ${local.validator_type} has ${local.validator_hw.default_cores} cores and ${floor(local.validator_hw.memory_size / 1024)} GiB; leave validator_instance_type null for m7i.4xlarge."
+      condition     = var.network != "mainnet" || (local.validator_hw.default_cores >= 8 && local.validator_hw.memory_size >= 32768)
+      error_message = "On mainnet the validator needs at least 8 physical cores and 32 GiB of memory, the node scripts' validator floor. ${local.validator_type} has ${local.validator_hw.default_cores} cores and ${floor(local.validator_hw.memory_size / 1024)} GiB; leave validator_instance_type null for m7i.4xlarge (8 cores, 64 GiB), or name a larger type."
     }
 
     precondition {

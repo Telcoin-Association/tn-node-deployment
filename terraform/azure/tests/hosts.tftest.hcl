@@ -20,20 +20,20 @@ override_resource {
 override_resource {
   target          = azurerm_resource_group.this
   override_during = plan
-  values          = { id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/tn-rg" }
+  values          = { id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/telcoin-rg" }
 }
 
 # Known IDs, so the provider can check the data disk attachment at plan time.
 override_resource {
   target          = azurerm_managed_disk.data
   override_during = plan
-  values          = { id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/tn-rg/providers/Microsoft.Compute/disks/tn-validator-data" }
+  values          = { id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/telcoin-rg/providers/Microsoft.Compute/disks/telcoin-validator-data" }
 }
 
 override_resource {
   target          = azurerm_linux_virtual_machine.validator
   override_during = plan
-  values          = { id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/tn-rg/providers/Microsoft.Compute/virtualMachines/tn-validator" }
+  values          = { id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/telcoin-rg/providers/Microsoft.Compute/virtualMachines/telcoin-validator" }
 }
 
 variables {
@@ -46,8 +46,8 @@ run "first_apply" {
   command = plan
 
   assert {
-    condition     = length(azurerm_linux_virtual_machine.gateway) == 0 && !output.gateway_created
-    error_message = "The gateway VM must not exist while rpc_domain is empty."
+    condition     = length(azurerm_linux_virtual_machine.gateway) == 0 && !output.gateway_created && output.session_command.gateway == null
+    error_message = "The gateway VM, and a command to reach it, must not exist while rpc_domain is empty."
   }
 
   assert {
@@ -107,12 +107,12 @@ run "second_apply" {
   }
 
   assert {
-    condition     = azurerm_linux_virtual_machine.validator.custom_data == base64gzip(module.plan.validator_user_data) && output.validator_user_data_sha256 == sha256(module.plan.validator_user_data)
+    condition     = azurerm_linux_virtual_machine.validator.custom_data == base64gzip(module.host_plan.validator_user_data) && output.validator_user_data_sha256 == sha256(module.host_plan.validator_user_data)
     error_message = "The validator boots from the host plan's user data, gzipped."
   }
 
   assert {
-    condition     = azurerm_linux_virtual_machine.gateway[0].custom_data == base64gzip(module.plan.gateway_user_data)
+    condition     = azurerm_linux_virtual_machine.gateway[0].custom_data == base64gzip(module.host_plan.gateway_user_data)
     error_message = "The gateway boots from the host plan's user data, gzipped."
   }
 
@@ -125,12 +125,12 @@ run "second_apply" {
       "TN_FB_DOMAIN='rpc.example.org'\n",
       "TN_FB_PUBLIC_IP='203.0.113.20'\n",
       "TN_FB_SSH_FROM='198.51.100.7/32,10.42.0.0/16'\n",
-    ] : strcontains(module.plan.gateway_env, want)])
+    ] : strcontains(module.host_plan.gateway_env, want)])
     error_message = "The gateway env must point the gateway at the validator's private address, 10.42.1.10."
   }
 
   assert {
-    condition     = strcontains(module.plan.validator_env, "TN_FB_DATA_DEVICE='/dev/disk/azure/scsi1/lun0'\n") && strcontains(module.plan.validator_env, "TN_FB_LOGIN_USER='ubuntu'\n")
+    condition     = strcontains(module.host_plan.validator_env, "TN_FB_DATA_DEVICE='/dev/disk/azure/scsi1/lun0'\n") && strcontains(module.host_plan.validator_env, "TN_FB_LOGIN_USER='ubuntu'\n")
     error_message = "The validator's data device is LUN 0 of the SCSI data controller and its login user the admin user."
   }
 
@@ -258,12 +258,12 @@ run "hubs_file" {
   }
 
   assert {
-    condition     = strcontains(module.plan.validator_env, "TN_FB_TRUSTED_NODES='/etc/telcoin-first-boot/trusted-nodes.yaml'\n") && contains([for f in yamldecode(module.plan.validator_user_data).write_files : f.path], "/etc/telcoin-first-boot/trusted-nodes.yaml")
+    condition     = strcontains(module.host_plan.validator_env, "TN_FB_TRUSTED_NODES='/etc/telcoin-first-boot/trusted-nodes.yaml'\n") && contains([for f in yamldecode(module.host_plan.validator_user_data).write_files : f.path], "/etc/telcoin-first-boot/trusted-nodes.yaml")
     error_message = "A hubs file reaches the validator through its user data."
   }
 
   assert {
-    condition     = module.plan.validator_user_data_gzip_bytes <= 65535
+    condition     = module.host_plan.validator_user_data_gzip_bytes <= 65535
     error_message = "The validator's custom data must fit Azure's 65535 bytes."
   }
 }
@@ -273,7 +273,6 @@ run "single_node_without_gateway" {
 
   variables {
     gateway_enabled = false
-    rpc_domain      = "rpc.example.org"
   }
 
   assert {
@@ -314,12 +313,13 @@ run "session_commands_bastion" {
   variables {
     admin_ssh_cidrs = []
     enable_bastion  = true
+    rpc_domain      = "rpc.example.org"
   }
 
   assert {
     condition = (
-      output.session_command.validator == "az network bastion ssh --name tn-bastion --resource-group tn-rg --target-resource-id /subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/tn-rg/providers/Microsoft.Compute/virtualMachines/tn-validator --auth-type ssh-key --username ubuntu --ssh-key ~/.ssh/id_ed25519" &&
-      output.session_command.gateway == "az network bastion ssh --name tn-bastion --resource-group tn-rg --target-resource-id /subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/tn-rg/providers/Microsoft.Compute/virtualMachines/tn-gateway --auth-type ssh-key --username ubuntu --ssh-key ~/.ssh/id_ed25519"
+      output.session_command.validator == "az network bastion ssh --name telcoin-bastion --resource-group telcoin-rg --target-resource-id /subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/telcoin-rg/providers/Microsoft.Compute/virtualMachines/telcoin-validator --auth-type ssh-key --username ubuntu --ssh-key ~/.ssh/id_ed25519" &&
+      output.session_command.gateway == "az network bastion ssh --name telcoin-bastion --resource-group telcoin-rg --target-resource-id /subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/telcoin-rg/providers/Microsoft.Compute/virtualMachines/telcoin-gateway --auth-type ssh-key --username ubuntu --ssh-key ~/.ssh/id_ed25519"
     )
     error_message = "With Bastion the operator connects through az network bastion ssh to each VM's resource ID."
   }

@@ -162,6 +162,7 @@ run "no_gateway" {
 
   variables {
     gateway_enabled = false
+    rpc_domain      = ""
   }
 
   assert {

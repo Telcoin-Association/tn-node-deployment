@@ -153,9 +153,9 @@ run "throughput_over_gp3" {
 run "kms_alias" {
   command = plan
   variables {
-    kms_key_id = "arn:aws:kms:us-east-1:111122223333:alias/aws/ebs"
+    disk_kms_key = "arn:aws:kms:us-east-1:111122223333:alias/aws/ebs"
   }
-  expect_failures = [var.kms_key_id]
+  expect_failures = [var.disk_kms_key]
 }
 
 run "missing_hubs_file" {
@@ -187,8 +187,27 @@ run "mainnet_four_cores" {
   expect_failures = [aws_instance.validator]
 }
 
-# check_hardware rounds MemTotal down, so a 32 GiB VM reads 31 and misses
-# the 32 GiB floor.
+# The floor is the node scripts' own: 8 cores and 32 GiB.
+run "mainnet_under_32_gib" {
+  command = plan
+  variables {
+    network = "mainnet"
+  }
+
+  override_data {
+    target = data.aws_ec2_instance_type.validator
+    values = {
+      default_cores           = 8
+      memory_size             = 31744
+      supported_architectures = ["x86_64"]
+      ebs_nvme_support        = "required"
+      nitro_tpm_support       = "supported"
+    }
+  }
+
+  expect_failures = [aws_instance.validator]
+}
+
 run "mainnet_32_gib" {
   command = plan
   variables {
@@ -206,7 +225,10 @@ run "mainnet_32_gib" {
     }
   }
 
-  expect_failures = [aws_instance.validator]
+  assert {
+    condition     = aws_instance.validator.instance_type == "m7i.4xlarge"
+    error_message = "A mainnet type at the floor, 8 cores and 32 GiB, is accepted."
+  }
 }
 
 run "testnet_four_cores" {
@@ -352,4 +374,54 @@ run "user_data_over_the_limit" {
   }
 
   expect_failures = [aws_instance.validator]
+}
+
+run "vpc_with_host_bits" {
+  command = plan
+
+  variables {
+    vpc_cidr = "10.42.0.5/16"
+  }
+
+  expect_failures = [var.vpc_cidr]
+}
+
+run "zero_validator_address" {
+  command = plan
+
+  variables {
+    validator_address = "0x0000000000000000000000000000000000000000"
+  }
+
+  expect_failures = [var.validator_address]
+}
+
+run "mainnet_release_tag_on_testnet" {
+  command = plan
+
+  variables {
+    node_release_tag = "v0.18.0"
+  }
+
+  expect_failures = [var.node_release_tag]
+}
+
+run "redirect_not_a_url" {
+  command = plan
+
+  variables {
+    redirect_queries_url = "rpc.example.org"
+  }
+
+  expect_failures = [var.redirect_queries_url]
+}
+
+run "rate_limit_not_whole" {
+  command = plan
+
+  variables {
+    gateway_rate_limit_submissions = 1.5
+  }
+
+  expect_failures = [var.gateway_rate_limit_submissions]
 }

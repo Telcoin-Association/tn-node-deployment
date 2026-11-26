@@ -122,6 +122,40 @@ run "four_cores_on_mainnet" {
   expect_failures = [google_compute_instance.validator]
 }
 
+# The floor is the node scripts' own, 8 cores and 32 GiB, in vCPUs here.
+run "mainnet_under_32_gib" {
+  command = plan
+
+  variables {
+    network = "mainnet"
+  }
+
+  override_data {
+    target = data.google_compute_machine_types.validator
+    values = { machine_types = [{ name = "c3d-standard-16", guest_cpus = 16, memory_mb = 31744 }] }
+  }
+
+  expect_failures = [google_compute_instance.validator]
+}
+
+run "mainnet_32_gib" {
+  command = plan
+
+  variables {
+    network = "mainnet"
+  }
+
+  override_data {
+    target = data.google_compute_machine_types.validator
+    values = { machine_types = [{ name = "c3d-standard-16", guest_cpus = 16, memory_mb = 32768 }] }
+  }
+
+  assert {
+    condition     = google_compute_instance.validator.machine_type == "c3d-standard-16"
+    error_message = "A mainnet type at the floor, 8 cores and 32 GiB, is accepted."
+  }
+}
+
 run "type_not_in_zone" {
   command = plan
 
@@ -195,12 +229,11 @@ run "iops_over_hyperdisk_limit" {
   expect_failures = [var.data_disk_iops]
 }
 
-run "throughput_over_iops_ratio" {
+run "throughput_over_hyperdisk" {
   command = plan
 
   variables {
-    data_disk_iops       = 15000
-    data_disk_throughput = 4000
+    data_disk_throughput = 2500
   }
 
   expect_failures = [var.data_disk_throughput]
@@ -225,4 +258,97 @@ run "missing_hubs_file" {
   }
 
   expect_failures = [var.trusted_nodes_file]
+}
+
+run "domain_without_gateway" {
+  command = plan
+
+  variables {
+    gateway_enabled = false
+    rpc_domain      = "rpc.example.org"
+  }
+
+  expect_failures = [var.rpc_domain]
+}
+
+run "admin_cidr_ipv6" {
+  command = plan
+
+  variables {
+    admin_ssh_cidrs = ["2001:db8::/32"]
+  }
+
+  expect_failures = [var.admin_ssh_cidrs]
+}
+
+run "admin_cidr_with_host_bits" {
+  command = plan
+
+  variables {
+    admin_ssh_cidrs = ["198.51.100.7/24"]
+  }
+
+  expect_failures = [var.admin_ssh_cidrs]
+}
+
+run "vpc_with_host_bits" {
+  command = plan
+
+  variables {
+    vpc_cidr = "10.42.0.5/16"
+  }
+
+  expect_failures = [var.vpc_cidr]
+}
+
+run "zero_validator_address" {
+  command = plan
+
+  variables {
+    validator_address = "0x0000000000000000000000000000000000000000"
+  }
+
+  expect_failures = [var.validator_address]
+}
+
+run "mainnet_release_tag_on_testnet" {
+  command = plan
+
+  variables {
+    node_release_tag = "v0.18.0"
+  }
+
+  expect_failures = [var.node_release_tag]
+}
+
+run "redirect_not_a_url" {
+  command = plan
+
+  variables {
+    redirect_queries_url = "rpc.example.org"
+  }
+
+  expect_failures = [var.redirect_queries_url]
+}
+
+run "rate_limit_not_whole" {
+  command = plan
+
+  variables {
+    gateway_rate_limit_submissions = 1.5
+  }
+
+  expect_failures = [var.gateway_rate_limit_submissions]
+}
+
+# Hyperdisk Balanced needs at least IOPS/256 MiB/s: 100000 IOPS need 391.
+run "throughput_under_iops_share" {
+  command = plan
+
+  variables {
+    data_disk_iops       = 100000
+    data_disk_throughput = 300
+  }
+
+  expect_failures = [var.data_disk_throughput]
 }

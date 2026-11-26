@@ -23,6 +23,8 @@ resource "google_compute_instance" "gateway" {
   allow_stopping_for_update = true
 
   boot_disk {
+    kms_key_self_link = local.kms_key
+
     initialize_params {
       image = data.google_compute_image.ubuntu.self_link
       size  = local.boot_disk_gb

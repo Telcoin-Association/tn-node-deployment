@@ -19,7 +19,6 @@ module "host_plan" {
   redirect_queries_url           = var.redirect_queries_url
   gateway_rate_limit_submissions = var.gateway_rate_limit_submissions
   validator_address              = var.validator_address
-  allow_no_tpm                   = var.allow_no_tpm
   session_commands               = local.session_commands
   node_release_tag               = var.node_release_tag
 }
@@ -36,8 +35,8 @@ data "google_compute_machine_types" "validator" {
   filter = "name = \"${local.validator_type}\""
 }
 
-# Compute Engine encrypts every disk; data_disk_kms_key swaps Google's key for
-# the operator's Cloud KMS key.
+# Compute Engine encrypts every disk; disk_kms_key swaps Google's key for the
+# operator's Cloud KMS key, here and on both boot disks.
 resource "google_compute_disk" "data" {
   name                   = "${var.name_prefix}-validator-data"
   zone                   = local.zone
@@ -47,7 +46,7 @@ resource "google_compute_disk" "data" {
   provisioned_throughput = local.data_disk.throughput
 
   dynamic "disk_encryption_key" {
-    for_each = var.data_disk_kms_key != "" ? [var.data_disk_kms_key] : []
+    for_each = local.kms_key != null ? [local.kms_key] : []
     content {
       kms_key_self_link = disk_encryption_key.value
     }
@@ -72,6 +71,8 @@ resource "google_compute_instance" "validator" {
   allow_stopping_for_update = false
 
   boot_disk {
+    kms_key_self_link = local.kms_key
+
     initialize_params {
       image = data.google_compute_image.ubuntu.self_link
       size  = local.boot_disk_gb
@@ -134,10 +135,10 @@ resource "google_compute_instance" "validator" {
     }
 
     # Compute Engine x86 types run two threads per core, so a core is two
-    # vCPUs; the floor is the mainnet validator minimum of lib/common.sh.
+    # vCPUs; the floor is the node scripts' mainnet validator minimum.
     precondition {
       condition     = var.network != "mainnet" || try(data.google_compute_machine_types.validator.machine_types[0].guest_cpus >= 16 && data.google_compute_machine_types.validator.machine_types[0].memory_mb >= 32768, false)
-      error_message = "A mainnet validator needs at least 8 physical cores (16 vCPUs) and 32 GiB of memory, and ${local.validator_type} has less. Leave validator_instance_type unset for ${local.validator_default.mainnet.type}, or name a larger type."
+      error_message = "On mainnet the validator needs at least 8 physical cores and 32 GiB of memory, the node scripts' validator floor; Compute Engine counts 16 vCPUs for 8 cores. ${local.validator_type} has ${try(data.google_compute_machine_types.validator.machine_types[0].guest_cpus, 0)} vCPUs and ${floor(try(data.google_compute_machine_types.validator.machine_types[0].memory_mb, 0) / 1024)} GiB; leave validator_instance_type null for c3d-standard-16 (8 cores, 64 GiB), or name a larger type."
     }
   }
 }
