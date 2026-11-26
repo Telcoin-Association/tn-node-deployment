@@ -715,6 +715,7 @@ check "summary, the gateway's default: its URL, no wss, no rpc-enable" "yes yes 
 out="$( (NETWORK=mainnet; DATA_DIR="$T/data"; PUBLIC_RPC_DOMAIN=node9.example.org; step_final_summary) 2>&1 )"
 check "summary, the gateway's default and --rpc-domain, not a validator: the way to its own site" "yes yes yes no" \
     "$(has "$out" "To serve https://node9.example.org/ from this host instead, run:") $(has "$out" "    ${UNADV_CMD}") $(has "$out" "    ${ENABLE_CMD}") $(has "$out" "rpc-advertise")"
+# shellcheck disable=SC2030  # each subshell sets its own
 out="$( (NETWORK=mainnet; DATA_DIR="$T/data"; PUBLIC_RPC_DOMAIN=node9.example.org; RPC_VIA_GATEWAY=true; step_final_summary) 2>&1 )"
 check "summary, the gateway's default and --rpc-domain, a validator: no way to a site here" "yes no" \
     "$(has "$out" "    https://${H}/") $(has "$out" "rpc-enable")"
@@ -729,6 +730,8 @@ command rm -f "$CONFIG_DIR/.node-meta"
 out="$( (main --help) 2>&1 )"
 check "--help: a validator's --rpc-domain, --rpc-http and --rpc-ws; the default name" "yes yes yes yes" \
     "$(has "$out" "On a mainnet validator (--admission closed) it is the name") $(has "$out" "gateway's URL, https:// only.") $(has "$out" "A mainnet validator advertises none: it is dropped,") $(has "$out" "A mainnet node given no RPC URL advertises https://v<label>.telcoin.network/")"
+check "--help: --public-ip lines up with the other public-RPC options" "27 27" \
+    "$(printf '%s\n' "$out" | awk '/^  --rpc-domain / { print index($0, "Public RPC") - 1 }') $(printf '%s\n' "$out" | awk '/^  --public-ip / { print index($0, "Inbound") - 1 }')"
 
 # Over existing keys: refused, the keytool does not run again.
 mkdir -p "$T/data/node-keys"
@@ -843,6 +846,81 @@ check_has "keys network: keygen recorded the gateway's default" "RPC_ADVERTISED_
 rc="$( tn_mainnet_enabled() { return 0; }; over_keys --json --phase=finalize --network mainnet "${LST[@]}" --rpc-domain node9.example.org )"
 check "mainnet finalize --rpc-domain over the gateway's record: done ok, no enable step, the record kept" "yes no yes" \
     "$(has "$(tail -n 1 "$T/out")" '"event":"done","ok":true,"phase":"finalize"') $(has "$(cat "$T/out")" '"msg":"Enabling public RPC') $(has "$(cat "$T/out")" "and that record is kept: no public RPC site for node9.example.org runs on this host. To serve https://node9.example.org/ from this host instead, run: sudo bash $T/sn/install-caddy.sh --phase=rpc-unadvertise, then: sudo bash $T/sn/install-caddy.sh --phase=rpc-enable --rpc-domain node9.example.org")"
+# A validator's keys (admission closed recorded): a finalize or an interactive re-run that
+# passes no --admission is a validator's from its first line, by what .node-meta records.
+awk '!/^ADMISSION_MODE=/' "$T/meta.keygen" > "$T/meta.val"
+printf 'ADMISSION_MODE=closed\n' >> "$T/meta.val"
+cp "$T/meta.val" "$CONFIG_DIR/.node-meta"
+rc="$( tn_mainnet_enabled() { return 0; }; over_keys --json --phase=finalize --network mainnet "${LST[@]}" --rpc-public )"
+check "validator finalize --rpc-public: done ok, the gateway notice, no rpc-enable" "yes yes no" \
+    "$(has "$(tail -n 1 "$T/out")" '"event":"done","ok":true,"phase":"finalize"') $(has "$(cat "$T/out")" "{\"event\":\"log\",\"msg\":\"public RPC not enabled: no public RPC domain given (--rpc-public without --rpc-domain <hostname>) -- a mainnet validator's RPC is served by its worker gateway, not by this host. To name your worker gateway, pass --rpc-domain <name>; once the keys exist, run: ${ADV_CMD} <name>\"}") $(has "$(cat "$T/out")" "rpc-enable")"
+rc="$( tn_mainnet_enabled() { return 0; }; over_keys --json --phase=finalize --network mainnet "${LST[@]}" --rpc-domain gw9.example.org --rpc-ws wss://x.example.org/ )"
+check "validator finalize --rpc-domain --rpc-ws: done ok, ws dropped once, no Caddy site or rpc-enable" "yes 1 no no" \
+    "$(has "$(tail -n 1 "$T/out")" '"event":"done","ok":true,"phase":"finalize"') $(grep -c "WARNING: --rpc-ws wss://x.example.org/ is dropped: on a mainnet validator (admission closed)" "$T/out") $(has "$(cat "$T/out")" "rpc-enable") $(has "$(cat "$T/out")" '"msg":"Enabling public RPC')"
+check "validator finalize --rpc-domain --rpc-ws: the gateway's record kept, the rpc-advertise command" yes \
+    "$(has "$(cat "$T/out")" "and that record is kept: no public RPC site for gw9.example.org runs on this host. To advertise https://gw9.example.org/ for the gateway instead, run: ${ADV_CMD} gw9.example.org")"
+check "validator finalize --rpc-domain --rpc-ws: the ws warning before the lock" yes \
+    "$(awk '/is dropped: on a mainnet validator/ && !w { w = NR } /layout to migrate/ && !s { s = NR } END { print (w && s && w < s) ? "yes" : "no" }' "$T/out")"
+rc="$( tn_mainnet_enabled() { return 0; }; over_keys --json --phase=finalize --network mainnet "${LST[@]}" --rpc-http http://gw8.example.org/ )"
+check "validator finalize --rpc-http http://: refused, nothing written" \
+    "1 $(done_false "--rpc-http http://gw8.example.org/ ${HTTP_REFUSED} Nothing on this host was changed.") same no no" \
+    "${rc} $(tail -n 1 "$T/out") $(cmp -s "$T/meta.val" "$CONFIG_DIR/.node-meta" && echo same || echo changed) $([[ -e "$REC/root-reached" ]] && echo yes || echo no) $([[ -e "$T/update.lock" || -e "$REC/meta.log" ]] && echo yes || echo no)"
+# An interactive re-run: the http:// refusal before the welcome screen, and the RPC choice
+# names the gateway.
+rc=0
+command rm -f "${REC:?}"/*
+( step_welcome() { : > "$REC/welcome"; exit 0; }; NETWORK=""; main --rpc-http http://gw8.example.org/ ) < /dev/null > "$T/out" 2> "$T/err" || rc=$?
+check "interactive re-run --rpc-http http://: refused before the welcome screen" "1 yes no no" \
+    "${rc} $(has "$(cat "$T/err")" "--rpc-http http://gw8.example.org/ ${HTTP_REFUSED} Nothing on this host was changed.") $([[ -e "$REC/welcome" ]] && echo yes || echo no) $([[ -e "$REC/root-reached" ]] && echo yes || echo no)"
+command rm -f "$REC/welcome"
+rerun() {  # rerun ARGS... -- an interactive re-run's flag check, the network chosen, then step_config: its output
+    ( JSON_MODE=false; NETWORK=""; ADMISSION_MODE=""
+      print_header() { :; }; prompt_port() { :; }; confirm() { return 0; }
+      while [[ $# -gt 0 ]]; do
+          case "$1" in
+              --rpc-domain) PUBLIC_RPC_DOMAIN="$2"; RPC_DOMAIN_GIVEN=true; shift 2 ;;
+              --rpc-ws) ADVERTISE_RPC_WS="$2"; shift 2 ;;
+              --admission) ADMISSION_MODE="$2"; shift 2 ;;
+          esac
+      done
+      init_public_rpc_flags
+      echo "--- welcome"
+      NETWORK=mainnet
+      setup_rpc_gateway_posture
+      step_config
+      # shellcheck disable=SC2031  # set by the posture in this same subshell
+      echo "via=${RPC_VIA_GATEWAY}" ) 2>&1
+}
+out="$(rerun <<< $'2\ngw7.example.org\n')"
+check "interactive re-run: the gateway's name in the prompt and the RPC access line" "yes yes yes via=true" \
+    "$(has "$out" "2) Gateway name      -- https://<domain>/, the name of your worker gateway,") $(has "$out" "Enter the DNS name of your worker gateway.") $(has "$out" "RPC access: ${GW_ACCESS}") $(printf '%s\n' "$out" | tail -n 1)"
+check "interactive re-run: no Caddy site, no wss, no inbound IP" "no no no" \
+    "$(has "$out" "80 + 443") $(has "$out" "wss://") $(has "$out" "Inbound public IP")"
+out="$(rerun --rpc-domain gw7.example.org --rpc-ws wss://x.example.org/ <<< $'\n')"
+check "interactive re-run --rpc-domain --rpc-ws: the gateway's name, ws dropped after the welcome screen, once" "yes 1 no" \
+    "$(has "$out" "RPC access (--rpc-domain): ${GW_ACCESS}") $(printf '%s\n' "$out" | awk 'f; /^--- welcome$/ { f = 1 }' | grep -c "WARN.* --rpc-ws wss://x.example.org/ is dropped") $(printf '%s\n' "$out" | awk '/^--- welcome$/ { exit } { print }' | grep -q "is dropped" && echo yes || echo no)"
+out="$(rerun --admission open <<< $'2\nnode7.example.org\n')"
+check "interactive re-run --admission open: the flag wins, the Caddy site of before" "yes via=false" \
+    "$(has "$out" "RPC access: public -- https://node7.example.org/ + wss://node7.example.org/") $(printf '%s\n' "$out" | tail -n 1)"
+# The posture's inputs alone: a network or a mode given wins over the record; a --json
+# keygen, which records the mode it is given, goes by its flags.
+pv() {  # pv JSON PHASE NETWORK ADMISSION -- RPC_VIA_GATEWAY after the posture over that .node-meta
+    ( JSON_MODE="$1"; JSON_PHASE="$2"; JSON_NETWORK_INPUT=testnet; NETWORK="$3"; ADMISSION_MODE="$4"
+      setup_rpc_gateway_posture > /dev/null 2>&1
+      # shellcheck disable=SC2031  # set by the posture in this same subshell
+      echo "$RPC_VIA_GATEWAY" )
+}
+check "posture from the record: interactive, the network chosen" true "$(pv false "" mainnet "")"
+check "posture from the record: interactive, before the menu" true "$(pv false "" "" "")"
+check "posture from the record: interactive, another network chosen" false "$(pv false "" testnet "")"
+check "posture from the record: --admission open given" false "$(pv false "" mainnet open)"
+check "posture from the record: --json finalize" true "$(pv true finalize mainnet "")"
+check "posture from the record: --json keygen goes by its flags" false "$(pv true keygen mainnet "")"
+sed 's/^NETWORK=.*/NETWORK=testnet/' "$T/meta.val" > "$CONFIG_DIR/.node-meta"
+check "posture from the record: a testnet record, before the menu" false "$(pv false "" "" "")"
+cp "$T/meta.keygen" "$CONFIG_DIR/.node-meta"
+check "posture from the record: no mode recorded" false "$(pv false "" mainnet "")"
+cp "$T/meta.val" "$CONFIG_DIR/.node-meta"
 # A host keyed by an older release (no NETWORK): a testnet finalize goes on as before.
 grep -v '^NETWORK=' "$T/meta.keygen" > "$CONFIG_DIR/.node-meta"
 over_keys --json --phase=finalize --network testnet "${LST[@]}" > /dev/null

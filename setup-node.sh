@@ -24,7 +24,7 @@
 #                            of its worker gateway instead: advertised as https only,
 #                            with no WebSocket URL and no public RPC site on this host;
 #                            its A record points at the gateway host's static public IP.
-#   --public-ip <ip>       Inbound public IP the A record points at (NAT / multi-IP
+#   --public-ip <ip>         Inbound public IP the A record points at (NAT / multi-IP
 #                            hosts); passed through to install-caddy.sh. In --json mode it
 #                            is also the P2P public IP, as before. A value that is not an
 #                            IPv4 or IPv6 address is ignored, with a warning.
@@ -1639,8 +1639,9 @@ init_public_rpc_flags() {
         ENABLE_PUBLIC_RPC="true"
     fi
     derive_public_rpc_urls
-    # A --json run knows here whether it is a mainnet validator's (an interactive run knows
-    # once the network is chosen): the notes below, and the URLs keygen gets, follow from it.
+    # A --json run, and an interactive run over a node .node-meta records, know here
+    # whether it is a mainnet validator's (another interactive run knows once the network
+    # is chosen): the notes below, and the URLs keygen gets, follow from it.
     setup_rpc_gateway_posture
     if [[ -n "$RPC_PRIVATE_NOTE" ]] && json_mode; then
         public_rpc_no_domain_notice
@@ -1928,21 +1929,37 @@ derive_public_rpc_urls() {
 # init_public_rpc_flags (NETWORK is set later, by json_set_network, from the --network
 # read here; --admission may still be in the case it was given in), an interactive one
 # once the network is chosen (step_preflight). step_generate_keys asks again, and so does
-# a finalize once it has read the mode back. Safe to call more than once.
+# a finalize once it has read the mode back. A run that takes the admission mode it is
+# not given from .node-meta (a finalize, an interactive run: admission_read_back) knows
+# it from there in init_public_rpc_flags already, and an interactive one takes the
+# recorded network until the menu sets one; a flag given wins. A --json keygen records
+# the mode it is given, so its flags alone decide. Safe to call more than once.
 setup_rpc_gateway_posture() {
-    local net="$NETWORK" mode
+    local net="$NETWORK" mode="$ADMISSION_MODE" meta="${CONFIG_DIR}/.node-meta" w
     if [[ -z "$net" ]] && json_mode; then
         net="$JSON_NETWORK_INPUT"
     fi
-    mode="$(printf '%s' "$ADMISSION_MODE" | tr '[:upper:]' '[:lower:]')"
+    if [[ -f "$meta" ]] && { ! json_mode || [[ "$JSON_PHASE" == "finalize" ]]; }; then
+        [[ -n "$net" ]] || net="$(meta_get NETWORK "$meta" 2>/dev/null)" || net=""
+        [[ -n "$mode" ]] || mode="$(meta_get ADMISSION_MODE "$meta" 2>/dev/null)" || mode=""
+    fi
+    mode="$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]')"
     [[ "$net" == "mainnet" && "$mode" == "closed" ]] || return 0
     RPC_VIA_GATEWAY=true
+    # No NETWORK yet: an interactive run before its welcome screen. Nothing on the host
+    # has changed, and that screen clears what prints here, so step_config prints the
+    # warning with the other RPC notes.
     case "$ADVERTISE_RPC_HTTP" in
         ""|https://*) ;;
-        *) setup_fail "--rpc-http ${ADVERTISE_RPC_HTTP} is refused: a mainnet validator's RPC URL (admission closed) is its worker gateway's, and must be https://. Pass --rpc-http https://<name>/ or --rpc-domain <name>.$(json_mode && printf ' Nothing on this host was changed.')" ;;
+        *) setup_fail "--rpc-http ${ADVERTISE_RPC_HTTP} is refused: a mainnet validator's RPC URL (admission closed) is its worker gateway's, and must be https://. Pass --rpc-http https://<name>/ or --rpc-domain <name>.$({ json_mode || [[ -z "$NETWORK" ]]; } && printf ' Nothing on this host was changed.')" ;;
     esac
     if [[ -n "$ADVERTISE_RPC_WS" && "$ADVERTISE_RPC_WS" != "wss://${PUBLIC_RPC_DOMAIN}/" ]]; then
-        setup_warn "--rpc-ws ${ADVERTISE_RPC_WS} is dropped: on a mainnet validator (admission closed) the RPC URL names its worker gateway, which serves HTTPS only, so node-info.yaml advertises no WebSocket URL."
+        w="--rpc-ws ${ADVERTISE_RPC_WS} is dropped: on a mainnet validator (admission closed) the RPC URL names its worker gateway, which serves HTTPS only, so node-info.yaml advertises no WebSocket URL."
+        if json_mode || [[ -n "$NETWORK" ]]; then
+            setup_warn "$w"
+        else
+            RPC_INPUT_WARNINGS+=("$w")
+        fi
     fi
     ADVERTISE_RPC_WS=""
     PUBLIC_WS_URL=""
