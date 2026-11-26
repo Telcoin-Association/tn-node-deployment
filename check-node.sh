@@ -2375,6 +2375,145 @@ check_gateway() {
     return 0
 }
 
+# check_gateway_edge -- the public side of a worker gateway that Caddy fronts
+# (FRONT=caddy), run after check_gateway from the GW_ST_* values its gw_status
+# left; silent for any other gateway, and when gw_status did not run.
+#   /ready  not 200 while the gateway runs: a warning, and an issue on a host
+#           with no node, whose only job is to take transactions to the
+#           validator
+#   DNS     install-caddy.sh --json --phase=gateway-check-dns, which decides
+#           whether the name reaches this host: a name that does not resolve is
+#           an issue, one that resolves elsewhere a warning (NAT or a proxy can
+#           make that right)
+#   https   GET https://<domain>/health through Caddy on this host (curl
+#           --resolve <domain>:443:127.0.0.1) must answer 200 over a verified
+#           certificate, else an issue; a warning when that certificate expires
+#           within 14 days (openssl, when the host has it)
+#   ufw     active, with allow rules for 80/tcp and 443/tcp, which Caddy needs
+#           for https://<domain>/ and its certificate; reading ufw needs root
+# A cloud firewall cannot be seen from the host; one information line says so.
+check_gateway_edge() {
+    local dom json="" tool="${SCRIPT_DIR}/install-caddy.sh" re resolved="" pub=""
+    local url code crc=0 got fix cert="" end="" missing=""
+    [[ "${GW_ST_INSTALLED:-}" == "true" && "${GW_ST_FRONT:-}" == "caddy" ]] || return 0
+    dom="${GW_ST_DOMAIN:-}"
+    echo ""
+    print_step "Checking the worker gateway's public edge (Caddy)..."
+
+    if [[ "${GW_ST_ACTIVE:-}" == "true" && "${GW_ST_HEALTH:-}" == "true" && "${GW_ST_READY:-}" != "true" ]]; then
+        if [[ "$CN_GATEWAY_ONLY" == "true" ]]; then
+            print_error "The gateway's /ready is not 200, so it refuses transactions (503): the validator at ${GW_ST_UPSTREAM_READINESS:-its upstream} is down, catching up or not reachable from this host. Run bash check-node.sh on the validator host."
+            (( ++HEALTH_ISSUES ))
+        else
+            print_warn "The gateway's /ready is not 200, so it refuses transactions (503) until the node at ${GW_ST_UPSTREAM_READINESS:-its upstream} is ready"
+        fi
+    fi
+
+    if [[ -z "$dom" ]]; then
+        if [[ "$(id -u 2>/dev/null)" != "0" ]]; then
+            print_info "Gateway name, DNS and certificate: not checked (the name is in gateway.meta, which needs sudo to read)"
+        else
+            print_info "Gateway name, DNS and certificate: not checked (gateway.meta names no DOMAIN)"
+        fi
+    else
+        if [[ -r "$tool" ]]; then
+            if command -v timeout >/dev/null 2>&1; then
+                json="$(timeout 20 bash "$tool" --json --phase=gateway-check-dns --gateway-domain "$dom" 2>/dev/null | tail -n 1)"
+            else
+                json="$(bash "$tool" --json --phase=gateway-check-dns --gateway-domain "$dom" 2>/dev/null | tail -n 1)"
+            fi
+        fi
+        json="${json// /}"
+        re='"resolved_ip":"([0-9.]*)"'
+        [[ ! "$json" =~ $re ]] || resolved="${BASH_REMATCH[1]}"
+        re='"public_ip":"([0-9.]*)"'
+        [[ ! "$json" =~ $re ]] || pub="${BASH_REMATCH[1]}"
+        case "$json" in
+            *'"error":'*|"")
+                print_info "DNS of ${dom}: not checked (install-caddy.sh --json --phase=gateway-check-dns gave no answer)" ;;
+            *'"propagated":true'*)
+                print_ok "DNS: ${dom} resolves to ${resolved}, an address that reaches this host" ;;
+            *'"propagated":false'*)
+                if [[ -z "$resolved" ]]; then
+                    print_error "DNS: ${dom} does not resolve, so nobody reaches the gateway by its name; its A record must point at this host's static public IP${pub:+ (${pub} as seen from here)}"
+                    (( ++HEALTH_ISSUES ))
+                else
+                    print_warn "DNS: ${dom} resolves to ${resolved}, which is neither this host's public IP${pub:+ (${pub} as seen from here)} nor a local address; behind NAT or a proxy that can be right, otherwise point the A record at this host's static public IP"
+                fi
+                ;;
+            *)
+                print_info "DNS of ${dom}: not checked (install-caddy.sh --json --phase=gateway-check-dns gave no answer)" ;;
+        esac
+
+        url="https://${dom}/health"
+        code="$(curl -q -sS -o /dev/null -w '%{http_code}' --proto '=https' --max-redirs 0 \
+            --connect-timeout 3 --max-time 5 --resolve "${dom}:443:127.0.0.1" "$url" 2>/dev/null)" || crc=$?
+        if [[ "$crc" -eq 0 && "$code" == "200" ]]; then
+            print_ok "GET ${url} through Caddy on this host answered 200 over a verified certificate"
+            if ! command -v openssl >/dev/null 2>&1; then
+                print_info "Certificate expiry: not checked (openssl not found)"
+            else
+                if command -v timeout >/dev/null 2>&1; then
+                    cert="$(timeout 10 openssl s_client -connect 127.0.0.1:443 -servername "$dom" < /dev/null 2>/dev/null)"
+                else
+                    cert="$(openssl s_client -connect 127.0.0.1:443 -servername "$dom" < /dev/null 2>/dev/null)"
+                fi
+                end="$(printf '%s\n' "$cert" | openssl x509 -noout -enddate 2>/dev/null)"
+                end="${end#notAfter=}"
+                if [[ -z "$end" ]]; then
+                    print_info "Certificate expiry: not checked (openssl could not read the certificate Caddy serves for ${dom})"
+                elif printf '%s\n' "$cert" | openssl x509 -noout -checkend 1209600 >/dev/null 2>&1; then
+                    print_ok "The certificate for ${dom} is valid until ${end}"
+                else
+                    print_warn "The certificate for ${dom} expires ${end}, within 14 days. Caddy renews it on its own, so renewal is failing: see journalctl -u caddy"
+                fi
+            fi
+        elif [[ "$crc" -eq 0 && "${GW_ST_HEALTH:-}" != "true" ]]; then
+            # Caddy answered over a verified certificate; the gateway behind it is
+            # down, which gw_status has counted already.
+            print_info "GET ${url} through Caddy on this host got HTTP ${code:-000}: the gateway behind Caddy does not answer (see above)"
+        else
+            fix="fix: bash setup-gateway.sh --status, and journalctl -u caddy"
+            case "$crc" in
+                0)  got="HTTP ${code:-000}" ;;
+                7)  got="the connection was refused"
+                    fix="fix: check that Caddy runs: systemctl status caddy" ;;
+                28) got="no answer within 5 s" ;;
+                35|51|53|54|58|59|60|64|66|77|80|82|83|90|91)
+                    got="a TLS or certificate error (curl exit ${crc}), so Caddy has no valid certificate for ${dom}"
+                    fix="Caddy gets one once the A record of ${dom} points at this host and TCP 80 and 443 reach it from anywhere; see journalctl -u caddy" ;;
+                *)  got="curl exit ${crc}" ;;
+            esac
+            print_error "GET ${url} through Caddy on this host got ${got} instead of 200"
+            print_info "$fix"
+            (( ++HEALTH_ISSUES ))
+        fi
+    fi
+
+    if [[ "$(id -u 2>/dev/null)" != "0" ]]; then
+        print_info "Gateway firewall (ufw): not checked (reading ufw needs sudo)"
+    elif ! have_fns ufw_installed ufw_active ufw_has_allow; then
+        print_info "Gateway firewall (ufw): not checked (lib/common.sh ${COMMON_VERSION:-unknown} is older than this check-node.sh; run update-scripts.sh)"
+    elif ! ufw_installed; then
+        print_error "ufw is not installed, so this host has no firewall of its own; install it (sudo apt-get install ufw), then run: sudo bash firewall-setup.sh --enable"
+        (( ++HEALTH_ISSUES ))
+    elif ! ufw_active; then
+        print_error "ufw is not active, so this host has no firewall rules in force; run: sudo bash firewall-setup.sh --enable (it keeps 80/tcp and 443/tcp open for Caddy)"
+        (( ++HEALTH_ISSUES ))
+    else
+        ufw_has_allow 80 tcp || missing="80/tcp"
+        ufw_has_allow 443 tcp || missing="${missing:+${missing} and }443/tcp"
+        if [[ -z "$missing" ]]; then
+            print_ok "ufw is active and allows 80/tcp and 443/tcp for Caddy"
+        else
+            print_error "ufw has no allow rule for ${missing}; Caddy needs TCP 80 and 443 open from anywhere to serve https://${dom:-<gateway name>}/ and renew its certificate; run: sudo bash firewall-setup.sh --enable"
+            (( ++HEALTH_ISSUES ))
+        fi
+    fi
+    print_info "Cloud firewall rules (security groups, firewall rules, NSGs) cannot be seen from this host: check that they let TCP 80 and 443 in from anywhere"
+    return 0
+}
+
 # check_gateway_upstream -- the validator side of a worker gateway, run when
 # .node-meta has GATEWAY_ALLOW_FROM (firewall-setup.sh --gateway-from) or
 # GATEWAY_UPSTREAM (edit-config.sh --set gateway_upstream). ufw must let every
@@ -3430,9 +3569,11 @@ report_testnet_addons
 report_scripts_release
 
 # =============================================================================
-# 9.8 WORKER GATEWAY (setup-gateway.sh on this host; the validator side of one)
+# 9.8 WORKER GATEWAY (setup-gateway.sh on this host, its Caddy edge; the
+# validator side of one)
 # =============================================================================
 check_gateway
+check_gateway_edge
 check_gateway_upstream
 
 # =============================================================================
