@@ -162,7 +162,7 @@ variable "subnet_cidr" {
 # --- Machines and disks ------------------------------------------------------
 
 variable "validator_instance_type" {
-  description = "The validator's EC2 type, an x86_64 Nitro type. Null means m7i.2xlarge on testnet (4 cores, 32 GiB) and m7i.4xlarge on mainnet (8 cores, 64 GiB). Mainnet refuses a type with fewer than 8 physical cores or less than 32 GiB nominal, the node scripts' validator floor. The default has 64 GiB because the host reads a 32 GiB machine as 31 GiB, and the scripts' hardware check then warns."
+  description = "The validator's EC2 type, an x86_64 Nitro type. Null means m7i.2xlarge on testnet (4 cores, 32 GiB) and m7i.4xlarge on mainnet (8 cores, 64 GiB). Mainnet refuses a type with fewer than 8 physical cores or less than 32 GiB nominal, the node scripts' validator floor. The default keeps the floor's 8 cores and has 64 GiB, the memory of the scripts' recommended tier for a mainnet validator (16 cores, 64 GB, 4000 GB of disk)."
   type        = string
   default     = null
 

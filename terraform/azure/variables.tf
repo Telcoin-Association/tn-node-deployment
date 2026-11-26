@@ -243,7 +243,7 @@ variable "bastion_subnet_cidr" {
 # disks over SCSI (data_device depends on it), needs accelerated networking,
 # runs two vCPUs on each core and gives at least 4 GiB a vCPU.
 variable "validator_instance_type" {
-  description = "The validator's VM size, a v5 D or E size with premium storage. Null means Standard_D8s_v5 on testnet (4 cores, 32 GiB) and Standard_D16s_v5 on mainnet (8 cores, 64 GiB). Mainnet refuses a type with fewer than 8 physical cores or less than 32 GiB nominal, the node scripts' validator floor. The default has 64 GiB because the host reads a 32 GiB machine as 31 GiB, and the scripts' hardware check then warns."
+  description = "The validator's VM size, a v5 D or E size with premium storage. Null means Standard_D8s_v5 on testnet (4 cores, 32 GiB) and Standard_D16s_v5 on mainnet (8 cores, 64 GiB). Mainnet refuses a type with fewer than 8 physical cores or less than 32 GiB nominal, the node scripts' validator floor. The default keeps the floor's 8 cores and has 64 GiB, the memory of the scripts' recommended tier for a mainnet validator (16 cores, 64 GB, 4000 GB of disk)."
   type        = string
   default     = null
 

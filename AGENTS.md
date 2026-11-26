@@ -754,6 +754,12 @@ host's env file and cloud-config and the `next_steps` and `tao_handoff` outputs.
   per-network redirect URLs in `host-plan` (`TESTNET_RPC_URL` and `MAINNET_RPC_URL` of
   `lib/common.sh`) and the Docker apt key fingerprint in `first-boot-gateway.sh`
   (`TN_DOCKER_APT_FINGERPRINT` of `setup-node.sh`). Change a source and its mirror together.
+- The plan-time validations in `terraform/modules/host-plan/variables.tf` and the roots mirror
+  the checks of `terraform/first-boot/first-boot-lib.sh` and `first-boot-gateway.sh`, which in
+  turn mirror what `setup-gateway.sh` and `firewall-setup.sh` accept. A change to one side is
+  made on the other in the same commit, and the sample tables of
+  `host-plan/tests/first_boot_rules.tftest.hcl` and `tools/tests/first_boot_test.sh`
+  (`plan_table`) are kept row for row.
 - The data disk, both static public IPs and the validator VM keep `prevent_destroy`; the
   validator ignores a new image and new user data (on Azure its SSH key too), because its boot
   disk holds the stored passphrase credential, and the gateway VM is replaced when its user data

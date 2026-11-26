@@ -194,7 +194,7 @@ variable "subnet_cidr" {
 # --- Machines and disks ------------------------------------------------------
 
 variable "validator_instance_type" {
-  description = "The validator's machine type. Its boot disk and its data disk are Hyperdisk Balanced, so the type must be of a series that takes it, such as C3, C3D, C4 or N4 (N2 and E2 do not). Null means c3-standard-8 on testnet (4 cores, 32 GiB) and c3d-standard-16 on mainnet (8 cores, 64 GiB). Mainnet refuses a type with fewer than 8 physical cores or less than 32 GiB nominal, the node scripts' validator floor. The default has 64 GiB because the host reads a 32 GiB machine as 31 GiB, and the scripts' hardware check then warns."
+  description = "The validator's machine type. Its boot disk and its data disk are Hyperdisk Balanced, so the type must be of a series that takes it, such as C3, C3D, C4 or N4 (N2 and E2 do not). Null means c3-standard-8 on testnet (4 cores, 32 GiB) and c3d-standard-16 on mainnet (8 cores, 64 GiB). Mainnet refuses a type with fewer than 8 physical cores or less than 32 GiB nominal, the node scripts' validator floor. The default keeps the floor's 8 cores and has 64 GiB, the memory of the scripts' recommended tier for a mainnet validator (16 cores, 64 GB, 4000 GB of disk)."
   type        = string
   default     = null
 

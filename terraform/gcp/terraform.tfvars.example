@@ -46,7 +46,8 @@ admin_ssh_cidrs = []
 # trusted_nodes_file = "trusted-nodes.yaml"
 
 # Null takes the per-network defaults: c3-standard-8 on testnet,
-# c3d-standard-16 on mainnet (8 cores, 64 GiB: twice the 32 GiB floor),
+# c3d-standard-16 on mainnet (8 cores, 64 GiB: the recommended memory, twice
+# the 32 GiB floor),
 # e2-standard-2 for the worker gateway.
 # validator_instance_type = "c3d-standard-16"
 # gateway_instance_type   = "e2-standard-2"

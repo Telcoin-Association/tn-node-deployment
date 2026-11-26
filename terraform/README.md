@@ -220,7 +220,8 @@ The machine defaults:
 | Data disk | gp3 | Hyperdisk Balanced | Premium SSD v2 |
 | Other types | x86_64 Nitro types | Validator: a series that takes Hyperdisk Balanced, such as C3, C3D, C4 or N4. Gateway: one that takes pd-balanced, such as E2, N2 or C3 | v5 D or E sizes with premium storage (Dsv5, Ddsv5, Dasv5, Dadsv5 and their E counterparts) |
 
-The mainnet default has twice the 32 GiB floor because a 32 GiB VM reports a little less to the host, which the node scripts' hardware check reads as under the floor.
+On mainnet the plan refuses less than the node scripts' validator minimum, 8 cores, 32 GB RAM and 2000 GB of disk.
+The mainnet default keeps those 8 cores and has 64 GiB, the memory of the scripts' recommended tier (16 cores, 64 GB RAM, 4000 GB disk).
 On Azure, `Standard_D8s_v5` sustains 12,800 uncached IOPS and 290 MB/s, a little under the testnet disk's 15,000 and 300, and bursts to 20,000 for up to 30 minutes.
 
 ## Outputs

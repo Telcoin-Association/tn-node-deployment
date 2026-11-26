@@ -47,8 +47,8 @@ admin_ssh_cidrs = []
 # allow_no_tpm = true
 
 # Null takes the per-network defaults: m7i.2xlarge on testnet, m7i.4xlarge on
-# mainnet (8 cores, 64 GiB: twice the 32 GiB floor), m7i.large for the worker
-# gateway.
+# mainnet (8 cores, 64 GiB: the recommended memory, twice the 32 GiB floor),
+# m7i.large for the worker gateway.
 # validator_instance_type = "m7i.4xlarge"
 # gateway_instance_type   = "m7i.large"
 
