@@ -1,0 +1,48 @@
+# checkov for terraform/, run by tools/check-terraform.sh. A skip goes under
+# skip-check, one per line, with a comment saying why the finding does not
+# apply.
+framework:
+  - terraform
+compact: true
+quiet: true
+# The run is offline: no guideline download, no upload.
+skip-download: true
+skip-check:
+  # AWS: TCP 80 from anywhere on the worker gateway is how Caddy answers the
+  # ACME HTTP challenge and redirects to https; terraform/aws/tests checks
+  # that no other host and no other port admits the internet.
+  - CKV_AWS_260
+  # AWS: basic five-minute metrics, as aws/node.yaml has. Detailed monitoring
+  # is billed per metric, and nothing these hosts run reads it.
+  - CKV_AWS_126
+  # AWS: a flow log needs a destination, a retention and a role, whose cost
+  # and placement are the operator's to choose; the module creates nothing an
+  # operator pays for without asking.
+  - CKV2_AWS_11
+  # AWS: each Elastic IP is associated with its host's network interface
+  # (aws_eip_association, network_interface_id) before the instance boots,
+  # which this check does not follow.
+  - CKV2_AWS_19
+  # Google Cloud. Both hosts must be reachable from the internet: peers dial
+  # the validator's static address on UDP 49590 and 49594, and the worker
+  # gateway serves the public RPC name on 80 and 443.
+  - CKV_GCP_40
+  # The worker gateway's port 80 answers ACME HTTP-01 challenges and redirects
+  # to HTTPS; Caddy cannot get or renew its certificate without it.
+  - CKV_GCP_106
+  # A customer-supplied key is a raw or RSA-wrapped key held in the
+  # configuration and the state, and nothing here is secret. Compute Engine
+  # encrypts every disk, and every disk takes a Cloud KMS key (disk_kms_key).
+  - CKV_GCP_38
+  # Azure. Managed disks are always encrypted at rest with platform-managed
+  # keys; a customer-managed key needs a Key Vault and a disk encryption set,
+  # which an operator who wants one manages outside this deployment.
+  - CKV_AZURE_93
+  # Azure. Both NICs carry a static public IP by design: peers dial the
+  # validator's for P2P and the RPC name points at the gateway's. The hosts'
+  # security group admits only the ports each host serves.
+  - CKV_AZURE_119
+  # Azure. AzureBastionSubnet holds only the managed Bastion service, for which
+  # Azure makes a security group optional (and, if present, a fixed rule set);
+  # the hosts' subnet has its group, which terraform/azure's tests check.
+  - CKV2_AZURE_31

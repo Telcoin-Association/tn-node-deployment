@@ -574,9 +574,16 @@ validator side. Rules:
   release tag of that network (`tn_release_tag_ok`), and `_gw_pin_ok` refuses a pin of another
   form or one without such a tag. Set a pin and its release together in a `chore` commit of a
   scripts release; `tools/check-gateway-pin.sh` must pass. From `scripts-v2.2.0` the testnet
-  pin is set (the image of the signed `v0.18.0-adiri` release; the line is in `lib/gateway.sh`)
-  and the mainnet pin is empty, so a mainnet enable refuses ("this scripts release pins no
-  worker-gateway image for mainnet yet").
+  pin is set (the image of the signed `v0.18.0-adiri` release; the line is in `lib/gateway.sh`).
+- Until telcoin-network publishes a mainnet release, the mainnet pin is a placeholder: the
+  testnet pin and its release, copied onto the mainnet line. `_gw_pin_placeholder` (mainnet, with
+  a final testnet release by `tn_release_tag_final`; a release candidate never) lets `_gw_pin_ok`
+  take it only while `tn_mainnet_enabled` is false, and `gw_status` logs that the image is a
+  placeholder. The tripwire is `tools/check-gateway-pin.sh`: at `TN_MAINNET_ENABLED=1` it refuses
+  the placeholder and an empty mainnet pin, with exit 1 and nothing downloaded, so the change that
+  flips the switch pins a signed mainnet release in the same scripts release; at 0 it prints
+  `mainnet: note: placeholder` and checks the placeholder against the testnet release's signed
+  files. Never take the placeholder for a mainnet release, and never relax the tripwire.
 - The unit never pulls (`--pull=never`): `gw_image_ensure` pulls by digest before anything is
   written, and `gw_image_probe` needs every flag of `GW_REQUIRED_FLAGS` in the image's `--help`,
   so a flag added to the unit goes into that list too.
@@ -713,6 +720,58 @@ from a Session Manager shell, so the BLS passphrase never enters AWS. Rules:
 - The `cfn lint` CI job (not a required check) installs cfn-lint by hash from
   `aws/requirements-ci.txt` and cfn-guard by sha256; the cfn-guard version and sha256 appear in
   `ci.yml` and in `publish-aws-templates.yml`, so move them together.
+
+## Terraform deployment
+
+`terraform/` builds a validator host and a worker-gateway host in one private network on AWS,
+Google Cloud or Azure (OPERATOR.md section 2.13; `terraform/README.md` is the operator's page and
+`terraform/REHEARSAL.md` the rehearsal checklists). Each root (`terraform/aws`, `terraform/gcp`,
+`terraform/azure`) calls `terraform/modules/host-plan`, which creates nothing: it renders each
+host's env file and cloud-config and the `next_steps` and `tao_handoff` outputs. cloud-init runs
+`terraform/first-boot/first-boot-validator.sh` or `first-boot-gateway.sh`, with
+`first-boot-lib.sh`, once as root. Rules:
+
+- `terraform/` is not shipped to hosts: never a row of `SCRIPTS`, `UI_BUNDLE` or
+  `TESTNET_ADDONS_BUNDLE`, no `.sha256` sidecars. The first-boot scripts reach a host only in its
+  user data, from the operator's checkout.
+- A host installs the node scripts the published installer serves, so first boot refuses a
+  release older than `min_scripts_release` (`TN_FB_MIN_RELEASE`, against `release=` in the
+  installed `MANIFEST`) at its `scripts-release` step. A flag that first boot or `next_steps`
+  passes to a node script raises that default to the first release that has it.
+- Nothing in Terraform is secret: no input, state or output holds a passphrase or key, and no
+  output is sensitive. The validator's first boot never runs `setup-node.sh` or
+  `firewall-setup.sh`; the operator generates the keys from `next_steps`.
+- The env-file contract: `host-plan` writes `/etc/telcoin-first-boot/first-boot.env` as ordered
+  `KEY='value'` lines of `TN_FB_*` keys whose values hold only `[A-Za-z0-9._:/,@-]` (an output
+  precondition), and `first-boot-lib.sh` parses it, never sources it: a line of another form, a
+  character outside that set or a key given twice is refused, and `fb_validate_env` checks every
+  value again, as the node scripts check them, before the host changes. A key is added on both
+  sides in one change (`FB_KEYS` and `fb_validate_env` in the library, the pairs in
+  `host-plan/main.tf`); `tools/tests/terraform_static_test.sh` checks that each role renders
+  exactly the keys its script takes, none twice. The validator's pairs never take `rpc_domain`,
+  so the apply that sets it leaves the validator's user data alone (`validator_user_data_sha256`).
+- Two values mirror the scripts, and `terraform_static_test.sh` keeps them equal: the
+  per-network redirect URLs in `host-plan` (`TESTNET_RPC_URL` and `MAINNET_RPC_URL` of
+  `lib/common.sh`) and the Docker apt key fingerprint in `first-boot-gateway.sh`
+  (`TN_DOCKER_APT_FINGERPRINT` of `setup-node.sh`). Change a source and its mirror together.
+- The plan-time validations in `terraform/modules/host-plan/variables.tf` and the roots mirror
+  the checks of `terraform/first-boot/first-boot-lib.sh` and `first-boot-gateway.sh`, which in
+  turn mirror what `setup-gateway.sh` and `firewall-setup.sh` accept. A change to one side is
+  made on the other in the same commit, and the sample tables of
+  `host-plan/tests/first_boot_rules.tftest.hcl` and `tools/tests/first_boot_test.sh`
+  (`plan_table`) are kept row for row.
+- The data disk, both static public IPs and the validator VM keep `prevent_destroy`; the
+  validator ignores a new image and new user data (on Azure its SSH key too), because its boot
+  disk holds the stored passphrase credential, and the gateway VM is replaced when its user data
+  changes. `terraform_static_test.sh` pins both lists (`PROTECTED`, `LIFECYCLE`).
+- The three roots take the same shared inputs and give the same outputs, which
+  `terraform/README.md` lists; keep them in step. There is no DNS lookup in any root and no
+  backend block.
+- `bash tools/check-terraform.sh` runs fmt, validate, `terraform test` (mocked providers),
+  tflint and checkov from images pinned by digest, and exits 2 when Docker does not answer; the
+  CI job `terraform` runs it (see CI). `tools/tests/terraform_static_test.sh` and
+  `tools/tests/first_boot_test.sh` need neither Terraform nor Docker and run in `run.sh`. Nothing
+  here runs `terraform apply` or needs cloud credentials.
 
 ## Partner documents
 
@@ -1299,7 +1358,14 @@ into a pass. The jobs:
   request that changes `lib/gateway.sh`, `lib/common.sh`, `lib/release-keys/`, the tool, `ci.yml`,
   `publish-installer.yml`, `MANIFEST`, `MANIFEST.asc` or `RELEASE`; with both pins empty it
   downloads nothing and passes, and with the testnet pin set, as from `scripts-v2.2.0`, it
-  downloads that release's signed files and checks the pin against them.
+  downloads that release's signed files and checks the pin against them. The mainnet placeholder
+  is checked against the testnet release it names, and refused once `TN_MAINNET_ENABLED` is 1.
+- `terraform` ("terraform static checks", not a required check): `bash tools/check-terraform.sh`
+  on pull requests and pushes to main, never on a tag (`if: github.ref_type != 'tag'`), since it
+  fetches providers and rulesets from public registries and an outage there must not fail a
+  release tag's run. It has `contents: read`, the pinned checkout with
+  `persist-credentials: false` and no other `uses:`, and passes the job token to tflint only, for
+  the ruleset download.
 - `ui-tests` ("Node Manager UI tests"): on Python 3.10, installs `ui/requirements.txt` and
   `ui/tests/requirements-dev.txt` with `--require-hashes`, runs `python -m pytest -q ui` (there
   is no unittest fallback), then the three UI shell tests under bash 5. As the runner user,

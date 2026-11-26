@@ -1,0 +1,3 @@
+hub-key:
+  primary:
+    network_address: /ip4/192.0.2.1/udp/49590/quic-v1

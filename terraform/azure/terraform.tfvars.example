@@ -1,0 +1,80 @@
+# Copy to terraform.tfvars and edit. Every value here is public: nothing in
+# this deployment is secret, and the BLS passphrase never passes through it.
+# Addresses below are documentation examples, not real hosts.
+
+# Where both hosts run. Null subscription_id reads ARM_SUBSCRIPTION_ID. The
+# region must offer zonal Premium SSD v2 disks.
+# subscription_id = "00000000-0000-0000-0000-000000000000"
+location = "eastus2"
+zone     = "1"
+
+# testnet or mainnet.
+network = "testnet"
+
+# Starts every resource name, and tags them all as deployment.
+name_prefix = "telcoin"
+
+# The validator's execution address (on mainnet its Safe), printed into the
+# key generation command.
+# validator_address = "0x0000000000000000000000000000000000000001"
+
+# Testnet only: the node release key generation installs.
+# node_release_tag = "v0.18.0-adiri"
+
+# First apply: leave rpc_domain empty. Point an A record for your RPC name at
+# the gateway_public_ip output (or send tao_handoff to the Telcoin
+# Association), wait until it resolves, then set it and apply again: that
+# apply creates the worker gateway host.
+rpc_domain = ""
+
+# false builds a single node (an observer or an RPC node) with no gateway.
+# gateway_enabled = true
+
+# Required: your SSH public key (ssh-ed25519, or ssh-rsa of 2048 bits or
+# more), installed for admin_username on both hosts. The admin user is never
+# telcoin, the node's service account.
+admin_ssh_public_key = "ssh-ed25519 AAAA... you@example"
+# admin_username = "ubuntu"
+
+# Shells go through Azure Bastion, SSH from the IPv4 networks listed here, or
+# both: at least one is required.
+# enable_bastion = true
+admin_ssh_cidrs = ["198.51.100.7/32"]
+
+# The trusted hubs map, written to the validator at first boot. Leave empty to
+# copy it to the host yourself; next_steps names the path. It travels in the
+# VM's custom data.
+# trusted_nodes_file = "trusted-nodes.yaml"
+
+# Null takes the per-network defaults: Standard_D8s_v5 on testnet,
+# Standard_D16s_v5 on mainnet (8 cores, 64 GiB: the recommended memory, twice
+# the 32 GiB floor),
+# Standard_D2s_v5 for the worker gateway.
+# validator_instance_type = "Standard_D16s_v5"
+# gateway_instance_type   = "Standard_D2s_v5"
+
+# Null takes the per-network defaults, 500 GiB / 15000 IOPS / 300 MB/s on
+# testnet and 2000 GiB / 20000 IOPS / 300 MB/s on mainnet. The floors are
+# 350 GiB / 15000 IOPS / 240 MB/s and 2000 GiB / 20000 IOPS / 300 MB/s.
+# data_disk_size_gb    = 2000
+# data_disk_iops       = 20000
+# data_disk_throughput = 300
+
+# Encrypt the VMs' caches and temporary data on the host too; the
+# subscription needs the EncryptionAtHost feature registered.
+# encryption_at_host_enabled = true
+
+# Ubuntu Server LTS: 26.04 (default) or 24.04.
+# ubuntu_version = "26.04"
+
+# The private network. The validator takes the subnet's 10th address and the
+# worker gateway its 20th.
+# vpc_cidr    = "10.42.0.0/16"
+# subnet_cidr = "10.42.1.0/24"
+# bastion_subnet_cidr = "10.42.2.0/26"
+
+# The worker gateway sends queries to the network's public RPC unless this
+# names another, and keeps this many submissions a second for
+# eth_sendRawTransaction (0 turns the reservation off).
+# redirect_queries_url           = ""
+# gateway_rate_limit_submissions = 300

@@ -196,6 +196,8 @@ sudo bash ~/telcoin-node-scripts/check-node.sh
 sudo bash ~/telcoin-node-scripts/check-node.sh --address 0xYOUR_ADDRESS
 ```
 
+> On AWS, Google Cloud or Azure, the Terraform deployment in [`terraform/`](terraform/README.md) is the preferred way to stand up a validator with its worker gateway: it builds the validator host and the worker-gateway host in one private network, installs the scripts on both, sets the gateway up unattended and prints the key generation, firewall and setup commands you run on the validator. It never sees the BLS passphrase. Its hosts need `scripts-v2.3.0` or newer from the installer, which is not released yet. See [terraform/README.md](terraform/README.md) and [OPERATOR.md section 2.13](OPERATOR.md#213-deploy-with-terraform).
+
 ### Day-to-day operations
 
 ```bash
@@ -555,7 +557,7 @@ On testnet and devnet, `firewall-setup.sh` does this automatically, source-restr
 
 From the next release a bare `--healthcheck <port>` binds `127.0.0.1` only. The scripts pass the bare port (`--healthcheck 43174`), so on a node that runs such a release the monitor cannot reach the endpoint, whatever `ufw` allows, until the flag carries an address: `--healthcheck 0.0.0.0:43174` for every interface (keep the source rule; the node logs a warning that begins `listener bound on every interface`), or `--healthcheck <address>:43174` with an address the host owns. `v0.16.0-adiri` does not accept the address form. The probes the scripts and the Node Manager UI run on the host reach a loopback bind either way. See [OPERATOR.md section 4.6](OPERATOR.md#46-testnet-add-ons).
 
-A mainnet node runs no health endpoint: the add-ons refuse mainnet, `firewall-setup.sh` deletes any health-port rule there and keeps the port closed, and `check-node.sh` fails a mainnet node whose node command carries `--healthcheck`.
+A mainnet node runs no health endpoint: the add-ons refuse mainnet, `firewall-setup.sh` deletes any health-port rule there and keeps the port closed, and `check-node.sh` fails a mainnet node whose node command carries `--healthcheck`, unless `.node-meta` has `GATEWAY_UPSTREAM`: the flag is then the worker gateway's readiness port ([OPERATOR.md section 4.15](OPERATOR.md#415-worker-gateway)).
 
 The push heartbeat of [Private alerts](#private-alerts-every-network) is the way forward for node alerts: it works on every network, mainnet included, opens no port, and alerts you rather than the Association.
 
@@ -810,7 +812,7 @@ The health check verifies:
 - **Network consensus state** — queries the network RPC (the public RPC of the network in `.node-meta`, testnet `https://rpc.adiri.tel`, unless `--network-rpc` says otherwise) for ground truth: current block, epoch, how many authors the latest commit has ("N authors in the latest commit"), and how fresh that commit is. The header's `Network RPC:` line says whose endpoint it is (`https://rpc.telcoin.network (mainnet public RPC)`, `<url> (--network-rpc, for testnet)`). When the network is unknown (no `NETWORK` in `.node-meta` and no Telcoin chain ID from the local RPC) and no `--network-rpc` is given, nothing is compared: `Network RPC:  none (network unknown; give --network-rpc URL to compare)`, then `Network query skipped (network unknown; give --network-rpc URL to compare)`, and the sections that fall back to the local view give that reason. It does not count as an issue.
 - **Local consensus state** — calls `tn_latestConsensusHeader` on the local node and applies the freshness contract: `block == 0` → ERROR (fully stalled), commit-timestamp age > 60s → WARN (stale), else OK. Also reports lag vs network in blocks.
 - **Author presence** — checks whether your authority ID appears in the latest commit's consensus headers. Catches the failure mode where a validator is running (systemd green, RPC up) but silent (not authoring headers). The authority ID comes from the node's own `tn_info` answer; `--authority-id <BASE58>` is the fallback when the local node does not answer, and the report says which one it used, or why it has none (for example the local RPC is DOWN, or `tn_info` has no `authority_id`). What absence means depends on on-chain committee membership for the current epoch: an error for a member, expected for anyone else. When membership cannot be read, absence is an error only for an Active or PendingExit validator whose node does not report `Observer`, judged by the stake status of the node's own address (from `tn_info` or `node-info.yaml`, never `.node-meta` or `--address`). With the network RPC down, the check uses the latest commit the local node has seen.
-- **Epoch and committee** — the epoch ID, the time to the next boundary and its UTC time, the committee size from the chain ("Committee of epoch E: N members (on-chain)", which can be more than the authors in the latest commit), committee membership for this epoch and the next two, and for a staked validator the activation epoch and the earliest committee seat (activation + 2). It warns when a committee member reports `Observer`, and says to let the node catch up when its epoch is behind, or else to look in the node log (`journalctl -u <svc> -n 200`). It compares the node's worker count with the required count (`WorkerConfigs.numWorkers()`, 1 on testnet today); fewer workers than required is a health issue, and because workers are fixed when the keys are generated and no script adds one, the report says to email support@telcoin.org before the node is due for a committee seat. When the node runs more than one worker, each extra worker's RPC and WebSocket ports are probed.
+- **Epoch and committee** — the epoch ID, the time to the next boundary and its UTC time, the committee size from the chain ("Committee of epoch E: N members (on-chain)", which can be more than the authors in the latest commit), committee membership for this epoch and the next two, and for a staked validator the activation epoch and the earliest committee seat (activation + 2). It warns when a committee member reports `Observer`, and says to let the node catch up when its epoch is behind, or else to look in the node log (`journalctl -u <svc> -n 200`). It compares the node's worker count with the required count (`WorkerConfigs.numWorkers()`, 1 on testnet today); fewer workers than required is a health issue, and because workers are fixed when the keys are generated and no script adds one, the report says to email support@telcoin.org before the node is due for a committee seat. When the node runs more than one worker, each extra worker's RPC and WebSocket ports are probed. On mainnet, a node whose stake status is Staked, PendingActivation, Active or PendingExit gets a warning when its admission mode (`ADMISSION_MODE` in `.node-meta`, else `admission.mode` in `network-config`) is not closed, with the `edit-config.sh --set admission=closed` command; it never counts as an issue ([OPERATOR.md section 2.9](OPERATOR.md#29-node-admission)).
 - **Reputation score** — your own score from `sub_dag.reputation_scores.scores_per_authority` (the singular `reputation_score` of older releases is read as a fallback) alongside the committee average. Flags scores below half-average.
 - **Validator on-chain status** — uses the address from `--address`, or the execution address recorded in `.node-meta`, to call the ConsensusRegistry contract and report your validator state (Undefined / Staked / PendingActivation / Active / etc.) with the next step. An Exited validator is told whether `unstake()` is eligible now. When the status cannot be read, the report gives the reason (for example `http 429`).
 - **Consensus role** — prints `Consensus role: CvvActive`, `CvvInactive` or `Observer` from `tn_nodeMode` when the node binary supports it. Informational; it never changes the verdict.
@@ -818,8 +820,10 @@ The health check verifies:
 - **Public RPC** — on a node with a public RPC domain, see [Check it](#check-it). It also warns when the Caddy site predates block v2 (with the command that refreshes it) and when `--http.api` or `--ws.api` names `debug`, `trace` or `admin`. A list that starts with `all` is not warned about: the node reads it as plain `all` and ignores the rest (see [Public node tuning](#public-node-tuning)).
 - **Script release** — the last block, `Checking the script release...`, reads the installed release record (`MANIFEST` beside the scripts): `Scripts release: <tag> (serial <n>), released <date>, <age>` and `Scripts release expires <date> (in N days)`. An expired release (`Scripts release <tag> expired N days ago (on <date>): a newer signed release is overdue.`, with `Check for it: bash <dir>/update-scripts.sh --check`) and a missing record (`No signed release installed: <dir> has no MANIFEST record.`) are warnings. It checks no signature, makes no network call and never adds to the issue count.
 - **Disk space** — uses the actual data directory from `/etc/telcoin/.node-meta` (falls back to `/var/lib/telcoin`), so the check reports usage on whichever mount actually holds chain data — not just the default. On macOS it reads `df -Pk`.
-- **Host security** — the [ownership layout](#system-layout) (an old layout warns on testnet and fails on mainnet; layout 2 is compared path by path), how the passphrase reaches the node (a failure when the unit's environment or the start script carries `TN_BLS_PASSPHRASE`), the unit's sandbox and its `systemd-analyze security` score, a cleartext `bls.key` (a failure without `bls.kw`, a warning beside it), the update lock (who holds it), and, on mainnet, that the testnet health monitor is off.
+- **Host security** — the [ownership layout](#system-layout) (an old layout warns on testnet and fails on mainnet; layout 2 is compared path by path), how the passphrase reaches the node (a failure when the unit's environment or the start script carries `TN_BLS_PASSPHRASE`), the unit's sandbox and its `systemd-analyze security` score, a cleartext `bls.key` (a failure without `bls.kw`, a warning beside it), the update lock (who holds it), and, on mainnet, that the testnet health monitor is off (with `GATEWAY_UPSTREAM` in `.node-meta`, a `--healthcheck` on the node line is the worker gateway's readiness port and passes).
 - **Memory** — total / available / percent used. On macOS, which has no `/proc/meminfo`, the memory check is skipped with a note and a CPU line shows the physical core count, so the report still runs to the end.
+
+On a host with a worker gateway, the report checks the gateway (`Checking the worker gateway...`) and, when Caddy fronts it, its public edge (`Checking the worker gateway's public edge (Caddy)...`): `/ready`, which counts as an issue on a host with no node; the name's DNS, through `install-caddy.sh --phase=gateway-check-dns`; `GET https://<name>/health` through Caddy on the host, over a verified certificate, with a warning when the certificate expires within 14 days; and `ufw` allowing 80/tcp and 443/tcp from anywhere. The cloud's own firewall rules cannot be seen from the host, and the report says so. On a validator behind a gateway it checks the `ufw` rules for the gateway host, the RPC and health binds and the advertised URL, which on mainnet must be the gateway's `https` URL with no WebSocket URL or the report counts an issue. See [OPERATOR.md section 4.15](OPERATOR.md#415-worker-gateway).
 
 With an older `lib/common.sh`, the report warns once in its header, names the checks it skips and runs the rest.
 
@@ -2192,18 +2196,49 @@ The mainnet refusal of `0.0.0.0` in `4) RPC access` names the worker gateway rou
 It needs lib/common.sh 2.2.8 or later.
 Full release note: [CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md).
 
-### check-node v2.2.2 — an unfinished --p2p-committee off is reported with the command that finishes it, and a gateway advertisement is checked at the gateway
+### check-node v2.2.2 — an unfinished --p2p-committee off is reported with the command that finishes it, a gateway advertisement is checked at the gateway, and so are a gateway host's public edge and a staked mainnet validator's admission
 With `P2P_COMMITTEE=on` in `.node-meta` and the allowlist timer's unit file gone, check-node reports one error, `P2P committee mode is on in .node-meta, but a --p2p-committee off did not finish (...)`, which says whether the table is still loaded, and names `firewall-setup.sh --p2p-committee off` as the fix.
 It checks nothing else of the allowlist then.
 Fix for nodes that advertise a worker gateway (`RPC_ADVERTISED_VIA=gateway`), on every network: the public RPC block probed a Caddy site they do not have and named `rpc-enable`, which refuses there.
 It now compares worker 0 with `https://<name>/` and no WebSocket URL and asks `GET https://<name>/health` once: a name that does not resolve gets the A record to create (for the node's default name, the TAO handoff), and any other answer but 200 names `setup-gateway.sh --status` on the gateway host.
 It only warns.
+On a host where Caddy fronts a worker gateway, a new section `Checking the worker gateway's public edge (Caddy)...` checks `/ready` (an issue on a host with no node), the name's DNS, `GET https://<name>/health` through Caddy over a verified certificate (a warning when it expires within 14 days) and `ufw` allowing 80/tcp and 443/tcp from anywhere, and says that the cloud's own firewall rules cannot be seen from the host.
+Fix for a mainnet validator behind a worker gateway: with `GATEWAY_UPSTREAM` in `.node-meta`, the node's `--healthcheck` is the gateway's readiness port and passes, instead of failing as the testnet health monitor.
+There, an advertisement other than the gateway's `https` URL with no WebSocket URL is now an issue.
+On mainnet, a staked validator whose admission mode is not closed gets a warning that names `edit-config.sh --set admission=closed`; it never counts as an issue.
+See [OPERATOR.md section 4.15](OPERATOR.md#415-worker-gateway) and [section 2.9](OPERATOR.md#29-node-admission).
 Full release note: [CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md).
 
 ### migrate-node-naming v2.0.1 — a source list the kill switch set aside stays aside
 A P2P source list that `--p2p-committee off` set aside (`P2P_PER_SOURCE=off`) is not turned into per-source rules when the migration opens the P2P ports: both ports open to every source.
 The warning after the migration's allowlist resync names the command that works: `--p2p-committee sync --accept-floor-shrink` after exit 4, `--p2p-committee off` after exit 5, else `--p2p-committee sync`.
 Full release note: [CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md).
+
+### terraform/ — a validator and its worker gateway on AWS, Google Cloud or Azure (new)
+`terraform/` holds root modules for AWS, Google Cloud and Azure that build a validator host and a worker-gateway host in one private network ([terraform/README.md](terraform/README.md), [OPERATOR.md section 2.13](OPERATOR.md#213-deploy-with-terraform)).
+The validator's first boot only mounts the data disk and installs the scripts; the operator runs key generation by hand from the printed `next_steps`, so the BLS passphrase never enters Terraform.
+A second apply, once `rpc_domain` is set, creates the gateway host, which sets the gateway up unattended.
+Both hosts need `scripts-v2.3.0` or newer from the installer, and their first boot stops at its `scripts-release` step on an older release.
+`terraform/` is not shipped to hosts: `update-scripts.sh` does not track it, and it has no `.sha256` sidecars.
+Full release note: [CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md).
+
+### lib/gateway.sh v2.3.0 — the testnet release's image stands in as the mainnet pin
+Until telcoin-network publishes a mainnet release, `lib/gateway.sh` pins the testnet release's worker-gateway image, from `v0.18.0-adiri`, for mainnet too, as a placeholder, so a mainnet gateway host can be set up and its name and certificate checked before genesis; before, `setup-gateway.sh --enable` on mainnet refused with `this scripts release pins no worker-gateway image for mainnet yet`.
+It takes the placeholder only while `TN_MAINNET_ENABLED` is 0, never for a release candidate, and `--status` and `check-node.sh` say that the image is a placeholder.
+`tools/check-gateway-pin.sh` checks it against that release's signed files with a `mainnet: note: placeholder` line, and refuses it, and an empty mainnet pin, once `TN_MAINNET_ENABLED` is 1, so the release that enables mainnet pins a mainnet release.
+See [OPERATOR.md section 4.15](OPERATOR.md#415-worker-gateway).
+Full release note: [CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md).
+
+### setup-gateway v2.3.0 -- the worker gateway's submission reservation is on
+`setup-gateway.sh` 2.3.0, with `lib/gateway.sh` 2.3.0, gains `--rate-limit-submissions N`: the
+submissions a second the gateway keeps for single `eth_sendRawTransaction` calls out of its global
+bucket, so a flood of queries cannot starve them. The default is 300 (burst 600); `0` turns the
+reservation off. The value lives in `gateway.meta` as `RATE_LIMIT_SUBMISSIONS`. A `gateway.meta`
+from scripts-v2.2.0 has no such line: it loads with the default, `--status` says the unit differs,
+and `--refresh` writes the key and the flag with one restart. `--rate-limit-submissions` joins
+`GW_REQUIRED_FLAGS`, so an image whose `--help` lacks it is refused: the testnet pin
+`v0.18.0-adiri` has it, and a mainnet pin must be a release that has it. The default is not
+load-tested (issue #83).
 
 ### lib/common.sh v2.2.8 — the map checks setup-node and edit-config share, the mainnet keygen switch, and the default RPC name
 New `tn_committee_peers_check`, `tn_trusted_nodes_shape_ok` (moved here from edit-config), `tn_map_addr_check`, `tn_trusted_nodes_node_check` and `tn_local_worker_count`: setup-node and edit-config call them before they write `network-config`.
@@ -2344,17 +2379,6 @@ mainnet) are unchanged. Full release note:
 ### setup-node v2.1.1 — Ubuntu 26.04 recommended
 Ubuntu 26.04 LTS is the recommended OS; 24.04 stays supported. `--help` says so for mainnet,
 which still needs systemd 255 or later.
-
-### setup-gateway v2.3.0 -- the worker gateway's submission reservation is on
-`setup-gateway.sh` 2.3.0, with `lib/gateway.sh` 2.3.0, gains `--rate-limit-submissions N`: the
-submissions a second the gateway keeps for single `eth_sendRawTransaction` calls out of its global
-bucket, so a flood of queries cannot starve them. The default is 300 (burst 600); `0` turns the
-reservation off. The value lives in `gateway.meta` as `RATE_LIMIT_SUBMISSIONS`. A `gateway.meta`
-from scripts-v2.2.0 has no such line: it loads with the default, `--status` says the unit differs,
-and `--refresh` writes the key and the flag with one restart. `--rate-limit-submissions` joins
-`GW_REQUIRED_FLAGS`, so an image whose `--help` lacks it is refused: the testnet pin
-`v0.18.0-adiri` has it, and a mainnet pin must be a release that has it. The default is not
-load-tested (issue #83).
 
 ### setup-gateway v2.2.0 — the worker gateway, a public JSON-RPC front for transaction submissions (new)
 `setup-gateway.sh` 2.2.0, with `lib/gateway.sh` 2.2.0 (`GATEWAY_VERSION`), is new. It runs

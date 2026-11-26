@@ -344,6 +344,36 @@ FAKE_UID=0 runc check_gateway_upstream
 check_has "advertised ws URL: information, no issue" "issues=0" "$OUT"
 check "advertised ws URL: names rpc-advertise" yes "$(has 'install-caddy.sh --phase rpc-advertise' "$OUT")"
 
+# On mainnet, behind a gateway, any other advertisement breaks forwarding: an issue.
+mainnet() { sed 's/^NETWORK=devnet$/NETWORK=mainnet/' "$R/etc/telcoin/.node-meta" > "$T/meta" && cp "$T/meta" "$R/etc/telcoin/.node-meta"; }
+fresh; mknode "$FROM" "$UP"; mainnet; nodeinfo https://gw.example.org wss://gw.example.org; setrules "$ALL4"
+FAKE_UID=0 runc check_gateway_upstream
+check_has "mainnet behind a gateway, ws URL advertised: one issue" "issues=1" "$OUT"
+check "mainnet ws URL: an error naming rpc-advertise" yes \
+    "$(has "node-info.yaml advertises RPC https://gw.example.org, ws wss://gw.example.org; a mainnet validator behind a worker gateway must advertise" "$OUT")"
+nodeinfo http://gw.example.org
+FAKE_UID=0 runc check_gateway_upstream
+check_has "mainnet behind a gateway, http URL advertised: one issue" "issues=1" "$OUT"
+check "mainnet http URL: names rpc-advertise" yes "$(has 'install-caddy.sh --phase rpc-advertise --rpc-domain <gateway host>' "$OUT")"
+NODE_FLAGS="--http.addr 127.0.0.1 --healthcheck ${HP}"
+fresh; mknode "$FROM"; mainnet; nodeinfo https://gw.example.org wss://gw.example.org; setrules "$ALL4"
+FAKE_UID=0 runc check_gateway_upstream
+NODE_FLAGS="--http.addr 0.0.0.0 --healthcheck 0.0.0.0:${HP}"
+check_has "mainnet, GATEWAY_ALLOW_FROM only: the advertisement stays information" "issues=0" "$OUT"
+
+# The full mainnet validator behind a gateway: the health-monitor rule and the
+# upstream checks pass together.
+fresh; mknode "$FROM" "$UP"; mainnet; nodeinfo https://gw.example.org; setrules "$ALL4"
+HEALTH_ISSUES=0
+OUT="$(FAKE_UID=0; export FAKE_UID; check_healthcheck_on_mainnet 2>&1; check_gateway_upstream 2>&1; printf '\nissues=%s' "$HEALTH_ISSUES")"
+check_has "mainnet behind a gateway, everything in place: no issue" "issues=0" "$OUT"
+check "mainnet full state: --healthcheck serves the gateway" yes \
+    "$(has "--healthcheck 0.0.0.0:${HP} on the node line serves the worker gateway at 10.0.0.5,10.0.0.6" "$OUT")"
+check "mainnet full state: binds ok" yes "$(has 'RPC and --healthcheck listen on 0.0.0.0 for the gateway at 10.0.0.5,10.0.0.6' "$OUT")"
+check "mainnet full state: ufw ok" yes "$(has "ufw lets 10.0.0.5,10.0.0.6 reach the RPC port 8545" "$OUT")"
+check "mainnet full state: advertisement ok" yes "$(has 'node-info.yaml advertises https://gw.example.org and no ws URL' "$OUT")"
+check_lacks "mainnet full state: no error line" "[ERROR]" "$OUT"
+
 fresh; mknode "$FROM" "$UP"; nodeinfo https://gw.example.org; setrules "$ALL4"
 FAKE_UID=1000 runc check_gateway_upstream
 check_has "validator, not root: no false issue" "issues=0" "$OUT"

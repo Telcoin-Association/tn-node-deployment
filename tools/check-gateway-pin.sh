@@ -10,9 +10,16 @@
 # (GW_TESTNET_IMAGE_PIN with GW_TESTNET_PIN_RELEASE, GW_MAINNET_IMAGE_PIN with
 # GW_MAINNET_PIN_RELEASE). For each network, testnet first, a set pin passes
 # only when, in this order:
-#   1. the pin and its release are both set;
+#   1. the pin and its release are both set. Once TN_MAINNET_ENABLED of
+#      lib/common.sh is 1 (tn_mainnet_enabled), the release that offers
+#      mainnet, the mainnet pin must be set: an empty one is refused;
 #   2. the release is a tag of that network (tn_release_tag_ok), so a release
-#      candidate never backs the mainnet pin;
+#      candidate never backs the mainnet pin. One exception, the mainnet
+#      placeholder: until telcoin-network publishes a mainnet release, a final
+#      testnet release (tn_release_tag_final) backs the mainnet pin while
+#      TN_MAINNET_ENABLED is 0, with a "mainnet: note: placeholder" line, and
+#      rules 3 to 7 run against that release. At 1 it is refused, so the
+#      release that offers mainnet pins a mainnet release;
 #   3. the pin is GW_RELEASE_IMAGE_REPO@sha256:<64 lowercase hex>;
 #   4. the release's SHA256SUMS-edge.asc verifies over its SHA256SUMS-edge
 #      against lib/release-keys, judged by _tn_release_keyring and
@@ -41,13 +48,16 @@
 #                        published release is never judged against other keys.
 #   TMPDIR               where the work directory is made (default /tmp)
 #
-# Empty pins pass without a download and without gpg, curl or sha256sum: when
-# neither network sets a pin or a release, the tool prints "no pin" for both
-# and exits 0.
+# Empty pins pass without a download and without gpg, curl or sha256sum while
+# TN_MAINNET_ENABLED is 0: when neither network sets a pin or a release, the
+# tool prints "no pin" for both and exits 0. At 1 the empty mainnet pin is
+# refused, still without a download.
 #
 # Exit status:
 #   0  every set pin is the image of its signed release, or no pin is set
-#   1  a pin is refused; "testnet: refused: ..." or "mainnet: refused: ..." on
+#      (while TN_MAINNET_ENABLED is 0)
+#   1  a pin is refused (at TN_MAINNET_ENABLED=1 also an empty or placeholder
+#      mainnet pin); "testnet: refused: ..." or "mainnet: refused: ..." on
 #      stdout says why, then a summary on stderr
 #   2  the check cannot run: a usage error; a missing tool, library function or
 #      variable; TN_RELEASE_KEYS_DIR with a published release; no readable
@@ -183,7 +193,8 @@ fi
 source "${GWPIN_REPO}/lib/common.sh" || cannot "could not load ${GWPIN_REPO}/lib/common.sh"
 set +e
 for f in _tn_release_keyring _tn_release_sig_ok _tn_release_get _tn_release_cleanup \
-    _tn_release_sum _tn_release_keys_dir tn_release_tag_ok tn_release_tag_grammar; do
+    _tn_release_sum _tn_release_keys_dir tn_release_tag_ok tn_release_tag_final \
+    tn_release_tag_grammar tn_mainnet_enabled; do
     declare -F "$f" >/dev/null 2>&1 \
         || cannot "lib/common.sh lacks ${f}; this tool runs only with the lib/common.sh beside it"
 done
@@ -211,7 +222,10 @@ for v in GW_RELEASE_IMAGE_REPO GW_TESTNET_IMAGE_PIN GW_TESTNET_PIN_RELEASE \
 done
 [ -n "$GW_RELEASE_IMAGE_REPO" ] || cannot "${GWPIN_LIB} sets GW_RELEASE_IMAGE_REPO to an empty value"
 
-if [ -z "${GW_TESTNET_IMAGE_PIN}${GW_TESTNET_PIN_RELEASE}${GW_MAINNET_IMAGE_PIN}${GW_MAINNET_PIN_RELEASE}" ]; then
+# Once mainnet is offered an empty mainnet pin is refused, so this shortcut is
+# taken only while it is not.
+if ! tn_mainnet_enabled \
+    && [ -z "${GW_TESTNET_IMAGE_PIN}${GW_TESTNET_PIN_RELEASE}${GW_MAINNET_IMAGE_PIN}${GW_MAINNET_PIN_RELEASE}" ]; then
     printf 'testnet: no pin\nmainnet: no pin\n'
     printf 'check-gateway-pin: no worker-gateway pin is set in %s; nothing to check\n' "$GWPIN_LIB" >&2
     exit 0
@@ -368,6 +382,11 @@ _gwpin_check() {
         *) up="MAINNET" ;;
     esac
     if [ -z "$pin" ] && [ -z "$rel" ]; then
+        if [ "$net" = mainnet ] && tn_mainnet_enabled; then
+            printf '%s: refused: GW_%s_IMAGE_PIN and GW_%s_PIN_RELEASE are empty, but this scripts release offers mainnet (TN_MAINNET_ENABLED=1); pin the worker-gateway image of a signed mainnet release\n' \
+                "$net" "$up" "$up"
+            return 1
+        fi
         printf '%s: no pin\n' "$net"
         return 0
     fi
@@ -382,7 +401,15 @@ _gwpin_check() {
         return 1
     fi
     # The tag check comes before any path or URL is built from REL.
-    if ! tn_release_tag_ok "$net" "$rel"; then
+    if [ "$net" = mainnet ] && tn_release_tag_final testnet "$rel"; then
+        if tn_mainnet_enabled; then
+            printf '%s: refused: GW_%s_PIN_RELEASE %s is a testnet release, the placeholder taken only while TN_MAINNET_ENABLED is 0, but this scripts release offers mainnet (TN_MAINNET_ENABLED=1); bump the pin to the worker-gateway image of a signed mainnet release\n' \
+                "$net" "$up" "$rel"
+            return 1
+        fi
+        printf '%s: note: placeholder: GW_%s_PIN_RELEASE %s is a testnet release, standing in for mainnet while TN_MAINNET_ENABLED is 0; the release that offers mainnet must pin a mainnet release\n' \
+            "$net" "$up" "$rel"
+    elif ! tn_release_tag_ok "$net" "$rel"; then
         printf '%s: refused: GW_%s_PIN_RELEASE %s is not a %s release tag (%s)\n' \
             "$net" "$up" "$rel" "$net" "$(tn_release_tag_grammar)"
         return 1

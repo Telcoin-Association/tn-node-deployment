@@ -1,0 +1,103 @@
+# Telcoin Network ${network}: the steps after this apply
+#
+# Validator host: public ${vpub}, private ${vpriv}
+%{ if session_validator != "" ~}
+#   open a shell: ${session_validator}
+%{ endif ~}
+%{ if gateway ~}
+# Worker gateway host: public ${gpub}, private ${gpriv}
+%{ if session_gateway != "" ~}
+#   open a shell: ${session_gateway}
+%{ endif ~}
+%{ endif ~}
+#
+# Run the commands below on the validator host. Its first boot prepares the
+# host and stops: go on once ${done_marker} exists there.
+# ${log_path} says what it did; a failure leaves
+# ${fail_marker} instead.
+# Each host needs node scripts ${min_release} or newer: first boot
+# installs them and stops on an older release.
+%{ if !hubs_given ~}
+#
+# No trusted_nodes_file was given: put the trusted hubs map on the validator
+# host at ${hubs}
+# (root-owned, mode 0644, at most 64 KiB) before key generation.
+%{ endif ~}
+%{ if mainnet ~}
+#
+# 1. Install a telcoin-network binary built with no build features at
+#    /usr/local/bin/telcoin-network, root-owned, mode 0755 (OPERATOR.md 2.12).
+#
+# 2. Generate the keys. Back up node-keys/ and node-info.yaml offline
+#    afterwards (OPERATOR.md 2.5) and send node-info.yaml as OPERATOR.md 2.12
+#    says, never node-keys/ or the passphrase.
+ARGS=(--network mainnet --install-method existing --binary-path /usr/local/bin/telcoin-network
+%{ else ~}
+#
+# 1. Generate the keys, then back up node-keys/ and node-info.yaml offline
+%{ if release_tag != "" ~}
+#    (OPERATOR.md 2.5).
+ARGS=(--network testnet --install-method release --release-tag ${release_tag}
+%{ else ~}
+#    (OPERATOR.md 2.5). Replace vX.Y.Z-adiri with the current testnet release
+#    from the telcoin-network releases page (OPERATOR.md 7.1).
+ARGS=(--network testnet --install-method release --release-tag vX.Y.Z-adiri
+%{ endif ~}
+%{ endif ~}
+  --address ${address}
+  --external-primary /ip4/${vpub}/udp/49590/quic-v1
+  --external-worker  /ip4/${vpub}/udp/49594/quic-v1
+  --listener-primary /ip4/${vpriv}/udp/49590/quic-v1
+  --listener-worker  /ip4/${vpriv}/udp/49594/quic-v1
+  --admission closed --trusted-nodes ${hubs}${allow_no_tpm ? " --allow-no-tpm" : ""})
+read -rs PASS
+printf '%s\n' "$PASS" | sudo bash ${dir}/setup-node.sh --json --phase=keygen --passphrase-stdin "$${ARGS[@]}"
+unset PASS
+#
+# ${step.firewall}. Turn on the host firewall: SSH from ${ssh_from}${gateway ? ";\n#    the node's RPC and health port from the worker gateway only" : ""}.
+sudo bash ${dir}/firewall-setup.sh --enable${gateway ? " --gateway-from ${gpriv}" : ""} --ssh-from ${ssh_from}
+%{ if mainnet ~}
+#
+# ==== At launch ====
+#
+# Mainnet setup past key generation opens with the script release that
+# enables mainnet. Update the scripts to it (OPERATOR.md 4.1) and add to ARGS
+# what its notes name, such as --genesis-dir.
+%{ endif ~}
+#
+# ${step.finalize}. Write the configuration and start the node, with ARGS as above
+#    (define it again in a new shell).
+sudo bash ${dir}/setup-node.sh --json --phase=finalize "$${ARGS[@]}"
+%{ if gateway ~}
+#
+# ${step.upstream}. Let the worker gateway reach the node's RPC and health port.
+sudo bash ${dir}/edit-config.sh --set gateway_upstream=${gpriv}
+#
+# ${step.check}. After the second apply, once ${done_marker} exists on the
+#    gateway host, advertise the gateway's name${mainnet ? " (only for a name of\n#    your own: key generation already advertises the default one)" : ""} and check the node.
+sudo bash ${dir}/install-caddy.sh --phase=rpc-advertise --rpc-domain ${domain != "" ? domain : "<rpc_domain>"}
+%{ else ~}
+#
+# ${step.check}. Check the node.
+%{ endif ~}
+sudo bash ${dir}/check-node.sh
+%{ if gateway ~}
+#
+# The RPC name.
+%{ if domain != "" ~}
+# rpc_domain is ${domain}. Its A record must point at the gateway's static IP,
+# ${gpub}, before the gateway can get its certificate.
+%{ else ~}
+%{ if mainnet ~}
+# Key generation prints https://v<label>.telcoin.network/, the name
+# node-info.yaml advertises. Send that name and the gateway's static IP,
+# ${gpub}, to the Telcoin Association (TAO), which creates its A record, or use
+# a name of your own and point its A record at ${gpub}.
+%{ else ~}
+# Point an A record for a name of your own at the gateway's static IP,
+# ${gpub}.
+%{ endif ~}
+# Then set rpc_domain to the name and apply again: the second apply creates the
+# gateway host, and terraform output next_steps fills in the name above.
+%{ endif ~}
+%{ endif ~}

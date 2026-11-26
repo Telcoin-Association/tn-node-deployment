@@ -4,7 +4,8 @@
 # check_unit_sandbox, check_healthcheck_on_mainnet) on fixture trees, as a
 # normal user: a current start script and unit pass; an older script that
 # exports the passphrase, a unit that sets it, and a mainnet node with the
-# health monitor fail; a unit without the sandbox warns. The functions are cut
+# health monitor fail; a --healthcheck that a worker gateway reads
+# (GATEWAY_UPSTREAM) passes; a unit without the sandbox warns. The functions are cut
 # from check-node.sh. Maintainer tooling (not updater-tracked). bash 3.2 safe.
 set -u
 # shellcheck source=tools/tests/lib.sh
@@ -86,6 +87,46 @@ check_has "mainnet with the monitor in .node-meta: an issue" "issues=1" "$OUT"
 printf 'NETWORK=testnet\nENABLE_HEALTHCHECK_MONITOR=true\n' > "$T/fx/etc/telcoin/.node-meta"
 runc check_healthcheck_on_mainnet
 check "testnet: not checked" "issues=0" "$(printf '%s' "$OUT" | tail -n 1)"
+
+# Behind a worker gateway (GATEWAY_UPSTREAM) --healthcheck is the gateway's
+# readiness port, not the monitor; ENABLE_HEALTHCHECK_MONITOR=true still fails.
+printf 'NETWORK=mainnet\nINSTALL_METHOD=source\nGATEWAY_UPSTREAM=10.0.0.5\n' > "$T/fx/etc/telcoin/.node-meta"
+_tn_start_script_text source /opt/telcoin/telcoin-network "$ARGS --healthcheck 0.0.0.0:43174" > "$SCRIPT"
+runc check_healthcheck_on_mainnet
+check_has "mainnet behind a gateway with --healthcheck: no issue" "issues=0" "$OUT"
+check_has "mainnet behind a gateway: the flag serves the gateway" "yes" \
+    "$(printf '%s' "$OUT" | grep -qF -- '--healthcheck 0.0.0.0:43174 on the node line serves the worker gateway at 10.0.0.5' && echo yes)"
+check_lacks "mainnet behind a gateway: not told to remove the flag" "remove" "$OUT"
+printf 'NETWORK=mainnet\nINSTALL_METHOD=source\nGATEWAY_UPSTREAM=10.0.0.5\nENABLE_HEALTHCHECK_MONITOR=true\n' > "$T/fx/etc/telcoin/.node-meta"
+runc check_healthcheck_on_mainnet
+check_has "mainnet behind a gateway, monitor in .node-meta: an issue" "issues=1" "$OUT"
+check_has "monitor behind a gateway: names the .node-meta line, keeps --healthcheck" "yes" \
+    "$(printf '%s' "$OUT" | grep -F 'ENABLE_HEALTHCHECK_MONITOR=true in .node-meta' | grep -qF 'Keep --healthcheck on the node line' && echo yes)"
+current
+printf 'NETWORK=mainnet\nINSTALL_METHOD=source\nGATEWAY_UPSTREAM=10.0.0.5\n' > "$T/fx/etc/telcoin/.node-meta"
+runc check_healthcheck_on_mainnet
+check_has "mainnet behind a gateway without --healthcheck: no issue here" "issues=0" "$OUT"
+check_has "mainnet behind a gateway without --healthcheck: no monitor" "yes" \
+    "$(printf '%s' "$OUT" | grep -qF 'No testnet health monitor on this mainnet node' && echo yes)"
+# GATEWAY_UPSTREAM twice: which gateway, if any, reads --healthcheck is unknown.
+printf 'NETWORK=mainnet\nINSTALL_METHOD=source\nGATEWAY_UPSTREAM=10.0.0.5\nGATEWAY_UPSTREAM=10.0.0.6\n' > "$T/fx/etc/telcoin/.node-meta"
+_tn_start_script_text source /opt/telcoin/telcoin-network "$ARGS --healthcheck 0.0.0.0:43174" > "$SCRIPT"
+runc check_healthcheck_on_mainnet
+check_has "GATEWAY_UPSTREAM twice: no issue here (the gateway check counts it)" "issues=0" "$OUT"
+check_has "GATEWAY_UPSTREAM twice: names the duplicate" "yes" \
+    "$(printf '%s' "$OUT" | grep -qF 'GATEWAY_UPSTREAM is set more than once in .node-meta, so whether --healthcheck on the node line serves a gateway was not checked; remove the extra lines' && echo yes)"
+check_lacks "GATEWAY_UPSTREAM twice: not told to remove --healthcheck" "remove it" "$OUT"
+check_lacks "GATEWAY_UPSTREAM twice: no monitor claim" "health monitor is on" "$OUT"
+# ENABLE_HEALTHCHECK_MONITOR=true is an issue with a gateway or without one, so
+# the duplicate does not hide it.
+printf 'NETWORK=mainnet\nINSTALL_METHOD=source\nGATEWAY_UPSTREAM=10.0.0.5\nGATEWAY_UPSTREAM=10.0.0.6\nENABLE_HEALTHCHECK_MONITOR=true\n' > "$T/fx/etc/telcoin/.node-meta"
+runc check_healthcheck_on_mainnet
+check_has "GATEWAY_UPSTREAM twice, monitor in .node-meta: an issue" "issues=1" "$OUT"
+check_has "GATEWAY_UPSTREAM twice, monitor in .node-meta: names the line" "yes" \
+    "$(printf '%s' "$OUT" | grep -qF 'The testnet health monitor is on for this mainnet node (ENABLE_HEALTHCHECK_MONITOR=true in .node-meta); remove that line.' && echo yes)"
+check_has "GATEWAY_UPSTREAM twice, monitor in .node-meta: names the duplicate too" "yes" \
+    "$(printf '%s' "$OUT" | grep -qF 'GATEWAY_UPSTREAM is set more than once in .node-meta' && echo yes)"
+current
 
 # ---- LIB-B: resolve_network picks the network's own RPC, never another's -------------
 # resolve_network and the helpers it calls, cut from check-node.sh, over the
@@ -230,4 +271,94 @@ check "scripts, real date: expires 2999-12-31" "yes" \
 TODAY=""
 check "the report runs the scripts block" 1 "$(grep -c '^report_scripts_release$' "$CN")"
 check_lacks "the scripts block warns and never counts a health issue" "HEALTH_ISSUES" "$(sed -n '/^report_scripts_release() {/,/^}/p' "$CN")"
+
+# ---- ADM: a staked mainnet validator runs Closed admission (check_admission_mainnet) ----
+# The rule and its helpers, cut from check-node.sh, over the fixture .node-meta
+# and network-config. The stake status is §3's cached read for the node's own
+# address; no RPC answers, so nothing else can be read.
+{
+    for f in lower stake_label stake_status_for_rule network_config_admission_mode check_admission_mainnet; do
+        sed -n "/^${f}() {/,/^}/p" "$CN"
+    done
+} > "$T/adm.sh"
+# shellcheck source=/dev/null
+. "$T/adm.sh"
+ADD="$T/fx/var/lib/telcoin"
+NC="$ADD/network-config"
+mkdir -p "$ADD"
+A1=0x00000000000000000000000000000000000000a1
+# shellcheck disable=SC2034  # read by stake_status_for_rule
+EXEC_SRC=node-info.yaml EXEC_ADDR="$A1" VALIDATOR_ADDRESS="$A1" NETWORK_OK=false LOCAL_RPC_MODE=DOWN
+admeta() { printf '%s\n' "DATA_DIR=$ADD" "$@" > "$NWMETA"; }
+adm() {  # adm RC LINE -- the cached stake read, then the rule: OUT without colour escapes, then issues=N
+    # shellcheck disable=SC2034  # read by stake_status_for_rule
+    ONCHAIN_STAKE_RC="$1" ONCHAIN_STAKE_LINE="$2"
+    HEALTH_ISSUES=0
+    OUT="$(check_admission_mainnet 2>&1; printf '\nissues=%s' "$HEALTH_ISSUES")"
+    OUT="$(printf '%s\n' "$OUT" | sed "s/${ESC}\[[0-9;]*m//g")"
+}
+silent() { sed '/^$/d' <<< "$OUT"; }
+FIX="Run: sudo bash edit-config.sh --set admission=closed"
+HUBS=", then sudo bash edit-config.sh --set trusted_nodes=<hubs file>"
+
+admeta NETWORK=mainnet ADMISSION_MODE=closed
+adm 0 "3 12 0 0"
+check_has "active, closed in .node-meta: ok" "  [OK]  Admission mode closed (from .node-meta), as mainnet validators run" "$OUT"
+check_has "active, closed: no issue" "issues=0" "$OUT"
+admeta NETWORK=mainnet ADMISSION_MODE=open
+adm 0 "3 12 0 0"
+check_has "active, open: a warning naming the setter and the hubs" \
+    "  [WARN] This node is Active on mainnet, but its admission mode is open (from .node-meta); mainnet validators run Closed admission with their trusted hubs. ${FIX}${HUBS}" "$OUT"
+check_has "active, open: never an issue" "issues=0" "$OUT"
+admeta NETWORK=mainnet ADMISSION_MODE=grace TRUSTED_NODES_FILE=/etc/telcoin/trusted-nodes.yaml
+adm 0 "4 12 0 4294967295"
+check_has "pending exit, grace with hubs recorded: only the admission setter" \
+    "  [WARN] This node is Pending Exit on mainnet, but its admission mode is grace (from .node-meta); mainnet validators run Closed admission with their trusted hubs. ${FIX}" "$OUT"
+admeta NETWORK=mainnet
+printf '%s\n' 'hostname: "v1"' 'peers:' '  mode: Closed' 'admission:' '  snapshot_max_age_secs: 300' '  mode: Grace   # by hand' 'trusted_nodes: {}' > "$NC"
+adm 0 "1 0 0 0"
+check_has "staked, no ADMISSION_MODE: network-config's admission.mode" \
+    "  [WARN] This node is Staked on mainnet, but its admission mode is grace (from network-config); mainnet validators run Closed admission with their trusted hubs. ${FIX}${HUBS}" "$OUT"
+printf '%s\n' 'hostname: "v1"' 'admission:' '  mode: "Closed"' > "$NC"
+adm 0 "2 13 0 0"
+check_has "pending activation, network-config Closed (quoted): ok" "  [OK]  Admission mode closed (from network-config), as mainnet validators run" "$OUT"
+rm -f "$NC"
+adm 0 "3 12 0 0"
+check_has "active, no mode anywhere: runs Open" \
+    "  [WARN] This node is Active on mainnet, but no admission mode is set, so it runs Open; mainnet validators run Closed admission with their trusted hubs. ${FIX}${HUBS}" "$OUT"
+check_has "active, no mode: never an issue" "issues=0" "$OUT"
+adm 0 "5 12 0 20"
+check "exited: silent" "issues=0" "$(silent)"
+adm 0 "none"
+check "no validator record: silent" "issues=0" "$(silent)"
+adm 2 "unknown transport timeout"
+check "stake status unreadable: silent" "issues=0" "$(silent)"
+admeta NETWORK=testnet ADMISSION_MODE=open
+adm 0 "3 12 0 0"
+check "testnet: silent" "issues=0" "$(silent)"
+admeta NETWORK=mainnet ADMISSION_MODE=open ADMISSION_MODE=closed
+adm 0 "3 12 0 0"
+check_has "ADMISSION_MODE twice: not judged" \
+    "  [WARN] ADMISSION_MODE is set more than once in .node-meta, so the admission mode was not checked; remove the extra lines" "$OUT"
+# The data dir unknown or unreadable: network-config cannot be read, so the
+# mode is unknown, not unset.
+admeta NETWORK=mainnet "DATA_DIR=$T/fx/elsewhere"
+adm 0 "3 12 0 0"
+check_has "DATA_DIR twice: not checked" "  ->  Admission mode: not checked (the node's data dir is not known; the disk section says why)" "$OUT"
+check_lacks "DATA_DIR twice: no claim that it runs Open" "runs Open" "$OUT"
+admeta NETWORK=mainnet
+printf '%s\n' 'admission:' '  mode: Closed' > "$NC"
+if [ "$(id -u)" = 0 ]; then
+    skip "data dir not readable: not checked" "root reads every directory"
+else
+    chmod 0 "$ADD"
+    adm 0 "3 12 0 0"
+    chmod 0755 "$ADD"
+    check_has "data dir not readable: not checked" "  ->  Admission mode: not checked (${NC} is not readable; run with sudo)" "$OUT"
+    check_lacks "data dir not readable: no claim that it runs Open" "runs Open" "$OUT"
+fi
+rm -f "$NC"
+check "the report runs the rule right after the epoch section" "report_epoch_committee check_admission_mainnet" \
+    "$(grep -A1 -x 'report_epoch_committee' "$CN" | tr '\n' ' ' | sed 's/ $//')"
+check_lacks "the admission rule never counts a health issue" "HEALTH_ISSUES" "$(sed -n '/^check_admission_mainnet() {/,/^}/p' "$CN")"
 finish
