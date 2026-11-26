@@ -1,9 +1,25 @@
-# checkov for terraform/, run by tools/check-terraform.sh. No check is
-# skipped. A skip goes under skip-check, one per line, with a comment saying
-# why the finding does not apply.
+# checkov for terraform/, run by tools/check-terraform.sh. A skip goes under
+# skip-check, one per line, with a comment saying why the finding does not
+# apply.
 framework:
   - terraform
 compact: true
 quiet: true
 # The run is offline: no guideline download, no upload.
 skip-download: true
+skip-check:
+  # AWS: TCP 80 from anywhere on the worker gateway is how Caddy answers the
+  # ACME HTTP challenge and redirects to https; terraform/aws/tests checks
+  # that no other host and no other port admits the internet.
+  - CKV_AWS_260
+  # AWS: basic five-minute metrics, as aws/node.yaml has. Detailed monitoring
+  # is billed per metric, and nothing these hosts run reads it.
+  - CKV_AWS_126
+  # AWS: a flow log needs a destination, a retention and a role, whose cost
+  # and placement are the operator's to choose; the module creates nothing an
+  # operator pays for without asking.
+  - CKV2_AWS_11
+  # AWS: each Elastic IP is associated with its host's network interface
+  # (aws_eip_association, network_interface_id) before the instance boots,
+  # which this check does not follow.
+  - CKV2_AWS_19

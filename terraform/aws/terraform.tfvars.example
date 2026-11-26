@@ -1,0 +1,64 @@
+# Copy to terraform.tfvars and edit. Every value here is public: nothing in
+# this deployment is secret, and the BLS passphrase never passes through it.
+
+# Where both hosts run. Null picks the first zone, in name order, that
+# offers both instance types.
+region = "eu-central-1"
+# availability_zone = "eu-central-1a"
+
+# testnet or mainnet.
+network = "testnet"
+
+# Starts every resource name.
+name_prefix = "telcoin"
+
+# The validator's execution address (on mainnet its Safe), printed into the
+# key generation command.
+# validator_address = "0x0000000000000000000000000000000000000001"
+
+# Testnet only: the node release key generation installs.
+# node_release_tag = "v0.18.0-adiri"
+
+# First apply: leave rpc_domain empty. Point an A record for your RPC name at
+# the gateway_public_ip output (or send tao_handoff to the Telcoin
+# Association), wait until it resolves, then set it and apply again: that
+# apply creates the worker gateway host.
+rpc_domain = ""
+
+# false builds a single node (an observer or an RPC node) with no gateway.
+# gateway_enabled = true
+
+# Shells go through Session Manager by default, with no port open. List IPv4
+# networks here to open TCP 22 to them as well (documentation range shown).
+admin_ssh_cidrs = []
+# admin_ssh_cidrs = ["198.51.100.7/32"]
+
+# The trusted hubs map, written to the validator at first boot. Leave empty to
+# copy it to the host yourself; next_steps names the path. Instance user data
+# holds 16 KiB gzipped, so a large map has to go by hand.
+# trusted_nodes_file = "trusted-nodes.yaml"
+
+# Mainnet seals the passphrase credential to a TPM2. Either boot an image
+# registered with NitroTPM support, or accept the host key alone.
+# ami_id       = "ami-0123456789abcdef0"
+# allow_no_tpm = true
+
+# Null takes the per-network defaults: m7i.2xlarge and 500 GiB / 15000 IOPS /
+# 300 MiB/s on testnet, m7i.4xlarge and 2000 GiB / 20000 IOPS / 300 MiB/s on
+# mainnet; the gateway is an m7i.large.
+# validator_instance_type = "m7i.4xlarge"
+# gateway_instance_type   = "m7i.large"
+# data_disk_size_gb       = 2000
+# data_disk_iops          = 20000
+# data_disk_throughput    = 300
+
+# A KMS key of your own for every volume, instead of the AWS managed key.
+# kms_key_id = "arn:aws:kms:eu-central-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab"
+
+# Ubuntu Server LTS: 26.04 (default) or 24.04.
+# ubuntu_version = "26.04"
+
+# The private network. The validator takes the subnet's 10th address and the
+# gateway its 20th.
+# vpc_cidr    = "10.42.0.0/16"
+# subnet_cidr = "10.42.1.0/24"
