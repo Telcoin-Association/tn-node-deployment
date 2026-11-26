@@ -1695,6 +1695,8 @@ journalctl -u telcoin-ui -f
 
 Optional. Serves your node's JSON-RPC at `https://<domain>/` and its WebSocket at `wss://<domain>/`, and advertises both on-network so gateways and wallets can find the node. Without it (the default), RPC stays on `127.0.0.1`.
 
+On mainnet this site is for nodes that are not validators. A mainnet validator's public RPC is its worker gateway, on a host of its own, and its keys advertise the gateway's name: with no `--rpc-domain`, key generation writes the node's default name, `https://v<label>.telcoin.network/` (`<label>` is the first five characters of its BLS public key, lowercased), into `node-info.yaml` with no WebSocket URL and records `RPC_ADVERTISED_VIA=gateway`; the Telcoin Association (TAO) creates its A record once the operator sends it the name and the gateway host's static public IP. A name of your own, given with `--admission closed --rpc-domain <name>` at key generation or later with `install-caddy.sh --phase=rpc-advertise --rpc-domain <name>`, is encouraged; on mainnet `--rpc-domain` without `--admission closed` sets up a node that is not a validator, with a WebSocket URL for this site, and key generation notes that a validator must pass `--admission closed`. `rpc-enable` refuses a mainnet node that runs admission closed, as a validator does, a mainnet node fronted by a gateway (`GATEWAY_UPSTREAM`), and any node that advertises a gateway: a node that is not a validator and kept the default name runs `--phase=rpc-unadvertise`, then `--phase=rpc-enable --rpc-domain <name>`. See [OPERATOR.md section 4.15](OPERATOR.md#415-worker-gateway) and [section 2.12](OPERATOR.md#212-generate-mainnet-keys-before-genesis).
+
 reth never listens publicly. [Caddy](https://caddyserver.com) holds the TLS certificate (automatic Let's Encrypt) on port 443 and proxies to reth on loopback: JSON-RPC to `RPC_PORT` (8545), WebSocket upgrades to `WS_PORT` (8546). `install-caddy.sh` keeps this in the same Caddyfile as the optional [dashboard](#external-dashboard-access-optional-via-caddy); changing one site never touches the other. It needs Caddy 2.8.0 or newer (the dashboard's `basic_auth` and the RPC site's page depend on it) and refuses an older Caddy, with install instructions, before it writes anything.
 
 The site `rpc-enable` writes is block v2, stamped `# tn-rpc block v2` in the Caddyfile:
@@ -1742,7 +1744,7 @@ Set up DNS, then:
 sudo bash ~/telcoin-node-scripts/install-caddy.sh --phase=rpc-enable --rpc-domain node7.adiri.telcoin.network
 ```
 
-Add `--public-ip <ip>` behind NAT. `rpc-enable` first prints what the endpoint exposes and asks for a yes; run from a script with no terminal, it needs `--yes` (`-y`) and otherwise stops before any change (`setup-node.sh --rpc-domain` passes `--yes`, because the domain is your consent). On mainnet it is refused for a staked validator, or when the stake cannot be read. For a guided run, start `sudo bash ~/telcoin-node-scripts/install-caddy.sh` and pick `[2] Public RPC endpoint`; it checks DNS before it changes anything.
+Add `--public-ip <ip>` behind NAT. `rpc-enable` first prints what the endpoint exposes and asks for a yes; run from a script with no terminal, it needs `--yes` (`-y`) and otherwise stops before any change (`setup-node.sh --rpc-domain` passes `--yes`, because the domain is your consent). On mainnet it is refused for a node that runs admission closed or is fronted by a worker gateway, for a staked validator, and when the stake cannot be read. For a guided run, start `sudo bash ~/telcoin-node-scripts/install-caddy.sh` and pick `[2] Public RPC endpoint`; it checks DNS before it changes anything.
 
 **If the dashboard already sits on `nodeN`**, move it and enable RPC in one step. Create the A record for `dashboard.nodeN.<suffix>` first (Caddy needs a certificate for that name too), then:
 
@@ -1778,7 +1780,7 @@ sudo bash ~/telcoin-node-scripts/check-node.sh
 sudo bash ~/telcoin-node-scripts/install-caddy.sh --phase=rpc-status
 ```
 
-`check-node.sh` has a public RPC block: the domain, Caddy's state, an https and a wss probe (sent through Caddy on loopback, so the real certificate is checked), the WS port, and the URLs `node-info.yaml` advertises. It ends with `public RPC: OK`, or with `public RPC: WARN -- <reasons>` and the command that fixes it. Run it with `sudo`: `.node-meta` is root-only, and without it the block reports `unknown`. A private node shows `public RPC: not configured (private node)`.
+`check-node.sh` has a public RPC block: the domain, Caddy's state, an https and a wss probe (sent through Caddy on loopback, so the real certificate is checked), the WS port, and the URLs `node-info.yaml` advertises. It ends with `public RPC: OK`, or with `public RPC: WARN -- <reasons>` and the command that fixes it. Run it with `sudo`: `.node-meta` is root-only, and without it the block reports `unknown`. A private node shows `public RPC: not configured (private node)`. On a node that advertises a worker gateway (`RPC_ADVERTISED_VIA=gateway`), the block checks the gateway's name instead, with one `GET https://<name>/health` and no wss probe, and says so when the node's default name does not resolve yet because the TAO has not created its A record ([OPERATOR.md section 4.15](OPERATOR.md#415-worker-gateway)).
 
 `--phase=rpc-status` shows whether the site is enabled, what `node-info.yaml` advertises, and whether reth's WebSocket port is listening.
 
@@ -1964,11 +1966,11 @@ Interactive setup prompts for everything. The public RPC flags (`--rpc-domain` t
 
 | Flag | What it does |
 |---|---|
-| `--rpc-domain <name>` | Public RPC on this DNS name. Derives and advertises `https://<name>/` and `wss://<name>/` at key generation, then enables Caddy after the node starts |
+| `--rpc-domain <name>` | Public RPC on this DNS name. Derives and advertises `https://<name>/` and `wss://<name>/` at key generation, then enables Caddy after the node starts. On a mainnet validator (`--admission closed`) it names the worker gateway instead: `https://<name>/` only (host lowercased), recorded with `RPC_ADVERTISED_VIA=gateway`, and no Caddy site ([OPERATOR.md section 2.12](OPERATOR.md#212-generate-mainnet-keys-before-genesis)) |
 | `--public-ip <ip>` | Inbound public IP the A record points at (NAT or multi-IP hosts). In `--json` mode it is also the P2P public IP. A value that is not an IPv4 or IPv6 address is ignored with a warning and not recorded |
 | `--rpc-public` | Asks for public RPC. Needs `--rpc-domain`; without one, setup warns and RPC stays private |
 | `--no-public-rpc` | Private RPC (`127.0.0.1` only) without the prompt. Can't be combined with `--rpc-domain` or `--rpc-public` |
-| `--rpc-http <url>` | Overrides the HTTP RPC URL written to `node-info.yaml`. An `http://` or `https://` URL |
+| `--rpc-http <url>` | Overrides the HTTP RPC URL written to `node-info.yaml`. An `http://` or `https://` URL; on a mainnet validator (`--admission closed`) the worker gateway's URL, `https://` only |
 | `--rpc-ws <url>` | Overrides the WebSocket RPC URL written to `node-info.yaml`. A `ws://` or `wss://` URL. Needs `--rpc-http` or `--rpc-domain` |
 | `--public-rpc-url <url>` | Overrides `PUBLIC_RPC_URL` in `.node-meta` (UI and tooling only, never sent to the network). An `http://` or `https://` URL |
 | `--public-ws-url <url>` | Overrides `PUBLIC_WS_URL` in `.node-meta`. A `ws://` or `wss://` URL |

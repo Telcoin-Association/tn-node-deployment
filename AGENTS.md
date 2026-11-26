@@ -610,6 +610,32 @@ validator side. Rules:
 - `rpc-advertise` records `RPC_ADVERTISED_VIA=gateway`; `rpc-disable` leaves that advertisement
   alone and `rpc-enable` refuses while it or a `tn-gateway` block exists, because one host never
   serves both sites.
+- The worker gateway owns a mainnet validator's advertisement. Validator posture is
+  `NETWORK=mainnet` with `ADMISSION_MODE=closed` and nothing else (the keygen before genesis runs
+  for observers too); `setup_rpc_gateway_posture` in `setup-node.sh` decides it. Only two writers
+  set `RPC_ADVERTISED_VIA=gateway`: `install-caddy.sh rpc-advertise`, and setup-node's mainnet
+  keygen (`setup_rpc_advertise_record`), which gives a node with no RPC URL its default name
+  from `tn_rpc_default_host` (`lib/common.sh`, the one place that builds the name; callers
+  never compose it) and, in posture, records an operator's `--rpc-domain` or `--rpc-http` for the
+  gateway: https only (an `http://` `--rpc-http` is refused before anything changes), normalised
+  as the keytool stores it (lowercase host, no default port, a trailing slash), no
+  `PUBLIC_WS_URL`, no Caddy site. Outside posture on mainnet those flags set up a node that is not
+  a validator (https plus wss for a Caddy site on the host), with a note that a validator passes
+  `--admission closed`; setup names `rpc-advertise` only to a validator, and `rpc-unadvertise`
+  then `rpc-enable` to any other node that carries the default. The default never goes into the
+  shell variable `PUBLIC_RPC_DOMAIN`, which `step_public_rpc` would serve through Caddy
+  (`RPC_DEFAULT_HOST` holds it). A failure to derive or write it is a warning, never a failed
+  keygen. `step_create_service` leaves `PUBLIC_RPC_DOMAIN`, `PUBLIC_RPC_URL` and `PUBLIC_WS_URL`
+  alone while the record is the gateway's (`setup_rpc_gateway_owned`), since a `--json` finalize
+  is a new process with those variables empty.
+- On mainnet the node-side public RPC site and a gateway never front one node:
+  `caddy_rpc_enable_precheck` refuses a Closed node (before the advertisement refusal, whose
+  advice would strip a validator's URL) and a node with `GATEWAY_UPSTREAM`, both before
+  `caddy_mainnet_gate`; `set_gateway_upstream` in `edit-config.sh` refuses a host whose Caddyfile
+  holds the `tn-rpc` block (`off` is never refused). `rpc-advertise` writes a name it cannot
+  verify, with a warning, only on mainnet and only while the host has no node service; anywhere
+  else its `/health` check refuses. `check-node.sh` checks a gateway-owned advertisement at
+  `https://<name>/health` (`report_public_rpc_gateway`, warn-only), never through Caddy.
 - While `.node-meta` holds `GATEWAY_UPSTREAM`, `firewall-setup.sh` refuses, and never just warns
   about, a run that would drop the gateway's rules or turn `ufw` off: `--reset`, and a
   `--gateway-from` list or `none` that leaves out a host it names (`fw_gw_upstream_guard`).
