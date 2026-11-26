@@ -382,7 +382,10 @@ write_env validator "TN_FB_TRUSTED_NODES=${HUBS}"
 : > "$R$DEV"
 run_fb validator
 failed_at "no hubs file" validator trusted-nodes
-check "no hubs file: no installer" 0 "$(count "$CALLS" sudo)"
+check "no hubs file: no command ran" "" "$CALLS"
+check "no hubs file: fstab unchanged, no apt file" "LABEL=cloudimg-rootfs / ext4 discard,errors=remount-ro 0 1 no" \
+    "$(cat "$R/etc/fstab") $([ -e "$R/etc/apt/apt.conf.d/50telcoin-first-boot" ] && echo yes || echo no)"
+check_has "no hubs file: says nothing was changed" yes "$(grep -q 'Nothing was changed\.$' "$R/var/log/telcoin-first-boot.log" && echo yes || echo no)"
 
 echo "== validator: the installer serves an older release"
 fresh v-old
@@ -508,6 +511,64 @@ write_env gateway "TN_FB_SSH_FROM=198.51.100.0/24,,10.42.0.0/16"
 run_fb gateway
 refused "an SSH list with an empty entry" gateway
 
+# What setup-gateway.sh and firewall-setup.sh would refuse after the host has
+# changed is refused here, before anything changes.
+# env_refused KEY=VALUE... -- each value stops the gateway at the env step, no command run.
+env_refused() {
+    local kv
+    for kv in "$@"; do
+        fresh r-gw
+        write_env gateway "$kv"
+        run_fb gateway
+        check "${kv}: refused before any change" "1 step=env " "$RC $(marker failed | grep '^step=') $CALLS"
+    done
+}
+# env_taken KEY=VALUE... -- each value lets the gateway through.
+env_taken() {
+    local kv
+    for kv in "$@"; do
+        fresh g-taken
+        write_env gateway "$kv"
+        : > "$T/dns-ok"
+        run_fb gateway
+        check "${kv}: taken" "0 role=gateway" "$RC $(marker "done")"
+    done
+}
+env_refused TN_FB_UPSTREAM=8.8.8.8 TN_FB_UPSTREAM=127.0.0.1 TN_FB_UPSTREAM=0.10.0.1 TN_FB_UPSTREAM=172.32.0.1 \
+    TN_FB_UPSTREAM=100.128.0.1 TN_FB_UPSTREAM=192.169.0.1 TN_FB_UPSTREAM=010.42.1.10
+env_taken TN_FB_UPSTREAM=172.16.0.1 TN_FB_UPSTREAM=172.31.255.254 TN_FB_UPSTREAM=192.168.7.7 \
+    TN_FB_UPSTREAM=100.64.0.1 TN_FB_UPSTREAM=100.127.0.1 TN_FB_UPSTREAM=169.254.10.10
+env_refused TN_FB_REDIRECT_QUERIES=http://10.42.1.10:8545 TN_FB_REDIRECT_QUERIES=http://10.42.1.10:43174/ \
+    TN_FB_REDIRECT_QUERIES=http://localhost:8655 TN_FB_REDIRECT_QUERIES=http://LocalHost:8656/x \
+    TN_FB_REDIRECT_QUERIES=http://127.0.0.1:9655 TN_FB_REDIRECT_QUERIES=http://0.0.0.0:8655 \
+    TN_FB_REDIRECT_QUERIES=https://rpc.example.org:99999/ TN_FB_REDIRECT_QUERIES=https://rpc.example.org:0/ \
+    TN_FB_REDIRECT_QUERIES=https://rpc.example.org:08545/ TN_FB_REDIRECT_QUERIES=https://rpc..example.org/ \
+    TN_FB_REDIRECT_QUERIES=https://-rpc.example.org/ TN_FB_REDIRECT_QUERIES=https://rpc.example.org/a:b \
+    TN_FB_REDIRECT_QUERIES=https://rpc.example.org/a@b TN_FB_REDIRECT_QUERIES=ftp://rpc.example.org/
+env_taken TN_FB_REDIRECT_QUERIES=https://rpc.example.org:8545/ TN_FB_REDIRECT_QUERIES=http://10.42.1.10:8546 \
+    TN_FB_REDIRECT_QUERIES=http://10.42.1.11:8545 TN_FB_REDIRECT_QUERIES=http://localhost:8545 \
+    TN_FB_REDIRECT_QUERIES=https://rpc.example.org:65535/v1/rpc
+env_refused TN_FB_SSH_FROM=0.0.0.0/0 TN_FB_SSH_FROM=0.0.0.0 TN_FB_SSH_FROM=10.0.0.0/7 TN_FB_SSH_FROM=10.0.0.0/33 \
+    TN_FB_SSH_FROM=10.0.0.0/08 TN_FB_SSH_FROM=:: TN_FB_SSH_FROM=::/0 TN_FB_SSH_FROM=:::/999 \
+    TN_FB_SSH_FROM=2001:db8::/7 TN_FB_SSH_FROM=2001:db8::/129 TN_FB_SSH_FROM=::ffff:198.51.100.7 \
+    TN_FB_SSH_FROM=1:2:3 TN_FB_SSH_FROM=1::2::3 TN_FB_SSH_FROM=12345::1 TN_FB_SSH_FROM=1:2:3:4:5:6:7:8:9 \
+    TN_FB_SSH_FROM=198.51.100.0/24,0.0.0.0/0
+env_taken TN_FB_SSH_FROM=198.51.100.7 TN_FB_SSH_FROM=2001:db8::/32 TN_FB_SSH_FROM=fe80::1 \
+    TN_FB_SSH_FROM=1:2:3:4:5:6:7:8/128 TN_FB_SSH_FROM=::1 TN_FB_SSH_FROM=10.0.0.0/8,2001:db8:0:1::/64
+env_refused TN_FB_INSTALLER_URL=https://install..telcoin.network TN_FB_INSTALLER_URL=https://install.telcoin.network:70000
+fresh r-gw
+write_env gateway TN_FB_REDIRECT_QUERIES=http://10.42.1.10:8545
+run_fb gateway
+check_has "a redirect URL that loops: says why" \
+    "reason=TN_FB_REDIRECT_QUERIES in /etc/telcoin-first-boot/first-boot.env points at the validator's own RPC or readiness port, or at this host's gateway, and setup-gateway.sh refuses that: give a node that answers queries (it is 'http://10.42.1.10:8545')." \
+    "$(marker failed)"
+fresh r-gw
+write_env gateway TN_FB_SSH_FROM=0.0.0.0/0
+run_fb gateway
+check_has "an SSH source that is anywhere: says why" \
+    "reason=TN_FB_SSH_FROM in /etc/telcoin-first-boot/first-boot.env must be a comma list of addresses or CIDRs of /8 or narrower, none of them 0.0.0.0 or :: (it is '0.0.0.0/0')." \
+    "$(marker failed)"
+
 fresh r-noenv
 rm -f "$R/etc/telcoin-first-boot/first-boot.env"
 run_fb gateway
@@ -601,17 +662,23 @@ failed_at "exit 0 not ok" gateway gateway
 check "exit 0 not ok: no firewall" 0 "$(count "$CALLS" firewall-setup.sh)"
 
 echo "== gateway: the name never resolves"
+# The wait ends on the clock, not after a number of checks: 3 s with a check a
+# second is three checks or so (whole seconds on the clock make it 2 to 5).
 fresh g-dns
 write_env gateway
-run_fb gateway TN_FB_DNS_TIMEOUT=90
+run_fb gateway TN_FB_DNS_TIMEOUT=3 TN_FB_WAIT_STEP=1
 succeeded "dns timeout" gateway
-check "dns timeout: three checks, then setup-gateway.sh" "$GW_DNS
-$GW_DNS
-$GW_DNS
+n="$(count "$CALLS" "$GW_DNS")"
+check "dns timeout: checks until 3 s are up (${n} checks)" yes "$([ "$n" -ge 2 ] && [ "$n" -le 5 ] && echo yes || echo no)"
+check "dns timeout: then setup-gateway.sh and the firewall" "$GW_DNS
 $GW_SG
-$GW_FW" "$(grep -E '^(install-caddy|setup-gateway|firewall-setup)\.sh' <<< "$CALLS")"
+$GW_FW" "$(grep -E '^(install-caddy|setup-gateway|firewall-setup)\.sh' <<< "$CALLS" | uniq)"
 check_has "dns timeout: a warning in the log" yes \
-    "$(grep -q 'Warning: gw.example.org did not reach 203.0.113.7 within 90 s (gw.example.org does not resolve yet)' "$R/var/log/telcoin-first-boot.log" && echo yes || echo no)"
+    "$(grep -q 'Warning: gw.example.org did not reach 203.0.113.7 within 3 s (gw.example.org does not resolve yet)' "$R/var/log/telcoin-first-boot.log" && echo yes || echo no)"
+fresh g-dns0
+write_env gateway
+run_fb gateway TN_FB_DNS_TIMEOUT=0
+check "dns timeout 0: one check" 1 "$(count "$CALLS" "$GW_DNS")"
 
 echo "== gateway: the installer serves an older release"
 fresh g-old

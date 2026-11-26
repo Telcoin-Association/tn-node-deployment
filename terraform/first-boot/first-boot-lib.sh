@@ -27,7 +27,8 @@
 #                         (default empty). With it set, a regular file stands in
 #                         for the data device.
 #   TN_FB_WAIT_STEP       seconds every wait or retry sleeps instead of its own
-#                         interval; the number of tries stays the same
+#                         interval; the number of tries stays the same, except
+#                         in the DNS wait, which ends on the clock
 #   TN_FB_DEVICE_TIMEOUT  seconds to wait for the data device (default 600)
 #   TN_FB_DNS_TIMEOUT     seconds to wait for the gateway's name (default 1800)
 # Each of the last three is a whole number of seconds; anything else is refused
@@ -172,12 +173,6 @@ fb_try() {
     done
 }
 
-# fb_is_block PATH -- PATH is a block device (or, under TN_FB_ROOT, a file).
-fb_is_block() {
-    [ -b "$1" ] && return 0
-    [ -n "$FB_ROOT" ] && [ -f "$1" ]
-}
-
 # -----------------------------------------------------------------------------
 # The env file
 # -----------------------------------------------------------------------------
@@ -198,11 +193,16 @@ fb_ipv4_ok() {
     return 0
 }
 
-# fb_url_ok SCHEMES V -- V is SCHEMES://host[:port][/path], SCHEMES an ERE
-# alternative such as https or https?.
+# fb_url_ok SCHEMES V -- V is SCHEMES://host[:port][/path] (SCHEMES an ERE such
+# as https?) as setup-gateway.sh takes --redirect-queries: labels joined by
+# single dots, a port 1-65535.
 fb_url_ok() {
-    local re="^${1}://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?(/[A-Za-z0-9._/:@,-]*)?\$"
-    [[ "$2" =~ $re ]]
+    local l='[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?' re hp
+    re="^${1}://${l}(\\.${l})*(:[1-9][0-9]{0,4})?(/[A-Za-z0-9._/-]*)?\$"
+    [[ "$2" =~ $re ]] || return 1
+    hp="${2#*://}"
+    hp="${hp%%/*}"
+    case "$hp" in *:*) [ "${hp##*:}" -le 65535 ] ;; esac
 }
 
 # fb_release_num V -- V, a node scripts release scripts-vMAJOR.MINOR.PATCH, as
@@ -283,23 +283,28 @@ fb_validate_env() {
             fi
             ;;
         gateway)
-            fb_ipv4_ok "$TN_FB_UPSTREAM" || fb_env_bad TN_FB_UPSTREAM "must be the validator's private IPv4 address"
+            # As setup-gateway.sh and firewall-setup.sh check them (fbg_* are in
+            # first-boot-gateway.sh).
+            fbg_upstream_ok "$TN_FB_UPSTREAM" \
+                || fb_env_bad TN_FB_UPSTREAM "must be the validator's private IPv4 address (10/8, 172.16/12, 192.168/16, 100.64/10 or 169.254/16)"
             re='^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$'
             if ! [[ "$TN_FB_DOMAIN" =~ $re ]] || [ "${#TN_FB_DOMAIN}" -gt 253 ]; then
                 fb_env_bad TN_FB_DOMAIN "must be a DNS name"
             fi
             fb_ipv4_ok "$TN_FB_PUBLIC_IP" || fb_env_bad TN_FB_PUBLIC_IP "must be the gateway's public IPv4 address"
-            fb_url_ok 'https?' "$TN_FB_REDIRECT_QUERIES" || fb_env_bad TN_FB_REDIRECT_QUERIES "must be an http or https URL"
+            fb_url_ok 'https?' "$TN_FB_REDIRECT_QUERIES" \
+                || fb_env_bad TN_FB_REDIRECT_QUERIES "must be http(s)://host[:port][/path], with a port 1-65535"
+            if fbg_redirect_loops "$TN_FB_REDIRECT_QUERIES" "$TN_FB_UPSTREAM"; then
+                fb_env_bad TN_FB_REDIRECT_QUERIES "points at the validator's own RPC or readiness port, or at this host's gateway, and setup-gateway.sh refuses that: give a node that answers queries"
+            fi
             re='^(0|[1-9][0-9]{0,5})$'
             [[ "$TN_FB_RATE_LIMIT_SUBMISSIONS" =~ $re ]] || fb_env_bad TN_FB_RATE_LIMIT_SUBMISSIONS "must be a whole number"
-            # The firewall checks each source itself; this keeps empty entries
-            # and anything but addresses and prefixes out of its command line.
-            re='^[0-9A-Fa-f.:]+(/[0-9]{1,3})?$'
+            s="must be a comma list of addresses or CIDRs of /8 or narrower, none of them 0.0.0.0 or ::"
             case ",${TN_FB_SSH_FROM}," in
-                ,,|*,,*) fb_env_bad TN_FB_SSH_FROM "must be a comma list of addresses or CIDRs" ;;
+                ,,|*,,*) fb_env_bad TN_FB_SSH_FROM "$s" ;;
             esac
-            for s in $(printf '%s' "$TN_FB_SSH_FROM" | tr ',' ' '); do
-                [[ "$s" =~ $re ]] || fb_env_bad TN_FB_SSH_FROM "must be a comma list of addresses or CIDRs"
+            for re in $(printf '%s' "$TN_FB_SSH_FROM" | tr ',' ' '); do
+                fbg_src_ok "$re" || fb_env_bad TN_FB_SSH_FROM "$s"
             done
             ;;
     esac
@@ -400,9 +405,8 @@ fb_install_node_scripts() {
     fb_check_release
 }
 
-# fb_check_release -- the steps after this one pass flags an older release does
-# not know, so it stops here. The release is the release= line of the MANIFEST
-# the installer checked against its signature and installed with the scripts.
+# fb_check_release -- later steps pass flags an older release does not know. The
+# release is in the MANIFEST the installer verified and installed.
 fb_check_release() {
     local m="${FB_SCRIPTS_DIR}/MANIFEST" rel have want got
     fb_step scripts-release "the node scripts are ${TN_FB_MIN_RELEASE} or newer"

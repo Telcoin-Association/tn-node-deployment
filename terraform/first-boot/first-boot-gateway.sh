@@ -49,6 +49,56 @@ FB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # added only when the downloaded key has exactly this fingerprint.
 readonly TN_DOCKER_APT_FINGERPRINT="9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
 
+# fbg_upstream_ok V -- V is a private IPv4 address of another host.
+fbg_upstream_ok() {
+    local a b
+    fb_ipv4_ok "$1" || return 1
+    IFS=. read -r a b _ <<< "$1"
+    case "$a" in
+        10) return 0 ;;
+        172) [ "$b" -ge 16 ] && [ "$b" -le 31 ] ;;
+        192) [ "$b" = 168 ] ;;
+        100) [ "$b" -ge 64 ] && [ "$b" -le 127 ] ;;
+        169) [ "$b" = 254 ] ;;
+        *) return 1 ;;
+    esac
+}
+
+# fbg_src_ok V -- V is an SSH source: IPv4, or IPv6 in hex groups, with a mask
+# of /8 or narrower; never 0.0.0.0 or ::, which mean anywhere.
+fbg_src_ok() {
+    local ip="${1%%/*}" max=32 g='[0-9A-Fa-f]{1,4}' re
+    case "$ip" in 0.0.0.0|::|*:::*|*::*::*|:[!:]*|*[!:]:) return 1 ;; esac
+    if ! fb_ipv4_ok "$ip"; then
+        max=128
+        re="^${g}(:${g}){7}\$"
+        case "$ip" in
+            *::*) ip="${ip/::/:}"; ip="${ip#:}"; ip="${ip%:}"; re="^${g}(:${g}){0,6}\$" ;;
+        esac
+        [[ "$ip" =~ $re ]] || return 1
+    fi
+    re='^[1-9][0-9]{0,2}$'
+    case "$1" in
+        */*) [[ "${1#*/}" =~ $re ]] && [ "${1#*/}" -ge 8 ] && [ "${1#*/}" -le "$max" ] ;;
+    esac
+}
+
+# fbg_redirect_loops URL UPSTREAM -- URL names UPSTREAM's RPC or readiness port,
+# or this gateway's ports on a loopback name.
+fbg_redirect_loops() {
+    local h p=80
+    h="${1#*://}"
+    h="${h%%/*}"
+    case "$1" in https:*) p=443 ;; esac
+    case "$h" in *:*) p="${h##*:}" ;; esac
+    h="$(printf '%s' "${h%%:*}" | tr '[:upper:]' '[:lower:]')"
+    case "$h" in localhost|127.0.0.1|0.0.0.0) h=lo ;; esac
+    case "${h}:${p}" in
+        "${2}:8545"|"${2}:43174"|lo:8655|lo:8656|lo:9655) return 0 ;;
+    esac
+    return 1
+}
+
 # -----------------------------------------------------------------------------
 # JSON lines of the node scripts, read the way lib/gateway.sh reads them (no jq)
 # -----------------------------------------------------------------------------
@@ -162,13 +212,14 @@ fbg_docker_running() {
 
 # fbg_wait_dns -- the gateway's name should reach this host before Caddy asks
 # for its certificate, but waiting longer helps nothing: Caddy retries with
-# backoff by itself, so a name that is still missing only goes to the log.
+# backoff by itself, so a name that is still missing only goes to the log. The
+# wait ends on the clock: a check can itself take a while when DNS or the
+# outbound HTTPS it uses is slow.
 fbg_wait_dns() {
-    local limit tries n=1 out="" note re='"propagated"[[:space:]]*:[[:space:]]*true'
+    local limit end out="" note re='"propagated"[[:space:]]*:[[:space:]]*true'
     fb_step dns "${TN_FB_DOMAIN} resolving to ${TN_FB_PUBLIC_IP}"
     limit="${TN_FB_DNS_TIMEOUT:-1800}"
-    tries=$((limit / 30))
-    [ "$tries" -ge 1 ] || tries=1
+    end=$((SECONDS + limit))
     while :; do
         out="$(bash "${FB_SCRIPTS_DIR}/install-caddy.sh" --json --phase=gateway-check-dns \
             --gateway-domain "$TN_FB_DOMAIN" --public-ip "$TN_FB_PUBLIC_IP" 2>>"$FB_LOG" </dev/null)" || out=""
@@ -176,9 +227,8 @@ fbg_wait_dns() {
             fb_log "${TN_FB_DOMAIN} reaches this host."
             return 0
         fi
-        [ "$n" -lt "$tries" ] || break
+        [ "$SECONDS" -lt "$end" ] || break
         fb_sleep 30
-        n=$((n + 1))
     done
     note="$(fbg_json_str note "$out")"
     fb_log "Warning: ${TN_FB_DOMAIN} did not reach ${TN_FB_PUBLIC_IP} within ${limit} s${note:+ (${note})}. The gateway is set up anyway; Caddy gets the certificate once the A record resolves, and sudo systemctl reload caddy starts a new attempt at once."

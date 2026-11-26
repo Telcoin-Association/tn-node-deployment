@@ -11,13 +11,13 @@
 #
 # Steps, in order (first-boot-lib.sh has the env file, the log and the markers):
 #   env             check /etc/telcoin-first-boot/first-boot.env
+#   trusted-nodes   TN_FB_TRUSTED_NODES, when set, is a readable file
 #   apt-lock        apt waits up to 15 minutes for the dpkg lock
 #   cve-2026-31431  the algif_aead modprobe line; unload the module if loaded
 #   swap            swap off
 #   data-disk       wait up to 10 minutes for TN_FB_DATA_DEVICE; format it only
 #                   when it carries no signature at all, refuse anything but
 #                   ext4, mount it by UUID (nofail) at /var/lib/telcoin
-#   trusted-nodes   TN_FB_TRUSTED_NODES, when set, is a readable file
 #   node-scripts    the published installer, as TN_FB_LOGIN_USER, three tries
 #   scripts-release the installed release is TN_FB_MIN_RELEASE or newer
 #
@@ -38,6 +38,12 @@ FB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 readonly FB_DATA_DIR=/var/lib/telcoin
 
+# fbv_is_block PATH -- PATH is a block device (or, under TN_FB_ROOT, a file).
+fbv_is_block() {
+    [ -b "$1" ] && return 0
+    [ -n "$FB_ROOT" ] && [ -f "$1" ]
+}
+
 # fbv_data_disk -- the data disk at /var/lib/telcoin. setup-node.sh takes the
 # mount point as it is (root-owned, holding only lost+found) and hands it to
 # the node's service user.
@@ -47,7 +53,7 @@ fbv_data_disk() {
     dev="${FB_ROOT}${TN_FB_DATA_DEVICE}"
     limit="${TN_FB_DEVICE_TIMEOUT:-600}"
     # The disk can attach after the instance starts.
-    until fb_is_block "$dev"; do
+    until fbv_is_block "$dev"; do
         [ "$waited" -lt "$limit" ] \
             || fb_fail "The data device ${TN_FB_DATA_DEVICE} did not appear within ${limit} s; check that the data disk is attached to this instance."
         fb_sleep 5
@@ -86,7 +92,8 @@ fbv_data_disk() {
     mountpoint -q "$mnt" || fb_fail "The data disk did not mount at ${FB_DATA_DIR}."
 }
 
-# fbv_trusted_nodes -- the hubs file the printed key generation names.
+# fbv_trusted_nodes -- the hubs file the printed key generation names, checked
+# with the env file, before the data disk or anything else changes.
 fbv_trusted_nodes() {
     local f
     fb_step trusted-nodes "the trusted nodes file ${TN_FB_TRUSTED_NODES:-(none given)}"
@@ -96,17 +103,17 @@ fbv_trusted_nodes() {
     fi
     f="${FB_ROOT}${TN_FB_TRUSTED_NODES}"
     if [ ! -f "$f" ] || [ ! -r "$f" ] || [ ! -s "$f" ]; then
-        fb_fail "The trusted nodes file ${TN_FB_TRUSTED_NODES} is missing, unreadable or empty."
+        fb_fail "The trusted nodes file ${TN_FB_TRUSTED_NODES} is missing, unreadable or empty." nochange
     fi
 }
 
 main() {
     fb_init validator
+    fbv_trusted_nodes
     fb_apt_lock_timeout
     fb_cve_2026_31431
     fb_swap_off
     fbv_data_disk
-    fbv_trusted_nodes
     fb_install_node_scripts setup-node.sh
     fb_done "The host is ready: the data disk is mounted at ${FB_DATA_DIR} and the node scripts are in ${FB_SCRIPTS_DIR#"$FB_ROOT"}. Next: the key generation and firewall commands that terraform output next_steps prints, run on this host."
 }
