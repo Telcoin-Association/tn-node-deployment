@@ -20,12 +20,15 @@ Telcoin Association (TAO), which creates the A record; a name of one's own, give
 `install-caddy.sh --phase=rpc-advertise`, is encouraged. A failure to write the default is a
 warning, never a failed keygen. On a mainnet node that runs admission closed, `--rpc-domain` and
 `--rpc-http` name the gateway: https only (an `http://` `--rpc-http` is refused), stored as the
-keytool stores it (lowercase host, no default port, `/` for an empty path), no Caddy site. Without
-`--admission closed` they set up a node that is not a validator, with a WebSocket URL for a public
-RPC site on the host, and key generation notes that a validator must pass `--admission closed`.
-On mainnet `rpc-enable` refuses a node that runs admission closed and a node with
-`GATEWAY_UPSTREAM`, and `edit-config.sh --set gateway_upstream=` refuses a host that serves the
-public RPC site. On every network setup keeps a record the gateway owns when it writes the
+keytool stores it (lowercase host, no default port, `/` for an empty path, or the form worker 0
+reads back when the keytool rewrites more, with a line that says so), no Caddy site. A finalize or
+interactive re-run not given `--admission` takes the mode `.node-meta` records, so a validator gets
+those texts and the refusal from the first line. Without `--admission closed` the two flags set up
+a node that is not a validator, with a WebSocket URL for a public RPC site on the host, and key
+generation notes that a validator must pass `--admission closed`. On mainnet `rpc-enable` refuses
+a node that runs admission closed (naming a recorded gateway URL as it is recorded) and a node
+with `GATEWAY_UPSTREAM`, and `edit-config.sh --set gateway_upstream=` refuses a host that serves
+the public RPC site. On every network setup keeps a record the gateway owns when it writes the
 service, and check-node checks it at `https://<name>/health` instead of through a Caddy site. On
 mainnet, `rpc-advertise` on a host with no node service yet writes the record with a warning when
 the name does not answer; testnet and devnet refuse as before.

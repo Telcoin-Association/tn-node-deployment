@@ -612,14 +612,19 @@ validator side. Rules:
   serves both sites.
 - The worker gateway owns a mainnet validator's advertisement. Validator posture is
   `NETWORK=mainnet` with `ADMISSION_MODE=closed` and nothing else (the keygen before genesis runs
-  for observers too); `setup_rpc_gateway_posture` in `setup-node.sh` decides it. Only two writers
-  set `RPC_ADVERTISED_VIA=gateway`: `install-caddy.sh rpc-advertise`, and setup-node's mainnet
-  keygen (`setup_rpc_advertise_record`), which gives a node with no RPC URL its default name
+  for observers too); `setup_rpc_gateway_posture` in `setup-node.sh` decides it. On a finalize
+  and an interactive run, a mode the run is not given comes from `.node-meta`, and so does an
+  interactive run's network until its menu sets one, so a validator's RPC texts and refusals apply
+  from the first line; a flag given wins, and a `--json` keygen goes by its flags alone. Only two
+  writers set `RPC_ADVERTISED_VIA=gateway`: `install-caddy.sh rpc-advertise`, and setup-node's
+  mainnet keygen (`setup_rpc_advertise_record`), which gives a node with no RPC URL its default name
   from `tn_rpc_default_host` (`lib/common.sh`, the one place that builds the name; callers
   never compose it) and, in posture, records an operator's `--rpc-domain` or `--rpc-http` for the
   gateway: https only (an `http://` `--rpc-http` is refused before anything changes), normalised
   as the keytool stores it (`setup_rpc_url_normal`: lowercase scheme and host, no default port,
-  `/` for an empty path), `PUBLIC_RPC_DOMAIN` only for a DNS name with no other port and no
+  `/` for an empty path) and, when worker 0 reads back another https URL with no WebSocket URL
+  after `set-rpc` (the keytool's parser rewrites more), recorded as read back with an info line
+  (`setup_rpc_gateway_write`), `PUBLIC_RPC_DOMAIN` only for a DNS name with no other port and no
   path (`setup_rpc_url_host`), no `PUBLIC_WS_URL`, no Caddy site. Outside posture on mainnet those
   flags set up a node that is not a validator (https plus wss for a Caddy site on the host), with
   a note that a validator passes `--admission closed`. When `--rpc-domain` meets a record the

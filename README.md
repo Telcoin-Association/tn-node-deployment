@@ -2149,7 +2149,7 @@ prints the exact fix command.
 
 ### install-caddy v2.2.2 — on mainnet the public RPC site and a worker gateway never front one node
 On mainnet `rpc-enable` refuses a node that runs admission closed, as a validator does (`This mainnet node runs admission closed, as a validator does. A mainnet validator's RPC is served by its worker gateway, never by a Caddy site on the validator. ...`), and a node with `GATEWAY_UPSTREAM` (`... Run edit-config.sh --set gateway_upstream=off first.`), both before the stake is read; the closed-admission refusal comes before the one over a gateway advertisement, whose advice would only strip the validator's URL.
-That refusal now names the advertised URL and says that key generation on mainnet writes it too.
+That refusal now names the advertised URL, one with a path as `.node-meta` records it, and says that key generation on mainnet writes it too.
 On mainnet, `rpc-advertise` on a host with no node service yet writes the record when `https://<name>/health` does not answer, with a warning and the open item `https://<name>/ not verified`; with a node service, and on testnet and devnet, it still refuses.
 `rpc-unadvertise` on a mainnet node running admission closed warns that other nodes can no longer forward transactions to it.
 See [OPERATOR.md section 4.15](OPERATOR.md#415-worker-gateway).
@@ -2174,7 +2174,9 @@ Mainnet validators can generate their keys before the mainnet genesis exists: `-
 Every other mainnet path stays refused, a host recorded for mainnet refuses a keygen, a finalize or an interactive install for another network, and a keygen over existing keys changes nothing and says what it compared.
 A mainnet keygen given no RPC URL writes the node's default name, `https://v<label>.telcoin.network/` (`<label>` the first five characters of its BLS public key, lowercased), into `node-info.yaml` with `keytool set-rpc` and no WebSocket URL, records it as the worker gateway's (`RPC_ADVERTISED_VIA=gateway`), prints the TAO handoff that makes it answer and the route to a name of one's own, and adds `advertised_rpc` to its `done` event; a failure there is a warning, never a failed keygen.
 On a mainnet node that runs admission closed, `--rpc-domain` and `--rpc-http` name the worker gateway instead: https only (an `http://` `--rpc-http` is refused before anything changes), stored as the keytool stores it (`--rpc-domain GW.Example.org` records `https://gw.example.org/`), no Caddy site, `--rpc-ws` dropped with a warning.
+A URL the keytool stores in yet another form, such as a port written with a leading zero, is recorded as worker 0 reads it back, with one line that says so.
 On mainnet without `--admission closed` those flags set up a node that is not a validator, with a WebSocket URL for a public RPC site on the host, and key generation notes that a validator must pass `--admission closed`; given `--rpc-domain <name>` over a record the gateway owns, a finalize or re-run names `rpc-unadvertise` then `rpc-enable --rpc-domain <name>` to such a node, and `rpc-advertise` to a validator.
+A finalize or interactive re-run that is not given `--admission` takes the mode `.node-meta` records, so a validator gets the gateway's texts and the `http://` refusal from the first line.
 On every network, writing the service leaves `PUBLIC_RPC_DOMAIN`, `PUBLIC_RPC_URL` and `PUBLIC_WS_URL` alone while the record is the gateway's, where a `--json` finalize wiped them before.
 With P2P committee mode on, every re-run that completes resyncs the allowlist.
 It needs lib/common.sh 2.2.8 or later.
