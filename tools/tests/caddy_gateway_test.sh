@@ -490,6 +490,14 @@ rpc_enable_refused "mainnet closed, advertised via a gateway" "${NMM}ADMISSION_M
 check "rpc-enable, mainnet closed via a gateway: never told to rpc-unadvertise" 0 "$(grep -c 'rpc-unadvertise first' "$T/ev")"
 check "rpc-enable, mainnet closed via a gateway: names the recorded URL and how to change the name" "yes 0" \
     "$(grep -qF -- 'node-info.yaml already advertises https://gw1.example.org/ for the worker gateway; --phase=rpc-advertise --rpc-domain <name> changes the name.' "$T/ev" && echo yes) $(grep -c 'Advertise the gateway with' "$T/ev")"
+# A recorded URL with a path is named as recorded: no / is added to it.
+GWPATH='PUBLIC_RPC_URL=https://gw8.example.org/rpc\nRPC_ADVERTISED_VIA=gateway\n'
+rpc_enable_refused "mainnet closed, a gateway URL with a path" "${NMM}ADMISSION_MODE=closed\n${GWPATH}" \
+    "node-info.yaml already advertises https://gw8.example.org/rpc for the worker gateway;"
+check "rpc-enable, mainnet closed, a gateway URL with a path: no / added" 0 "$(grep -c 'gw8.example.org/rpc/' "$T/ev")"
+rpc_enable_refused "mainnet open, a gateway URL with a path" "${NMM}ADMISSION_MODE=open\n${GWPATH}" \
+    "node-info.yaml advertises https://gw8.example.org/rpc for a worker gateway"
+check "rpc-enable, mainnet open, a gateway URL with a path: no / added" 0 "$(grep -c 'gw8.example.org/rpc/' "$T/ev")"
 rpc_enable_refused "mainnet, GATEWAY_UPSTREAM set" "${NMM}ADMISSION_MODE=open\nGATEWAY_UPSTREAM=10.0.0.9\n" \
     "GATEWAY_UPSTREAM=10.0.0.9: a worker gateway fronts this node"
 check "rpc-enable, mainnet upstream: names gateway_upstream=off" yes "$(grep -qF -- '--set gateway_upstream=off first' "$T/ev" && echo yes)"

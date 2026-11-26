@@ -2785,9 +2785,10 @@ caddy_rpc_enable_precheck() {
         if [[ "$adm" == "closed" ]]; then
             via="$(addon_meta_get RPC_ADVERTISED_VIA "" 2>/dev/null)" || via=""
             url="$(addon_meta_get PUBLIC_RPC_URL "" 2>/dev/null)" || url=""
-            url="${url%/}"
+            # A bare host is named with its /, as node-info.yaml holds it; a path as recorded.
+            [[ -z "$url" || "${url#*://}" == */?* ]] || url="${url%/}/"
             if [[ "$via" == "gateway" && -n "$url" ]]; then
-                die "This mainnet node runs admission closed, as a validator does. A mainnet validator's RPC is served by its worker gateway, never by a Caddy site on the validator. node-info.yaml already advertises ${url}/ for the worker gateway; --phase=rpc-advertise --rpc-domain <name> changes the name. Nothing was changed."
+                die "This mainnet node runs admission closed, as a validator does. A mainnet validator's RPC is served by its worker gateway, never by a Caddy site on the validator. node-info.yaml already advertises ${url} for the worker gateway; --phase=rpc-advertise --rpc-domain <name> changes the name. Nothing was changed."
             fi
             die "This mainnet node runs admission closed, as a validator does. A mainnet validator's RPC is served by its worker gateway, never by a Caddy site on the validator. Advertise the gateway with --phase=rpc-advertise --rpc-domain <name>. Nothing was changed."
         fi
@@ -2798,8 +2799,8 @@ caddy_rpc_enable_precheck() {
     via="$(addon_meta_get RPC_ADVERTISED_VIA "")" || die "RPC_ADVERTISED_VIA is set more than once in .node-meta; fix the file first. Nothing was changed."
     if [[ "$via" == "gateway" ]]; then
         url="$(addon_meta_get PUBLIC_RPC_URL "" 2>/dev/null)" || url=""
-        url="${url%/}"
-        die "node-info.yaml advertises ${url:+${url}/ for }a worker gateway (RPC_ADVERTISED_VIA=gateway, written by key generation on mainnet or by rpc-advertise). Run --phase=rpc-unadvertise first to serve a public RPC site here. Nothing was changed."
+        [[ -z "$url" || "${url#*://}" == */?* ]] || url="${url%/}/"
+        die "node-info.yaml advertises ${url:+${url} for }a worker gateway (RPC_ADVERTISED_VIA=gateway, written by key generation on mainnet or by rpc-advertise). Run --phase=rpc-unadvertise first to serve a public RPC site here. Nothing was changed."
     fi
     if [[ "$net" == "mainnet" ]]; then
         up="$(addon_meta_get GATEWAY_UPSTREAM "")" || die "GATEWAY_UPSTREAM is set more than once in .node-meta; fix the file first. Nothing was changed."
