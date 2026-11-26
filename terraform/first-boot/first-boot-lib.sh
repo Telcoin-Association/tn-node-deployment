@@ -60,6 +60,7 @@ TN_FB_NETWORK=""
 TN_FB_CLOUD=""
 TN_FB_LOGIN_USER=""
 TN_FB_INSTALLER_URL=""
+TN_FB_MIN_RELEASE=""
 TN_FB_DATA_DEVICE=""
 TN_FB_TRUSTED_NODES=""
 TN_FB_UPSTREAM=""
@@ -68,7 +69,7 @@ TN_FB_PUBLIC_IP=""
 TN_FB_REDIRECT_QUERIES=""
 TN_FB_RATE_LIMIT_SUBMISSIONS=""
 TN_FB_SSH_FROM=""
-readonly FB_KEYS="TN_FB_ROLE TN_FB_NETWORK TN_FB_CLOUD TN_FB_LOGIN_USER TN_FB_INSTALLER_URL TN_FB_DATA_DEVICE TN_FB_TRUSTED_NODES TN_FB_UPSTREAM TN_FB_DOMAIN TN_FB_PUBLIC_IP TN_FB_REDIRECT_QUERIES TN_FB_RATE_LIMIT_SUBMISSIONS TN_FB_SSH_FROM"
+readonly FB_KEYS="TN_FB_ROLE TN_FB_NETWORK TN_FB_CLOUD TN_FB_LOGIN_USER TN_FB_INSTALLER_URL TN_FB_MIN_RELEASE TN_FB_DATA_DEVICE TN_FB_TRUSTED_NODES TN_FB_UPSTREAM TN_FB_DOMAIN TN_FB_PUBLIC_IP TN_FB_REDIRECT_QUERIES TN_FB_RATE_LIMIT_SUBMISSIONS TN_FB_SSH_FROM"
 
 # -----------------------------------------------------------------------------
 # Logging, markers, the end of a run
@@ -204,6 +205,14 @@ fb_url_ok() {
     [[ "$2" =~ $re ]]
 }
 
+# fb_release_num V -- V, a node scripts release scripts-vMAJOR.MINOR.PATCH, as
+# one number that orders releases; rc 1 for any other form.
+fb_release_num() {
+    local re='^scripts-v(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$'
+    [[ "$1" =~ $re ]] || return 1
+    printf '%s' $(( BASH_REMATCH[1] * 100000000 + BASH_REMATCH[2] * 10000 + BASH_REMATCH[3] ))
+}
+
 # fb_abs_path_ok V -- V is an absolute path that never climbs (no ..).
 fb_abs_path_ok() {
     case "$1" in
@@ -261,6 +270,8 @@ fb_validate_env() {
     re='^[a-z_][a-z0-9_-]{0,31}$'
     [[ "$TN_FB_LOGIN_USER" =~ $re ]] || fb_env_bad TN_FB_LOGIN_USER "must be a login name"
     fb_url_ok https "$TN_FB_INSTALLER_URL" || fb_env_bad TN_FB_INSTALLER_URL "must be an https URL"
+    fb_release_num "$TN_FB_MIN_RELEASE" >/dev/null \
+        || fb_env_bad TN_FB_MIN_RELEASE "must be a node scripts release, scripts-vMAJOR.MINOR.PATCH"
     case "$FB_ROLE" in
         validator)
             case "$TN_FB_DATA_DEVICE" in
@@ -371,8 +382,8 @@ fb_swap_off() {
 
 # fb_install_node_scripts FILE... -- the signed release the published installer
 # names, installed as the login user the way the runbook installs it; then each
-# FILE must be in the install. pipefail turns a failed download into a failed
-# attempt.
+# FILE must be in the install, and the release must be TN_FB_MIN_RELEASE or
+# newer. pipefail turns a failed download into a failed attempt.
 fb_install_node_scripts() {
     local f
     fb_step node-scripts "the node scripts from ${TN_FB_INSTALLER_URL}, installed as ${TN_FB_LOGIN_USER}"
@@ -386,4 +397,25 @@ fb_install_node_scripts() {
     for f in "$@"; do
         [ -f "${FB_SCRIPTS_DIR}/${f}" ] || fb_fail "The installer left no ${FB_SCRIPTS_DIR#"$FB_ROOT"}/${f}."
     done
+    fb_check_release
+}
+
+# fb_check_release -- the steps after this one pass flags an older release does
+# not know, so it stops here. The release is the release= line of the MANIFEST
+# the installer checked against its signature and installed with the scripts.
+fb_check_release() {
+    local m="${FB_SCRIPTS_DIR}/MANIFEST" rel have want got
+    fb_step scripts-release "the node scripts are ${TN_FB_MIN_RELEASE} or newer"
+    want="$(fb_release_num "$TN_FB_MIN_RELEASE")"
+    rel="$(sed -n 's/^release=//p' "$m" 2>/dev/null)" || rel=""
+    if have="$(fb_release_num "$rel")"; then
+        if [ "$have" -ge "$want" ]; then
+            fb_log "The node scripts are ${rel}."
+            return 0
+        fi
+        got="The installer put the node scripts ${rel} on this host"
+    else
+        got="The node scripts the installer put on this host name no release (no release= line in ${m#"$FB_ROOT"})"
+    fi
+    fb_fail "${got}; this deployment needs ${TN_FB_MIN_RELEASE} or newer. Once ${TN_FB_INSTALLER_URL} serves ${TN_FB_MIN_RELEASE} or newer, run this script again: sudo bash ${FB_LIBEXEC}/first-boot-${FB_ROLE}.sh"
 }

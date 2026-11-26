@@ -13,10 +13,12 @@
 #   apt-lock        apt waits up to 15 minutes for the dpkg lock
 #   cve-2026-31431  the algif_aead modprobe line; unload the module if loaded
 #   swap            swap off
+#   node-scripts    the published installer, as TN_FB_LOGIN_USER, three tries
+#   scripts-release the installed release is TN_FB_MIN_RELEASE or newer; first,
+#                   so an older one stops the boot before Docker is installed
 #   docker          Docker Engine from Docker's apt repository, its signing key
 #                   checked against TN_DOCKER_APT_FINGERPRINT first
 #   docker-service  systemctl enable --now docker; wait for docker info
-#   node-scripts    the published installer, as TN_FB_LOGIN_USER, three tries
 #   dns             wait up to 30 minutes for TN_FB_DOMAIN to reach this host
 #                   (install-caddy.sh --phase=gateway-check-dns); never fails
 #                   the boot, because Caddy keeps asking for the certificate
@@ -241,9 +243,9 @@ main() {
     fb_apt_lock_timeout
     fb_cve_2026_31431
     fb_swap_off
+    fb_install_node_scripts setup-gateway.sh install-caddy.sh firewall-setup.sh check-node.sh
     fbg_docker
     fbg_docker_running
-    fb_install_node_scripts setup-gateway.sh install-caddy.sh firewall-setup.sh check-node.sh
     fbg_wait_dns
     fbg_setup_gateway
     fbg_firewall

@@ -13,9 +13,12 @@
 #              exit 1 is tried again (and three of them stop the boot), exit 3
 #              stops before the firewall, exit 0 without "ok":true stops; a
 #              name that never resolves does not stop the boot; a Docker
-#              signing key with another fingerprint writes no apt source
-#   both       a bad env value or test hook is refused before anything changes;
-#              a run stopped by a signal still leaves the failed marker
+#              signing key with another fingerprint writes no apt source; an
+#              older node scripts release stops the boot before Docker
+#   both       a release older than TN_FB_MIN_RELEASE, or none, stops the boot
+#              at scripts-release; a bad env value or test hook is refused
+#              before anything changes; a run stopped by a signal still leaves
+#              the failed marker
 #
 #   bash tools/tests/run.sh tools/tests/first_boot_test.sh
 #   docker run --rm --network none -v "$PWD:/w:ro" -w /w bash:3.2 bash tools/tests/run.sh tools/tests/first_boot_test.sh
@@ -27,8 +30,8 @@
 # under TN_FB_ROOT stands in for the data device and holds "<type> <uuid>", or
 # nothing for a blank disk. The installer is a script the curl stub prints: it
 # copies stand-ins of setup-node.sh, setup-gateway.sh, install-caddy.sh,
-# firewall-setup.sh and check-node.sh, which log their arguments too, into the
-# login user's telcoin-node-scripts. TN_FB_WAIT_STEP=0 removes every sleep.
+# firewall-setup.sh and check-node.sh, which log their arguments too, and a
+# MANIFEST record into the login user's telcoin-node-scripts. TN_FB_WAIT_STEP=0 removes every sleep.
 # Maintainer tooling (not updater-tracked). bash 3.2 safe.
 # =============================================================================
 set -u
@@ -45,6 +48,7 @@ DEV=/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol0123456789abcdef0
 NEW_UUID=0f3c2a4e-1111-4222-8333-444455556666
 OLD_UUID=7d1e2c3b-aaaa-4bbb-8ccc-ddddeeeeffff
 HUBS=/etc/telcoin-first-boot/trusted-nodes.yaml
+MIN_RELEASE=scripts-v2.3.0
 # shellcheck disable=SC2016  # the installer command line as the sudo stub logs it, $1 included
 INSTALL_LINE='sudo -u ubuntu -H bash -c set -o pipefail; curl --proto "=https" --tlsv1.2 -fsSL --url "$1" | bash -s -- --yes first-boot-installer https://install.telcoin.network'
 INSTALL_CURL='curl --proto =https --tlsv1.2 -fsSL --url https://install.telcoin.network'
@@ -104,7 +108,8 @@ case " $* " in
 esac
 exit 2'
 # curl: Docker's key, or the installer: a script that copies the stand-ins into
-# the login user's home. installer-fails holds how many installer downloads fail.
+# the login user's home with a MANIFEST whose release= is the file release (none
+# when it is empty). installer-fails holds how many installer downloads fail.
 stub curl '
 u=""; o=""; prev=""
 for a in "$@"; do
@@ -127,6 +132,9 @@ printf "installer %s\n" "$*" >> "$FBT_DIR/calls.log"
 d="${TN_FB_ROOT}/home/${FBT_SUDO_USER}/telcoin-node-scripts"
 mkdir -p "$d"
 cp "$FBT_DIR"/scripts/*.sh "$d"/
+rm -f "$d/MANIFEST"
+[ -s "$FBT_DIR/release" ] && printf "format=1\nrelease=%s\nserial=3\n" "$(cat "$FBT_DIR/release")" > "$d/MANIFEST"
+exit 0
 EOF'
 # sudo: drops -u USER -H (FBT_SUDO_USER keeps the user) and runs the rest.
 stub sudo '
@@ -196,6 +204,7 @@ fresh() {
         "$T/selfkill"
     : > "$T/calls.log"
     printf '%s\n' "$GOOD_FPR" > "$T/docker-key-fpr"
+    printf '%s\n' "$MIN_RELEASE" > "$T/release"
 }
 
 # write_env ROLE [KEY=VALUE...] -- R's env file: the role's keys, each KEY=VALUE
@@ -205,7 +214,7 @@ write_env() {
     shift
     local -a keys
     keys=("TN_FB_ROLE=${role}" "TN_FB_NETWORK=testnet" "TN_FB_CLOUD=aws" "TN_FB_LOGIN_USER=ubuntu"
-        "TN_FB_INSTALLER_URL=https://install.telcoin.network")
+        "TN_FB_INSTALLER_URL=https://install.telcoin.network" "TN_FB_MIN_RELEASE=${MIN_RELEASE}")
     if [ "$role" = validator ]; then
         keys+=("TN_FB_DATA_DEVICE=${DEV}" "TN_FB_TRUSTED_NODES=")
     else
@@ -375,6 +384,48 @@ run_fb validator
 failed_at "no hubs file" validator trusted-nodes
 check "no hubs file: no installer" 0 "$(count "$CALLS" sudo)"
 
+echo "== validator: the installer serves an older release"
+fresh v-old
+write_env validator
+: > "$R$DEV"
+printf 'scripts-v2.2.0\n' > "$T/release"
+run_fb validator
+failed_at "older release" validator scripts-release
+check_has "older release: names both releases and the command" \
+    "reason=The installer put the node scripts scripts-v2.2.0 on this host; this deployment needs ${MIN_RELEASE} or newer. Once https://install.telcoin.network serves ${MIN_RELEASE} or newer, run this script again: sudo bash /usr/local/libexec/telcoin-first-boot/first-boot-validator.sh" \
+    "$(marker failed)"
+for rel in scripts-v2.2.9 scripts-v1.99.99 scripts-v02.3.0 scripts-v2.3 v2.3.0; do
+    fresh v-old
+    write_env validator
+    : > "$R$DEV"
+    printf '%s\n' "$rel" > "$T/release"
+    run_fb validator
+    check "release ${rel}: stops at scripts-release" "1 step=scripts-release" "$RC $(marker failed | grep '^step=')"
+done
+fresh v-norel
+write_env validator
+: > "$R$DEV"
+: > "$T/release"
+run_fb validator
+failed_at "no release record" validator scripts-release
+check_has "no release record: says so" \
+    "reason=The node scripts the installer put on this host name no release (no release= line in /home/ubuntu/telcoin-node-scripts/MANIFEST); this deployment needs ${MIN_RELEASE} or newer. Once https://install.telcoin.network serves ${MIN_RELEASE} or newer, run this script again: sudo bash /usr/local/libexec/telcoin-first-boot/first-boot-validator.sh" \
+    "$(marker failed)"
+for rel in scripts-v2.3.0 scripts-v2.3.1 scripts-v2.10.0 scripts-v3.0.0; do
+    fresh v-new
+    write_env validator
+    : > "$R$DEV"
+    printf '%s\n' "$rel" > "$T/release"
+    run_fb validator
+    check "release ${rel}: the host is ready" "0 role=validator" "$RC $(marker "done")"
+done
+fresh v-new
+write_env validator TN_FB_MIN_RELEASE=scripts-v2.9.1
+: > "$R$DEV"
+printf 'scripts-v2.10.0\n' > "$T/release"
+run_fb validator
+check "2.10.0 is newer than 2.9.1 (by number, not by text)" "0 role=validator" "$RC $(marker "done")"
+
 echo "== validator: stopped by a signal"
 fresh v-term
 write_env validator
@@ -404,7 +455,7 @@ printf "TN_FB_DATA_DEVICE='/dev/sdb;reboot'\n" >> "$R/etc/telcoin-first-boot/fir
 run_fb validator
 refused "a value with a shell character" validator
 check_has "a value with a shell character: names the line" \
-    "reason=Line 8 of /etc/telcoin-first-boot/first-boot.env is not a KEY='value' line whose value holds only letters, digits and . _ : / , @ -." "$(marker failed)"
+    "reason=Line 9 of /etc/telcoin-first-boot/first-boot.env is not a KEY='value' line whose value holds only letters, digits and . _ : / , @ -." "$(marker failed)"
 
 fresh r-net
 write_env validator TN_FB_NETWORK=devnet
@@ -425,6 +476,21 @@ fresh r-role
 write_env gateway
 run_fb validator
 refused "the gateway's env on the validator" validator
+
+fresh r-minrel
+write_env validator TN_FB_MIN_RELEASE=2.3.0
+: > "$R$DEV"
+run_fb validator
+refused "a minimum release that is not scripts-vX.Y.Z" validator
+check_has "a minimum release that is not scripts-vX.Y.Z: names the key" \
+    "reason=TN_FB_MIN_RELEASE in /etc/telcoin-first-boot/first-boot.env must be a node scripts release, scripts-vMAJOR.MINOR.PATCH (it is '2.3.0')." "$(marker failed)"
+
+fresh r-nominrel
+write_env gateway
+grep -v '^TN_FB_MIN_RELEASE=' "$R/etc/telcoin-first-boot/first-boot.env" > "$T/env.tmp"
+cat "$T/env.tmp" > "$R/etc/telcoin-first-boot/first-boot.env"
+run_fb gateway
+refused "no minimum release" gateway
 
 fresh r-hook
 write_env validator
@@ -462,6 +528,9 @@ succeeded "gateway" gateway
 check "gateway: the calls, in order, with their arguments" "modprobe -r algif_aead
 swapoff -a
 swapon --show --noheadings
+$INSTALL_LINE
+$INSTALL_CURL
+installer --yes
 dpkg --print-architecture
 curl --proto =https --tlsv1.2 -fsSL --max-time 60 --max-filesize 1048576 -o $R/var/lib/telcoin-first-boot/docker-apt.TMP/key --url https://download.docker.com/linux/ubuntu/gpg
 gpg --batch --no-tty --with-colons --import-options show-only --import
@@ -471,9 +540,6 @@ apt-get -q update
 apt-get -y -q install docker-ce docker-ce-cli containerd.io
 systemctl enable --now docker
 docker info
-$INSTALL_LINE
-$INSTALL_CURL
-installer --yes
 $GW_DNS
 $GW_SG
 $GW_FW
@@ -547,6 +613,20 @@ $GW_FW" "$(grep -E '^(install-caddy|setup-gateway|firewall-setup)\.sh' <<< "$CAL
 check_has "dns timeout: a warning in the log" yes \
     "$(grep -q 'Warning: gw.example.org did not reach 203.0.113.7 within 90 s (gw.example.org does not resolve yet)' "$R/var/log/telcoin-first-boot.log" && echo yes || echo no)"
 
+echo "== gateway: the installer serves an older release"
+fresh g-old
+write_env gateway
+: > "$T/dns-ok"
+printf 'scripts-v2.2.0\n' > "$T/release"
+run_fb gateway
+failed_at "gateway older release" gateway scripts-release
+check_has "gateway older release: names both releases and the command" \
+    "reason=The installer put the node scripts scripts-v2.2.0 on this host; this deployment needs ${MIN_RELEASE} or newer. Once https://install.telcoin.network serves ${MIN_RELEASE} or newer, run this script again: sudo bash /usr/local/libexec/telcoin-first-boot/first-boot-gateway.sh" \
+    "$(marker failed)"
+check "gateway older release: no Docker, no DNS wait, no gateway" "0 0 0 0 0" \
+    "$(count "$CALLS" apt-get) $(count "$CALLS" docker) $(count "$CALLS" gpg) $(count "$CALLS" install-caddy.sh) $(count "$CALLS" setup-gateway.sh)"
+check "gateway older release: no apt source" no "$([ -e "$R/etc/apt/sources.list.d/docker.list" ] && echo yes || echo no)"
+
 echo "== gateway: a Docker key with another fingerprint"
 fresh g-fpr
 write_env gateway
@@ -555,7 +635,7 @@ run_fb gateway
 failed_at "bad fingerprint" gateway docker
 check "bad fingerprint: no apt source, no keyring" "no no" \
     "$([ -e "$R/etc/apt/sources.list.d/docker.list" ] && echo yes || echo no) $([ -e "$R/etc/apt/keyrings/docker.gpg" ] && echo yes || echo no)"
-check "bad fingerprint: no apt-get, no installer" "0 0" "$(count "$CALLS" apt-get) $(count "$CALLS" sudo)"
+check "bad fingerprint: no apt-get, no setup-gateway.sh" "0 0" "$(count "$CALLS" apt-get) $(count "$CALLS" setup-gateway.sh)"
 check "bad fingerprint: no temp dir is left" "" "$(cd "$R/var/lib/telcoin-first-boot" && ls -d docker-apt.* 2>/dev/null)"
 
 finish

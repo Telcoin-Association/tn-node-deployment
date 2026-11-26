@@ -19,6 +19,7 @@
 #                   ext4, mount it by UUID (nofail) at /var/lib/telcoin
 #   trusted-nodes   TN_FB_TRUSTED_NODES, when set, is a readable file
 #   node-scripts    the published installer, as TN_FB_LOGIN_USER, three tries
+#   scripts-release the installed release is TN_FB_MIN_RELEASE or newer
 #
 # USAGE:
 #   sudo bash /usr/local/libexec/telcoin-first-boot/first-boot-validator.sh
