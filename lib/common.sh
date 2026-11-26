@@ -12177,6 +12177,28 @@ tn_node_info_field() {
     printf '%s\n' "$v"
 }
 
+# tn_rpc_default_host KEY — print the default advertised RPC name for the base58
+# BLS public KEY (the bls_public_key of node-info.yaml): v, then the first five
+# characters of KEY lowercased, then .telcoin.network, so a key starting pDmpE
+# gives vpdmpe.telcoin.network. rc 1, with nothing printed, when KEY is not 131
+# characters long or 132 starting with 2, or holds a character outside the
+# base58 alphabet.
+tn_rpc_default_host() {
+    local k="${1:-}" label
+    case "${#k}" in
+        131) ;;
+        132) [[ "$k" == 2* ]] || return 1 ;;
+        *) return 1 ;;
+    esac
+    # The alphabet is spelled out: a bracket range such as a-z follows the
+    # locale's collation and can match letters outside ASCII.
+    case "$k" in
+        *[!123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]*) return 1 ;;
+    esac
+    label="$(printf '%s' "${k:0:5}" | LC_ALL=C tr '[:upper:]' '[:lower:]')" || return 1
+    printf 'v%s.telcoin.network\n' "$label"
+}
+
 # tn_node_info_worker_ports FILE — print the UDP port of each worker in
 # node-info.yaml, one per line in worker order (p2p_info.workers), or the single
 # port of a legacy p2p_info.worker map. rc 1, with nothing printed, when there is
