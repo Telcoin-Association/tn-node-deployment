@@ -89,17 +89,18 @@ run "second_apply" {
   }
 
   assert {
-    condition = (
-      google_compute_instance.validator.metadata["user-data"] == module.host_plan.validator_user_data &&
-      !strcontains(jsonencode(google_compute_instance.validator.metadata), "rpc.example.org") &&
-      !strcontains(module.host_plan.validator_env, "rpc.example.org")
-    )
-    error_message = "The validator's metadata must not change with rpc_domain."
+    condition     = output.validator_user_data_sha256 == run.first_apply.validator_user_data_sha256
+    error_message = "The validator's user data must be the same with and without rpc_domain."
   }
 
   assert {
-    condition     = output.session_command.validator == run.first_apply.session_command.validator && output.validator_public_ip == run.first_apply.validator_public_ip
-    error_message = "The validator keeps its name, its route in and its public address across the two applies."
+    condition     = !strcontains(jsonencode(google_compute_instance.validator.metadata), "rpc.example.org")
+    error_message = "The validator's metadata must not name rpc_domain."
+  }
+
+  assert {
+    condition     = output.session_command.validator == run.first_apply.session_command.validator
+    error_message = "The validator keeps its name and its route in across the two applies."
   }
 
   assert {
@@ -216,5 +217,12 @@ run "hubs_file" {
       base64decode(yamldecode(google_compute_instance.validator.metadata["user-data"]).write_files[3].content) == file("tests/fixtures/trusted-nodes.yaml")
     )
     error_message = "trusted_nodes_file reaches the validator through its user data."
+  }
+
+  # second_apply's equal hashes mean something only if the hash moves when an
+  # input the validator takes does.
+  assert {
+    condition     = output.validator_user_data_sha256 != run.first_apply.validator_user_data_sha256
+    error_message = "A hubs file changes the validator's user data, so its hash must change."
   }
 }

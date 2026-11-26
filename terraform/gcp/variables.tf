@@ -186,7 +186,7 @@ variable "subnet_cidr" {
 # --- Machines and disks ------------------------------------------------------
 
 variable "validator_instance_type" {
-  description = "The validator's machine type, which must support Hyperdisk Balanced. Null means c3-standard-8 on testnet (4 cores, 32 GiB) and c3d-standard-16 on mainnet (8 cores, 64 GiB). Mainnet refuses less than 8 physical cores and 32 GiB, the node scripts' validator floor; the default doubles the memory because a 32 GiB VM reports a little less to the host, which the scripts' hardware check reads as under that floor."
+  description = "The validator's machine type. Its boot disk and its data disk are Hyperdisk Balanced, so the type must be of a series that takes it, such as C3, C3D, C4 or N4 (N2 and E2 do not). Null means c3-standard-8 on testnet (4 cores, 32 GiB) and c3d-standard-16 on mainnet (8 cores, 64 GiB). Mainnet refuses less than 8 physical cores and 32 GiB, the node scripts' validator floor; the default doubles the memory because a 32 GiB VM reports a little less to the host, which the scripts' hardware check reads as under that floor."
   type        = string
   default     = null
 
@@ -197,7 +197,7 @@ variable "validator_instance_type" {
 }
 
 variable "gateway_instance_type" {
-  description = "The worker gateway's machine type. Null means e2-standard-2. Its boot disk is pd-balanced, so the type must take Persistent Disk (C4 and N4 do not)."
+  description = "The worker gateway's machine type. Its boot disk is pd-balanced, a Persistent Disk, so the type must be of a series that takes it, such as E2, N2 or C3 (C4 and N4 do not). Null means e2-standard-2."
   type        = string
   default     = null
 
@@ -251,7 +251,7 @@ variable "data_disk_throughput" {
 }
 
 variable "disk_kms_key" {
-  description = "A Cloud KMS key of your own for every disk: both boot disks and the data disk, as projects/P/locations/L/keyRings/R/cryptoKeys/K. Empty encrypts them with Google's own key. The project's Compute Engine service agent needs roles/cloudkms.cryptoKeyEncrypterDecrypter on it."
+  description = "A Cloud KMS key of your own for every disk: both boot disks and the data disk, as projects/P/locations/L/keyRings/R/cryptoKeys/K. Empty encrypts them with Google's own key. The project's Compute Engine service agent needs roles/cloudkms.cryptoKeyEncrypterDecrypter on it. Honoured at the first apply only: a later change would replace the data disk and the validator, whose boot disk holds the stored passphrase credential, so the plan stops on their prevent_destroy."
   type        = string
   default     = ""
   nullable    = false

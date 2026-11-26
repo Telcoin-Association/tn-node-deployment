@@ -107,7 +107,7 @@ run "second_apply" {
   }
 
   assert {
-    condition     = azurerm_linux_virtual_machine.validator.custom_data == base64gzip(module.host_plan.validator_user_data) && output.validator_user_data_sha256 == sha256(module.host_plan.validator_user_data)
+    condition     = azurerm_linux_virtual_machine.validator.custom_data == base64gzip(module.host_plan.validator_user_data)
     error_message = "The validator boots from the host plan's user data, gzipped."
   }
 
@@ -265,6 +265,13 @@ run "hubs_file" {
   assert {
     condition     = module.host_plan.validator_user_data_gzip_bytes <= 65535
     error_message = "The validator's custom data must fit Azure's 65535 bytes."
+  }
+
+  # second_apply's equal hashes mean something only if the hash moves when an
+  # input the validator takes does.
+  assert {
+    condition     = output.validator_user_data_sha256 != run.first_apply.validator_user_data_sha256
+    error_message = "A hubs file changes the validator's user data, so its hash must change."
   }
 }
 

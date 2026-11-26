@@ -213,7 +213,7 @@ variable "data_disk_throughput" {
 }
 
 variable "disk_kms_key" {
-  description = "The ARN of a KMS key of your own for every volume: both root volumes and the data volume. Empty encrypts them with the account's AWS managed EBS key."
+  description = "The ARN of a KMS key of your own for every volume: both root volumes and the data volume. Empty encrypts them with the account's AWS managed EBS key. Honoured at the first apply only: a later change would replace the data volume and the validator, whose root volume holds the stored passphrase credential, so the plan stops on their prevent_destroy."
   type        = string
   default     = ""
   nullable    = false

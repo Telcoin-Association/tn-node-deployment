@@ -13,6 +13,8 @@
 #   - in each cloud root that exists (aws, gcp, azure; one that does not is
 #     skipped with a note), every block of the types in PROTECTED below holds
 #     prevent_destroy = true in its lifecycle block, and each type is there;
+#   - in each cloud root that exists, the validator VM ignores and the gateway
+#     VM follows what LIFECYCLE below lists;
 #   - the per-network redirect_queries_url defaults, wherever they live,
 #     equal TESTNET_RPC_URL and MAINNET_RPC_URL of lib/common.sh;
 #   - the Docker apt key fingerprint of the gateway's first boot equals
@@ -66,12 +68,44 @@ azure  azurerm_linux_virtual_machine  validator  -          the validator VM
 # *bastion*: the Azure Bastion host's address exists only while enable_bastion
 # is on, and prevent_destroy on it would make turning the bastion off fail.
 
-# gzip -9 budgets of each host's scripts, about 15 percent above their size
-# when the budgets were set (lib + gateway 9,176 bytes, lib + validator 7,260).
-# AWS takes 16,384 bytes of user data, which also carries the env file and, on
-# the validator, the hubs file.
-readonly GZ_BUDGET_GATEWAY=10550
-readonly GZ_BUDGET_VALIDATOR=8350
+# What a later apply must leave alone, and what it must replace. A mocked plan
+# cannot show either: no mock knows which arguments force a new resource. The
+# validator VM's root disk holds the stored passphrase credential, so nothing
+# that would force a new VM may reach it; the gateway VM is rebuilt from its
+# user data, so new user data must mean a new VM. kind:
+#   ignores ITEM  ITEM is an entry of the block's lifecycle ignore_changes
+#   follows ARG   the block sets ARG, which forces a new resource, and does not
+#                 ignore it
+#   sets ARG=V    the block sets ARG to V
+#   trigger REF   the block's lifecycle replace_triggered_by names REF
+#   input REF     the block's input names REF
+#   cloud  type                           block        kind     item
+readonly LIFECYCLE="
+aws    aws_instance                   validator    ignores  ami
+aws    aws_instance                   validator    ignores  user_data_base64
+aws    aws_instance                   gateway      follows  user_data_base64
+aws    aws_instance                   gateway      sets     user_data_replace_on_change=true
+gcp    google_compute_instance        validator    ignores  metadata[\"user-data\"]
+gcp    google_compute_instance        validator    ignores  boot_disk[0].initialize_params[0].image
+gcp    google_compute_instance        gateway      trigger  terraform_data.gateway_cfg
+gcp    terraform_data                 gateway_cfg  input    module.host_plan.gateway_user_data
+azure  azurerm_linux_virtual_machine  validator    ignores  custom_data
+azure  azurerm_linux_virtual_machine  validator    ignores  source_image_reference
+azure  azurerm_linux_virtual_machine  validator    ignores  admin_ssh_key
+azure  azurerm_linux_virtual_machine  gateway      follows  custom_data
+"
+
+# gzip -9 budgets of each host's scripts, set from the real limit: AWS takes
+# 16,384 bytes of user data for the whole cloud-config, which is roughly the
+# scripts' gzip plus 1,200 bytes for the cloud-config and the env file, plus,
+# on the validator only, the hubs file (about 3,300 bytes gzipped for 4 KB of
+# base58 text).
+#   gateway    16,384 - 1,200         = 15,184; budget 12,500
+#   validator  16,384 - 1,200 - 3,300 = 11,884; budget 10,000
+# Each budget stays some 2,000 bytes under its limit: a small fix to a script
+# does not trip it, and growth that would crowd the limit does.
+readonly GZ_BUDGET_GATEWAY=12500
+readonly GZ_BUDGET_VALIDATOR=10000
 
 # Phrases taken out of a line before the password/secret/token scan:
 #   http_tokens                      AWS: the instance metadata setting that
@@ -139,6 +173,14 @@ tf_lex() {
 #   R|LOC|TYPE|NAME|PROTECTED|ADDRESS_TYPE  each top-level resource; PROTECTED is
 #                                           1 when its lifecycle block holds
 #                                           prevent_destroy = true
+#   L|LOC|TYPE|NAME|KIND|TEXT               what a resource keeps or follows
+#                                           across applies: KIND ignore, one entry
+#                                           of its lifecycle ignore_changes (no
+#                                           spaces); trigger, its
+#                                           replace_triggered_by; arg, one of its
+#                                           own arguments as NAME=VALUE (no
+#                                           spaces); input, a line of a
+#                                           terraform_data input
 #   U|LOC|NETWORK|URL                       an entry of a public_rpc_url map or of
 #                                           the default of variable
 #                                           redirect_queries_url (NETWORK any for a
@@ -211,7 +253,7 @@ tf_scan() {
                 split(h, q, "\""); rtype[n] = q[2]; rname[n] = q[4]
             }
             if (n == 1 && h ~ /^variable[[:space:]]+"[^"]*"$/) { split(h, q, "\""); vname[n] = q[2] }
-            prot[n] = 0; atype[n] = ""; src[n] = ""; sloc[n] = ""
+            prot[n] = 0; atype[n] = ""; src[n] = ""; sloc[n] = ""; ign[n] = ""; trg[n] = ""
             hasport[n] = 0; pr[n] = ""; nl[n] = 0; ne[n] = 0; fromp[n] = ""; top[n] = ""
             hasproto[n] = 0; icmp[n] = 0; allproto[n] = 0; fe[n] = ""; feu[n] = 0; dn[n] = 0; achild[n] = 0; dchild[n] = 0
             lkey[n] = ""; lbal[n] = 0
@@ -219,7 +261,7 @@ tf_scan() {
             if (n > 1 && (h == "allow" || h ~ /^dynamic[[:space:]]+"allow"$/)) achild[n - 1] = 1
             if (n > 1 && (h == "deny" || h ~ /^dynamic[[:space:]]+"deny"$/)) dchild[n - 1] = 1
         }
-        function close_block(n,   p, a1, a2, u, e) {
+        function close_block(n,   p, a1, a2, u, e, il, ia, im, ij) {
             if (icmp[n]) {
                 hasport[n] = 1
             } else {
@@ -235,7 +277,13 @@ tf_scan() {
                 # whatever ports the rule names.
                 if ((hasproto[n] && !hasport[n]) || allproto[n]) { hasport[n] = 1; pr[n] = pr[n] " 0-65535" }
             }
-            if (n == 1 && rtype[1] != "") print "R|" rloc[1] "|" rtype[1] "|" rname[1] "|" prot[1] "|" atype[1]
+            if (n == 1 && rtype[1] != "") {
+                print "R|" rloc[1] "|" rtype[1] "|" rname[1] "|" prot[1] "|" atype[1]
+                il = ign[1]; gsub(/[[:space:]]/, "", il); sub(/^\[/, "", il); sub(/\]$/, "", il)
+                im = split(il, ia, ",")
+                for (ij = 1; ij <= im; ij++) if (ia[ij] != "") print "L|" rloc[1] "|" rtype[1] "|" rname[1] "|ignore|" ia[ij]
+                if (trg[1] != "") print "L|" rloc[1] "|" rtype[1] "|" rname[1] "|trigger|" trg[1]
+            }
             if (src[n] != "") judge(n)
             p = n - 1
             if (p >= 1 && (hdr[n] ~ /^(allow|deny|content)$/ || hdr[n] ~ /^dynamic[[:space:]]+"(allow|deny)"$/)) {
@@ -279,6 +327,11 @@ tf_scan() {
                 return
             }
             if (n == 2 && rtype[1] != "" && hdr[2] == "lifecycle" && lk == "prevent_destroy" && v ~ /^true[[:space:]]*$/) prot[1] = 1
+            if (n == 2 && rtype[1] != "" && hdr[2] == "lifecycle" && lk == "ignore_changes") ign[1] = ign[1] v
+            if (n == 2 && rtype[1] != "" && hdr[2] == "lifecycle" && lk == "replace_triggered_by") trg[1] = trg[1] " " v
+            if (n == 1 && rtype[1] != "" && k != "") { t = v; gsub(/[[:space:]]/, "", t); print "L|" loc "|" rtype[1] "|" rname[1] "|arg|" k "=" t }
+            if (rtype[1] == "terraform_data" && ((n == 1 && lk == "input") || (n >= 2 && hdr[2] ~ /^input[[:space:]]*=$/)))
+                print "L|" loc "|" rtype[1] "|" rname[1] "|input|" v
             if (n == 1 && rtype[1] != "" && lk == "address_type") atype[1] = toupper(unq(v))
             if ((lk == "testnet" || lk == "mainnet") && (hdr[n] ~ /^public_rpc_url[[:space:]]*=$/ ||
                 (n == 2 && vname[1] == "redirect_queries_url" && hdr[2] ~ /^default[[:space:]]*=$/)))
@@ -438,6 +491,52 @@ protected() {
             printf '%s: no %s block %s (%s)\n' "$cloud" "$type" "$blocks" "$what"
         fi
     done <<< "$PROTECTED"
+}
+
+# lifecycle_rules TREE CLOUD -- the LIFECYCLE rows of CLOUD that TREE/CLOUD
+# breaks.
+lifecycle_rules() {
+    local tree="$1" cloud="$2" recs="" files=() f c type block kind item loc ok seen tag rloc rtype name rkind text missing=" "
+    while IFS= read -r f; do files+=("$f"); done < <(tf_files "$tree" "$cloud")
+    [[ ${#files[@]} -eq 0 ]] || recs="$(tf_records "$tree" "${files[@]}" | grep '^[RL]|')"
+    while read -r c type block kind item; do
+        [[ "$c" == "$cloud" ]] || continue
+        loc="" ok=0 seen=0
+        while IFS='|' read -r tag rloc rtype name rkind text; do
+            [[ "$rtype" == "$type" && "$name" == "$block" ]] || continue
+            if [[ "$tag" == R ]]; then loc="$rloc"; continue; fi
+            case "$kind" in
+                ignores) [[ "$rkind" == ignore && "$text" == "$item" ]] && ok=1 ;;
+                follows)
+                    [[ "$rkind" == arg && "${text%%=*}" == "$item" ]] && seen=1
+                    [[ "$rkind" == ignore && "$text" == "$item" ]] && seen=2 ;;
+                sets) [[ "$rkind" == arg && "$text" == "$item" ]] && ok=1 ;;
+                trigger | input)
+                    text=" ${text//[^A-Za-z0-9_.]/ } "
+                    [[ "$rkind" == "$kind" && "$text" == *" ${item} "* ]] && ok=1 ;;
+            esac
+        done <<< "$recs"
+        [[ "$kind" == follows && "$seen" == 1 ]] && ok=1
+        if [[ -z "$loc" ]]; then
+            case "$missing" in *" ${type}.${block} "*) continue ;; esac
+            missing="${missing}${type}.${block} "
+            printf '%s: no %s block %s\n' "$cloud" "$type" "$block"
+            continue
+        fi
+        [[ "$ok" == 1 ]] && continue
+        case "$kind" in
+            ignores) printf '%s: %s.%s does not list %s in its lifecycle ignore_changes\n' "$loc" "$type" "$block" "$item" ;;
+            follows)
+                if [[ "$seen" == 2 ]]; then
+                    printf '%s: %s.%s ignores %s, so a new value does not replace it\n' "$loc" "$type" "$block" "$item"
+                else
+                    printf '%s: %s.%s does not set %s\n' "$loc" "$type" "$block" "$item"
+                fi ;;
+            sets) printf '%s: %s.%s does not set %s\n' "$loc" "$type" "$block" "${item/=/ = }" ;;
+            trigger) printf '%s: %s.%s has no lifecycle replace_triggered_by naming %s\n' "$loc" "$type" "$block" "$item" ;;
+            input) printf '%s: %s.%s has no input naming %s\n' "$loc" "$type" "$block" "$item" ;;
+        esac
+    done <<< "$LIFECYCLE"
 }
 
 # rpc_defaults TREE -- each per-network default under TREE that is not the
@@ -711,6 +810,16 @@ for cloud in aws gcp azure; do
     fi
 done
 
+for cloud in aws gcp azure; do
+    if [[ -d "$TF/$cloud" ]]; then
+        check "${cloud}: the validator VM ignores what would replace it, and new user data replaces the gateway VM" "" \
+            "$(lifecycle_rules "$TF" "$cloud")"
+    else
+        skip "${cloud}: the validator VM ignores what would replace it, and new user data replaces the gateway VM" \
+            "${show}/${cloud} does not exist yet"
+    fi
+done
+
 check "the per-network public RPC defaults equal TESTNET_RPC_URL and MAINNET_RPC_URL" "" "$(rpc_defaults "$TF")"
 
 setup_fpr="$(fingerprint "$TN_TEST_REPO/setup-node.sh")"
@@ -804,8 +913,10 @@ resource "aws_instance" "validator" {
 /* The gateway is disposable,
    so it carries no lifecycle block. */
 resource "aws_instance" "gateway" {
-  count     = var.rpc_domain != "" ? 1 : 0
-  user_data = <<-EOT
+  count                       = var.rpc_domain != "" ? 1 : 0
+  user_data_base64            = base64gzip("x")
+  user_data_replace_on_change = true
+  user_data                   = <<-EOT
     { unbalanced
   EOT
 }
@@ -929,7 +1040,23 @@ resource "google_compute_address" "validator_private" {
 resource "google_compute_instance" "validator" {
   lifecycle {
     prevent_destroy = true
-    ignore_changes  = [metadata["user-data"]]
+    ignore_changes = [
+      metadata["user-data"],
+      boot_disk[0].initialize_params[0].image,
+    ]
+  }
+}
+
+resource "terraform_data" "gateway_cfg" {
+  input = {
+    user_data = module.host_plan.gateway_user_data
+  }
+}
+
+resource "google_compute_instance" "gateway" {
+  lifecycle {
+    ignore_changes       = [boot_disk[0].initialize_params[0].image]
+    replace_triggered_by = [terraform_data.gateway_cfg[count.index]]
   }
 }
 
@@ -1000,8 +1127,12 @@ resource "azurerm_linux_virtual_machine" "validator" {
   disable_password_authentication = true
   lifecycle {
     prevent_destroy = true
-    ignore_changes  = [custom_data]
+    ignore_changes  = [custom_data, source_image_reference, admin_ssh_key]
   }
+}
+
+resource "azurerm_linux_virtual_machine" "gateway" {
+  custom_data = base64gzip("x")
 }
 
 resource "azurerm_network_security_rule" "p2p" {
@@ -1238,6 +1369,18 @@ resource "google_compute_firewall" "everything" {
     protocol = "all"
   }
 }
+
+resource "terraform_data" "gateway_cfg" {
+  input = {
+    size = module.host_plan.gateway_user_data_gzip_bytes
+  }
+}
+
+resource "google_compute_instance" "gateway" {
+  lifecycle {
+    replace_triggered_by = [terraform_data.gateway_cfg_old]
+  }
+}
 EOF
 
 cat > "$BAD/azure/main.tf" <<'EOF'
@@ -1292,6 +1435,13 @@ resource "azurerm_network_security_group" "inline" {
     destination_address_prefix = "*"
   }
 }
+
+resource "azurerm_linux_virtual_machine" "gateway" {
+  custom_data = base64gzip("x")
+  lifecycle {
+    ignore_changes = [custom_data]
+  }
+}
 EOF
 
 printf 'framework:\n  - terraform\napi_token: abc\n' > "$BAD/settings.yaml"
@@ -1338,6 +1488,23 @@ check "fixture bad: gcp protected resources (an address with no address_type is 
 check "fixture bad: azure protected resources" \
     "azure/main.tf:13: azurerm_public_ip.gateway (the static public IPs) has no prevent_destroy = true in its lifecycle block" \
     "$(protected "$BAD" azure)"
+for cloud in aws gcp azure; do
+    check "fixture ok: ${cloud} lifecycle rules pass" "" "$(lifecycle_rules "$OK" "$cloud")"
+done
+check "fixture bad: aws lifecycle rules (a missing block is named once)" "aws: no aws_instance block validator
+aws/main.tf:18: aws_instance.gateway does not set user_data_base64
+aws/main.tf:18: aws_instance.gateway does not set user_data_replace_on_change = true" "$(lifecycle_rules "$BAD" aws)"
+check "fixture bad: gcp lifecycle rules (a longer name or another resource does not count)" \
+    "gcp/main.tf:19: google_compute_instance.validator does not list metadata[\"user-data\"] in its lifecycle ignore_changes
+gcp/main.tf:19: google_compute_instance.validator does not list boot_disk[0].initialize_params[0].image in its lifecycle ignore_changes
+gcp/main.tf:53: google_compute_instance.gateway has no lifecycle replace_triggered_by naming terraform_data.gateway_cfg
+gcp/main.tf:47: terraform_data.gateway_cfg has no input naming module.host_plan.gateway_user_data" "$(lifecycle_rules "$BAD" gcp)"
+check "fixture bad: azure lifecycle rules (an ignored custom_data replaces nothing)" \
+    "azure/main.tf:17: azurerm_linux_virtual_machine.validator does not list custom_data in its lifecycle ignore_changes
+azure/main.tf:17: azurerm_linux_virtual_machine.validator does not list source_image_reference in its lifecycle ignore_changes
+azure/main.tf:17: azurerm_linux_virtual_machine.validator does not list admin_ssh_key in its lifecycle ignore_changes
+azure/main.tf:53: azurerm_linux_virtual_machine.gateway ignores custom_data, so a new value does not replace it" \
+    "$(lifecycle_rules "$BAD" azure)"
 mkdir -p "$T/fx/empty/gcp"
 check "fixture: a root without its types fails on each" "gcp: no google_compute_disk block (the data disk)
 gcp: no google_compute_address block external (the static public IPs)
@@ -1494,6 +1661,9 @@ check_rc "TN_TERRAFORM_DIR at the failing tree: exit 1" 1 "$?"
 check "TN_TERRAFORM_DIR at the failing tree: the rules that fail" "FAIL  aws: the data disk, static public IPs and validator VM hold prevent_destroy = true
 FAIL  gcp: the data disk, static public IPs and validator VM hold prevent_destroy = true
 FAIL  azure: the data disk, static public IPs and validator VM hold prevent_destroy = true
+FAIL  aws: the validator VM ignores what would replace it, and new user data replaces the gateway VM
+FAIL  gcp: the validator VM ignores what would replace it, and new user data replaces the gateway VM
+FAIL  azure: the validator VM ignores what would replace it, and new user data replaces the gateway VM
 FAIL  the per-network public RPC defaults equal TESTNET_RPC_URL and MAINNET_RPC_URL
 FAIL  no .tf rule opens 22, 8545 or 43174 to the world
 FAIL  no password, secret or token outside comments under ${BAD}" "$(grep '^FAIL' "$T/nested-bad")"

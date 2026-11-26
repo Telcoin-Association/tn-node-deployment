@@ -188,6 +188,13 @@ run "hubs_file" {
     condition     = base64decode(yamldecode(module.host_plan.validator_user_data).write_files[3].content) == file("tests/fixtures/trusted-nodes.yaml")
     error_message = "The hubs file written at first boot must be trusted_nodes_file as given."
   }
+
+  # second_apply's equal hashes mean something only if the hash moves when an
+  # input the validator takes does.
+  assert {
+    condition     = output.validator_user_data_sha256 != run.first_apply.validator_user_data_sha256
+    error_message = "A hubs file changes the validator's user data, so its hash must change."
+  }
 }
 
 run "single_node" {
