@@ -287,8 +287,8 @@ fb_validate_env() {
             # first-boot-gateway.sh).
             fbg_upstream_ok "$TN_FB_UPSTREAM" \
                 || fb_env_bad TN_FB_UPSTREAM "must be the validator's private IPv4 address (10/8, 172.16/12, 192.168/16, 100.64/10 or 169.254/16)"
-            re='^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$'
-            if ! [[ "$TN_FB_DOMAIN" =~ $re ]] || [ "${#TN_FB_DOMAIN}" -gt 253 ]; then
+            re='^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$'
+            if ! [[ "$TN_FB_DOMAIN" =~ $re && "${TN_FB_DOMAIN##*.}" =~ [A-Za-z] ]] || [ "${#TN_FB_DOMAIN}" -gt 253 ]; then
                 fb_env_bad TN_FB_DOMAIN "must be a DNS name"
             fi
             fb_ipv4_ok "$TN_FB_PUBLIC_IP" || fb_env_bad TN_FB_PUBLIC_IP "must be the gateway's public IPv4 address"
@@ -418,6 +418,8 @@ fb_check_release() {
             return 0
         fi
         got="The installer put the node scripts ${rel} on this host"
+    elif grep -q '^release=' "$m" 2>/dev/null; then
+        got="The node scripts the installer put on this host name a release this check cannot read (release=${rel//$'\n'/ release=} in ${m#"$FB_ROOT"})"
     else
         got="The node scripts the installer put on this host name no release (no release= line in ${m#"$FB_ROOT"})"
     fi

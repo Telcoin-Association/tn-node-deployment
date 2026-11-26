@@ -17,10 +17,13 @@
 #              name that never resolves does not stop the boot; a Docker
 #              signing key with another fingerprint writes no apt source; an
 #              older node scripts release stops the boot before Docker
-#   both       a release older than TN_FB_MIN_RELEASE, or none, stops the boot
-#              at scripts-release; a bad env value or test hook is refused
-#              before anything changes; a run stopped by a signal still leaves
-#              the failed marker
+#   both       a release older than TN_FB_MIN_RELEASE, none, or one the check
+#              cannot read stops the boot at scripts-release, each named as
+#              what it is; a bad env value or test hook is refused before
+#              anything changes, and the plan's table of values (host-plan's
+#              first_boot_rules.tftest.hcl) passes or stops the env step as the
+#              plan takes or refuses each; a run stopped by a signal still
+#              leaves the failed marker
 #
 #   bash tools/tests/run.sh tools/tests/first_boot_test.sh
 #   docker run --rm --network none -v "$PWD:/w:ro" -w /w bash:3.2 bash tools/tests/run.sh tools/tests/first_boot_test.sh
@@ -431,6 +434,19 @@ failed_at "no release record" validator scripts-release
 check_has "no release record: says so" \
     "reason=The node scripts the installer put on this host name no release (no release= line in /home/ubuntu/telcoin-node-scripts/MANIFEST); this deployment needs ${MIN_RELEASE} or newer. Once https://install.telcoin.network serves ${MIN_RELEASE} or newer, run this script again: sudo bash /usr/local/libexec/telcoin-first-boot/first-boot-validator.sh" \
     "$(marker failed)"
+# A release= line in a form the check does not read (cut-release.sh's tag rule
+# is wider) is named as it is, not as a missing line.
+for rel in scripts-v2.3.01 ''; do
+    fresh v-oddrel
+    write_env validator
+    : > "$R$DEV"
+    printf '%s\n' "$rel" > "$T/release"
+    run_fb validator
+    failed_at "release=${rel}" validator scripts-release
+    check_has "release=${rel}: names the line" \
+        "reason=The node scripts the installer put on this host name a release this check cannot read (release=${rel} in /home/ubuntu/telcoin-node-scripts/MANIFEST); this deployment needs ${MIN_RELEASE} or newer. Once https://install.telcoin.network serves ${MIN_RELEASE} or newer, run this script again: sudo bash /usr/local/libexec/telcoin-first-boot/first-boot-validator.sh" \
+        "$(marker failed)"
+done
 for rel in scripts-v2.3.0 scripts-v2.3.1 scripts-v2.10.0 scripts-v3.0.0; do
     fresh v-new
     write_env validator
@@ -590,6 +606,100 @@ fresh r-noenv
 rm -f "$R/etc/telcoin-first-boot/first-boot.env"
 run_fb gateway
 refused "no env file" gateway
+
+# --- the plan's table -----------------------------------------------------------
+# The values of terraform/modules/host-plan/tests/first_boot_rules.tftest.hcl, in
+# its order, as env values (TN_FB_SSH_FROM ends with the plan's vpc_cidr): the
+# plan takes what first boot takes, so a host it builds does not stop at its env
+# file. Change a row in both tables or in neither. taken: the env step passes
+# (the run then stops at swap, held on here); refused: it stops at env;
+# plan-refuses: first boot takes it, the plan refuses it on purpose (that file
+# says why).
+# plan_table -- each "KEY VERDICT VALUE" line of stdin through the gateway's env step.
+plan_table() {
+    local key verdict val want
+    while read -r key verdict val; do
+        want="1 step=swap"
+        [ "$verdict" != refused ] || want="1 step=env"
+        fresh r-table
+        write_env gateway "${key}=${val}"
+        : > "$T/swap-on"
+        : > "$T/swap-stuck"
+        run_fb gateway < /dev/null
+        check "table: ${key}=${val} ${verdict}" "$want" "$RC $(marker failed | grep '^step=')"
+    done
+}
+plan_table <<'EOF'
+TN_FB_INSTALLER_URL taken https://install.example.org:65535/a
+TN_FB_INSTALLER_URL taken https://install.example.org/v2/latest_1.sh
+TN_FB_INSTALLER_URL refused https://install.example.org/v2:latest
+TN_FB_INSTALLER_URL refused https://install..telcoin.network
+TN_FB_INSTALLER_URL refused https://install.telcoin.network:70000
+TN_FB_INSTALLER_URL refused http://install.telcoin.network
+TN_FB_REDIRECT_QUERIES taken https://rpc.example.org:8545/
+TN_FB_REDIRECT_QUERIES taken http://10.42.1.10:8546
+TN_FB_REDIRECT_QUERIES taken http://10.42.1.11:8545
+TN_FB_REDIRECT_QUERIES taken http://localhost:8545
+TN_FB_REDIRECT_QUERIES taken https://rpc.example.org:65535/v1/rpc
+TN_FB_REDIRECT_QUERIES taken http://rpc.example.org:8545/v1/a_b-c.d
+TN_FB_REDIRECT_QUERIES refused https://rpc.example.org:99999/
+TN_FB_REDIRECT_QUERIES refused https://rpc.example.org:65536/
+TN_FB_REDIRECT_QUERIES refused https://rpc.example.org:0/
+TN_FB_REDIRECT_QUERIES refused https://rpc.example.org:08545/
+TN_FB_REDIRECT_QUERIES refused https://rpc..example.org/
+TN_FB_REDIRECT_QUERIES refused https://rpc.-x.example.org/
+TN_FB_REDIRECT_QUERIES refused https://-rpc.example.org/
+TN_FB_REDIRECT_QUERIES refused http://rpc.example.org:8545/v1:a@b,c
+TN_FB_REDIRECT_QUERIES refused https://rpc.example.org/a@b
+TN_FB_REDIRECT_QUERIES refused ftp://rpc.example.org/
+TN_FB_REDIRECT_QUERIES refused http://10.42.1.10:8545
+TN_FB_REDIRECT_QUERIES refused http://10.42.1.10:43174/
+TN_FB_REDIRECT_QUERIES refused http://localhost:8655
+TN_FB_REDIRECT_QUERIES refused http://LocalHost:8656/x
+TN_FB_REDIRECT_QUERIES refused http://127.0.0.1:9655
+TN_FB_REDIRECT_QUERIES refused http://0.0.0.0:8655
+TN_FB_DOMAIN taken rpc.example.org
+TN_FB_DOMAIN taken rpc.example.xn--p1ai
+TN_FB_DOMAIN taken a.b1
+TN_FB_DOMAIN taken x.y-z
+TN_FB_DOMAIN refused rpc.example.123
+TN_FB_DOMAIN refused 10.42.1.20
+TN_FB_DOMAIN refused localhost
+TN_FB_DOMAIN refused rpc..example.org
+TN_FB_DOMAIN refused -rpc.example.org
+TN_FB_DOMAIN refused rpc.example.org.
+TN_FB_SSH_FROM taken 198.51.100.7/32,10.42.0.0/16
+TN_FB_SSH_FROM taken 198.51.100.0/24,10.42.0.0/16
+TN_FB_SSH_FROM taken 10.0.0.0/8,10.42.0.0/16
+TN_FB_SSH_FROM taken 198.51.100.7/24,10.42.0.0/16
+TN_FB_SSH_FROM taken 2001:db8::/32,10.42.0.0/16
+TN_FB_SSH_FROM taken 1:2:3:4:5:6:7:8/128,10.42.0.0/16
+TN_FB_SSH_FROM refused 0.0.0.0/0,10.42.0.0/16
+TN_FB_SSH_FROM refused 0.0.0.0/8,10.42.0.0/16
+TN_FB_SSH_FROM refused 128.0.0.0/1,10.42.0.0/16
+TN_FB_SSH_FROM refused 10.0.0.0/7,10.42.0.0/16
+TN_FB_SSH_FROM refused 10.0.0.0/33,10.42.0.0/16
+TN_FB_SSH_FROM refused 10.0.0.0/08,10.42.0.0/16
+TN_FB_SSH_FROM refused 010.0.0.0/8,10.42.0.0/16
+TN_FB_SSH_FROM refused ::/0,10.42.0.0/16
+TN_FB_SSH_FROM refused ::/8,10.42.0.0/16
+TN_FB_SSH_FROM refused 2001:db8::/7,10.42.0.0/16
+TN_FB_SSH_FROM refused 2001:db8::/129,10.42.0.0/16
+TN_FB_SSH_FROM refused ::ffff:198.51.100.7/128,10.42.0.0/16
+TN_FB_SSH_FROM refused 1::2::3/64,10.42.0.0/16
+TN_FB_SSH_FROM refused 10.042.0.0/16
+TN_FB_MIN_RELEASE taken scripts-v0.0.0
+TN_FB_MIN_RELEASE taken scripts-v2.10.0
+TN_FB_MIN_RELEASE taken scripts-v9999.9999.9999
+TN_FB_MIN_RELEASE refused scripts-v2.03.0
+TN_FB_MIN_RELEASE refused scripts-v10000.0.0
+TN_FB_MIN_RELEASE refused scripts-v2.3
+TN_FB_MIN_RELEASE refused scripts-v2.3.0-rc1
+TN_FB_MIN_RELEASE refused v2.3.0
+TN_FB_DOMAIN plan-refuses RPC.Example.org
+TN_FB_SSH_FROM plan-refuses 198.51.100.7,10.42.0.0/16
+TN_FB_UPSTREAM plan-refuses 169.254.10.10
+EOF
 
 # --- gateway --------------------------------------------------------------------
 GW_DNS='install-caddy.sh --json --phase=gateway-check-dns --gateway-domain gw.example.org --public-ip 203.0.113.7'

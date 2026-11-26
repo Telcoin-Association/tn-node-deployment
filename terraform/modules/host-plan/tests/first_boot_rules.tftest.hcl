@@ -3,6 +3,10 @@
 # and stops at its env file. Each run is one value; "taken" runs plan, the
 # others name the variable that refuses it. The last runs are values first
 # boot takes and the plan refuses on purpose.
+#
+# The same table, row for row and in this order, is the plan_table of
+# tools/tests/first_boot_test.sh, which runs each value through first boot.
+# Change a row in both tables or in neither.
 
 variables {
   role_set             = { validator = true, gateway = true }
