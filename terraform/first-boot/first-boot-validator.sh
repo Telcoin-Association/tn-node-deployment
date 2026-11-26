@@ -48,7 +48,7 @@ fbv_is_block() {
 # mount point as it is (root-owned, holding only lost+found) and hands it to
 # the node's service user.
 fbv_data_disk() {
-    local dev limit waited=0 probe=0 fstype uuid mnt fstab re='^[0-9A-Fa-f-]+$'
+    local dev limit waited=0 probe=0 fstype uuid mnt fstab nl re='^[0-9A-Fa-f-]+$'
     fb_step data-disk "the data disk ${TN_FB_DATA_DEVICE} at ${FB_DATA_DIR}"
     dev="${FB_ROOT}${TN_FB_DATA_DEVICE}"
     limit="${TN_FB_DEVICE_TIMEOUT:-600}"
@@ -84,7 +84,10 @@ fbv_data_disk() {
     fstab="${FB_ROOT}/etc/fstab"
     mkdir -p "$mnt" || fb_fail "Could not create ${FB_DATA_DIR}."
     if ! grep -q "^UUID=${uuid} " "$fstab" 2> /dev/null; then
-        printf 'UUID=%s %s ext4 defaults,nofail 0 2\n' "$uuid" "$FB_DATA_DIR" >> "$fstab" \
+        # A last line without its newline would run into the new one.
+        nl=""
+        [ ! -s "$fstab" ] || [ -z "$(tail -c 1 "$fstab")" ] || nl='\n'
+        printf "${nl}UUID=%s %s ext4 defaults,nofail 0 2\n" "$uuid" "$FB_DATA_DIR" >> "$fstab" \
             || fb_fail "Could not add the data disk to /etc/fstab."
     fi
     systemctl daemon-reload || fb_fail "systemctl daemon-reload failed."

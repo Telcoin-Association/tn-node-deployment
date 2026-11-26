@@ -7,7 +7,8 @@
 #              filesystem stops the boot, a device that never appears times
 #              out; swap that stays on stops it; the installer failing three
 #              times stops it; a run after a fix formats nothing again and adds
-#              no second fstab line; a missing trusted nodes file stops it;
+#              no second fstab line; an fstab without a final newline keeps
+#              its last line; a missing trusted nodes file stops it;
 #              setup-node.sh, firewall-setup.sh and the gateway scripts never run
 #   gateway    every step in order with its exact arguments, each flag one the
 #              real script's argument parser in this tree names; setup-gateway.sh
@@ -311,6 +312,21 @@ for s in setup-node.sh firewall-setup.sh setup-gateway.sh install-caddy.sh check
     check_lacks "blank disk: ${s} never runs" "$s" "$CALLS"
 done
 check_lacks "blank disk: no passphrase anywhere" "passphrase" "$OUT$(cat "$R/var/log/telcoin-first-boot.log")"
+
+echo "== validator: an fstab without a final newline"
+fresh v-nonl
+write_env validator
+printf 'ext4 %s\n' "$OLD_UUID" > "$R$DEV"
+printf 'LABEL=cloudimg-rootfs / ext4 discard,errors=remount-ro 0 1' > "$R/etc/fstab"
+run_fb validator
+succeeded "no final newline" validator
+check "no final newline: the last line is kept, the entry on its own line" "LABEL=cloudimg-rootfs / ext4 discard,errors=remount-ro 0 1
+UUID=${OLD_UUID} /var/lib/telcoin ext4 defaults,nofail 0 2" "$(cat "$R/etc/fstab")"
+check "no final newline: the file ends with a newline" 1 "$(tail -c 1 "$R/etc/fstab" | od -An -c | grep -c '\\n')"
+: > "$T/calls.log"
+run_fb validator
+succeeded "no final newline, second run" validator
+check "no final newline, second run: nothing added" 2 "$(grep -c . "$R/etc/fstab")"
 
 echo "== validator: an ext4 disk"
 fresh v-ext4
