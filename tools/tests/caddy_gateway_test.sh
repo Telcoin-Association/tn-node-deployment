@@ -484,9 +484,12 @@ rpc_enable_refused() { # rpc_enable_refused NAME META EXPECTED-TEXT
 }
 rpc_enable_refused "mainnet, admission closed" "${NMM}ADMISSION_MODE=closed\n" \
     "This mainnet node runs admission closed, as a validator does."
-check "rpc-enable, mainnet closed: names rpc-advertise" yes "$(grep -qF -- '--phase=rpc-advertise --rpc-domain <name>' "$T/ev" && echo yes)"
+check "rpc-enable, mainnet closed: names rpc-advertise" yes "$(grep -qF -- 'Advertise the gateway with --phase=rpc-advertise --rpc-domain <name>.' "$T/ev" && echo yes)"
+check "rpc-enable, mainnet closed, nothing recorded: no recorded URL named" 0 "$(grep -c 'already advertises' "$T/ev")"
 rpc_enable_refused "mainnet closed, advertised via a gateway" "${NMM}ADMISSION_MODE=closed\n${GWMETA}" "runs admission closed"
 check "rpc-enable, mainnet closed via a gateway: never told to rpc-unadvertise" 0 "$(grep -c 'rpc-unadvertise first' "$T/ev")"
+check "rpc-enable, mainnet closed via a gateway: names the recorded URL and how to change the name" "yes 0" \
+    "$(grep -qF -- 'node-info.yaml already advertises https://gw1.example.org/ for the worker gateway; --phase=rpc-advertise --rpc-domain <name> changes the name.' "$T/ev" && echo yes) $(grep -c 'Advertise the gateway with' "$T/ev")"
 rpc_enable_refused "mainnet, GATEWAY_UPSTREAM set" "${NMM}ADMISSION_MODE=open\nGATEWAY_UPSTREAM=10.0.0.9\n" \
     "GATEWAY_UPSTREAM=10.0.0.9: a worker gateway fronts this node"
 check "rpc-enable, mainnet upstream: names gateway_upstream=off" yes "$(grep -qF -- '--set gateway_upstream=off first' "$T/ev" && echo yes)"
@@ -524,8 +527,21 @@ check "rpc-unadvertise, not editable: says the URL is still there, not the warni
     "$(said 'still advertises the removed endpoint') $(grep -cF -- "$NOFWD" "$T/out")"
 
 # --- rpc-advertise before the node's service exists ---------------------------------------
-# No node unit: nothing can answer /health yet, so a failure is a warning and the
-# record is written. With a unit the refusal is unchanged.
+# No node unit on mainnet: nothing can answer /health yet, so a failure is a warning
+# and the record is written. Off mainnet, with NETWORK unreadable, or with a unit the
+# refusal is unchanged.
+for c in "testnet|${NMD}" "NETWORK twice|NETWORK=mainnet\n${NMD}"; do
+    fresh "${c#*|}"
+    printf 'original\n' > "$NIF"
+    before="$(tree_sum)"
+    ( adv_stubs; tn_resolve_service() { lib_tn_resolve_service "$@"; }
+      GW_URL_CODE=000; GW_URL_RC=6; main --phase=rpc-advertise --rpc-domain gw9.example.org ) >"$T/out" 2>&1
+    check_rc "rpc-advertise, ${c%%|*}, no node unit, /health fails: refused" 1 $?
+    check "rpc-advertise, ${c%%|*}, no node unit: the refusal, not the warning" "yes 0" \
+        "$(said 'breaks transaction forwarding') $(grep -c 'is not verified' "$T/out")"
+    check "rpc-advertise, ${c%%|*}, no node unit: tree byte-identical, no edit" "same " \
+        "$([[ "$(tree_sum)" == "$before" ]] && echo same) $(cat "$ORDER")"
+done
 fresh "${NMM}ADMISSION_MODE=closed\n"
 printf 'original\n' > "$NIF"
 ( adv_stubs; tn_resolve_service() { lib_tn_resolve_service "$@"; }

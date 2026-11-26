@@ -2770,7 +2770,8 @@ caddy_operation_reset() {
 # (GATEWAY_UPSTREAM set: gateway_upstream=off first), <domain> and <move_to> (both
 # normalised) and the one-hostname-per-site rule. The closed-admission refusal comes
 # before the advertisement one, whose advice (rpc-unadvertise) would only strip a
-# validator's URL. Sets CADDY_DASH_FROM (the dashboard's current hostname, '' when
+# validator's URL; when .node-meta records that URL it names it, since the gateway is
+# then already advertised and only its name can change. Sets CADDY_DASH_FROM (the dashboard's current hostname, '' when
 # none) and CADDY_DASH_MOVE (true when the dashboard sits on <domain> and moves to
 # <move_to> in the same swap + reload).
 CADDY_DASH_FROM=""
@@ -2782,6 +2783,12 @@ caddy_rpc_enable_precheck() {
     if [[ "$net" == "mainnet" ]]; then
         adm="$(addon_meta_get ADMISSION_MODE "")" || die "ADMISSION_MODE is set more than once in .node-meta; fix the file first. Nothing was changed."
         if [[ "$adm" == "closed" ]]; then
+            via="$(addon_meta_get RPC_ADVERTISED_VIA "" 2>/dev/null)" || via=""
+            url="$(addon_meta_get PUBLIC_RPC_URL "" 2>/dev/null)" || url=""
+            url="${url%/}"
+            if [[ "$via" == "gateway" && -n "$url" ]]; then
+                die "This mainnet node runs admission closed, as a validator does. A mainnet validator's RPC is served by its worker gateway, never by a Caddy site on the validator. node-info.yaml already advertises ${url}/ for the worker gateway; --phase=rpc-advertise --rpc-domain <name> changes the name. Nothing was changed."
+            fi
             die "This mainnet node runs admission closed, as a validator does. A mainnet validator's RPC is served by its worker gateway, never by a Caddy site on the validator. Advertise the gateway with --phase=rpc-advertise --rpc-domain <name>. Nothing was changed."
         fi
     fi
@@ -3263,14 +3270,16 @@ caddy_gateway_url_check() {
 # (the guarded restart checks the node on it), a public RPC site on this host
 # (rpc-enable's advertisement is rpc-disable's to clear), and for rpc-advertise a
 # https://<domain>/health that does not answer 200 from here (caddy_gateway_url_check;
-# no flag skips it). A host with no node service yet (keys made before genesis) only
-# warns about that URL: nothing can answer before the node and its gateway run, and
-# no node restart is at stake. It sets CADDY_GW_URL_EXCUSED to <domain>, so a --json
-# run, which comes here before its step list and again in do_rpc_advertise, asks and
-# warns once. Sets CADDY_RPC_PORT.
+# no flag skips it). A mainnet host (NETWORK=mainnet in .node-meta) with no node
+# service yet (keys made before genesis) only warns about that URL: nothing can answer
+# before the node and its gateway run, and no node restart is at stake. Off mainnet,
+# or when NETWORK cannot be read, that URL is refused as on a running node. The
+# warning sets CADDY_GW_URL_EXCUSED to <domain>, so a --json run, which comes here
+# before its step list and again in do_rpc_advertise, asks and warns once. Sets
+# CADDY_RPC_PORT.
 CADDY_GW_URL_EXCUSED=""
 caddy_rpc_node_precheck() {
-    local phase="$1" domain="${2:-}" rc=0
+    local phase="$1" domain="${2:-}" rc=0 net
     caddy_node_host || die "${phase} edits node-info.yaml of the node on this host, and this host has no telcoin node (no .node-meta). Run it on the node whose record should name the gateway. Nothing was changed."
     if [[ "$phase" == "rpc-advertise" ]]; then
         caddy_require_domain "$domain" "RPC domain"
@@ -3285,8 +3294,9 @@ caddy_rpc_node_precheck() {
     CADDY_RPC_PORT="$(caddy_node_port --http.port RPC_PORT 8545)" || rc=$?
     [[ "$rc" -eq 0 ]] || die "no usable reth HTTP port to check the node with after its restart (see above). Nothing was changed."
     if [[ "$phase" == "rpc-advertise" && "$CADDY_GW_URL_EXCUSED" != "$domain" ]] && ! caddy_gateway_url_check "$domain"; then
-        if ! tn_resolve_service >/dev/null 2>&1; then
-            caddy_say warn "https://${domain}/ is not verified: GET https://${domain}/health from this host got ${CADDY_GW_URL_GOT} instead of 200, and this host has no node service yet, so nothing can answer before the node and its gateway run. The record is written anyway; check-node.sh verifies it later."
+        net="$(addon_meta_get NETWORK "" 2>/dev/null)" || net=""
+        if [[ "$net" == "mainnet" ]] && ! tn_resolve_service >/dev/null 2>&1; then
+            caddy_say warn "https://${domain}/ is not verified: GET https://${domain}/health from this host got ${CADDY_GW_URL_GOT} instead of 200, and this mainnet host has no node service yet, so nothing can answer before the node and its gateway run. The record is written anyway; check-node.sh verifies it later."
             CADDY_GW_URL_EXCUSED="$domain"
             return 0
         fi
