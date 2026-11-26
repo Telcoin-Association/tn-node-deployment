@@ -1206,12 +1206,87 @@ risky_api_modules() {
     echo "$out"
 }
 
+# report_public_rpc_gateway <domain> -- the public RPC of a node whose
+# advertisement belongs to a worker gateway (RPC_ADVERTISED_VIA=gateway in
+# .node-meta): the gateway serves https://<domain>/ from its own host, so there is
+# no Caddy site or wss route here to probe. Compares worker 0 in node-info.yaml
+# with https://<domain>/ and no ws URL, then asks GET https://<domain>/health from
+# this host with the options of install-caddy.sh's caddy_gateway_url_check, so
+# both scripts judge the gateway's name alike. A name that does not resolve and is
+# this node's default (tn_rpc_default_host of its BLS key) waits for the A record
+# the Telcoin Association creates. Warn-only, like report_public_rpc.
+report_public_rpc_gateway() {
+    local domain="$1" node_info adv_http adv_ws want_http adv_ok=true
+    local url code crc got ni_key def=""
+    print_step "Checking public RPC..."
+    node_info="$(detect_data_dir)/node-info.yaml"
+    read -r adv_http adv_ws <<<"$(advertised_rpc "$node_info")"
+    if [[ -z "$domain" ]]; then
+        print_info "public RPC: advertised by the worker gateway (RPC_ADVERTISED_VIA=gateway; no Caddy site on this host), but .node-meta has no PUBLIC_RPC_DOMAIN, so the gateway's name was not probed"
+        print_info "advertised: http=${adv_http} ws=${adv_ws}"
+        return 0
+    fi
+    print_info "public RPC: https://${domain}/ (the worker gateway's, RPC_ADVERTISED_VIA=gateway; no Caddy site on this host)"
+    if [[ -f "$node_info" ]]; then
+        print_info "advertised: http=${adv_http} ws=${adv_ws}"
+    else
+        print_info "advertised: http=${adv_http} ws=${adv_ws} (${node_info} not found)"
+    fi
+    want_http="https://${domain}/"
+    if [[ "$adv_http" != "$want_http" || "$adv_ws" != "none" ]]; then
+        adv_ok=false
+        print_warn "public RPC: WARN -- node-info.yaml advertises http=${adv_http} ws=${adv_ws}; behind the worker gateway it should advertise ${want_http} and no ws URL"
+        print_info "fix: sudo bash ${SCRIPT_DIR}/install-caddy.sh --phase=rpc-advertise --rpc-domain ${domain}"
+    fi
+
+    url="https://${domain}/health"
+    crc=0
+    code="$(curl -q -sS -o /dev/null -w '%{http_code}' --proto '=https' --max-redirs 0 \
+        --connect-timeout 3 --max-time 5 "$url" 2>/dev/null)" || crc=$?
+    if [[ "$crc" -eq 0 && "$code" == "200" ]]; then
+        if [[ "$adv_ok" == "true" ]]; then
+            print_ok "public RPC: OK (GET ${url} answered 200)"
+        else
+            print_info "GET ${url} answered 200"
+        fi
+        return 0
+    fi
+    if [[ "$crc" -eq 6 ]]; then
+        if have_fns tn_rpc_default_host tn_node_info_field \
+            && ni_key="$(tn_node_info_field "$node_info" bls_public_key 2>/dev/null)"; then
+            def="$(tn_rpc_default_host "$ni_key" 2>/dev/null)" || def=""
+        fi
+        if [[ -n "$def" && "$(lower "$domain")" == "$def" ]]; then
+            print_warn "public RPC: WARN -- ${domain} does not resolve from this host. It is this node's default name, and its A record is created by the Telcoin Association (TAO)."
+            print_info "send ${domain} and the static public IP of your worker gateway host to the TAO, which creates the A record; then run the gateway with --domain ${domain} (OPERATOR.md 4.15)"
+            print_info "or use a name of your own: create its A record for the worker gateway's static IP, then run: sudo bash ${SCRIPT_DIR}/install-caddy.sh --phase=rpc-advertise --rpc-domain <name>"
+        else
+            print_warn "public RPC: WARN -- ${domain} does not resolve from this host"
+            print_info "fix: point the A record of ${domain} at your worker gateway's static IP"
+        fi
+        return 0
+    fi
+    case "$crc" in
+        0)  got="HTTP ${code:-000}" ;;
+        7)  got="the connection was refused" ;;
+        28) got="no answer within 5 s" ;;
+        35|51|53|54|58|59|60|64|66|77|80|82|83|90|91)
+            got="a TLS or certificate error (curl exit ${crc}): the certificate must be valid for ${domain}" ;;
+        *)  got="curl exit ${crc}" ;;
+    esac
+    print_warn "public RPC: WARN -- GET ${url} got ${got} instead of 200"
+    print_info "fix: on the worker gateway host, run: bash setup-gateway.sh --status"
+    return 0
+}
+
 # report_public_rpc -- status of the operator's public RPC endpoint (Caddy vhost
 # "tn-rpc" written by install-caddy.sh, hostname persisted by setup-node.sh as
 # PUBLIC_RPC_DOMAIN in .node-meta). Probes https + wss through Caddy on loopback
 # (--resolve, real certificate) and compares worker.rpc in node-info.yaml with the
-# served hostname. Warn-only: never touches HEALTH_ISSUES and every probe is
-# guarded, so it cannot change the exit code or abort the report.
+# served hostname. An advertisement that belongs to a worker gateway
+# (RPC_ADVERTISED_VIA=gateway) is checked by report_public_rpc_gateway instead.
+# Warn-only: never touches HEALTH_ISSUES and every probe is guarded, so it cannot
+# change the exit code or abort the report.
 report_public_rpc() {
     local caddyfile="${TN_ROOT_PREFIX:-}/etc/caddy/Caddyfile"
     local rpc_begin="# >>> tn-rpc >>>" rpc_end="# <<< tn-rpc <<<"
@@ -1224,6 +1299,10 @@ report_public_rpc() {
         return 0
     fi
     domain="$(meta_get PUBLIC_RPC_DOMAIN "$meta" 2>/dev/null || true)"
+    if [[ "$(meta_get RPC_ADVERTISED_VIA "$meta" 2>/dev/null || true)" == "gateway" ]]; then
+        report_public_rpc_gateway "$domain"
+        return 0
+    fi
     if [[ -f "$caddyfile" ]] && grep -qF "$rpc_begin" "$caddyfile" 2>/dev/null; then
         have_block=true
         # Site address = first "<host> {" line inside the fenced block (same rule
