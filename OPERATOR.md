@@ -9,7 +9,7 @@ When you need every option of a script, follow the links into the [README](READM
 
 <!-- release: remove this block when the release that CHANGELOG/scripts-v2.3.0.md describes is cut -->
 > **Not in a script release yet.**
-> `firewall-setup.sh` 2.2.1, `setup-node.sh` 2.1.7, `edit-config.sh` 2.2.4 and `check-node.sh` 2.2.2 are on `main` only, and this runbook already describes them: sections 2.6, 2.7, 2.9, 2.10 and 2.12, and their rows in sections 4.3, 7 and 9.
+> `firewall-setup.sh` 2.2.1, `setup-node.sh` 2.1.7, `edit-config.sh` 2.2.4, `check-node.sh` 2.2.2 and `install-caddy.sh` 2.2.2 are on `main` only, and this runbook already describes them: sections 2.6, 2.7, 2.9, 2.10 and 2.12, the worker gateway's advertisement and the public RPC rules for mainnet in sections 4.15, 5 and 6.1, and their rows in sections 4.3, 7 and 9.
 > [CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md) lists the changes.
 > On `scripts-v2.2.0`, which `update-scripts.sh` and the installer install today:
 >
@@ -17,6 +17,7 @@ When you need every option of a script, follow the links into the [README](READM
 > - The allowlist's floor is the bootstrap peers file alone, or the genesis `committee.yaml` when there is none: the trusted hubs are not in it, and there is no `--accept-floor-shrink`.
 > - Setup and `edit-config.sh` write any bootstrap peers map as `committee_peers`, and only `edit-config.sh` checks the shape of a trusted nodes file, so check both maps by hand (section 2.9).
 > - The mainnet keygen of section 2.12 is refused like every other mainnet run.
+> - On a node that advertises a worker gateway (`RPC_ADVERTISED_VIA=gateway`), `check-node.sh` probes the Caddy site of section 5, which the node does not have, and names `rpc-enable`, which refuses there; check the gateway with `setup-gateway.sh --status` on its host. A setup run that writes the service over such a node rewrites `PUBLIC_RPC_DOMAIN`, `PUBLIC_RPC_URL` and `PUBLIC_WS_URL` from its own flags, so run `rpc-advertise` again after it.
 
 Contents:
 

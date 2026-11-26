@@ -7,6 +7,29 @@ For recent entries (v1.1.40 onwards), see the Changelog section of README.md.
 
 ## Unreleased
 
+### Default RPC name for a mainnet validator's worker gateway, November 2026 -- setup-node 2.1.7, install-caddy 2.2.2, edit-config 2.2.4, check-node 2.2.2, lib/common 2.2.8
+Not yet in a scripts release; part of the pending note
+[CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md). A mainnet keygen given no RPC URL
+writes the node's default name, `https://v<label>.telcoin.network/` (`<label>` the first five
+characters of the `bls_public_key` in `node-info.yaml`, lowercased, from the new
+`tn_rpc_default_host`), into worker 0 with `keytool set-rpc` and no WebSocket URL, and records it
+as the worker gateway's: `PUBLIC_RPC_DOMAIN`, `PUBLIC_RPC_URL` and `RPC_ADVERTISED_VIA=gateway`.
+To make it answer, the operator sends the name and the gateway host's static public IP to the
+Telcoin Association (TAO), which creates the A record; a name of one's own, given with
+`--admission closed --rpc-domain <name>` at keygen or later with
+`install-caddy.sh --phase=rpc-advertise`, is encouraged. A failure to write the default is a
+warning, never a failed keygen. On a mainnet node that runs admission closed, `--rpc-domain` and
+`--rpc-http` name the gateway: https only (an `http://` `--rpc-http` is refused), stored as the
+keytool stores it (lowercase host, no default port, a trailing slash), no Caddy site. Without
+`--admission closed` they set up a node that is not a validator, with a WebSocket URL for a public
+RPC site on the host, and key generation notes that a validator must pass `--admission closed`.
+On mainnet `rpc-enable` refuses a node that runs admission closed and a node with
+`GATEWAY_UPSTREAM`, and `edit-config.sh --set gateway_upstream=` refuses a host that serves the
+public RPC site. On every network setup keeps a record the gateway owns when it writes the
+service, and check-node checks it at `https://<name>/health` instead of through a Caddy site. On
+mainnet, `rpc-advertise` on a host with no node service yet writes the record with a warning when
+the name does not answer; testnet and devnet refuse as before.
+
 ### Worker gateway submission reservation on, November 2026 -- setup-gateway 2.3.0, lib/gateway 2.3.0
 Not yet in a scripts release.
 `setup-gateway.sh --rate-limit-submissions N` sets the submissions a second the worker gateway

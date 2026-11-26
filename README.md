@@ -2147,6 +2147,14 @@ prints the exact fix command.
 > come with the next script release ([CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md)).
 > `scripts-v2.2.0` ends at `update-node v2.1.3` below.
 
+### install-caddy v2.2.2 — on mainnet the public RPC site and a worker gateway never front one node
+On mainnet `rpc-enable` refuses a node that runs admission closed, as a validator does (`This mainnet node runs admission closed, as a validator does. A mainnet validator's RPC is served by its worker gateway, never by a Caddy site on the validator. ...`), and a node with `GATEWAY_UPSTREAM` (`... Run edit-config.sh --set gateway_upstream=off first.`), both before the stake is read; the closed-admission refusal comes before the one over a gateway advertisement, whose advice would only strip the validator's URL.
+That refusal now names the advertised URL and says that key generation on mainnet writes it too.
+On mainnet, `rpc-advertise` on a host with no node service yet writes the record when `https://<name>/health` does not answer, with a warning and the open item `https://<name>/ not verified`; with a node service, and on testnet and devnet, it still refuses.
+`rpc-unadvertise` on a mainnet node running admission closed warns that other nodes can no longer forward transactions to it.
+See [OPERATOR.md section 4.15](OPERATOR.md#415-worker-gateway).
+Full release note: [CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md).
+
 ### firewall-setup v2.2.1 — the kill switch opens the P2P ports, and the allowlist floor keeps the trusted hubs
 Fix for validators in P2P committee mode with a static source list: `--p2p-committee off` turned `P2P_ALLOW_FROM` back into per-source rules and cut off every committee peer outside it.
 It now opens the P2P ports to every source behind the new-flow limit, keeps the list for the next `on` and records `P2P_PER_SOURCE=off`, so later runs keep them open until `--enable --p2p-from <list>`.
@@ -2157,28 +2165,37 @@ A resync never takes an address out of the floor on its own: it keeps the floor 
 See [P2P committee allowlist](#p2p-committee-allowlist).
 Full release note: [CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md).
 
-### setup-node v2.1.7 — committee_peers only from a complete map, the trusted hubs checked before anything is written, mainnet keys before genesis
+### setup-node v2.1.7 — committee_peers only from a complete map, the trusted hubs checked before anything is written, mainnet keys before genesis with the worker gateway's default RPC name
 Fix for validators set up with `--admission` and a `--bootstrap-peers` map that does not list the whole genesis committee (a map of hubs alone, or of the other validators without this node): setup wrote it as `committee_peers`, and the node then exited within a second of every start during epoch 0 (`Error: committee_peers: missing validator <key>`).
 Setup now writes `committee_peers` only from a map that lists every validator of the genesis `committee.yaml` at its first level, each key once, and holds this node's own network keys in this node's entry; any other map is left out of it with a warning naming the gap, and stays installed, dialed and in the allowlist floor.
 Fix for validators given a trusted hubs map the node cannot use: `--trusted-nodes` checked only the file, so a hub entry pasted from `node-info.yaml` (workers as a list), one without a `network_key` or one with a DNS name passed, and the node then refused to start, or started and never dialed the hub.
 Setup now runs edit-config's shape check, which also refuses `/dns*`, `/tcp` and malformed addresses, in the preflight; the bootstrap peers map gets the same address rule.
 Mainnet validators can generate their keys before the mainnet genesis exists: `--json --phase=keygen --network mainnet --install-method existing --binary-path <binary>` runs with a root-owned binary that has no build features, records `NETWORK=mainnet` before any key exists and gets no chain configs ([OPERATOR.md section 2.12](OPERATOR.md#212-generate-mainnet-keys-before-genesis)).
 Every other mainnet path stays refused, a host recorded for mainnet refuses a keygen, a finalize or an interactive install for another network, and a keygen over existing keys changes nothing and says what it compared.
+A mainnet keygen given no RPC URL writes the node's default name, `https://v<label>.telcoin.network/` (`<label>` the first five characters of its BLS public key, lowercased), into `node-info.yaml` with `keytool set-rpc` and no WebSocket URL, records it as the worker gateway's (`RPC_ADVERTISED_VIA=gateway`), prints the TAO handoff that makes it answer and the route to a name of one's own, and adds `advertised_rpc` to its `done` event; a failure there is a warning, never a failed keygen.
+On a mainnet node that runs admission closed, `--rpc-domain` and `--rpc-http` name the worker gateway instead: https only (an `http://` `--rpc-http` is refused before anything changes), stored as the keytool stores it (`--rpc-domain GW.Example.org` records `https://gw.example.org/`), no Caddy site, `--rpc-ws` dropped with a warning.
+On mainnet without `--admission closed` those flags set up a node that is not a validator, with a WebSocket URL for a public RPC site on the host, and key generation notes that a validator must pass `--admission closed`; setup names `rpc-advertise` only to a validator, and `rpc-unadvertise` then `rpc-enable --rpc-domain <name>` to a node that is not one and kept the default.
+On every network, writing the service leaves `PUBLIC_RPC_DOMAIN`, `PUBLIC_RPC_URL` and `PUBLIC_WS_URL` alone while the record is the gateway's, where a `--json` finalize wiped them before.
 With P2P committee mode on, every re-run that completes resyncs the allowlist.
 It needs lib/common.sh 2.2.8 or later.
 Full release note: [CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md).
 
-### edit-config v2.2.4 — the same committee_peers and trusted hubs checks, and a resync after a trusted nodes edit
+### edit-config v2.2.4 — the same committee_peers and trusted hubs checks, a resync after a trusted nodes edit, and no gateway upstream beside the public RPC site on mainnet
 The `admission`, `trusted_nodes` and `bootstrap_peers` edits write the bootstrap peers map as `committee_peers` only when it lists every validator of the genesis `committee.yaml` and its entry for this node holds this node's network keys, as setup-node v2.1.7 does; any other map is installed as before and left out of `committee_peers` with a warning, so the node starts at epoch 0.
 `--set trusted_nodes=` and `--set bootstrap_peers=` refuse a `network_address` that is a DNS name (`/dns`, `/dns4`, `/dns6`, `/dnsaddr`), uses TCP or is no multiaddr, naming the line and the entry: the node never dials such an address.
 `--set trusted_nodes=` also refuses worker ids other than those of the node's workers, and a map the installed release's parser rejects, quoting the node's reason.
 With P2P committee mode on, an edit that changed the trusted nodes map resyncs the allowlist once the node came back from its restart, as an edit of the bootstrap peers already did.
+On mainnet `--set gateway_upstream=<list>` refuses a host that serves the public RPC site (`... run sudo bash <dir>/install-caddy.sh --phase=rpc-disable first`); `off` is never refused for it.
+The mainnet refusal of `0.0.0.0` in `4) RPC access` names the worker gateway route instead.
 It needs lib/common.sh 2.2.8 or later.
 Full release note: [CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md).
 
-### check-node v2.2.2 — an unfinished --p2p-committee off is reported with the command that finishes it
+### check-node v2.2.2 — an unfinished --p2p-committee off is reported with the command that finishes it, and a gateway advertisement is checked at the gateway
 With `P2P_COMMITTEE=on` in `.node-meta` and the allowlist timer's unit file gone, check-node reports one error, `P2P committee mode is on in .node-meta, but a --p2p-committee off did not finish (...)`, which says whether the table is still loaded, and names `firewall-setup.sh --p2p-committee off` as the fix.
 It checks nothing else of the allowlist then.
+Fix for nodes that advertise a worker gateway (`RPC_ADVERTISED_VIA=gateway`), on every network: the public RPC block probed a Caddy site they do not have and named `rpc-enable`, which refuses there.
+It now compares worker 0 with `https://<name>/` and no WebSocket URL and asks `GET https://<name>/health` once: a name that does not resolve gets the A record to create (for the node's default name, the TAO handoff), and any other answer but 200 names `setup-gateway.sh --status` on the gateway host.
+It only warns.
 Full release note: [CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md).
 
 ### migrate-node-naming v2.0.1 — a source list the kill switch set aside stays aside
@@ -2186,9 +2203,10 @@ A P2P source list that `--p2p-committee off` set aside (`P2P_PER_SOURCE=off`) is
 The warning after the migration's allowlist resync names the command that works: `--p2p-committee sync --accept-floor-shrink` after exit 4, `--p2p-committee off` after exit 5, else `--p2p-committee sync`.
 Full release note: [CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md).
 
-### lib/common.sh v2.2.8 — the map checks setup-node and edit-config share, and the mainnet keygen switch
+### lib/common.sh v2.2.8 — the map checks setup-node and edit-config share, the mainnet keygen switch, and the default RPC name
 New `tn_committee_peers_check`, `tn_trusted_nodes_shape_ok` (moved here from edit-config), `tn_map_addr_check`, `tn_trusted_nodes_node_check` and `tn_local_worker_count`: setup-node and edit-config call them before they write `network-config`.
 New `TN_MAINNET_KEYGEN_ENABLED=1` and `tn_mainnet_keygen_enabled`, which open setup-node's mainnet keygen and nothing else while `TN_MAINNET_ENABLED` is 0, and `tn_keys_network_ok`, which refuses another network on a host recorded for mainnet.
+New `tn_rpc_default_host KEY`, which prints `v<label>.telcoin.network` for a base58 BLS public key of 131 characters, or 132 starting with `2`, and refuses any other.
 Full release note: [CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md).
 
 ### update-node v2.1.3 — v0.18.0-adiri is a one-way update
