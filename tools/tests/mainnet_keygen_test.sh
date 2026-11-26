@@ -7,7 +7,9 @@
 # proof of possession for the --address it is given, gets no chain configs, starts
 # nothing and says what to send. The release, docker and source methods are refused
 # with a message that names the way that works; finalize is refused as before; with
-# TN_MAINNET_KEYGEN_ENABLED=0 the keygen is refused as before.
+# TN_MAINNET_KEYGEN_ENABLED=0 the keygen is refused as before. A mainnet keygen with no
+# RPC URL gives worker 0 its default name (keytool set-rpc), recorded for the worker
+# gateway; every failure on that path is a warning.
 #
 # The refusals run the real script in a child bash: each one stops before the root
 # check, so nothing under the fixture root is written. The keygen itself runs from a
@@ -36,31 +38,81 @@ check "the switch-off copy sets TN_MAINNET_KEYGEN_ENABLED=0" yes \
     "$(grep -qx 'readonly TN_MAINNET_KEYGEN_ENABLED=0' "$T/off/lib/common.sh" && echo yes || echo no)"
 
 # Stub node binaries. --version prints one "Build Features:" line holding the
-# features in <stub>.features; any other call is the keytool: it records its argv
-# and stdin and writes an encrypted-looking key and node-info.yaml in --datadir, the
-# latter naming the --address it was given, as the real keytool's does.
+# features in <stub>.features; a call ending in --help prints clap help that lists
+# the RPC options; any other call is the keytool. keytool set-rpc records its argv and
+# stdin on their own (keytool.argv stays the key generation's) and sets worker 0's rpc,
+# unless SETRPC_RC makes it fail with that status or SETRPC_SKIPWRITE makes it say OK
+# and write nothing. Any other keytool call records its argv and stdin and writes an
+# encrypted-looking key and node-info.yaml in --datadir, the latter naming the
+# --address it was given and the BLS public key STUB_BLS, with worker 0 advertising the
+# --rpc-http and --rpc-ws it was given, as the real keytool's does.
 cat > "$T/bin/stub" <<'STUB'
 #!/bin/sh
 if [ "$1" = "--version" ]; then
     printf 'telcoin-network\nVersion: 0.18.0\nCommit SHA: 0000000\nBuild Features: %s\n' "$(cat "$0.features")"
     exit 0
 fi
+for a in "$@"; do last="$a"; done
+if [ "$last" = "--help" ]; then
+    printf 'Usage: telcoin keytool generate validator [OPTIONS]\n\nOptions:\n'
+    for f in --rpc-http --rpc-ws --rpc.max-blocks-per-filter --rpc.max-logs-per-response \
+             --rpc.max-subscriptions-per-connection --rpc.max-request-size --http.api; do
+        printf '      %s <VALUE>\n' "$f"
+    done
+    exit 0
+fi
+# rpc FILE HTTP WS -- FILE with worker 0 (its last entry) advertising HTTP and WS.
+rpc() {
+    awk '/^      rpc:/ { exit } { print }' "$1" > "$1.new"
+    if [ -n "$2" ]; then
+        printf '      rpc:\n        http: %s\n' "$2" >> "$1.new"
+        [ -z "$3" ] || printf '        ws: %s\n' "$3" >> "$1.new"
+    else
+        printf '      rpc: null\n' >> "$1.new"
+    fi
+    mv "$1.new" "$1"
+}
+dd=""
+addr=""
+http=""
+ws=""
+prev=""
+case " $* " in
+    *" set-rpc "*)
+        for a in "$@"; do
+            printf '%s\n' "$a" >> "$REC/setrpc.argv"
+            [ "$prev" = "--datadir" ] && dd="$a"
+            [ "$prev" = "--http" ] && http="$a"
+            [ "$prev" = "--ws" ] && ws="$a"
+            prev="$a"
+        done
+        cat > "$REC/setrpc.stdin"
+        if [ -n "${SETRPC_RC:-}" ]; then
+            printf "error: unrecognized subcommand 'set-rpc'\n\nUsage: telcoin keytool <COMMAND>\n" >&2
+            exit "$SETRPC_RC"
+        fi
+        [ -n "${SETRPC_SKIPWRITE:-}" ] || rpc "$dd/node-info.yaml" "$http" "$ws"
+        echo OK
+        exit 0
+        ;;
+esac
 : > "$REC/keytool.argv"
 # What .node-meta held when the keys were made.
 [ -f "$REC/meta.log" ] && cp "$REC/meta.log" "$REC/meta.at-keytool"
-dd=""
-addr=""
-prev=""
 for a in "$@"; do
     printf '%s\n' "$a" >> "$REC/keytool.argv"
     [ "$prev" = "--datadir" ] && dd="$a"
     [ "$prev" = "--address" ] && addr="$a"
+    [ "$prev" = "--rpc-http" ] && http="$a"
+    [ "$prev" = "--rpc-ws" ] && ws="$a"
     prev="$a"
 done
 cat > "$REC/keytool.stdin"
 mkdir -p "$dd/node-keys"
 : > "$dd/node-keys/bls.kw"
-printf 'name: stub\nexecution_address: %s\n' "$addr" > "$dd/node-info.yaml"
+printf 'name: stub\nbls_public_key: %s\nexecution_address: %s\np2p_info:\n  primary:\n    network_address: /ip4/203.0.113.10/udp/49590/quic-v1\n  workers:\n    - network_address: /ip4/203.0.113.10/udp/49594/quic-v1\n      rpc: null\n' \
+    "${STUB_BLS:-}" "$addr" > "$dd/node-info.yaml"
+rpc "$dd/node-info.yaml" "$http" "$ws"
 STUB
 for n in tn-main tn-adiri tn-testutils; do
     cp "$T/bin/stub" "$T/bin/$n"
@@ -75,6 +127,11 @@ cp "$T/bin/systemctl" "$T/bin/docker"
 chmod 0755 "$T/bin/systemctl" "$T/bin/docker"
 PATH="$T/bin:$PATH"
 
+# A BLS public key of the shape keytool writes (132 characters of base58, starting
+# with 2): the default RPC name is v and its first five characters, lowercased.
+STUB_BLS="2Xq7Y$(printf '%0127d' 0 | tr 0 a)"
+export STUB_BLS
+H="v2xq7y.telcoin.network"
 ADDR="0x000000000000000000000000000007310005eed3"
 PASS="a-mainnet-passphrase-20b"
 MK=(--json --phase=keygen --network mainnet --address "$ADDR"
@@ -274,6 +331,88 @@ check "closing text: no onboarding or staking steps (display_node_info)" no "$([
 check "closing text: node-info.yaml shown" yes "$(has "$(cat "$T/err")" "Your node-info.yaml has been generated at:")"
 check_lacks "closing text: no re-registering with the Association" "re-register with the Association" "$(cat "$T/err")"
 
+# ---- the advertised RPC URL ------------------------------------------------------------
+# With no RPC URL given, worker 0 gets the default name, written by keytool set-rpc (no
+# passphrase reaches it) and recorded in .node-meta as the worker gateway's.
+setrpc="$(cat "$REC/setrpc.argv" 2>/dev/null)"
+# shellcheck disable=SC2086  # the argv lines joined with spaces
+check "default name: keytool set-rpc writes it" yes "$(has "$(printf '%s ' $setrpc)" "keytool set-rpc --http https://${H}/ ")"
+check "default name: no WebSocket URL" "no https://${H}/ none" "$(has "$setrpc" "--ws") $(tn_node_info_rpc "$T/data/node-info.yaml")"
+check "default name: set-rpc reads no passphrase" "" "$(cat "$REC/setrpc.stdin" 2>/dev/null)"
+check_lacks "default name: no passphrase source for set-rpc" "--bls-passphrase-source" "$setrpc"
+check_lacks "default name: the passphrase in no set-rpc argv" "$PASS" "$setrpc"
+for kv in "PUBLIC_RPC_DOMAIN=${H}" "PUBLIC_RPC_URL=https://${H}" RPC_ADVERTISED_VIA=gateway "unset PUBLIC_WS_URL"; do
+    check_has "default name: .node-meta ${kv}" "$kv" "$meta"
+done
+check_lacks "default name: no PUBLIC_WS_URL recorded" "PUBLIC_WS_URL=" "$meta"
+# Set apart: bash 3.2 misreads a } inside "$(...)" nested in double quotes.
+ADV_FIELD="\"advertised_rpc\":{\"http\":\"https://${H}/\",\"via\":\"gateway\",\"default\":true},\"msg\":\"mainnet keys generated"
+check "default name: the done event names it" yes "$(has "$(tail -n 1 "$T/out")" "$ADV_FIELD")"
+check "default name: set-rpc's OK line is not on the JSON stream" no "$(grep -qx OK "$T/out" && echo yes || echo no)"
+ADV_CMD="sudo bash $T/sn/install-caddy.sh --phase=rpc-advertise --rpc-domain"
+check_has "default name: said, as a log event" \
+    "{\"event\":\"log\",\"msg\":\"Advertised RPC URL: https://${H}/ (worker 0 in node-info.yaml, no WebSocket URL). It is this node's default name: v and the first five characters of its BLS public key, lowercased. It belongs to your worker gateway (RPC_ADVERTISED_VIA=gateway in .node-meta), which serves it over HTTPS. No public RPC site runs on this host.\"}" \
+    "$(cat "$T/out")"
+check_has "default name: the TAO handoff" \
+    "{\"event\":\"log\",\"msg\":\"To make it answer, send ${H} and the static public IP of your worker gateway host to the Telcoin Association (TAO), which creates the A record. Then run your gateway with --domain ${H} (OPERATOR.md 4.15).\"}" \
+    "$(cat "$T/out")"
+check_has "default name: the own-name route" \
+    "{\"event\":\"log\",\"msg\":\"You are encouraged to use a name of your own: create its A record for the gateway's static IP, then run: ${ADV_CMD} <name>. Before key generation, pass --rpc-domain <name> and no default is set.\"}" \
+    "$(cat "$T/out")"
+check "default name: said on stderr too" yes "$(has "$(cat "$T/err")" "Advertised RPC URL: https://${H}/")"
+
+# Each failure is a warning: keygen still ends ok, and no owner is recorded.
+no_owner() {  # no_owner NAME -- the last keygen ended ok and recorded no gateway owner
+    local m
+    m="$(cat "$REC/meta.log" 2>/dev/null)"
+    check "$1: done ok" yes "$(has "$(tail -n 1 "$T/out")" "\"event\":\"done\",\"ok\":true,\"phase\":\"keygen\"")"
+    check "$1: no owner recorded, an earlier one removed" "no yes" \
+        "$(has "$m" "RPC_ADVERTISED_VIA=gateway") $(has "$m" "unset RPC_ADVERTISED_VIA")"
+    check "$1: no advertised_rpc in done, no TAO handoff" "no no" \
+        "$(has "$(tail -n 1 "$T/out")" "advertised_rpc") $(has "$(cat "$T/out")" "Telcoin Association (TAO)")"
+}
+STUB_BLS_SAVED="$STUB_BLS"
+STUB_BLS="not-a-key"
+check_rc "a malformed BLS key: rc 0" 0 "$(keygen "${KGM[@]}")"
+check_has "a malformed BLS key: warned" \
+    "{\"event\":\"log\",\"msg\":\"WARNING: Could not derive the default RPC name from bls_public_key in $T/data/node-info.yaml (it is not a base58 key of 131 or 132 characters), so node-info.yaml advertises no RPC URL. The keys are fine. Set one with: ${ADV_CMD} <name>\"}" \
+    "$(cat "$T/out")"
+check "a malformed BLS key: no set-rpc" no "$([[ -e "$REC/setrpc.argv" ]] && echo yes || echo no)"
+no_owner "a malformed BLS key"
+STUB_BLS=""
+check_rc "no BLS key: rc 0" 0 "$(keygen "${KGM[@]}")"
+check "no BLS key: warned" yes "$(has "$(cat "$T/out")" "(no bls_public_key could be read from it), so node-info.yaml advertises no RPC URL.")"
+no_owner "no BLS key"
+STUB_BLS="$STUB_BLS_SAVED"
+export SETRPC_RC=2
+check_rc "set-rpc rc 2: rc 0" 0 "$(keygen "${KGM[@]}")"
+unset SETRPC_RC
+check_has "set-rpc rc 2: warned with its first line" \
+    "{\"event\":\"log\",\"msg\":\"WARNING: keytool set-rpc failed (rc 2: error: unrecognized subcommand 'set-rpc'), so node-info.yaml advertises no RPC URL. The keys are fine. Set one with: ${ADV_CMD} ${H}\"}" \
+    "$(cat "$T/out")"
+check "set-rpc rc 2: worker 0 advertises nothing" "none none" "$(tn_node_info_rpc "$T/data/node-info.yaml")"
+no_owner "set-rpc rc 2"
+export SETRPC_SKIPWRITE=1
+check_rc "set-rpc writes nothing: rc 0" 0 "$(keygen "${KGM[@]}")"
+unset SETRPC_SKIPWRITE
+check_has "set-rpc writes nothing: the read-back warns" \
+    "{\"event\":\"log\",\"msg\":\"WARNING: After keytool set-rpc, worker 0 of $T/data/node-info.yaml reads 'none none' instead of 'https://${H}/ none', so no RPC URL is recorded for your worker gateway. The keys are fine. Set one with: ${ADV_CMD} ${H}\"}" \
+    "$(cat "$T/out")"
+no_owner "set-rpc writes nothing"
+# An Open node with --rpc-domain keeps the behaviour of before: keygen advertises
+# https and wss for the Caddy site rpc-enable serves later, and records no owner.
+check_rc "--rpc-domain, admission open: rc 0" 0 "$(keygen "${KGM[@]}" --admission open --rpc-domain node7.example.org)"
+argv="$(cat "$REC/keytool.argv" 2>/dev/null)"
+# shellcheck disable=SC2086  # the argv lines joined with spaces
+check "--rpc-domain, admission open: keygen advertises https and wss as before" yes \
+    "$(has "$(printf '%s ' $argv)" "--rpc-http https://node7.example.org/ --rpc-ws wss://node7.example.org/ ")"
+check "--rpc-domain, admission open: no set-rpc" no "$([[ -e "$REC/setrpc.argv" ]] && echo yes || echo no)"
+no_owner "--rpc-domain, admission open"
+# The interactive RPC choice names the default on mainnet only.
+DEFAULT_PROMPT="Enter accepts the default name v<first five characters of the BLS key>.telcoin.network, shown after key generation."
+check "prompt, mainnet: Enter takes the default name" yes "$(has "$( (NETWORK=mainnet; prompt_public_rpc) <<< "" 2>&1 )" "$DEFAULT_PROMPT")"
+check_lacks "prompt, testnet: as before" "$DEFAULT_PROMPT" "$( (NETWORK=testnet; prompt_public_rpc) <<< "" 2>&1 )"
+
 # Over existing keys: refused, the keytool does not run again.
 mkdir -p "$T/data/node-keys"
 command rm -f "$REC/keytool.argv"
@@ -297,6 +436,8 @@ check_rc "testnet keygen: rc 0" 0 "$(keygen "${KGT[@]}")"
 check "testnet keygen: the done message of before" yes \
     "$(has "$(tail -n 1 "$T/out")" "\"msg\":\"keys generated -- BACK THEM UP before finalizing\"}")"
 check_lacks "testnet keygen: no mainnet next steps" "genesis ceremony" "$(cat "$T/out")"
+check "testnet keygen: no set-rpc, no RPC owner either way, no advertised_rpc" "no no no" \
+    "$([[ -e "$REC/setrpc.argv" ]] && echo yes || echo no) $(has "$(cat "$REC/meta.log" 2>/dev/null)" RPC_ADVERTISED_VIA) $(has "$(cat "$T/out")" advertised_rpc)"
 check "testnet keygen: the onboarding steps of before" yes "$([[ -e "$REC/display-node-info" ]] && echo yes || echo no)"
 ensure_chain_configs_available() { : > "$REC/chain-configs"; return 1; }
 rc="$( tn_mainnet_enabled() { return 0; }; keygen "${KGM[@]}" )"
@@ -480,13 +621,17 @@ command rm -rf "$T/data" "$CONFIG_DIR/.node-meta" "$CONFIG_DIR/bls-passphrase.cr
 # stored passphrase. tn-sig is the keytool as the operator's SSH drop meets it: it sends
 # setup HUP after it wrote everything (sig.mode after: a HUP to setup alone), or after
 # bls.kw only and then dies of it (mid: a HUP to the whole process group), or it writes
-# no node-info.yaml at all (noinfo).
+# no node-info.yaml at all (noinfo). Its node-info.yaml carries a BLS key the default
+# RPC name comes from; a keytool set-rpc call only leaves setrpc.ran.
 cat > "$T/bin/tn-sig" <<'STUB'
 #!/bin/sh
 if [ "$1" = "--version" ]; then
     printf 'telcoin-network\nVersion: 0.18.0\nCommit SHA: 0000000\nBuild Features: \n'
     exit 0
 fi
+case " $* " in
+    *" set-rpc "*) : > "$REC/setrpc.ran"; exit 0 ;;
+esac
 dd=""
 addr=""
 prev=""
@@ -504,7 +649,8 @@ case "$mode" in
     noinfo) exit 0 ;;
     mid) kill -HUP "$(cat "$REC/setup.pid")"; exit 129 ;;
 esac
-printf 'name: stub\nexecution_address: %s\n' "$addr" > "$dd/node-info.yaml"
+printf 'name: stub\nbls_public_key: %s\nexecution_address: %s\np2p_info:\n  workers:\n    - network_address: /ip4/203.0.113.10/udp/49594/quic-v1\n      rpc: null\n' \
+    "$STUB_BLS" "$addr" > "$dd/node-info.yaml"
 [ "$mode" = after ] && kill -HUP "$(cat "$REC/setup.pid")"
 exit 0
 STUB
@@ -534,6 +680,8 @@ check "HUP to setup during the keytool: the credential stored before the keytool
 check "HUP to setup during the keytool: no success reported" \
     "$(done_false "setup stopped by SIGHUP (rc=129)")" "$(tail -n 1 "$T/out")"
 check_lacks "HUP to setup during the keytool: no file to send named" "Send $T/data/node-info.yaml" "$(cat "$T/out")"
+check "HUP to setup during the keytool: no set-rpc, no RPC owner either way" "no no" \
+    "$([[ -e "$REC/setrpc.ran" ]] && echo yes || echo no) $(has "$(cat "$REC/meta.log" 2>/dev/null)" RPC_ADVERTISED_VIA)"
 # A re-run over what that run left says it is all there.
 awk '/^unset /{next} { k = $0; sub(/=.*/, "", k); v[k] = $0; if (!(k in seen)) { seen[k] = 1; o[++n] = k } }
      END { for (i = 1; i <= n; i++) print v[o[i]] }' "$REC/meta.log" > "$CONFIG_DIR/.node-meta"

@@ -233,7 +233,8 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
         tn_network_config_render tn_node_supports_admission tn_committee_peers_check \
         tn_trusted_nodes_shape_ok tn_map_addr_check tn_trusted_nodes_node_check tn_local_worker_count \
         tn_chain_configs_tag tn_chain_configs_dir tn_chain_configs_from_tag tn_chain_config_pin_ok \
-        tn_bootstrap_servers_pin tn_bootstrap_servers_check >/dev/null; then
+        tn_bootstrap_servers_pin tn_bootstrap_servers_check \
+        tn_node_info_field tn_node_info_rpc tn_rpc_default_host >/dev/null; then
     _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this setup-node.sh: run update-scripts.sh and try again."
     case " $* " in
         *" --json "*) printf '{"event":"error","msg":"%s"}\n{"event":"done","ok":false,"msg":"%s"}\n' "$_tn_old" "$_tn_old" ;;
@@ -269,6 +270,12 @@ PUBLIC_WS_URL=""
 ADVERTISE_RPC_HTTP=""
 ADVERTISE_RPC_WS=""
 RPC_ADVERTISE_DERIVED=false # true: ADVERTISE_RPC_HTTP came from --rpc-domain, not --rpc-http
+# What a mainnet keygen recorded as its worker gateway's advertisement (RPC_ADVERTISED_VIA=gateway
+# in .node-meta, setup_rpc_advertise_record): the worker 0 URL, and the default name when that
+# URL is the default (v<label>.telcoin.network). The default is never PUBLIC_RPC_DOMAIN, which
+# step_public_rpc would serve through Caddy on this host.
+RPC_GATEWAY_URL=""
+RPC_DEFAULT_HOST=""
 EXPLORER_URL=""
 INSTALL_METHOD=""
 # The node binary (source and existing installs) or image (docker). --binary-path or
@@ -1450,6 +1457,12 @@ prompt_public_rpc() {
     echo "              Caddy (automatic TLS) and advertised to the network in"
     echo "              node-info.yaml. reth itself stays on 127.0.0.1."
     echo ""
+    # On mainnet a node with no RPC URL still advertises one: the default name that
+    # key generation writes for the worker gateway (setup_rpc_advertise_record).
+    if [[ "$NETWORK" == "mainnet" ]]; then
+        print_info "Enter accepts the default name v<first five characters of the BLS key>.telcoin.network, shown after key generation."
+        echo ""
+    fi
     local rpc_choice input
     while true; do
         read -r -p "  Enter choice [1]: " rpc_choice
@@ -2355,6 +2368,118 @@ keytool_supports_rpc_args() {
     tn_keytool_has "$(node_runner_spec)" --rpc-http generate validator
 }
 
+# The install-caddy.sh command that advertises NAME for the worker gateway.
+setup_rpc_advertise_cmd() {
+    printf 'sudo bash %s/install-caddy.sh --phase=rpc-advertise --rpc-domain %s' "$SCRIPT_DIR" "$1"
+}
+
+# A mainnet keygen that records no worker gateway owner leaves none behind: write_node_meta
+# keeps the keys it does not write, so an RPC_ADVERTISED_VIA of earlier keys would stay.
+setup_rpc_owner_clear() {
+    local meta="${CONFIG_DIR}/.node-meta"
+    meta_unset RPC_ADVERTISED_VIA "$meta" || setup_fail "Could not remove RPC_ADVERTISED_VIA from ${meta}."
+    return 0
+}
+
+# setup_rpc_gateway_write URL -- worker 0 of node-info.yaml advertises URL and no
+# WebSocket URL, recorded in .node-meta as the worker gateway's: PUBLIC_RPC_DOMAIN (the
+# host, when URL is https://<host>/), PUBLIC_RPC_URL (no trailing slash, as rpc-advertise
+# writes it), RPC_ADVERTISED_VIA=gateway, and no PUBLIC_WS_URL. keytool set-rpc of the
+# release that made the keys writes it unless worker 0 already reads so; it reads no
+# passphrase, and its output is captured, so its OK line stays off the --json stream.
+# Worker 0 is read back either way. rc 0 recorded (RPC_GATEWAY_URL); 1 not: a warning
+# said why, no owner is recorded, and the keys are fine.
+setup_rpc_gateway_write() {
+    local url="$1" ni="${DATA_DIR}/node-info.yaml" meta="${CONFIG_DIR}/.node-meta"
+    local cur="" out="" rc=0 first="" host="" name="<name>"
+    case "$url" in
+        https://*/)
+            host="${url#https://}"
+            host="${host%/}"
+            [[ "$host" != */* ]] || host=""
+            ;;
+    esac
+    [[ -z "$host" ]] || name="$host"
+    cur="$(tn_node_info_rpc "$ni" 2>/dev/null)" || cur=""
+    if [[ "$cur" != "${url} none" ]]; then
+        out="$(tn_keytool "$(node_runner_spec)" "$DATA_DIR" set-rpc --http "$url" 2>&1)" || rc=$?
+        if [[ "$rc" -ne 0 ]]; then
+            first="$(printf '%s\n' "$out" | awk 'NF { print; exit }')" || first=""
+            setup_warn "keytool set-rpc failed (rc ${rc}${first:+: ${first}}), so node-info.yaml advertises no RPC URL. The keys are fine. Set one with: $(setup_rpc_advertise_cmd "$name")"
+            setup_rpc_owner_clear
+            return 1
+        fi
+        cur="$(tn_node_info_rpc "$ni" 2>/dev/null)" || cur="unreadable"
+        if [[ "$cur" != "${url} none" ]]; then
+            setup_warn "After keytool set-rpc, worker 0 of ${ni} reads '${cur}' instead of '${url} none', so no RPC URL is recorded for your worker gateway. The keys are fine. Set one with: $(setup_rpc_advertise_cmd "$name")"
+            setup_rpc_owner_clear
+            return 1
+        fi
+    fi
+    if [[ -n "$host" ]]; then
+        write_node_meta "PUBLIC_RPC_DOMAIN=${host}"
+    else
+        meta_unset PUBLIC_RPC_DOMAIN "$meta" || setup_fail "Could not remove PUBLIC_RPC_DOMAIN from ${meta}."
+    fi
+    meta_unset PUBLIC_WS_URL "$meta" || setup_fail "Could not remove PUBLIC_WS_URL from ${meta}."
+    write_node_meta "PUBLIC_RPC_URL=${url%/}" "RPC_ADVERTISED_VIA=gateway"
+    RPC_GATEWAY_URL="$url"
+    return 0
+}
+
+# setup_rpc_advertise_record GIVEN -- once a mainnet keygen made the keys, say who serves
+# the URL worker 0 advertises: other nodes forward transactions to it, and on mainnet a
+# node's public RPC is served by its worker gateway. A node whose operator gave no URL
+# (GIVEN, the --rpc-http or --rpc-domain URL, is empty) advertises its default name,
+# https://v<label>.telcoin.network/, <label> the first five characters of its BLS public
+# key lowercased (tn_rpc_default_host), written and recorded by setup_rpc_gateway_write
+# (RPC_DEFAULT_HOST). Every failure is a warning: the keys are fine, and a URL can be set
+# later with install-caddy.sh --phase=rpc-advertise. A keygen that records no owner
+# removes the one earlier keys left. Other networks: nothing.
+setup_rpc_advertise_record() {
+    local given="${1:-}" ni="${DATA_DIR}/node-info.yaml" key="" host="" why=""
+    RPC_GATEWAY_URL=""
+    RPC_DEFAULT_HOST=""
+    [[ "$NETWORK" == "mainnet" ]] || return 0
+    if [[ -n "$given" ]]; then
+        setup_rpc_owner_clear
+        return 0
+    fi
+    key="$(tn_node_info_field "$ni" bls_public_key 2>/dev/null)" || key=""
+    if [[ -z "$key" ]]; then
+        why="no bls_public_key could be read from it"
+    elif ! host="$(tn_rpc_default_host "$key")"; then
+        why="it is not a base58 key of 131 or 132 characters"
+    fi
+    if [[ -n "$why" ]]; then
+        setup_warn "Could not derive the default RPC name from bls_public_key in ${ni} (${why}), so node-info.yaml advertises no RPC URL. The keys are fine. Set one with: $(setup_rpc_advertise_cmd '<name>')"
+        setup_rpc_owner_clear
+        return 0
+    fi
+    if setup_rpc_gateway_write "https://${host}/"; then
+        RPC_DEFAULT_HOST="$host"
+    fi
+    return 0
+}
+
+# setup_rpc_default_next -- after the keys are shown: the URL setup_rpc_advertise_record
+# recorded for the worker gateway, and what makes it answer. On stderr and, in --json
+# mode, as log events. Nothing when it recorded none.
+setup_rpc_default_next() {
+    local h="$RPC_DEFAULT_HOST" line
+    [[ -n "$RPC_GATEWAY_URL" && -n "$h" ]] || return 0
+    for line in \
+        "Advertised RPC URL: https://${h}/ (worker 0 in node-info.yaml, no WebSocket URL). It is this node's default name: v and the first five characters of its BLS public key, lowercased. It belongs to your worker gateway (RPC_ADVERTISED_VIA=gateway in .node-meta), which serves it over HTTPS. No public RPC site runs on this host." \
+        "To make it answer, send ${h} and the static public IP of your worker gateway host to the Telcoin Association (TAO), which creates the A record. Then run your gateway with --domain ${h} (OPERATOR.md 4.15)." \
+        "You are encouraged to use a name of your own: create its A record for the gateway's static IP, then run: $(setup_rpc_advertise_cmd '<name>'). Before key generation, pass --rpc-domain <name> and no default is set."; do
+        print_info "$line"
+        if json_mode; then
+            json_event log "$line"
+        fi
+    done
+    return 0
+}
+
 step_generate_keys() {
     print_header "Step 5 of 8: Node Key Management"
 
@@ -2471,7 +2596,9 @@ step_generate_keys() {
     # --rpc-ws pass through as given (the fleet path); URLs derived from --rpc-domain are
     # passed only when this release's keytool knows --rpc-http. Otherwise keygen goes
     # ahead without them and rpc-enable advertises them after the node starts.
-    local probe_rc=0 probe_note
+    # rpc_given keeps the operator's URL from before that: a mainnet keygen gives worker
+    # 0 its default name only when the operator gave none (setup_rpc_advertise_record).
+    local probe_rc=0 probe_note rpc_given="$ADVERTISE_RPC_HTTP"
     if [[ "$RPC_ADVERTISE_DERIVED" == "true" && -n "$ADVERTISE_RPC_HTTP" ]]; then
         keytool_supports_rpc_args || probe_rc=$?
     fi
@@ -2545,6 +2672,11 @@ step_generate_keys() {
     if [[ "$fresh" != "true" ]]; then
         setup_store_passphrase
     fi
+    # Still under the held signals, so a signal cannot stop keytool set-rpc halfway
+    # through node-info.yaml. A signal already held stops setup now instead.
+    if [[ -z "$SETUP_HELD_SIGNAL" ]]; then
+        setup_rpc_advertise_record "$rpc_given"
+    fi
     setup_release_signals
 
     TN_SETUP_PASS=""
@@ -2563,6 +2695,7 @@ step_generate_keys() {
     else
         display_node_info "$DATA_DIR" "$VALIDATOR_ADDRESS"
     fi
+    setup_rpc_default_next
 
     echo ""
     print_warn "BACK UP YOUR KEYS NOW."
@@ -3789,7 +3922,7 @@ json_phase_keygen() {
     json_event step "Generating node keys"
     step_generate_keys
 
-    local info="${DATA_DIR}/node-info.yaml" info_content="" done_msg="keys generated -- BACK THEM UP before finalizing"
+    local info="${DATA_DIR}/node-info.yaml" info_content="" done_msg="keys generated -- BACK THEM UP before finalizing" adv="" dflt=false
     # Success, and the file to send, only with the key, node-info.yaml and the stored
     # passphrase all in place.
     if [[ ! -f "${DATA_DIR}/node-keys/bls.kw" || ! -f "$info" || "$SETUP_PASS_STORED" != "true" ]]; then
@@ -3800,7 +3933,13 @@ json_phase_keygen() {
         setup_mainnet_keygen_next "$info"
         done_msg="mainnet keys generated -- BACK THEM UP; send ${info} only, never the keys or the passphrase; finalize once the mainnet release and genesis are published"
     fi
-    json_done "{\"event\":\"done\",\"ok\":true,\"phase\":\"keygen\",\"node_type\":\"observer\",\"node_info_path\":\"$(json_escape "$info")\",\"keys_dir\":\"$(json_escape "${DATA_DIR}/node-keys")\",\"node_info\":\"${info_content}\",\"msg\":\"$(json_escape "$done_msg")\"}"
+    # The URL recorded for the worker gateway (setup_rpc_advertise_record), when there is
+    # one; a done event without it is the one of before.
+    if [[ -n "$RPC_GATEWAY_URL" ]]; then
+        [[ -z "$RPC_DEFAULT_HOST" ]] || dflt=true
+        adv="\"advertised_rpc\":{\"http\":\"$(json_escape "$RPC_GATEWAY_URL")\",\"via\":\"gateway\",\"default\":${dflt}},"
+    fi
+    json_done "{\"event\":\"done\",\"ok\":true,\"phase\":\"keygen\",\"node_type\":\"observer\",\"node_info_path\":\"$(json_escape "$info")\",\"keys_dir\":\"$(json_escape "${DATA_DIR}/node-keys")\",\"node_info\":\"${info_content}\",${adv}\"msg\":\"$(json_escape "$done_msg")\"}"
 }
 
 # finalize_same_as_keygen FLAG VALUE RECORDED -- stop when a finalize flag and the
