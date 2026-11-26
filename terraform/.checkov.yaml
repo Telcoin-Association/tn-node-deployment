@@ -35,3 +35,15 @@ skip-check:
   # encrypts every disk, and the data disk takes a Cloud KMS key
   # (data_disk_kms_key).
   - CKV_GCP_38
+  # Azure. Managed disks are always encrypted at rest with platform-managed
+  # keys; a customer-managed key needs a Key Vault and a disk encryption set,
+  # which an operator who wants one manages outside this deployment.
+  - CKV_AZURE_93
+  # Azure. Both NICs carry a static public IP by design: peers dial the
+  # validator's for P2P and the RPC name points at the gateway's. The hosts'
+  # security group admits only the ports each host serves.
+  - CKV_AZURE_119
+  # Azure. AzureBastionSubnet holds only the managed Bastion service, for which
+  # Azure makes a security group optional (and, if present, a fixed rule set);
+  # the hosts' subnet has its group, which terraform/azure's tests check.
+  - CKV2_AZURE_31

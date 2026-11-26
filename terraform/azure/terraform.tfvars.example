@@ -1,0 +1,66 @@
+# Copy to terraform.tfvars and fill in. Every value here is public: nothing in
+# this deployment is secret, and the BLS passphrase never enters Terraform.
+
+# testnet or mainnet.
+network = "testnet"
+
+# Prefix of every resource name: <prefix>-rg, <prefix>-validator, ...
+name_prefix = "tn"
+
+# Null reads ARM_SUBSCRIPTION_ID.
+# subscription_id = "00000000-0000-0000-0000-000000000000"
+
+# The region must offer zonal Premium SSD v2 disks.
+location = "eastus2"
+zone     = "1"
+
+# Required: your SSH public key (ssh-ed25519, or ssh-rsa of 2048 bits or more).
+admin_ssh_public_key = "ssh-ed25519 AAAA... you@example"
+
+# The admin user Azure creates on both hosts. Not telcoin: that is the node's
+# service account.
+# admin_username = "ubuntu"
+
+# How you reach the hosts' shells: SSH from these addresses, Azure Bastion, or
+# both. At least one is required.
+admin_ssh_cidrs = ["198.51.100.7/32"]
+# enable_bastion = true
+
+# Empty for the first apply. Once the A record for the name points at the
+# gateway_public_ip output, set it and apply again to build the gateway VM.
+rpc_domain = ""
+
+# false builds the validator host alone, with no worker gateway.
+# gateway_enabled = true
+
+# The validator's execution address (on mainnet its Safe), for the printed
+# key generation command: 0x followed by 40 hex digits.
+# validator_address = "0x..."
+
+# The trusted hubs map, written to the validator at first boot. Empty: copy it
+# to the host by hand, as the next_steps output says.
+# trusted_nodes_file = "trusted-nodes.yaml"
+
+# The testnet release the printed key generation installs.
+# node_release_tag = "v0.0.0-adiri"
+
+# Network ranges. Both must be private; the subnet sits inside the network.
+# vpc_cidr            = "10.42.0.0/16"
+# subnet_cidr         = "10.42.1.0/24"
+# bastion_subnet_cidr = "10.42.2.0/26"
+
+# Null picks the per-network defaults: Standard_D8s_v5 on testnet,
+# Standard_D16s_v5 on mainnet, Standard_D2s_v5 for the gateway.
+# validator_instance_type = "Standard_D16s_v5"
+# gateway_instance_type   = "Standard_D2s_v5"
+
+# Null picks the per-network defaults: 500 GiB, 15000 IOPS, 300 MB/s on
+# testnet; 2000 GiB, 20000 IOPS, 300 MB/s on mainnet.
+# data_disk_size_gb    = 2000
+# data_disk_iops       = 20000
+# data_disk_throughput = 300
+
+# Needs the EncryptionAtHost feature registered on the subscription.
+# encryption_at_host_enabled = true
+
+# ubuntu_version = "26.04"
