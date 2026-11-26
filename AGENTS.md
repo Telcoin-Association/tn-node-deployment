@@ -1355,7 +1355,7 @@ into a pass. The jobs:
   downloads that release's signed files and checks the pin against them. The mainnet placeholder
   is checked against the testnet release it names, and refused once `TN_MAINNET_ENABLED` is 1.
 - `terraform` ("terraform static checks", not a required check): `bash tools/check-terraform.sh`
-  on pull requests and branch pushes, never on a tag (`if: github.ref_type != 'tag'`), since it
+  on pull requests and pushes to main, never on a tag (`if: github.ref_type != 'tag'`), since it
   fetches providers and rulesets from public registries and an outage there must not fail a
   release tag's run. It has `contents: read`, the pinned checkout with
   `persist-credentials: false` and no other `uses:`, and passes the job token to tflint only, for

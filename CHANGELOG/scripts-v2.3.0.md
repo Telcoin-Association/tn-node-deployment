@@ -176,7 +176,7 @@ need lib/common 2.2.8, which the release installs with them.
   One information line says that the cloud's own firewall rules cannot be seen from the host.
 - Fix for a mainnet validator behind a worker gateway: with `GATEWAY_UPSTREAM` in `.node-meta`, the `--healthcheck` on the node line is the gateway's readiness port, which `edit-config.sh --set gateway_upstream` sets, and check-node failed it as the testnet health monitor.
   It now reports it as OK (`--healthcheck <value> on the node line serves the worker gateway at <upstream> (GATEWAY_UPSTREAM), not the testnet health monitor`); `ENABLE_HEALTHCHECK_MONITOR=true` stays an error, and so does the flag without `GATEWAY_UPSTREAM`.
-  A `GATEWAY_UPSTREAM` set more than once gets a warning, and the check is skipped.
+  A `GATEWAY_UPSTREAM` set more than once gets a warning that whether `--healthcheck` on the node line serves a gateway was not checked; `ENABLE_HEALTHCHECK_MONITOR=true` is still an error then.
 - On a mainnet validator with `GATEWAY_UPSTREAM`, a `node-info.yaml` that advertises anything but an `https` URL with no WebSocket URL is now an error that counts as an issue, because transactions forwarded to the validator fail; elsewhere it stays information.
 - On mainnet, a node whose stake status is Staked, Pending Activation, Active or Pending Exit gets a section `Checking admission (mainnet validator)...` after the epoch and committee report (OPERATOR.md section 2.9).
   Its admission mode is `ADMISSION_MODE` in `.node-meta`, else `admission.mode` in `network-config`, else unset, which the node runs as Open.
@@ -237,7 +237,7 @@ need lib/common 2.2.8, which the release installs with them.
 - The gateway host sets itself up unattended: Docker from Docker's apt repository with its signing key checked against the fingerprint `setup-node.sh` pins, `setup-gateway.sh --enable --mode standalone` behind Caddy, `firewall-setup.sh --enable` and `check-node.sh`.
 - Both hosts install the release the installer serves, and stop at their `scripts-release` step on one older than `min_scripts_release`, `scripts-v2.3.0` by default, with the command that runs first boot again once the installer serves it.
 - `terraform/` is not shipped to hosts: `update-scripts.sh` does not track it and it has no `.sha256` sidecars.
-  `tools/check-terraform.sh` and the CI job `terraform static checks` (pull requests and branch pushes, not a required check) run its static checks, and `terraform/REHEARSAL.md` lists what a rehearsal on each cloud must confirm.
+  `tools/check-terraform.sh` and the CI job `terraform static checks` (pull requests and pushes to `main`, not a required check) run its static checks, and `terraform/REHEARSAL.md` lists what a rehearsal on each cloud must confirm.
 
 ## New keys, flags and exit codes
 

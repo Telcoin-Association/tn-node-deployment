@@ -160,10 +160,10 @@ All three roots take these:
 | `name_prefix` | `telcoin` | The start of every resource name, also set as a tag (a label on Google Cloud): a lowercase letter, then 1 to 20 lowercase letters, digits or `-`; on AWS not `sg-...`. |
 | `gateway_enabled` | `true` | `false` builds a single node with no gateway resources. |
 | `rpc_domain` | `""` | The RPC name the worker gateway serves. Empty on the first apply; setting it creates the gateway VM. Refused with `gateway_enabled = false`. |
-| `admin_ssh_cidrs` | `[]` | IPv4 networks that may reach TCP 22 of both hosts, given by their network address (`198.51.100.7/24` is refused). |
+| `admin_ssh_cidrs` | `[]` | IPv4 networks that may reach TCP 22 of both hosts, each /8 or narrower and never `0.0.0.0`, given by their network address (`198.51.100.7/24` is refused). |
 | `vpc_cidr` | `10.42.0.0/16` | The private range, inside 10/8, 172.16/12, 192.168/16 or 100.64/10; on AWS from /16 to /27. |
 | `subnet_cidr` | `10.42.1.0/24` | The hosts' subnet, /27 or larger, inside `vpc_cidr`. |
-| `validator_instance_type` | `null` | The validator's type; null takes the defaults below. Mainnet refuses fewer than 8 physical cores and 32 GiB. |
+| `validator_instance_type` | `null` | The validator's type; null takes the defaults below. Mainnet refuses fewer than 8 physical cores or less than 32 GiB nominal. |
 | `gateway_instance_type` | `null` | The gateway's type; null takes the default below. |
 | `data_disk_size_gb` | `null` | 500 GiB on testnet, 2000 on mainnet; the floors are 350 and 2000. A disk can grow later but never shrink. |
 | `data_disk_iops` | `null` | 15000 on testnet, 20000 on mainnet, which are also the floors. |
@@ -173,7 +173,7 @@ All three roots take these:
 | `node_release_tag` | `""` | The testnet release the printed key generation installs (`--release-tag`), such as `v0.18.0-adiri`; empty prints `vX.Y.Z-adiri`. Mainnet key generation takes an existing binary and does not use it. |
 | `min_scripts_release` | `scripts-v2.3.0` | The oldest node-scripts release first boot accepts on either host. |
 | `trusted_nodes_file` | `""` | A local path to the trusted hubs map, written to the validator as `/etc/telcoin-first-boot/trusted-nodes.yaml` through its user data. At most 64 KiB, and it must fit the cloud's user data limit, which the plan checks: 16 KiB gzipped on AWS, one 256 KiB metadata value on Google Cloud, 65535 bytes gzipped on Azure. Empty means you copy it by hand. |
-| `redirect_queries_url` | `""` | Where the gateway sends queries; empty means the network's public RPC (`https://rpc.adiri.tel` on testnet, `https://rpc.telcoin.network` on mainnet). |
+| `redirect_queries_url` | `""` | Where the gateway sends queries; empty means the network's public RPC (`https://rpc.adiri.tel` on testnet, `https://rpc.telcoin.network` on mainnet). The plan refuses a URL that points at the validator's own RPC or readiness port (8545, 43174), or at the gateway's own ports on a loopback name, as `setup-gateway.sh` does. |
 | `gateway_rate_limit_submissions` | `300` | Submissions a second the gateway keeps for `eth_sendRawTransaction`, 0 to 999999; 0 turns the reservation off. |
 
 AWS:
@@ -297,7 +297,7 @@ The Google Cloud and Azure roots turn a vTPM on for both hosts and have no such 
 `bash tools/check-terraform.sh` runs `terraform fmt`, `validate` and `terraform test` with mocked providers for `modules/host-plan` and each root, then tflint and checkov, each from a Docker image pinned by digest.
 It needs Docker and no cloud credentials, and runs no plan or apply outside `terraform test`.
 It exits 0 when every check passed, 1 when one failed and 2 when the checks cannot run, such as with no `docker` or a Docker daemon that does not answer.
-CI runs it as the `terraform static checks` job on pull requests and branch pushes, not on release tags; it is not a required check.
+CI runs it as the `terraform static checks` job on pull requests and pushes to `main`, not on release tags; it is not a required check.
 `tools/tests/terraform_static_test.sh` and `tools/tests/first_boot_test.sh` need neither Terraform nor Docker.
 
 [REHEARSAL.md](REHEARSAL.md) has the checklists for a testnet rehearsal on each cloud.
