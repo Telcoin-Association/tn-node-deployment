@@ -49,8 +49,11 @@ tn_mainnet_enabled() {
 # binary (--install-method existing --binary-path), so validators can generate
 # their keys and proofs of possession before the mainnet genesis, its chain
 # configs or a signed mainnet release exist. That run needs no chain configs and
-# never starts the node. Finalize, a full install, the gateway and the Node
-# Manager UI stay refused by TN_MAINNET_ENABLED; at 0 this keygen is refused too.
+# never starts the node. Finalize, a full install and the Node Manager UI stay
+# refused by TN_MAINNET_ENABLED; at 0 this keygen is refused too. The worker
+# gateway is not gated by either flag: lib/gateway.sh pins a testnet release's
+# image for mainnet as a placeholder, which it takes only while
+# TN_MAINNET_ENABLED is 0 and tools/check-gateway-pin.sh refuses at 1.
 readonly TN_MAINNET_KEYGEN_ENABLED=1
 
 # tn_mainnet_keygen_enabled -- rc 0 when this script release offers mainnet key

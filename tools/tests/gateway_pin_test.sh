@@ -30,13 +30,17 @@
 # line, CRLF, a blank line, a name twice, no worker gateway, node files; a
 # digest file that does not match its line, of two lines, with a control byte,
 # missing or a symlink; a tag other than the manifest's, of the other network,
-# of devnet, a mainnet release candidate, a pin or a release set alone; both
-# networks at once, and 2 over 1; the interface (option conflicts, http,
-# TN_RELEASE_KEYS_DIR with a published release, a FILE that lacks a variable,
-# an unknown option, --help); no work dir left behind; the static contract of
-# lib/gateway.sh (the release package, the devnet list, one line per pin and
-# release under its network-gated marker) and _gw_pin_ok refusing what the
-# tool refuses.
+# of devnet, a mainnet release candidate, a pin or a release set alone; the
+# mainnet placeholder (a final testnet release: a note, then rules 3 to 7,
+# offline and through the download path; a testnet release candidate refused)
+# and, in a copy of the tree with TN_MAINNET_ENABLED=1, the placeholder, the
+# tree's mainnet pin and an empty mainnet pin refused with nothing downloaded,
+# a mainnet release still taken; both networks at once, and 2 over 1; the
+# interface (option conflicts, http, TN_RELEASE_KEYS_DIR with a published
+# release, a FILE that lacks a variable, an unknown option, --help); no work dir
+# left behind; the static contract of lib/gateway.sh (the release package, the devnet list, one line per pin and
+# release under its network-gated marker, the mainnet pin the testnet pin
+# while mainnet is off) and _gw_pin_ok refusing what the tool refuses.
 #
 # Maintainer tooling (not updater-tracked, no sidecar). bash 3.2 safe.
 # =============================================================================
@@ -270,7 +274,8 @@ check_rc "empty pins: nothing downloaded: rc 0" 0 "$RC"
 check "empty pins: nothing downloaded: stdout" "$NOPIN" "$OUT"
 check "empty pins: nothing downloaded" "" "$LOG"
 
-if [ -z "$TREE_PINS" ]; then
+# Empty pins pass only while mainnet is off; the launch copy below covers 1.
+if [ -z "$TREE_PINS" ] && ! tn_mainnet_enabled; then
     gp -
     check_rc "the tree's pins pass" 0 "$RC"
     check "the tree's pins pass: no pin on either network" "$NOPIN" "$OUT"
@@ -594,6 +599,108 @@ expect "refuses a release without its pin" 1 \
     "${FNET}: refused: GW_${FUP}_PIN_RELEASE is ${FTAG} but GW_${FUP}_IMAGE_PIN is empty; set both or neither"
 
 # =============================================================================
+# mainnet placeholder
+# =============================================================================
+# Until telcoin-network publishes a mainnet release, a final testnet release
+# backs the mainnet pin while TN_MAINNET_ENABLED is 0, and rules 3 to 7 still
+# run against it. The fixture release stands in for that testnet release.
+PHNOTE="mainnet: note: placeholder: GW_MAINNET_PIN_RELEASE ${FTAG} is a testnet release, standing in for mainnet while TN_MAINNET_ENABLED is 0; the release that offers mainnet must pin a mainnet release"
+PHOK="mainnet: ok: GW_MAINNET_IMAGE_PIN is the worker-gateway image of telcoin-network ${FTAG} (${FLINE}); SHA256SUMS-edge.asc verifies against $T/k-good"
+PHREF="mainnet: refused: GW_MAINNET_PIN_RELEASE ${FTAG} is a testnet release, the placeholder taken only while TN_MAINNET_ENABLED is 0, but this scripts release offers mainnet (TN_MAINNET_ENABLED=1); bump the pin to the worker-gateway image of a signed mainnet release"
+EMPTYREF="mainnet: refused: GW_MAINNET_IMAGE_PIN and GW_MAINNET_PIN_RELEASE are empty, but this scripts release offers mainnet (TN_MAINNET_ENABLED=1); pin the worker-gateway image of a signed mainnet release"
+pins "$T/p-ph" "$FREPO" "" "" "$FLINE" "$FTAG"
+pins "$T/p-phz" "$FREPO" "" "" "$ZPIN" "$FTAG"
+pins "$T/p-phrc" "$FREPO" "" "" "$FLINE" "${FTAG}-rc1"
+PH_CASES="the mainnet placeholder passes offline, with a note
+the mainnet placeholder passes through the download path
+the mainnet placeholder still runs rules 3 to 7"
+ph_why=""
+if [ "$FNET" != testnet ] || ! tn_release_tag_final testnet "$FTAG"; then
+    ph_why="the fixture release ${FTAG} is not a final testnet release"
+elif tn_mainnet_enabled; then
+    ph_why="this tree offers mainnet, so it takes no placeholder (the launch copy below shows the refusal)"
+fi
+if [ -n "$ph_why" ]; then
+    while IFS= read -r c; do
+        skip "$c" "$ph_why"
+    done <<< "$PH_CASES"
+else
+    gp "$T/k-good" --gateway-lib "$T/p-ph" --release-dir "$T/rel"
+    expect "the mainnet placeholder passes offline, with a note" 0 "$PHNOTE" "$PHOK"
+    check "the mainnet placeholder passes offline: stdout, the note before the ok line" "testnet: no pin
+${PHNOTE}
+${PHOK}" "$OUT"
+    gp "$T/k-good" --gateway-lib "$T/p-ph" --base-url https://fixture.invalid
+    expect "the mainnet placeholder passes through the download path" 0 "$PHNOTE" "$PHOK"
+    check "the mainnet placeholder passes through the download path: the release's three files" "$DL" "$LOG"
+    gp "$T/k-good" --gateway-lib "$T/p-phz" --release-dir "$T/rel"
+    expect "the mainnet placeholder still runs rules 3 to 7" 1 "$PHNOTE" \
+        "mainnet: refused: GW_MAINNET_IMAGE_PIN is ${ZPIN}, but telcoin-network ${FTAG} publishes ${FLINE}"
+fi
+gp "$T/k-good" --gateway-lib "$T/p-phrc" --base-url https://fixture.invalid
+expect "a testnet release candidate never stands in for mainnet" 1 \
+    "mainnet: refused: GW_MAINNET_PIN_RELEASE ${FTAG}-rc1 is not a mainnet release tag"
+check "a testnet release candidate never stands in for mainnet: nothing downloaded" "" "$LOG"
+check_lacks "a testnet release candidate never stands in for mainnet: no placeholder note" "placeholder" "$OUT"
+
+# The launch copy: the tool and lib/ in $T/on with TN_MAINNET_ENABLED=1, as in
+# the release that offers mainnet. The worktree's lib/common.sh is not touched.
+mkdir -p "$T/on/tools"
+cp "$TOOL" "$T/on/tools/check-gateway-pin.sh"
+cp -R "${TN_TEST_REPO}/lib" "$T/on/lib"
+sed 's/^readonly TN_MAINNET_ENABLED=0$/readonly TN_MAINNET_ENABLED=1/' "${TN_TEST_REPO}/lib/common.sh" > "$T/on/lib/common.sh"
+check "the launch copy sets TN_MAINNET_ENABLED=1" yes \
+    "$(grep -qx 'readonly TN_MAINNET_ENABLED=1' "$T/on/lib/common.sh" && echo yes || echo no)"
+# gpon KEYS ARG... -- gp with the launch copy's tool.
+gpon() {
+    local was="$TOOL"
+    TOOL="$T/on/tools/check-gateway-pin.sh"
+    gp "$@"
+    TOOL="$was"
+}
+gpon "$T/k-good" --gateway-lib "$T/p-ph" --base-url https://fixture.invalid
+expect "mainnet enabled: the placeholder is refused" 1 "$PHREF" "check-gateway-pin: 1 worker-gateway pin(s) refused"
+check "mainnet enabled: the placeholder is refused: nothing downloaded" "" "$LOG"
+check_lacks "mainnet enabled: the placeholder is refused: no note" "note: placeholder" "$OUT"
+
+if tn_release_tag_final testnet "$GW_MAINNET_PIN_RELEASE"; then
+    pins "$T/p-treem" "$GW_RELEASE_IMAGE_REPO" "" "" "$GW_MAINNET_IMAGE_PIN" "$GW_MAINNET_PIN_RELEASE"
+    gpon - --gateway-lib "$T/p-treem" --base-url https://fixture.invalid
+    expect "mainnet enabled: the tree's placeholder mainnet pin is refused" 1 \
+        "mainnet: refused: GW_MAINNET_PIN_RELEASE ${GW_MAINNET_PIN_RELEASE} is a testnet release, the placeholder taken only while TN_MAINNET_ENABLED is 0"
+    check "mainnet enabled: the tree's placeholder mainnet pin is refused: nothing downloaded" "" "$LOG"
+else
+    skip "mainnet enabled: the tree's placeholder mainnet pin is refused" \
+        "the tree's mainnet pin is not a placeholder (GW_MAINNET_PIN_RELEASE '${GW_MAINNET_PIN_RELEASE}')"
+fi
+
+gpon - --gateway-lib "$T/p-empty" --base-url https://fixture.invalid
+expect "mainnet enabled: an empty mainnet pin is refused" 1 "check-gateway-pin: 1 worker-gateway pin(s) refused"
+check "mainnet enabled: an empty mainnet pin is refused: stdout" "testnet: no pin
+${EMPTYREF}" "$OUT"
+check "mainnet enabled: an empty mainnet pin is refused: nothing downloaded" "" "$LOG"
+
+# A signed mainnet release: the fixture release under the mainnet form of its
+# tag (its tarball names renamed, the manifest signed again).
+MTAG="${FTAG%-adiri}"
+if [ "$FNET" = testnet ] && tn_release_tag_ok mainnet "$MTAG"; then
+    rm -rf "$T/relm"
+    mkdir -p "$T/relm/${MTAG}"
+    cp "$T/rel/${FTAG}/"* "$T/relm/${MTAG}/"
+    awk -v f="-${FTAG}-" -v m="-${MTAG}-" \
+        '{ i = index($0, f); if (i) $0 = substr($0, 1, i - 1) m substr($0, i + length(f)); print }' \
+        "$T/rel/${FTAG}/SHA256SUMS-edge" > "$T/relm/${MTAG}/SHA256SUMS-edge"
+    sign_file "$T/relm/${MTAG}/SHA256SUMS-edge" good
+    pins "$T/p-onm" "$FREPO" "" "" "$FLINE" "$MTAG"
+    gpon "$T/k-good" --gateway-lib "$T/p-onm" --release-dir "$T/relm"
+    expect "mainnet enabled: a pin of a signed mainnet release is taken" 0 \
+        "mainnet: ok: GW_MAINNET_IMAGE_PIN is the worker-gateway image of telcoin-network ${MTAG} (${FLINE}); SHA256SUMS-edge.asc verifies against $T/k-good"
+    check_lacks "mainnet enabled: a pin of a signed mainnet release is taken: no placeholder note" "placeholder" "$OUT"
+else
+    skip "mainnet enabled: a pin of a signed mainnet release is taken" "the fixture release ${FTAG} has no mainnet form"
+fi
+
+# =============================================================================
 # both networks and interface
 # =============================================================================
 # The other network pins the same image with no release: refused before any read.
@@ -693,14 +800,24 @@ for U in TESTNET MAINNET; do
     esac
     check "each pin line keeps its network-gated marker: ${U}" yes "$v"
 done
+# The mainnet placeholder is the testnet pin and its release, copied.
+if tn_mainnet_enabled; then
+    skip "while mainnet is off, the mainnet pin is the testnet pin" \
+        "this tree offers mainnet: its mainnet pin is a mainnet release's"
+else
+    check "while mainnet is off, the mainnet pin is the testnet pin and its release" \
+        "${GW_TESTNET_IMAGE_PIN} ${GW_TESTNET_PIN_RELEASE}" "${GW_MAINNET_IMAGE_PIN} ${GW_MAINNET_PIN_RELEASE}"
+fi
 
 # _gw_pin_ok and the tool on the same pins, with the tree's GW_RELEASE_IMAGE_REPO.
 PHEX="$(printf '%064d' 0 | tr 0 c)"
 for net in testnet mainnet; do
+    # A final testnet release is the mainnet placeholder (taken while mainnet
+    # is off), so mainnet's wrong-network release is a testnet candidate.
     if [ "$net" = testnet ]; then
         good_rel="v1.0.0-adiri" bad_rel="v1.0.0"
     else
-        good_rel="v1.0.0" bad_rel="v1.0.0-adiri"
+        good_rel="v1.0.0" bad_rel="v1.0.0-adiri-rc1"
     fi
     rc=0
     _gw_pin_ok "$net" "${GW_RELEASE_IMAGE_REPO}@sha256:${PHEX}" "$good_rel" || rc=$?
@@ -725,6 +842,10 @@ for net in testnet mainnet; do
         check_rc "the library refuses what the tool refuses: a ${net} pin ${what}: the tool" 1 "$RC"
     done
 done
+rc=0
+_gw_pin_ok mainnet "${GW_RELEASE_IMAGE_REPO}@sha256:${PHEX}" "v1.0.0-adiri" || rc=$?
+if tn_mainnet_enabled; then want=1; else want=0; fi
+check_rc "the library takes the mainnet placeholder (a final testnet release) only while mainnet is off" "$want" "$rc"
 check "the work dir is removed after the library cases too" "" "$(ls -A "$T/tmp")"
 
 # Stop the gpg-agents real gpg started for the keys made here.

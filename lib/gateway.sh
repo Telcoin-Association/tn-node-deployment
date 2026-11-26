@@ -70,14 +70,20 @@ GW_DEVNET_IMAGE_REPOS="us-docker.pkg.dev/telcoin-network/tn-public/worker-gatewa
 # the release is a tag of the network (tn_release_tag_ok). Set both or neither.
 # tools/check-gateway-pin.sh checks a set pin against the signed release in CI
 # and before an installer is published. Empty: no gateway on that network yet.
+# Until telcoin-network publishes a mainnet release, the mainnet pin is the
+# testnet pin and its release, a placeholder so a mainnet gateway host can be
+# installed and rehearsed: _gw_pin_ok takes a final testnet release for mainnet
+# only while TN_MAINNET_ENABLED is 0, and check-gateway-pin refuses it (and an
+# empty mainnet pin) at 1, so the release that enables mainnet pins a mainnet
+# release.
 # A pin's gateway must list every flag of GW_REQUIRED_FLAGS in its --help, or
 # gw_image_probe refuses it; --rate-limit-submissions came with worker-gateway
 # 0.18.0, the testnet pin's release.
 # The signed MANIFEST covers this file.
 # network-gated: the testnet pin and its release (vX.Y.Z-adiri); gw_image_allowed reads them for testnet only
 GW_TESTNET_IMAGE_PIN="ghcr.io/telcoin-association/tn-worker-gateway@sha256:efed742a8a32db4f71b397d17ac448bcd98dcc0d14083197c1f7cecbc72bcffb" GW_TESTNET_PIN_RELEASE="v0.18.0-adiri"
-# network-gated: the mainnet pin and its release (vX.Y.Z); gw_image_allowed reads them for mainnet only
-GW_MAINNET_IMAGE_PIN="" GW_MAINNET_PIN_RELEASE=""
+# network-gated: the mainnet pin and its release (vX.Y.Z; a final vX.Y.Z-adiri as the placeholder while TN_MAINNET_ENABLED=0); gw_image_allowed reads them for mainnet only
+GW_MAINNET_IMAGE_PIN="ghcr.io/telcoin-association/tn-worker-gateway@sha256:efed742a8a32db4f71b397d17ac448bcd98dcc0d14083197c1f7cecbc72bcffb" GW_MAINNET_PIN_RELEASE="v0.18.0-adiri"
 # Every flag the unit passes; gw_image_probe needs each in the image's --help.
 GW_REQUIRED_FLAGS="--listen-addr --probe-addr --metrics --upstream-rpc-url --upstream-readiness-url --worker-id --redirect-queries --rate-limit-submissions --trusted-proxies"
 # docker for the unit text when `command -v docker` gives no absolute path.
@@ -486,10 +492,20 @@ gw_validate_inputs() {
 # Image
 # -----------------------------------------------------------------------------
 
+# _gw_pin_placeholder NETWORK RELEASE -- rc 0 when RELEASE, recorded beside
+# NETWORK's pin, makes that pin the placeholder: NETWORK is mainnet and RELEASE
+# is a final testnet release (tn_release_tag_final), whose image stands in until
+# telcoin-network publishes a mainnet release. A release candidate never does.
+_gw_pin_placeholder() {
+    [[ "${1:-}" == "mainnet" ]] && tn_release_tag_final testnet "${2:-}"
+}
+
 # _gw_pin_ok NETWORK PIN RELEASE -- rc 0 when NETWORK's pin can be used: PIN is
 # ${GW_RELEASE_IMAGE_REPO}@sha256:<64 lowercase hex> and RELEASE, the
 # telcoin-network release recorded beside it, is a NETWORK release tag
-# (tn_release_tag_ok). rc 1 with GW_ERR: a defect of this scripts release,
+# (tn_release_tag_ok), or, for the mainnet placeholder (_gw_pin_placeholder),
+# a final testnet release while this scripts release does not offer mainnet
+# (tn_mainnet_enabled). rc 1 with GW_ERR: a defect of this scripts release,
 # which tools/check-gateway-pin.sh refuses before a release is published.
 _gw_pin_ok() {
     local net="$1" pin="$2" rel="$3" hex re why=""
@@ -499,6 +515,10 @@ _gw_pin_ok() {
         why="the pin ${pin} is not ${GW_RELEASE_IMAGE_REPO}@sha256:<64 lowercase hex>"
     elif [[ -z "$rel" ]]; then
         why="no telcoin-network release is recorded beside the pin"
+    elif _gw_pin_placeholder "$net" "$rel"; then
+        if tn_mainnet_enabled; then
+            why="the release recorded beside the pin, '${rel}', is a testnet release, a placeholder taken only while mainnet is not enabled (TN_MAINNET_ENABLED), and this scripts release enables mainnet: the pin must be bumped to a mainnet release"
+        fi
     elif ! tn_release_tag_ok "$net" "$rel"; then
         why="the release recorded beside the pin, '${rel}', is not a ${net} release tag"
     fi
@@ -1349,6 +1369,9 @@ gw_status() {
         if [[ -n "$GW_V_IMAGE" ]] && ! gw_image_allowed "$GW_V_IMAGE" "$GW_V_NETWORK"; then
             _gw_issue "The gateway runs an image this scripts release does not allow: ${GW_ERR}; run setup-gateway.sh --refresh" "$fn"
             GW_ERR=""
+        elif [[ "$GW_V_NETWORK" == "mainnet" && -n "$GW_V_IMAGE" ]] \
+            && _gw_pin_placeholder mainnet "$GW_MAINNET_PIN_RELEASE"; then
+            _gw_say log "The worker-gateway image is a placeholder: ${GW_V_IMAGE} is the image of the testnet release ${GW_MAINNET_PIN_RELEASE}, pinned for mainnet until telcoin-network publishes a mainnet release. A later scripts release pins the mainnet image; then run update-scripts.sh and setup-gateway.sh --refresh." "$fn"
         fi
     fi
 

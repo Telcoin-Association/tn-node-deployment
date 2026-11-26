@@ -13,8 +13,11 @@
 #             restarts nothing but still runs the Caddy phase; a failed first
 #             enable leaves nothing, a failed change over an installation puts
 #             the unit and meta back byte for byte, a failed put-back is rc 2;
-#             refresh, also to a new pin; remove; status, also without root; the
-#             node's unit never reaches systemctl;
+#             refresh, also to a new pin; the mainnet placeholder pin (a final
+#             testnet release, taken and named by status while
+#             TN_MAINNET_ENABLED is 0, refused in a copy with it at 1); remove;
+#             status, also without root; the node's unit never reaches
+#             systemctl;
 #   script    --help, no action, two actions, an unknown argument, a missing
 #             value, a flag outside its action (one done line each with --json);
 #             the done line's field names and JSON types; exit 1, 2, 3 and 143;
@@ -1082,6 +1085,60 @@ check "M2: ... because it is not the pin" yes \
 GW_IN_IMAGE=""
 # shellcheck disable=SC2034  # read by lib/gateway.sh
 GW_TESTNET_IMAGE_PIN="" GW_TESTNET_PIN_RELEASE=""
+
+# The mainnet placeholder: until telcoin-network publishes a mainnet release, a
+# final testnet release's image stands in as the mainnet pin, taken only while
+# TN_MAINNET_ENABLED is 0. A release candidate never stands in.
+gw_remove quiet
+# shellcheck disable=SC2034  # read by lib/gateway.sh
+GW_MAINNET_IMAGE_PIN="$PIMG" GW_MAINNET_PIN_RELEASE="$PREL_T"
+rc=0; _gw_pin_ok mainnet "$PIMG" "$PREL_T" || rc=$?
+check_rc "placeholder: a mainnet pin from a final testnet release passes _gw_pin_ok while mainnet is off" 0 "$rc"
+rc=0; _gw_pin_ok mainnet "$PIMG" "${PREL_T}-rc1" || rc=$?
+check "placeholder: a testnet release candidate never stands in for mainnet" "1 yes" \
+    "${rc} $(has "$GW_ERR" "'${PREL_T}-rc1', is not a mainnet release tag")"
+chain 0x2db
+gin MODE=standalone NETWORK=mainnet UPSTREAM=10.0.0.12 DOMAIN=gw.example.org IMAGE=
+rc=0; gw_enable quiet || rc=$?
+check "placeholder: mainnet without --image enables with the placeholder pin" "0 yes" \
+    "${rc} $(has "$(cat "$(UNIT_P)")" "--stop-timeout 60 ${PIMG} ")"
+: > "$T/say.log"
+rc=0; gw_status quiet || rc=$?
+check_rc "placeholder: status counts no issue" 0 "$rc"
+check "placeholder: status says once that the image is the testnet release's placeholder" 1 \
+    "$(grep -c -F "log The worker-gateway image is a placeholder: ${PIMG} is the image of the testnet release ${PREL_T}," "$T/say.log")"
+GW_MAINNET_PIN_RELEASE="$PREL_M"
+: > "$T/say.log"
+rc=0; gw_status quiet || rc=$?
+check "placeholder: with a mainnet release recorded, status has no placeholder line" "0 0" \
+    "${rc} $(grep -c placeholder "$T/say.log")"
+
+# $T/on is a copy of lib/ with TN_MAINNET_ENABLED=1, standing for the launch
+# release; each case runs in a child bash, as this shell has the library loaded.
+mkdir -p "$T/on"
+cp -R "$TN_TEST_REPO/lib" "$T/on/lib"
+sed 's/^readonly TN_MAINNET_ENABLED=0$/readonly TN_MAINNET_ENABLED=1/' "$TN_TEST_REPO/lib/common.sh" > "$T/on/lib/common.sh"
+check "placeholder: the launch copy sets TN_MAINNET_ENABLED=1" yes \
+    "$(grep -qx 'readonly TN_MAINNET_ENABLED=1' "$T/on/lib/common.sh" && echo yes || echo no)"
+# on_pin PIN RELEASE -- gw_image_allowed PIN mainnet, the mainnet pin PIN from
+# RELEASE, in the launch copy: "RC GW_ERR".
+on_pin() {
+    # shellcheck disable=SC2016
+    "$BASH" -c 'source "$1/lib/common.sh" >/dev/null 2>&1; set +e
+        GW_MAINNET_IMAGE_PIN="$2" GW_MAINNET_PIN_RELEASE="$3"
+        rc=0; gw_image_allowed "$2" mainnet || rc=$?
+        printf "%s %s\n" "$rc" "$GW_ERR"' _ "$T/on" "$1" "$2" 2>/dev/null
+}
+OUT="$(on_pin "$PIMG" "$PREL_T")"
+check "placeholder, mainnet enabled: the placeholder pin is refused" \
+    "1 this scripts release's mainnet worker-gateway pin cannot be used: the release recorded beside the pin, '${PREL_T}', is a testnet release, a placeholder taken only while mainnet is not enabled (TN_MAINNET_ENABLED), and this scripts release enables mainnet: the pin must be bumped to a mainnet release; a corrected scripts release is needed (update-scripts.sh)" \
+    "$OUT"
+check "placeholder, mainnet enabled: a pin from a mainnet release is taken" "0 " "$(on_pin "$PIMG" "$PREL_M")"
+OUT="$(on_pin "$PIMG" "${PREL_T}-rc1")"
+check "placeholder, mainnet enabled: a testnet release candidate is still refused" "1 yes" \
+    "${OUT%% *} $(has "$OUT" "is not a mainnet release tag")"
+# shellcheck disable=SC2034  # read by lib/gateway.sh
+GW_MAINNET_IMAGE_PIN="" GW_MAINNET_PIN_RELEASE=""
 
 # An extra file in /etc/telcoin/gateway: --remove removes the gateway, names the file.
 printf 'note\n' > "$SA/etc/telcoin/gateway/NOTES"
