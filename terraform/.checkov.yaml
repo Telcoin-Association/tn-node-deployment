@@ -23,3 +23,15 @@ skip-check:
   # (aws_eip_association, network_interface_id) before the instance boots,
   # which this check does not follow.
   - CKV2_AWS_19
+  # Google Cloud. Both hosts must be reachable from the internet: peers dial
+  # the validator's static address on UDP 49590 and 49594, and the worker
+  # gateway serves the public RPC name on 80 and 443.
+  - CKV_GCP_40
+  # The worker gateway's port 80 answers ACME HTTP-01 challenges and redirects
+  # to HTTPS; Caddy cannot get or renew its certificate without it.
+  - CKV_GCP_106
+  # A customer-supplied key is a raw or RSA-wrapped key held in the
+  # configuration and the state, and nothing here is secret. Compute Engine
+  # encrypts every disk, and the data disk takes a Cloud KMS key
+  # (data_disk_kms_key).
+  - CKV_GCP_38

@@ -1,0 +1,68 @@
+# Copy to terraform.tfvars and fill in. Every value here is public: nothing in
+# this deployment is secret, and the BLS passphrase never passes through it.
+# Addresses below are documentation examples (RFC 5737), not real hosts.
+
+# The project the hosts are created in (required).
+project = "my-validator-project"
+
+# One region and one zone. The zone must offer the validator's machine type
+# and Hyperdisk Balanced. Unset zone means <region>-a.
+region = "us-central1"
+# zone = "us-central1-b"
+
+# testnet or mainnet.
+network = "testnet"
+
+# Starts every resource name and labels them deployment=<name_prefix>.
+name_prefix = "telcoin"
+
+# First apply: leave rpc_domain empty. Point an A record for your RPC name at
+# the gateway_public_ip output, wait until it resolves, then set rpc_domain and
+# apply again to create the worker gateway host.
+rpc_domain = ""
+
+# false builds the validator alone, with no worker gateway.
+# gateway_enabled = true
+
+# Filled into the printed key generation command (on mainnet, the Safe).
+# validator_address = "0x0000000000000000000000000000000000000001"
+
+# The testnet node release key generation installs.
+# node_release_tag = "v0.18.0-adiri"
+
+# The trusted hubs map, written to the validator at first boot. It ends up in
+# instance metadata (public data). Leave empty to copy it to the host by hand.
+# trusted_nodes_file = "trusted-nodes.yaml"
+
+# Admin access. By default admins come in through IAP with OS Login and no
+# public SSH is open. Members listed here get OS Login with sudo and the IAP
+# tunnel on both instances; they also need roles/compute.viewer (or
+# compute.instances.get and compute.projects.get) on the project.
+# admin_members = ["user:ops@example.org"]
+# enable_iap    = true
+
+# Opens TCP 22 of both hosts to these CIDRs directly. Never 0.0.0.0/0.
+# admin_ssh_cidrs = ["198.51.100.7/32"]
+
+# Private addressing. The validator takes the subnet's 10th address and the
+# worker gateway its 20th.
+# vpc_cidr    = "10.42.0.0/16"
+# subnet_cidr = "10.42.1.0/24"
+
+# Machine types. Unset: c3-standard-8 on testnet, c3d-standard-16 on mainnet,
+# e2-standard-2 for the worker gateway.
+# validator_instance_type = "c3-standard-8"
+# gateway_instance_type   = "e2-standard-2"
+
+# The data disk. Unset: 500 GiB, 15000 IOPS, 240 MiB/s on testnet;
+# 2000 GiB, 20000 IOPS, 300 MiB/s on mainnet. These are also the floors.
+# data_disk_size_gb    = 500
+# data_disk_iops       = 15000
+# data_disk_throughput = 240
+# data_disk_kms_key    = "projects/my-validator-project/locations/us-central1/keyRings/tn/cryptoKeys/data"
+
+# 24.04 or 26.04.
+# ubuntu_version = "26.04"
+
+# The worker gateway's submission reservation; 0 turns it off.
+# gateway_rate_limit_submissions = 300
