@@ -29,6 +29,10 @@
 #                  either port, or a default policy that is not deny: refused;
 #                  the monitor's own health rule is fine;
 #   public RPC     an RPC already on 0.0.0.0 without GATEWAY_UPSTREAM: refused;
+#   RPC site       on mainnet, a host whose Caddyfile holds the public RPC site
+#                  block (tn-rpc): refused, nothing written, the message names
+#                  install-caddy.sh --phase=rpc-disable; off is not refused,
+#                  nor is testnet, nor mainnet with only the dashboard block;
 #   PREV lost      setting again does not record the gateway's wildcard;
 #   lib/common.sh  tn_gateway_ports_private, tn_gateway_src_canon, and
 #                  kuma_extra_remove keeping a rule a gateway source needs.
@@ -353,6 +357,46 @@ done
 fixture " --healthcheck ${KP}"
 drv "gateway_upstream="
 check "an empty value: rc 1, files byte-identical" "1 same" "$RC $(same)"
+
+# ---- mainnet: this host's public RPC site or a worker gateway, never both ---------------
+CADDYFILE="$FX/etc/caddy/Caddyfile"
+mkdir -p "${CADDYFILE%/*}"
+# caddyfile dash|rpc -- the managed Caddyfile with the dashboard block and, for
+# rpc, the public RPC site block after it.
+caddyfile() {
+    {
+        printf '# >>> tn-dashboard >>>\nstatus.example.com {\n    reverse_proxy 127.0.0.1:3001\n}\n# <<< tn-dashboard <<<\n'
+        if [[ "$1" == rpc ]]; then
+            printf '\n# >>> tn-rpc >>>\nrpc.example.com {\n    reverse_proxy 127.0.0.1:8545\n}\n# <<< tn-rpc <<<\n'
+        fi
+    } > "$CADDYFILE"
+}
+fixture " --healthcheck ${KP}" mainnet
+ufw_status on 10.0.0.7
+caddyfile rpc
+drv gateway_upstream=10.0.0.7
+check "mainnet with the RPC site: rc 1, files byte-identical, no restart" "1 same 0" "$RC $(same) $(starts)"
+check "mainnet with the RPC site: done ok:false" yes "$(has '"ok":false' "$(done_line)")"
+check "mainnet with the RPC site: names rpc-disable" yes \
+    "$(has "install-caddy.sh --phase=rpc-disable first" "$(done_line)")"
+check "mainnet with the RPC site: says nothing was changed" yes "$(has "nothing was changed" "$(done_line)")"
+fixture " --healthcheck ${KP}" mainnet
+caddyfile dash
+drv gateway_upstream=10.0.0.7
+check "mainnet with only the dashboard: rc 0, flags set, one restart" "0 yes 1" \
+    "$RC $(has " --http.addr 0.0.0.0 " "$(nodeline)") $(restarts)"
+check "mainnet with only the dashboard: the two meta keys" \
+    "GATEWAY_UPSTREAM=10.0.0.7 GATEWAY_PREV_HEALTHCHECK=${KP}" "$(gwkeys)"
+# The site added while the gateway is set: off still takes the gateway away.
+caddyfile rpc
+drv gateway_upstream=off
+check_rc "mainnet off with the RPC site: rc 0" 0 "$RC"
+check "mainnet off with the RPC site: launch file byte-identical to before the set" same "$(launch_same)"
+check "mainnet off with the RPC site: both keys unset" "" "$(gwkeys)"
+fixture " --healthcheck ${KP}" testnet
+drv gateway_upstream=10.0.0.7
+check "testnet with the RPC site: rc 0, flags set" "0 yes" "$RC $(has " --http.addr 0.0.0.0 " "$(nodeline)")"
+rm -f "$CADDYFILE"
 
 # ---- another key on a stopped node: as before this change (it restarts) -----------------
 fixture "" testnet inactive
