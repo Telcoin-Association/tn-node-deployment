@@ -73,12 +73,13 @@ azure  azurerm_linux_virtual_machine  validator  -          the validator VM
 # validator VM's root disk holds the stored passphrase credential, so nothing
 # that would force a new VM may reach it; the gateway VM is rebuilt from its
 # user data, so new user data must mean a new VM. kind:
-#   ignores ITEM  ITEM is an entry of the block's lifecycle ignore_changes
+#   ignores ITEM  ITEM is an entry of the block's lifecycle ignore_changes list
 #   follows ARG   the block sets ARG, which forces a new resource, and does not
-#                 ignore it
+#                 ignore it (ignore_changes = all ignores it too)
 #   sets ARG=V    the block sets ARG to V
 #   trigger REF   the block's lifecycle replace_triggered_by names REF
 #   input REF     the block's input names REF
+# A REF counts outside quoted strings only.
 #   cloud  type                           block        kind     item
 readonly LIFECYCLE="
 aws    aws_instance                   validator    ignores  ami
@@ -175,12 +176,13 @@ tf_lex() {
 #                                           prevent_destroy = true
 #   L|LOC|TYPE|NAME|KIND|TEXT               what a resource keeps or follows
 #                                           across applies: KIND ignore, one entry
-#                                           of its lifecycle ignore_changes (no
-#                                           spaces); trigger, its
-#                                           replace_triggered_by; arg, one of its
-#                                           own arguments as NAME=VALUE (no
+#                                           of its lifecycle ignore_changes list
+#                                           (no spaces), or * for all; trigger,
+#                                           its replace_triggered_by; arg, one of
+#                                           its own arguments as NAME=VALUE (no
 #                                           spaces); input, a line of a
-#                                           terraform_data input
+#                                           terraform_data input. Trigger and
+#                                           input lose their quoted strings.
 #   U|LOC|NETWORK|URL                       an entry of a public_rpc_url map or of
 #                                           the default of variable
 #                                           redirect_queries_url (NETWORK any for a
@@ -202,6 +204,17 @@ tf_scan() {
     awk '
         BEGIN { np = split("22 8545 43174", SP, " ") }
         function unq(v) { sub(/^[[:space:]]*"/, "", v); sub(/"[[:space:],]*$/, "", v); return v }
+        # nostr(V) -- V with every quoted string taken out: text in quotes
+        # names no object.
+        function nostr(v,   out, i, n, c, q) {
+            out = ""; q = 0; n = length(v)
+            for (i = 1; i <= n; i++) {
+                c = substr(v, i, 1)
+                if (q) { if (c == "\\") i++; else if (c == "\"") q = 0; continue }
+                if (c == "\"") q = 1; else out = out c
+            }
+            return out
+        }
         function opentok(v,   t) {
             while (match(v, /"[^"]*"/)) {
                 t = substr(v, RSTART + 1, RLENGTH - 2)
@@ -279,10 +292,13 @@ tf_scan() {
             }
             if (n == 1 && rtype[1] != "") {
                 print "R|" rloc[1] "|" rtype[1] "|" rname[1] "|" prot[1] "|" atype[1]
-                il = ign[1]; gsub(/[[:space:]]/, "", il); sub(/^\[/, "", il); sub(/\]$/, "", il)
-                im = split(il, ia, ",")
+                # The entries of an ignore_changes list; the keyword all, which
+                # ignores every argument, as *.
+                il = ign[1]; gsub(/[[:space:]]/, "", il); im = 0
+                if (il == "all") print "L|" rloc[1] "|" rtype[1] "|" rname[1] "|ignore|*"
+                else if (sub(/^\[/, "", il) && sub(/\]$/, "", il)) im = split(il, ia, ",")
                 for (ij = 1; ij <= im; ij++) if (ia[ij] != "") print "L|" rloc[1] "|" rtype[1] "|" rname[1] "|ignore|" ia[ij]
-                if (trg[1] != "") print "L|" rloc[1] "|" rtype[1] "|" rname[1] "|trigger|" trg[1]
+                if (trg[1] != "") print "L|" rloc[1] "|" rtype[1] "|" rname[1] "|trigger|" nostr(trg[1])
             }
             if (src[n] != "") judge(n)
             p = n - 1
@@ -331,7 +347,7 @@ tf_scan() {
             if (n == 2 && rtype[1] != "" && hdr[2] == "lifecycle" && lk == "replace_triggered_by") trg[1] = trg[1] " " v
             if (n == 1 && rtype[1] != "" && k != "") { t = v; gsub(/[[:space:]]/, "", t); print "L|" loc "|" rtype[1] "|" rname[1] "|arg|" k "=" t }
             if (rtype[1] == "terraform_data" && ((n == 1 && lk == "input") || (n >= 2 && hdr[2] ~ /^input[[:space:]]*=$/)))
-                print "L|" loc "|" rtype[1] "|" rname[1] "|input|" v
+                print "L|" loc "|" rtype[1] "|" rname[1] "|input|" nostr(v)
             if (n == 1 && rtype[1] != "" && lk == "address_type") atype[1] = toupper(unq(v))
             if ((lk == "testnet" || lk == "mainnet") && (hdr[n] ~ /^public_rpc_url[[:space:]]*=$/ ||
                 (n == 2 && vname[1] == "redirect_queries_url" && hdr[2] ~ /^default[[:space:]]*=$/)))
@@ -509,7 +525,7 @@ lifecycle_rules() {
                 ignores) [[ "$rkind" == ignore && "$text" == "$item" ]] && ok=1 ;;
                 follows)
                     [[ "$rkind" == arg && "${text%%=*}" == "$item" ]] && seen=1
-                    [[ "$rkind" == ignore && "$text" == "$item" ]] && seen=2 ;;
+                    [[ "$rkind" == ignore && ( "$text" == "$item" || "$text" == "*" ) ]] && seen=2 ;;
                 sets) [[ "$rkind" == arg && "$text" == "$item" ]] && ok=1 ;;
                 trigger | input)
                     text=" ${text//[^A-Za-z0-9_.]/ } "
@@ -722,11 +738,15 @@ secret_words() {
             *) mode="hash" ;;
         esac
         awk -v mode="$mode" -v allow="$SECRET_ALLOW" -v name="${f#./}" '
-            # prose(S) -- S with the literal text of a one-line description or
-            # error_message string taken out; ${...} and %{...} stay.
-            function prose(s,   out, i, n, c, depth) {
-                if (!match(s, /^[[:space:]]*(description|error_message)[[:space:]]*=[[:space:]]*"/)) return s
-                out = substr(s, 1, RLENGTH); n = length(s); i = RLENGTH + 1; depth = 0
+            # prose(S, INHD) -- S with the literal text of a one-line description
+            # or error_message string taken out, or with INHD all of S, a line
+            # of such a heredoc (no escapes, no closing quote); ${...} and
+            # %{...} stay.
+            function prose(s, inhd,   out, i, n, c, depth) {
+                if (inhd) { out = ""; i = 1 }
+                else if (!match(s, /^[[:space:]]*(description|error_message)[[:space:]]*=[[:space:]]*"/)) return s
+                else { out = substr(s, 1, RLENGTH); i = RLENGTH + 1 }
+                n = length(s); depth = 0
                 while (i <= n) {
                     c = substr(s, i, 1)
                     if (depth > 0) {
@@ -736,19 +756,26 @@ secret_words() {
                         i++
                         continue
                     }
-                    if (c == "\\") { i += 2; continue }
+                    if (c == "\\" && !inhd) { i += 2; continue }
                     if (substr(s, i, 3) == "$${" || substr(s, i, 3) == "%%{") { i += 3; continue }
                     if (substr(s, i, 2) == "${" || substr(s, i, 2) == "%{") { out = out substr(s, i, 2); depth = 1; i += 2; continue }
-                    if (c == "\"") return out substr(s, i)
+                    if (c == "\"" && !inhd) return out substr(s, i)
                     i++
                 }
                 return out
+            }
+            # words(S, L) -- print line L when S names a word.
+            function words(s, l,   t, j) {
+                t = tolower(s)
+                for (j = 1; j <= na; j++) gsub(A[j], "", t)
+                if (t ~ /password|secret|token/) { sub(/^[[:space:]]+/, "", l); print name ":" FNR ": " l }
             }
             BEGIN { na = split(allow, A, " ") }
             FNR == 1 { inc = 0; hd = "" }
             hd != "" {
                 t = $0; gsub(/[[:space:]]/, "", t)
                 if (t == hd) hd = ""
+                else words(prose($0, 1), $0)
                 next
             }
             {
@@ -775,11 +802,9 @@ secret_words() {
                     if (s ~ /^[[:space:]]*(description|error_message)[[:space:]]*=[[:space:]]*<<-?[A-Za-z_][A-Za-z0-9_]*[[:space:]]*$/) {
                         hd = s; sub(/^[^<]*<<-?/, "", hd); gsub(/[[:space:]]/, "", hd)
                     }
-                    s = prose(s)
+                    s = prose(s, 0)
                 }
-                t = tolower(s)
-                for (j = 1; j <= na; j++) gsub(A[j], "", t)
-                if (t ~ /password|secret|token/) { l = $0; sub(/^[[:space:]]+/, "", l); print name ":" FNR ": " l }
+                words(s, $0)
             }
         ' "$tree/${f#./}"
     done < <(cd "$tree" && find . -name .terraform -prune -o -type f -print | sort)
@@ -1218,6 +1243,7 @@ variable "admin_user" {
 output "login" {
   description = <<-EOT
     The host keeps no password, secret or token.
+    $${secret} and %%{token} are literal text.
   EOT
   value       = var.admin_user
 }
@@ -1447,7 +1473,7 @@ EOF
 printf 'framework:\n  - terraform\napi_token: abc\n' > "$BAD/settings.yaml"
 printf '#!/bin/sh\nSECRET=abc # set here\n' > "$BAD/aws/helper.sh"
 # A name that holds a word is found next to prose that is skipped, and so is a
-# reference inside a message's interpolation.
+# reference inside a message's interpolation, in a quoted string or a heredoc.
 cat > "$BAD/gcp/prose.tf" <<'EOF'
 variable "db_password" {
   description = "Plain prose."
@@ -1472,6 +1498,13 @@ check "named" {
     condition     = var.db_password != ""
     error_message = "Set the value (${length(var.db_password)} characters)."
   }
+}
+
+output "size" {
+  description = <<-EOT
+    The value is ${length(var.db_password)} characters.
+  EOT
+  value       = 1
 }
 EOF
 
@@ -1505,6 +1538,28 @@ azure/main.tf:17: azurerm_linux_virtual_machine.validator does not list source_i
 azure/main.tf:17: azurerm_linux_virtual_machine.validator does not list admin_ssh_key in its lifecycle ignore_changes
 azure/main.tf:53: azurerm_linux_virtual_machine.gateway ignores custom_data, so a new value does not replace it" \
     "$(lifecycle_rules "$BAD" azure)"
+# The good tree with a gateway that no longer follows its user data though
+# every argument is still there: ignore_changes = all (AWS, Azure), and the
+# input and the trigger written as strings, which name nothing (GCP).
+MUT="$T/fx/mut"
+mkdir -p "$MUT/aws" "$MUT/gcp" "$MUT/azure"
+for cloud in aws azure; do
+    awk '{ print } /^resource "(aws_instance|azurerm_linux_virtual_machine)" "gateway" \{$/ {
+        print "  lifecycle {"; print "    ignore_changes = all"; print "  }" }' "$OK/${cloud}/main.tf" > "$MUT/${cloud}/main.tf"
+done
+sed -e 's/^    user_data = module\.host_plan\.gateway_user_data$/    user_data = "module.host_plan.gateway_user_data"/' \
+    -e 's/^    replace_triggered_by = \[terraform_data\.gateway_cfg\[count\.index\]\]$/    replace_triggered_by = ["terraform_data.gateway_cfg"]/' \
+    "$OK/gcp/main.tf" > "$MUT/gcp/main.tf"
+check "fixture: ignore_changes = all on the aws gateway ignores its user data" \
+    "aws/main.tf:56: aws_instance.gateway ignores user_data_base64, so a new value does not replace it" \
+    "$(lifecycle_rules "$MUT" aws)"
+check "fixture: ignore_changes = all on the azure gateway ignores its custom data" \
+    "azure/main.tf:35: azurerm_linux_virtual_machine.gateway ignores custom_data, so a new value does not replace it" \
+    "$(lifecycle_rules "$MUT" azure)"
+check "fixture: a gcp input or trigger written as a string names nothing" \
+    "gcp/main.tf:50: google_compute_instance.gateway has no lifecycle replace_triggered_by naming terraform_data.gateway_cfg
+gcp/main.tf:44: terraform_data.gateway_cfg has no input naming module.host_plan.gateway_user_data" \
+    "$(lifecycle_rules "$MUT" gcp)"
 mkdir -p "$T/fx/empty/gcp"
 check "fixture: a root without its types fails on each" "gcp: no google_compute_disk block (the data disk)
 gcp: no google_compute_address block external (the static public IPs)
@@ -1547,6 +1602,7 @@ gcp/prose.tf:12: secret_key = \"x\"
 gcp/prose.tf:15: resource \"random_password\" \"root\" {
 gcp/prose.tf:21: condition     = var.db_password != \"\"
 gcp/prose.tf:22: error_message = \"Set the value (\${length(var.db_password)} characters).\"
+gcp/prose.tf:28: The value is \${length(var.db_password)} characters.
 settings.yaml:3: api_token: abc" "$(secret_words "$BAD")"
 
 mkdir -p "$T/fx/pins"
