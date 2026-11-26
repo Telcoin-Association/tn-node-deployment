@@ -94,10 +94,11 @@ resource "azurerm_linux_virtual_machine" "validator" {
 
   lifecycle {
     # The root disk holds the stored passphrase credential: replacing the VM
-    # loses it. A new image or new custom data, which Azure cannot change in
-    # place, is therefore never applied to the validator.
+    # loses it. A new image, new custom data or a new admin key, none of which
+    # Azure can change in place, is therefore never applied to the validator;
+    # its key is rotated on the host.
     prevent_destroy = true
-    ignore_changes  = [custom_data, source_image_reference]
+    ignore_changes  = [custom_data, source_image_reference, admin_ssh_key]
 
     precondition {
       condition     = module.host_plan.validator_user_data_gzip_bytes <= local.custom_data_max_bytes

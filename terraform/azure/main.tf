@@ -47,11 +47,10 @@ locals {
   # Azure decodes custom data to at most 65535 bytes.
   custom_data_max_bytes = 65535
 
-  ssh_key_file = startswith(var.admin_ssh_public_key, "ssh-rsa ") ? "~/.ssh/id_rsa" : "~/.ssh/id_ed25519"
-  vm_id        = { for role, name in local.vm_name : role => "${azurerm_resource_group.this.id}/providers/Microsoft.Compute/virtualMachines/${name}" }
+  vm_id = { for role, name in local.vm_name : role => "${azurerm_resource_group.this.id}/providers/Microsoft.Compute/virtualMachines/${name}" }
   bastion_ssh = { for role in ["validator", "gateway"] : role => join(" ", [
     "az network bastion ssh --name ${var.name_prefix}-bastion --resource-group ${azurerm_resource_group.this.name}",
-    "--target-resource-id ${local.vm_id[role]} --auth-type ssh-key --username ${var.admin_username} --ssh-key ${local.ssh_key_file}",
+    "--target-resource-id ${local.vm_id[role]} --auth-type ssh-key --username ${var.admin_username} --ssh-key <private key of admin_ssh_public_key>",
   ]) }
   session_commands = {
     validator = var.enable_bastion ? local.bastion_ssh.validator : "ssh ${var.admin_username}@${azurerm_public_ip.validator.ip_address}"

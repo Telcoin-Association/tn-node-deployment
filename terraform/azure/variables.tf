@@ -125,7 +125,7 @@ variable "admin_ssh_cidrs" {
 }
 
 variable "admin_ssh_public_key" {
-  description = "The operator's SSH public key (ssh-ed25519, or ssh-rsa of at least 2048 bits), installed for admin_username on both hosts."
+  description = "The operator's SSH public key (ssh-ed25519, or ssh-rsa of at least 2048 bits), installed for admin_username on both hosts. A later change replaces the gateway and is ignored on the validator: a new key would replace that VM, whose root disk holds the stored passphrase credential, so its key is rotated on the host."
   type        = string
   nullable    = false
 

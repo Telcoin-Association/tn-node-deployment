@@ -154,6 +154,40 @@ run "iops_below_floor" {
   expect_failures = [var.data_disk_iops]
 }
 
+# The mainnet floors are above the testnet ones: a disk that meets
+# testnet's is still refused on mainnet.
+run "mainnet_iops_below_floor" {
+  command = plan
+
+  variables {
+    network        = "mainnet"
+    data_disk_iops = 15000
+  }
+
+  expect_failures = [var.data_disk_iops]
+}
+
+run "mainnet_throughput_below_floor" {
+  command = plan
+
+  variables {
+    network              = "mainnet"
+    data_disk_throughput = 240
+  }
+
+  expect_failures = [var.data_disk_throughput]
+}
+
+run "throughput_below_floor" {
+  command = plan
+
+  variables {
+    data_disk_throughput = 125
+  }
+
+  expect_failures = [var.data_disk_throughput]
+}
+
 run "throughput_over_premium_v2" {
   command = plan
 

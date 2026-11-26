@@ -318,10 +318,27 @@ run "session_commands_bastion" {
 
   assert {
     condition = (
-      output.session_command.validator == "az network bastion ssh --name telcoin-bastion --resource-group telcoin-rg --target-resource-id /subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/telcoin-rg/providers/Microsoft.Compute/virtualMachines/telcoin-validator --auth-type ssh-key --username ubuntu --ssh-key ~/.ssh/id_ed25519" &&
-      output.session_command.gateway == "az network bastion ssh --name telcoin-bastion --resource-group telcoin-rg --target-resource-id /subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/telcoin-rg/providers/Microsoft.Compute/virtualMachines/telcoin-gateway --auth-type ssh-key --username ubuntu --ssh-key ~/.ssh/id_ed25519"
+      output.session_command.validator == "az network bastion ssh --name telcoin-bastion --resource-group telcoin-rg --target-resource-id /subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/telcoin-rg/providers/Microsoft.Compute/virtualMachines/telcoin-validator --auth-type ssh-key --username ubuntu --ssh-key <private key of admin_ssh_public_key>" &&
+      output.session_command.gateway == "az network bastion ssh --name telcoin-bastion --resource-group telcoin-rg --target-resource-id /subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/telcoin-rg/providers/Microsoft.Compute/virtualMachines/telcoin-gateway --auth-type ssh-key --username ubuntu --ssh-key <private key of admin_ssh_public_key>"
     )
-    error_message = "With Bastion the operator connects through az network bastion ssh to each VM's resource ID."
+    error_message = "With Bastion the operator connects through az network bastion ssh to each VM's resource ID, naming the private key by a placeholder."
+  }
+}
+
+# The private key's path cannot be read from the public key: the command
+# names a placeholder rather than a guess.
+run "session_commands_bastion_rsa_key" {
+  command = plan
+
+  variables {
+    admin_ssh_cidrs      = []
+    enable_bastion       = true
+    admin_ssh_public_key = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCjNhN+2MKoPwNBnm/mt7I+q6Z1jLbVyGkaavGIrSFn6d5Jv/hcY7xD5dN7qSlVpFEeeJp02UXyKN1O/fKF7I0ypWAr/uzRP3HnaD5O0OIBf0GfviXaVDqO0of2bcE9Vo5e26W6/PQNyZO/ZfUHFFefSXEp2Ezvj2ZviM3ux53X3WUNPK6OW0aeZbSTzbEstKOv4RAdQV1iTDM7/S55ltW25/Kwt50x7NTV6acchoMqmRIhPu26bXR3PI9oM0otTFNOFOysrmX1m+KiLpwSZOc1YtFhUO5meK5QSfirB1ia0vIWeFDQk/8utSZM8u93XVO9vXHnCsS4ks6wlAM70nhF operator@example"
+  }
+
+  assert {
+    condition     = endswith(output.session_command.validator, " --ssh-key <private key of admin_ssh_public_key>") && !strcontains(output.next_steps, "~/.ssh/")
+    error_message = "The Bastion command must name the private key by a placeholder, never a guessed path."
   }
 }
 
