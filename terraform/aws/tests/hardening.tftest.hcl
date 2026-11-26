@@ -7,8 +7,9 @@ mock_provider "aws" {
 }
 
 variables {
-  region     = "us-east-1"
-  rpc_domain = "rpc.example.org"
+  region            = "us-east-1"
+  availability_zone = "us-east-1a"
+  rpc_domain        = "rpc.example.org"
 }
 
 run "testnet_storage" {

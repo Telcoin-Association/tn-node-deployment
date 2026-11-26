@@ -2,10 +2,11 @@
 # this deployment is secret, and the BLS passphrase never passes through it.
 # Addresses below are documentation examples, not real hosts.
 
-# Where both hosts run. Null availability_zone picks the first zone, in name
-# order, that offers every instance type in use.
-region = "eu-central-1"
-# availability_zone = "eu-central-1a"
+# Where both hosts run. The zone is given once and kept: the subnet and the
+# data volume cannot move. It must offer both hosts' instance types; a plan
+# that finds it does not names the zones that do.
+region            = "eu-central-1"
+availability_zone = "eu-central-1a"
 
 # testnet or mainnet.
 network = "testnet"

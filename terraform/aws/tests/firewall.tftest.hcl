@@ -7,7 +7,8 @@ mock_provider "aws" {
 }
 
 variables {
-  region = "us-east-1"
+  region            = "us-east-1"
+  availability_zone = "us-east-1a"
 }
 
 run "first_apply" {

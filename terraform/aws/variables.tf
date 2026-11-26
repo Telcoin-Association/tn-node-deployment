@@ -34,13 +34,13 @@ variable "region" {
 }
 
 variable "availability_zone" {
-  description = "The zone both hosts and the data volume sit in. Null picks the first zone, in name order, that offers every instance type in use."
+  description = "The zone of region both hosts and the data volume sit in, such as eu-central-1a; it must offer the validator's and the gateway's instance types. Given once and kept: the subnet and the data volume cannot move to another zone, so a zone worked out again on a later plan could only plan their replacement."
   type        = string
-  default     = null
+  nullable    = false
 
   validation {
-    condition     = var.availability_zone == null || try(startswith(var.availability_zone, var.region) && can(regex("^[a-z0-9-]+$", var.availability_zone)), false)
-    error_message = "availability_zone must be null or a zone of region, such as eu-central-1a."
+    condition     = can(regex("^${var.region}[a-z]$", var.availability_zone))
+    error_message = "availability_zone must be a zone of region, such as eu-central-1a."
   }
 }
 

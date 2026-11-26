@@ -9,6 +9,7 @@ mock_provider "aws" {
 
 variables {
   region            = "us-east-1"
+  availability_zone = "us-east-1a"
   validator_address = "0x1111111111111111111111111111111111111111"
 }
 
@@ -42,7 +43,7 @@ run "first_apply" {
 
   assert {
     condition     = aws_subnet.main.availability_zone == "us-east-1a" && aws_ebs_volume.data.availability_zone == "us-east-1a" && !aws_subnet.main.map_public_ip_on_launch
-    error_message = "The subnet and the data volume must be in the first zone that offers every type in use, and the subnet must give no public address."
+    error_message = "The subnet and the data volume must be in the given zone, and the subnet must give no public address."
   }
 
   assert {
@@ -210,19 +211,37 @@ run "single_node" {
   }
 }
 
-run "zone_offering_every_type" {
+# The zone is the one given, never the first that offers every type: here
+# us-east-1a, which sorts first, offers both types too.
+run "zone_given_is_the_zone_used" {
   command = plan
+
+  variables {
+    availability_zone = "us-east-1c"
+    rpc_domain        = "rpc.example.org"
+  }
 
   override_data {
     target = data.aws_ec2_instance_type_offerings.zone
     values = {
-      locations      = ["us-east-1a", "us-east-1c", "us-east-1c", "us-east-1d"]
-      instance_types = ["m7i.2xlarge", "m7i.2xlarge", "m7i.large", "m7i.large"]
+      locations      = ["us-east-1a", "us-east-1a", "us-east-1c", "us-east-1c"]
+      instance_types = ["m7i.2xlarge", "m7i.large", "m7i.2xlarge", "m7i.large"]
     }
   }
 
   assert {
-    condition     = aws_subnet.main.availability_zone == "us-east-1c"
-    error_message = "The zone must be the first one, in name order, that offers both the validator's and the gateway's type."
+    condition     = aws_subnet.main.availability_zone == "us-east-1c" && aws_ebs_volume.data.availability_zone == "us-east-1c"
+    error_message = "The subnet and the data volume must be in the given zone."
+  }
+
+  # An instance runs in the zone of its interface's subnet.
+  assert {
+    condition = alltrue([
+      aws_network_interface.validator.subnet_id == aws_subnet.main.id,
+      aws_network_interface.gateway[0].subnet_id == aws_subnet.main.id,
+      aws_instance.validator.primary_network_interface[0].network_interface_id == aws_network_interface.validator.id,
+      aws_instance.gateway[0].primary_network_interface[0].network_interface_id == aws_network_interface.gateway[0].id,
+    ])
+    error_message = "Both hosts must boot on interfaces in the subnet of the given zone."
   }
 }

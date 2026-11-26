@@ -7,7 +7,8 @@ mock_provider "aws" {
 }
 
 variables {
-  region = "us-east-1"
+  region            = "us-east-1"
+  availability_zone = "us-east-1a"
 }
 
 run "accepted_baseline" {
@@ -111,7 +112,7 @@ run "zone_lacking_the_validator_type" {
   expect_failures = [aws_subnet.main]
 }
 
-run "no_zone_offers_every_type" {
+run "zone_lacking_the_gateway_type" {
   command = plan
 
   override_data {
@@ -123,6 +124,14 @@ run "no_zone_offers_every_type" {
   }
 
   expect_failures = [aws_subnet.main]
+}
+
+run "zone_is_the_region" {
+  command = plan
+  variables {
+    availability_zone = "us-east-1"
+  }
+  expect_failures = [var.availability_zone]
 }
 
 run "mainnet_disk_below_floor" {

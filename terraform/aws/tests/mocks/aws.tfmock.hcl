@@ -90,6 +90,13 @@ override_resource {
 }
 
 override_resource {
+  target = aws_subnet.main
+  values = {
+    id = "subnet-0main"
+  }
+}
+
+override_resource {
   target = aws_network_interface.validator
   values = {
     id = "eni-0validator"

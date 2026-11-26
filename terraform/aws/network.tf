@@ -12,11 +12,11 @@ locals {
   gateway_type   = coalesce(var.gateway_instance_type, "m7i.large")
   instance_types = distinct(concat([local.validator_type], var.gateway_enabled ? [local.gateway_type] : []))
 
-  # Zone => the wanted types it offers. A zone qualifies when it offers all of
-  # them, so the gateway's second apply cannot fail on a type the zone lacks.
+  # Zone => the wanted types it offers. The given zone must offer all of them,
+  # so the gateway's second apply cannot fail on a type the zone lacks. Only
+  # the precondition reads this: the zone itself is never worked out here.
   zone_offers     = { for i, z in data.aws_ec2_instance_type_offerings.zone.locations : z => data.aws_ec2_instance_type_offerings.zone.instance_types[i]... }
   zone_candidates = sort([for z, types in local.zone_offers : z if length(setsubtract(local.instance_types, types)) == 0])
-  zone            = var.availability_zone != null ? var.availability_zone : try(local.zone_candidates[0], null)
 }
 
 data "aws_ec2_instance_type_offerings" "zone" {
@@ -51,7 +51,7 @@ resource "aws_internet_gateway" "main" {
 resource "aws_subnet" "main" {
   vpc_id                  = aws_vpc.main.id
   cidr_block              = var.subnet_cidr
-  availability_zone       = local.zone
+  availability_zone       = var.availability_zone
   map_public_ip_on_launch = false
 
   tags = {
@@ -60,8 +60,8 @@ resource "aws_subnet" "main" {
 
   lifecycle {
     precondition {
-      condition     = local.zone != null && try(contains(local.zone_candidates, local.zone), false)
-      error_message = "${var.availability_zone != null ? "${var.availability_zone} does not offer" : "No zone of ${var.region} offers"} every instance type in use (${join(", ", local.instance_types)}). Zones that do: ${length(local.zone_candidates) > 0 ? join(", ", local.zone_candidates) : "none"}. Pick another availability_zone or instance type."
+      condition     = contains(local.zone_candidates, var.availability_zone)
+      error_message = "${var.availability_zone} does not offer every instance type in use (${join(", ", local.instance_types)}). Zones of ${var.region} that do: ${length(local.zone_candidates) > 0 ? join(", ", local.zone_candidates) : "none"}. Set availability_zone to one of them, or pick another instance type."
     }
   }
 }

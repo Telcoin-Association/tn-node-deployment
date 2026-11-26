@@ -76,7 +76,7 @@ module "host_plan" {
 # The node's keys and chain data. Kept whatever happens to the instance, and
 # never snapshotted: a snapshot of this volume is a copy of the node keys.
 resource "aws_ebs_volume" "data" {
-  availability_zone = aws_subnet.main.availability_zone
+  availability_zone = var.availability_zone
   type              = "gp3"
   size              = local.disk.size
   iops              = local.disk.iops
