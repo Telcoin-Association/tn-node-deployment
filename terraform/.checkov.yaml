@@ -1,0 +1,9 @@
+# checkov for terraform/, run by tools/check-terraform.sh. No check is
+# skipped. A skip goes under skip-check, one per line, with a comment saying
+# why the finding does not apply.
+framework:
+  - terraform
+compact: true
+quiet: true
+# The run is offline: no guideline download, no upload.
+skip-download: true

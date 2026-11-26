@@ -9,4 +9,8 @@ __pycache__/
 # Partner document scratch output (tools/build-partner-pdf.sh)
 docs/partner/*/build/
 
+# Terraform working directories and saved plans (.terraform.lock.hcl is committed)
+.terraform/
+*.tfplan
+
 **/.DS_Store
