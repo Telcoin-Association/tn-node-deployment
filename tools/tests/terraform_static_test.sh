@@ -609,7 +609,10 @@ open_rules() {
 # secret_words TREE -- each line under TREE that holds password, secret or token
 # (in any case) outside a comment, once the SECRET_ALLOW phrases are taken out.
 # Markdown is prose about the tree, not part of it; .terraform is a working
-# directory.
+# directory. In HCL the text of a description or an error_message (a quoted
+# string or a heredoc) is prose too and is skipped, but an interpolation or a
+# directive inside it is still read, and so is every name: a block label, an
+# argument, a reference.
 secret_words() {
     local tree="$1" f mode
     while IFS= read -r f; do
@@ -620,8 +623,35 @@ secret_words() {
             *) mode="hash" ;;
         esac
         awk -v mode="$mode" -v allow="$SECRET_ALLOW" -v name="${f#./}" '
+            # prose(S) -- S with the literal text of a one-line description or
+            # error_message string taken out; ${...} and %{...} stay.
+            function prose(s,   out, i, n, c, depth) {
+                if (!match(s, /^[[:space:]]*(description|error_message)[[:space:]]*=[[:space:]]*"/)) return s
+                out = substr(s, 1, RLENGTH); n = length(s); i = RLENGTH + 1; depth = 0
+                while (i <= n) {
+                    c = substr(s, i, 1)
+                    if (depth > 0) {
+                        out = out c
+                        if (c == "{") depth++
+                        else if (c == "}") depth--
+                        i++
+                        continue
+                    }
+                    if (c == "\\") { i += 2; continue }
+                    if (substr(s, i, 3) == "$${" || substr(s, i, 3) == "%%{") { i += 3; continue }
+                    if (substr(s, i, 2) == "${" || substr(s, i, 2) == "%{") { out = out substr(s, i, 2); depth = 1; i += 2; continue }
+                    if (c == "\"") return out substr(s, i)
+                    i++
+                }
+                return out
+            }
             BEGIN { na = split(allow, A, " ") }
-            FNR == 1 { inc = 0 }
+            FNR == 1 { inc = 0; hd = "" }
+            hd != "" {
+                t = $0; gsub(/[[:space:]]/, "", t)
+                if (t == hd) hd = ""
+                next
+            }
             {
                 s = $0
                 if (mode == "hcl") {
@@ -642,6 +672,12 @@ secret_words() {
                     sub(/^[[:space:]]*\/\/.*/, "", s); sub(/[[:space:]]\/\/.*/, "", s)
                 }
                 if (mode != "none") { sub(/^[[:space:]]*#.*/, "", s); sub(/[[:space:]]#.*/, "", s) }
+                if (mode == "hcl") {
+                    if (s ~ /^[[:space:]]*(description|error_message)[[:space:]]*=[[:space:]]*<<-?[A-Za-z_][A-Za-z0-9_]*[[:space:]]*$/) {
+                        hd = s; sub(/^[^<]*<<-?/, "", hd); gsub(/[[:space:]]/, "", hd)
+                    }
+                    s = prose(s)
+                }
                 t = tolower(s)
                 for (j = 1; j <= na; j++) gsub(A[j], "", t)
                 if (t ~ /password|secret|token/) { l = $0; sub(/^[[:space:]]+/, "", l); print name ":" FNR ": " l }
@@ -1021,6 +1057,40 @@ EOF
 printf '# Operators: no password reaches the state.\nThe token and the secret are never stored.\n' > "$OK/README.md"
 printf 'binary provider data: token secret password\n' > "$OK/aws/.terraform/provider"
 printf '#!/bin/sh\n# no secret here\necho "${#x}" # the token count\n' > "$OK/aws/helper.sh"
+# Prose may name the words: a description, an error_message, a heredoc one.
+mkdir -p "$OK/aws/tests"
+cat > "$OK/aws/tests/prose.tftest.hcl" <<'EOF'
+variables {
+  admin_user = "ubuntu"
+}
+
+run "metadata_service" {
+  command = plan
+
+  assert {
+    condition     = var.admin_user != ""
+    error_message = "Both hosts must require IMDSv2 tokens; no password is set (${var.admin_user})."
+  }
+}
+EOF
+cat > "$OK/gcp/prose.tf" <<'EOF'
+variable "admin_user" {
+  description = "The login user. It takes a key, never a password; \"secret\" here is a word."
+  type        = string
+  default     = "ubuntu"
+  validation {
+    condition     = var.admin_user != "telcoin"
+    error_message = "admin_user must not be telcoin: %%{no} directive, $${no} interpolation, no token."
+  }
+}
+
+output "login" {
+  description = <<-EOT
+    The host keeps no password, secret or token.
+  EOT
+  value       = var.admin_user
+}
+EOF
 
 cat > "$BAD/aws/main.tf" <<'EOF'
 resource "aws_ebs_volume" "data" {
@@ -1226,6 +1296,34 @@ EOF
 
 printf 'framework:\n  - terraform\napi_token: abc\n' > "$BAD/settings.yaml"
 printf '#!/bin/sh\nSECRET=abc # set here\n' > "$BAD/aws/helper.sh"
+# A name that holds a word is found next to prose that is skipped, and so is a
+# reference inside a message's interpolation.
+cat > "$BAD/gcp/prose.tf" <<'EOF'
+variable "db_password" {
+  description = "Plain prose."
+  type        = string
+}
+
+output "api_token" {
+  description = "Plain prose."
+  value       = local.secret_key
+}
+
+locals {
+  secret_key = "x"
+}
+
+resource "random_password" "root" {
+  length = 32
+}
+
+check "named" {
+  assert {
+    condition     = var.db_password != ""
+    error_message = "Set the value (${length(var.db_password)} characters)."
+  }
+}
+EOF
 
 for cloud in aws gcp azure; do
     check "fixture ok: ${cloud} protected resources pass" "" "$(protected "$OK" "$cloud")"
@@ -1275,6 +1373,13 @@ check "fixture ok: no password, secret or token outside comments (README.md and 
     "$(secret_words "$OK")"
 check "fixture bad: each password, secret or token outside comments is found" "aws/helper.sh:2: SECRET=abc # set here
 azure/main.tf:18: admin_password = \"x\"
+gcp/prose.tf:1: variable \"db_password\" {
+gcp/prose.tf:6: output \"api_token\" {
+gcp/prose.tf:8: value       = local.secret_key
+gcp/prose.tf:12: secret_key = \"x\"
+gcp/prose.tf:15: resource \"random_password\" \"root\" {
+gcp/prose.tf:21: condition     = var.db_password != \"\"
+gcp/prose.tf:22: error_message = \"Set the value (\${length(var.db_password)} characters).\"
 settings.yaml:3: api_token: abc" "$(secret_words "$BAD")"
 
 mkdir -p "$T/fx/pins"
