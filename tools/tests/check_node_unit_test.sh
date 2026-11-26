@@ -4,7 +4,8 @@
 # check_unit_sandbox, check_healthcheck_on_mainnet) on fixture trees, as a
 # normal user: a current start script and unit pass; an older script that
 # exports the passphrase, a unit that sets it, and a mainnet node with the
-# health monitor fail; a unit without the sandbox warns. The functions are cut
+# health monitor fail; a --healthcheck that a worker gateway reads
+# (GATEWAY_UPSTREAM) passes; a unit without the sandbox warns. The functions are cut
 # from check-node.sh. Maintainer tooling (not updater-tracked). bash 3.2 safe.
 set -u
 # shellcheck source=tools/tests/lib.sh
@@ -86,6 +87,27 @@ check_has "mainnet with the monitor in .node-meta: an issue" "issues=1" "$OUT"
 printf 'NETWORK=testnet\nENABLE_HEALTHCHECK_MONITOR=true\n' > "$T/fx/etc/telcoin/.node-meta"
 runc check_healthcheck_on_mainnet
 check "testnet: not checked" "issues=0" "$(printf '%s' "$OUT" | tail -n 1)"
+
+# Behind a worker gateway (GATEWAY_UPSTREAM) --healthcheck is the gateway's
+# readiness port, not the monitor; ENABLE_HEALTHCHECK_MONITOR=true still fails.
+printf 'NETWORK=mainnet\nINSTALL_METHOD=source\nGATEWAY_UPSTREAM=10.0.0.5\n' > "$T/fx/etc/telcoin/.node-meta"
+_tn_start_script_text source /opt/telcoin/telcoin-network "$ARGS --healthcheck 0.0.0.0:43174" > "$SCRIPT"
+runc check_healthcheck_on_mainnet
+check_has "mainnet behind a gateway with --healthcheck: no issue" "issues=0" "$OUT"
+check_has "mainnet behind a gateway: the flag serves the gateway" "yes" \
+    "$(printf '%s' "$OUT" | grep -qF -- '--healthcheck 0.0.0.0:43174 on the node line serves the worker gateway at 10.0.0.5' && echo yes)"
+check_lacks "mainnet behind a gateway: not told to remove the flag" "remove" "$OUT"
+printf 'NETWORK=mainnet\nINSTALL_METHOD=source\nGATEWAY_UPSTREAM=10.0.0.5\nENABLE_HEALTHCHECK_MONITOR=true\n' > "$T/fx/etc/telcoin/.node-meta"
+runc check_healthcheck_on_mainnet
+check_has "mainnet behind a gateway, monitor in .node-meta: an issue" "issues=1" "$OUT"
+check_has "monitor behind a gateway: names the .node-meta line, keeps --healthcheck" "yes" \
+    "$(printf '%s' "$OUT" | grep -F 'ENABLE_HEALTHCHECK_MONITOR=true in .node-meta' | grep -qF 'Keep --healthcheck on the node line' && echo yes)"
+current
+printf 'NETWORK=mainnet\nINSTALL_METHOD=source\nGATEWAY_UPSTREAM=10.0.0.5\n' > "$T/fx/etc/telcoin/.node-meta"
+runc check_healthcheck_on_mainnet
+check_has "mainnet behind a gateway without --healthcheck: no issue here" "issues=0" "$OUT"
+check_has "mainnet behind a gateway without --healthcheck: no monitor" "yes" \
+    "$(printf '%s' "$OUT" | grep -qF 'No testnet health monitor on this mainnet node' && echo yes)"
 
 # ---- LIB-B: resolve_network picks the network's own RPC, never another's -------------
 # resolve_network and the helpers it calls, cut from check-node.sh, over the

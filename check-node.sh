@@ -2220,20 +2220,35 @@ check_health_score() {
 }
 
 # check_healthcheck_on_mainnet -- the testnet health monitor never runs on a
-# mainnet node: a failure when the node line has --healthcheck or .node-meta
-# has ENABLE_HEALTHCHECK_MONITOR=true there.
+# mainnet node: a failure when .node-meta has ENABLE_HEALTHCHECK_MONITOR=true
+# there, or when the node line has --healthcheck and .node-meta no
+# GATEWAY_UPSTREAM. With GATEWAY_UPSTREAM (edit-config.sh --set gateway_upstream)
+# the flag is the worker gateway's readiness port, which the node must keep;
+# whether it is bound for the gateway is check_gateway_upstream's to say.
 check_healthcheck_on_mainnet() {
-    local launch v="" flag=""
+    local launch v="" flag="" hc="" up=""
     if ! have_fns tn_detect_network tn_launch_flag_get; then
         CN_SKIPPED_CHECKS="${CN_SKIPPED_CHECKS:-} check_healthcheck_on_mainnet"
         return 0
     fi
     [[ "$(tn_detect_network 2>/dev/null || true)" == "mainnet" ]] || return 0
     launch="$(_cn_launch_file 2>/dev/null)" || launch=""
-    if [[ -n "$launch" && -r "$launch" ]] && tn_launch_flag_get "$launch" --healthcheck >/dev/null 2>&1; then
+    if [[ -n "$launch" && -r "$launch" ]] && hc="$(tn_launch_flag_get "$launch" --healthcheck 2>/dev/null)"; then
         flag="yes"
     fi
     v="$(meta_get ENABLE_HEALTHCHECK_MONITOR 2>/dev/null || true)"
+    up="$(meta_get GATEWAY_UPSTREAM 2>/dev/null || true)"
+    if [[ -n "$up" ]]; then
+        if [[ "$v" == "true" ]]; then
+            print_error "The testnet health monitor is on for this mainnet node (ENABLE_HEALTHCHECK_MONITOR=true in .node-meta); remove that line. Keep --healthcheck on the node line: the worker gateway at ${up} reads it."
+            (( ++HEALTH_ISSUES ))
+        elif [[ -n "$flag" ]]; then
+            print_ok "--healthcheck ${hc} on the node line serves the worker gateway at ${up} (GATEWAY_UPSTREAM), not the testnet health monitor"
+        else
+            print_ok "No testnet health monitor on this mainnet node"
+        fi
+        return 0
+    fi
     if [[ -n "$flag" || "$v" == "true" ]]; then
         print_error "The testnet health monitor is on for this mainnet node (--healthcheck on the node line or ENABLE_HEALTHCHECK_MONITOR=true); remove it."
         (( ++HEALTH_ISSUES ))
@@ -2369,7 +2384,8 @@ check_gateway() {
 # default deny, no allow from Anywhere). The RPC bind (--http.addr) and the --healthcheck bind must be
 # 0.0.0.0 exactly when GATEWAY_UPSTREAM is set; without it a wildcard RPC bind is
 # fine only behind the public-RPC Caddy block. node-info.yaml advertising an https
-# RPC URL and no ws URL is reported as information. Failures count in
+# RPC URL and no ws URL is reported; any other advertisement is information, and
+# an issue on mainnet with GATEWAY_UPSTREAM set. Failures count in
 # HEALTH_ISSUES; an older lib/common.sh skips the section with one line.
 check_gateway_upstream() {
     local from="" up="" frc=0 urc=0 list rest s rpc_port launch rpc_bind="" brc=0 bind="" hb_port="" hrc=0 ni http ws open
@@ -2485,6 +2501,8 @@ check_gateway_upstream() {
 
     # Advertisement: behind a gateway, worker 0 advertises the gateway's https URL
     # and no ws URL (install-caddy.sh --phase rpc-advertise writes exactly that).
+    # On mainnet any other record breaks the forwarding of transactions to this
+    # validator, so there it is an issue.
     ni="$(detect_data_dir 2>/dev/null)/node-info.yaml"
     if [[ ! -r "$ni" ]]; then
         print_info "node-info.yaml is not readable, so the advertised RPC URL was not checked"
@@ -2492,6 +2510,10 @@ check_gateway_upstream() {
         read -r http ws <<< "$(advertised_rpc "$ni")"
         if [[ "$http" == https://* && "$ws" == "none" ]]; then
             print_ok "node-info.yaml advertises ${http} and no ws URL"
+        elif [[ -n "$up" ]] && have_fns tn_detect_network \
+                && [[ "$(tn_detect_network 2>/dev/null || true)" == "mainnet" ]]; then
+            print_error "node-info.yaml advertises RPC ${http:-none}, ws ${ws:-none}; a mainnet validator behind a worker gateway must advertise the gateway's https URL and no ws URL, or transactions forwarded to it fail: run sudo bash install-caddy.sh --phase rpc-advertise --rpc-domain <gateway host>"
+            (( ++HEALTH_ISSUES ))
         else
             print_info "node-info.yaml advertises RPC ${http:-none}, ws ${ws:-none}; behind a gateway it should advertise the gateway's https URL and no ws URL: run sudo bash install-caddy.sh --phase rpc-advertise --rpc-domain <gateway host>"
         fi
