@@ -20,7 +20,11 @@
 #                            dashboard, if enabled later, needs a different one
 #                            (dashboard.<your-node-domain>). Point its A record at this
 #                            server's INBOUND public IP, with TCP 80 + 443 open.
-#   --public-ip <ip>         Inbound public IP the A record points at (NAT / multi-IP
+#                            On a mainnet validator (--admission closed) it is the name
+#                            of its worker gateway instead: advertised as https only,
+#                            with no WebSocket URL and no public RPC site on this host;
+#                            its A record points at the gateway host's static public IP.
+#   --public-ip <ip>       Inbound public IP the A record points at (NAT / multi-IP
 #                            hosts); passed through to install-caddy.sh. In --json mode it
 #                            is also the P2P public IP, as before. A value that is not an
 #                            IPv4 or IPv6 address is ignored, with a warning.
@@ -32,15 +36,20 @@
 #                            `--rpc-public false` changes nothing.
 #   --no-public-rpc          Private RPC (127.0.0.1 only), without the prompt.
 # With none of these, interactive setup asks (Enter = private) and --json stays private.
+# A mainnet node given no RPC URL advertises https://v<label>.telcoin.network/ (<label>:
+# the first five characters of its BLS public key, lowercased) for its worker gateway.
 # If DNS is not ready (or the enable fails), setup still completes, records the domain in
 # .node-meta (PUBLIC_RPC_DOMAIN) and prints the install-caddy.sh command to finish later.
 #
 # RPC URLS (optional; --rpc-domain implies all four, so most installs pass none of them):
 #   --rpc-http <url>         Worker HTTP RPC URL written to node-info.yaml at keygen
-#                            (keytool --rpc-http) and published to the network.
+#                            (keytool --rpc-http) and published to the network. On a
+#                            mainnet validator (--admission closed) it is its worker
+#                            gateway's URL, https:// only.
 #   --rpc-ws <url>           Worker WebSocket RPC URL for node-info.yaml (keytool --rpc-ws).
 #                            Needs --rpc-http or --rpc-domain; alone it is ignored, with a
-#                            warning.
+#                            warning. A mainnet validator advertises none: it is dropped,
+#                            with a warning.
 #   --public-rpc-url <url>   This node's public HTTP RPC address, recorded in .node-meta
 #                            (PUBLIC_RPC_URL) for the UI and tooling; never sent to the network.
 #   --public-ws-url <url>    The WebSocket counterpart, recorded in .node-meta (PUBLIC_WS_URL).
@@ -1390,7 +1399,11 @@ step_config() {
     # step_generate_keys). Run the same step, non-interactively.
     if json_mode; then
         print_ok "Configuration set (non-interactive)"
-        print_info "RPC access:  $([[ "$ENABLE_PUBLIC_RPC" == "true" ]] && echo "public (https://${PUBLIC_RPC_DOMAIN}/ + wss://${PUBLIC_RPC_DOMAIN}/)" || echo private)"
+        if [[ "$RPC_VIA_GATEWAY" == "true" && -n "$PUBLIC_RPC_DOMAIN" ]]; then
+            print_info "RPC access:  $(public_rpc_gateway_access)"
+        else
+            print_info "RPC access:  $([[ "$ENABLE_PUBLIC_RPC" == "true" ]] && echo "public (https://${PUBLIC_RPC_DOMAIN}/ + wss://${PUBLIC_RPC_DOMAIN}/)" || echo private)"
+        fi
         print_info "Ports: P2P ${P2P_PORT} / worker ${WORKER_PORT} / RPC ${RPC_PORT} / metrics ${METRICS_PORT}"
         return 0
     fi
@@ -1398,6 +1411,8 @@ step_config() {
     # RPC access: a flag decides it up front (no prompt); otherwise ask.
     if [[ "$NO_PUBLIC_RPC" == "true" ]]; then
         print_ok "RPC access: private (--no-public-rpc)"
+    elif [[ -n "$PUBLIC_RPC_DOMAIN" && "$RPC_VIA_GATEWAY" == "true" ]]; then
+        print_ok "RPC access (--rpc-domain): $(public_rpc_gateway_access)"
     elif [[ -n "$PUBLIC_RPC_DOMAIN" ]]; then
         print_ok "RPC access: public -- https://${PUBLIC_RPC_DOMAIN}/ + wss://${PUBLIC_RPC_DOMAIN}/ (--rpc-domain)"
     elif [[ -n "$RPC_PRIVATE_NOTE" ]]; then
@@ -1448,7 +1463,8 @@ step_config() {
 # Caddy serves as https:// + wss:// and that is advertised in node-info.yaml, so gateways
 # and wallets can discover it; reth itself stays on 127.0.0.1 either way. Sets
 # ENABLE_PUBLIC_RPC / PUBLIC_RPC_DOMAIN / RPC_INBOUND_IP. The enable runs at the end of
-# setup (step_public_rpc), once the node is up.
+# setup (step_public_rpc), once the node is up. On a mainnet validator (RPC_VIA_GATEWAY)
+# the name is its worker gateway's instead: no Caddy site here, so no inbound IP.
 prompt_public_rpc() {
     echo "  RPC access:"
     echo ""
@@ -1456,9 +1472,15 @@ prompt_public_rpc() {
     echo "              No DNS or firewall changes needed. Best for personal use,"
     echo "              development, and internal tooling."
     echo ""
-    echo "  2) Public            -- https://<domain>/ and wss://<domain>/ served by"
-    echo "              Caddy (automatic TLS) and advertised to the network in"
-    echo "              node-info.yaml. reth itself stays on 127.0.0.1."
+    if [[ "$RPC_VIA_GATEWAY" == "true" ]]; then
+        echo "  2) Gateway name      -- https://<domain>/, the name of your worker gateway,"
+        echo "              advertised in node-info.yaml (https only). No public RPC"
+        echo "              site runs on this host."
+    else
+        echo "  2) Public            -- https://<domain>/ and wss://<domain>/ served by"
+        echo "              Caddy (automatic TLS) and advertised to the network in"
+        echo "              node-info.yaml. reth itself stays on 127.0.0.1."
+    fi
     echo ""
     # On mainnet a node with no RPC URL still advertises one: the default name that
     # key generation writes for the worker gateway (setup_rpc_advertise_record).
@@ -1481,23 +1503,32 @@ prompt_public_rpc() {
     fi
 
     echo ""
-    print_info "Public RPC needs a DNS name for THIS node. Use the node's own public name"
-    # network-gated: example hostname in a prompt shown on every network; the operator types their own
-    print_info "for the RPC endpoint, e.g. node7.adiri.telcoin.network."
-    print_info "The Node Manager dashboard, if you enable it later, needs a DIFFERENT hostname:"
-    # network-gated: example hostname in a prompt shown on every network
-    print_info "dashboard.<your-node-domain> (e.g. dashboard.node7.adiri.telcoin.network) --"
-    print_info "one name cannot serve both."
-    print_info "Before setup finishes, point the name's DNS A record at this server's INBOUND"
-    print_info "public IP and allow inbound TCP 80 + 443 (Caddy gets its TLS certificate over"
-    print_info "them). If DNS is not ready in time, setup still completes and prints the one"
-    print_info "command that enables public RPC later. Leave blank to stay private."
+    local label="Public RPC domain [none = private]" blank="No domain entered -- RPC stays private."
+    if [[ "$RPC_VIA_GATEWAY" == "true" ]]; then
+        print_info "Enter the DNS name of your worker gateway. It is advertised as https://<name>/"
+        print_info "only (no WebSocket URL), and its A record points at the static public IP of"
+        print_info "your worker gateway host (OPERATOR.md 4.15). Leave blank for the default name."
+        label="Worker gateway name [none = the default name]"
+        blank="No name entered -- key generation advertises the default name."
+    else
+        print_info "Public RPC needs a DNS name for THIS node. Use the node's own public name"
+        # network-gated: example hostname in a prompt shown on every network; the operator types their own
+        print_info "for the RPC endpoint, e.g. node7.adiri.telcoin.network."
+        print_info "The Node Manager dashboard, if you enable it later, needs a DIFFERENT hostname:"
+        # network-gated: example hostname in a prompt shown on every network
+        print_info "dashboard.<your-node-domain> (e.g. dashboard.node7.adiri.telcoin.network) --"
+        print_info "one name cannot serve both."
+        print_info "Before setup finishes, point the name's DNS A record at this server's INBOUND"
+        print_info "public IP and allow inbound TCP 80 + 443 (Caddy gets its TLS certificate over"
+        print_info "them). If DNS is not ready in time, setup still completes and prints the one"
+        print_info "command that enables public RPC later. Leave blank to stay private."
+    fi
     echo ""
     while true; do
-        read -r -p "  Public RPC domain [none = private]: " input
+        read -r -p "  ${label}: " input
         input="$(normalize_rpc_domain "$input")"
         if [[ -z "$input" ]]; then
-            print_info "No domain entered -- RPC stays private."
+            print_info "$blank"
             ENABLE_PUBLIC_RPC="false"
             PUBLIC_RPC_DOMAIN=""
             return 0
@@ -1508,6 +1539,11 @@ prompt_public_rpc() {
     done
     PUBLIC_RPC_DOMAIN="$input"
     ENABLE_PUBLIC_RPC="true"
+    if [[ "$RPC_VIA_GATEWAY" == "true" ]]; then
+        print_ok "RPC access: $(public_rpc_gateway_access)"
+        derive_public_rpc_urls
+        return 0
+    fi
 
     echo ""
     print_info "Inbound public IP the A record points at. Only needed behind NAT or on a"
@@ -2170,7 +2206,9 @@ public_rpc_url_warnings() {
     if [[ "$RPC_VIA_GATEWAY" != "true" && "$ADVERTISE_RPC_WS" != "wss://${d}/" ]]; then
         given="${given:+${given} and }--rpc-ws ${ADVERTISE_RPC_WS}"
     fi
-    if [[ -n "$given" ]]; then
+    if [[ -n "$given" && "$RPC_VIA_GATEWAY" == "true" ]]; then
+        setup_warn "${given} differs from --rpc-domain ${d}: on a mainnet validator (admission closed) both name its worker gateway, and keygen advertises ${ADVERTISE_RPC_HTTP} for it, as given."
+    elif [[ -n "$given" ]]; then
         setup_warn "${given} differs from --rpc-domain ${d}: keygen writes it to node-info.yaml as given, but enabling public RPC (install-caddy.sh --phase=rpc-enable) replaces it with https://${d}/ + wss://${d}/ once the node starts."
     fi
     return 0
@@ -2524,6 +2562,22 @@ setup_rpc_gateway_write() {
     return 0
 }
 
+# setup_rpc_site_note URL -- a mainnet keygen outside the validator posture advertised URL
+# for a public RPC site on this host. A genesis validator that left out --admission closed
+# would otherwise not learn that its gateway's name was taken as this host's: one note, on
+# stderr and, in --json mode, as a log event.
+setup_rpc_site_note() {
+    local mode="admission ${ADMISSION_MODE}" ws="" line
+    [[ -n "$ADMISSION_MODE" ]] || mode="no --admission"
+    [[ -z "$PUBLIC_RPC_DOMAIN" && -z "$ADVERTISE_RPC_WS" ]] || ws=" with a WebSocket URL"
+    line="This mainnet node is set up as a non-validator (${mode}): ${1} is advertised${ws} for a public RPC site on this host. A validator must pass --admission closed, so the name is recorded for its worker gateway."
+    print_info "$line"
+    if json_mode; then
+        json_event log "$line"
+    fi
+    return 0
+}
+
 # setup_rpc_advertise_record GIVEN -- once a mainnet keygen made the keys, say who serves
 # the URL worker 0 advertises: other nodes forward transactions to it, and on mainnet a
 # node's public RPC is served by its worker gateway. A node whose operator gave no URL
@@ -2532,7 +2586,8 @@ setup_rpc_gateway_write() {
 # key lowercased (tn_rpc_default_host), written and recorded by setup_rpc_gateway_write
 # (RPC_DEFAULT_HOST). A validator's own URL (RPC_VIA_GATEWAY) is recorded the same way,
 # and written by set-rpc when a keytool without --rpc-http left it out of the keygen;
-# any other node's URL is served by this host's Caddy site, so no owner is recorded.
+# any other node's URL is served by this host's Caddy site, so no owner is recorded
+# (setup_rpc_site_note says so).
 # Every failure is a warning: the keys are fine, and a URL can be set later with
 # install-caddy.sh --phase=rpc-advertise. A keygen that records no owner removes the one
 # earlier keys left. Other networks: nothing.
@@ -2545,6 +2600,7 @@ setup_rpc_advertise_record() {
         if [[ "$RPC_VIA_GATEWAY" == "true" ]]; then
             setup_rpc_gateway_write "$given" || true
         else
+            setup_rpc_site_note "$given"
             setup_rpc_owner_clear || true
         fi
         return 0
@@ -2590,7 +2646,7 @@ setup_rpc_default_next() {
         set -- \
             "Advertised RPC URL: https://${h}/ (worker 0 in node-info.yaml, no WebSocket URL). It is this node's default name: v and the first five characters of its BLS public key, lowercased. It belongs to your worker gateway (RPC_ADVERTISED_VIA=gateway in .node-meta), which serves it over HTTPS. No public RPC site runs on this host." \
             "To make it answer, send ${h} and the static public IP of your worker gateway host to the Telcoin Association (TAO), which creates the A record. Then run your gateway with --domain ${h} (OPERATOR.md 4.15)." \
-            "You are encouraged to use a name of your own: create its A record for the gateway's static IP, then run: $(setup_rpc_advertise_cmd '<name>'). Before key generation, pass --rpc-domain <name> and no default is set."
+            "You are encouraged to use a name of your own: create its A record for the gateway's static IP, then run: $(setup_rpc_advertise_cmd '<name>'). Before key generation, a validator passes --admission closed --rpc-domain <name>, and no default is set."
     fi
     for line in "$@"; do
         print_info "$line"
@@ -3536,9 +3592,21 @@ public_rpc_cmd() {
 # A public-RPC flag came without a usable hostname (RPC_PRIVATE_NOTE says which). Not an
 # error -- Node Manager UI releases before 1.9.0 send `--rpc-public true` and never a
 # domain -- so RPC stays private and this says how to enable it later. --json: a `log`
-# event, never `error`, so the run still ends with done ok:true.
+# event, never `error`, so the run still ends with done ok:true. A mainnet validator's
+# RPC is its worker gateway's: it is told how to name the gateway instead.
 public_rpc_no_domain_notice() {
-    local cmd
+    local cmd way
+    if [[ "$RPC_VIA_GATEWAY" == "true" ]]; then
+        cmd="$(setup_rpc_advertise_cmd '<name>')"
+        way="To name your worker gateway, pass --rpc-domain <name>; once the keys exist, run:"
+        print_warn "Public RPC not enabled: ${RPC_PRIVATE_NOTE} -- a mainnet validator's RPC is served by its worker gateway, not by this host."
+        print_info "$way"
+        echo "    ${cmd}"
+        if json_mode; then
+            json_event log "public RPC not enabled: ${RPC_PRIVATE_NOTE} -- a mainnet validator's RPC is served by its worker gateway, not by this host. ${way} ${cmd}"
+        fi
+        return 0
+    fi
     cmd="$(public_rpc_cmd rpc-enable '<hostname>')"
     print_warn "Public RPC not enabled: ${RPC_PRIVATE_NOTE} -- RPC stays private (127.0.0.1 only)."
     print_info "To serve public RPC later, point a DNS name at this server and run:"
@@ -3581,12 +3649,25 @@ public_rpc_node_info() {
     printf '%s/node-info.yaml' "$(tn_resolve_data_dir 2>/dev/null || echo /var/lib/telcoin)"
 }
 
+# What --rpc-domain <d> means on a mainnet validator, for the RPC access lines.
+public_rpc_gateway_access() {
+    printf '%s is the name of your worker gateway, advertised as https://%s/ only (no WebSocket URL): no public RPC site runs on this host. Its A record points at the static public IP of your worker gateway host.' \
+        "$PUBLIC_RPC_DOMAIN" "$PUBLIC_RPC_DOMAIN"
+}
+
+# The install-caddy.sh command that withdraws the worker gateway's advertisement.
+setup_rpc_unadvertise_cmd() {
+    printf 'sudo bash %s/install-caddy.sh --phase=rpc-unadvertise' "$SCRIPT_DIR"
+}
+
 # --rpc-domain on a node whose public RPC is its worker gateway's (setup_rpc_via_gateway):
 # no Caddy site is enabled here and a record the gateway owns stays as it is.
 # PUBLIC_RPC_STATE=gateway; says what node-info.yaml advertises and, when that is not
-# https://<domain>/, the command that advertises it for the gateway.
+# https://<domain>/, the way to it: the command that advertises it for the gateway; for
+# a mainnet node that is not a validator (it kept the default name keygen recorded), the
+# way to a public RPC site of its own here instead, rpc-unadvertise and then rpc-enable.
 public_rpc_gateway_note() {
-    local d="$PUBLIC_RPC_DOMAIN" cur="" cmd msg
+    local d="$PUBLIC_RPC_DOMAIN" cur="" cmd msg way
     PUBLIC_RPC_STATE="gateway"
     cmd="$(setup_rpc_advertise_cmd "$d")"
     cur="$(tn_node_info_rpc "$(public_rpc_node_info)" 2>/dev/null)" || cur=""
@@ -3601,7 +3682,11 @@ public_rpc_gateway_note() {
         fi
     else
         [[ -n "$cur" && "$cur" != "none" ]] || cur="no RPC URL"
-        setup_warn "node-info.yaml advertises ${cur} for your worker gateway (RPC_ADVERTISED_VIA=gateway in .node-meta), and that record is kept: no public RPC site for ${d} runs on this host. To advertise https://${d}/ for the gateway instead, run: ${cmd}"
+        way="To advertise https://${d}/ for the gateway instead, run: ${cmd}"
+        if [[ "$NETWORK" == "mainnet" && "$RPC_VIA_GATEWAY" != "true" ]]; then
+            way="To serve https://${d}/ from this host instead, run: $(setup_rpc_unadvertise_cmd), then: $(public_rpc_cmd rpc-enable "$d")"
+        fi
+        setup_warn "node-info.yaml advertises ${cur} for your worker gateway (RPC_ADVERTISED_VIA=gateway in .node-meta), and that record is kept: no public RPC site for ${d} runs on this host. ${way}"
     fi
     return 0
 }
@@ -3830,7 +3915,12 @@ step_final_summary() {
     # advertised state or the one command that finishes the job. A node whose public RPC
     # is its worker gateway's gets what node-info.yaml advertises for the gateway instead:
     # no Caddy site, no wss, no rpc-enable.
-    local gw_http=""
+    local gw_http="" own_site=false
+    # A mainnet node that is not a validator kept the gateway's record over its
+    # --rpc-domain (public_rpc_gateway_note): it is shown the way to its own site here.
+    if [[ "$NETWORK" == "mainnet" && "$RPC_VIA_GATEWAY" != "true" && -n "$PUBLIC_RPC_DOMAIN" ]]; then
+        own_site=true
+    fi
     if setup_rpc_via_gateway; then
         gw_http="$(tn_node_info_rpc "$ni" 2>/dev/null)" || gw_http=""
         gw_http="${gw_http%% *}"
@@ -3840,9 +3930,14 @@ step_final_summary() {
             echo "    ${gw_http}"
             print_ok "Advertised in node-info.yaml (worker 0, no WebSocket URL) for your worker gateway (RPC_ADVERTISED_VIA=gateway in .node-meta)."
             print_info "It answers once its A record points at the gateway's static public IP and the gateway runs with --domain for it (OPERATOR.md 4.15)."
-        else
+        elif [[ "$own_site" != "true" ]]; then
             print_warn "node-info.yaml advertises no RPC URL for your worker gateway yet. To advertise its name, run:"
             echo "    $(setup_rpc_advertise_cmd "${PUBLIC_RPC_DOMAIN:-<name>}")"
+        fi
+        if [[ "$own_site" == "true" && "$gw_http" != "https://${PUBLIC_RPC_DOMAIN}/" ]]; then
+            print_info "To serve https://${PUBLIC_RPC_DOMAIN}/ from this host instead, run:"
+            echo "    $(setup_rpc_unadvertise_cmd)"
+            echo "    $(public_rpc_cmd rpc-enable)"
         fi
     elif [[ -n "$PUBLIC_RPC_DOMAIN" ]]; then
         echo ""
