@@ -477,6 +477,8 @@ step_preflight() {
     json_mode || select_network
     # A --json run asked this before the lock (run_json_mode).
     json_mode || setup_keys_network_check
+    # A mainnet validator's RPC is its worker gateway's: known now, before the RPC choice.
+    setup_rpc_gateway_posture
     # After the network is chosen: check_internet probes that network's own RPC, and
     # check_hardware compares the host with that network's tiers.
     check_internet
@@ -1597,13 +1599,16 @@ init_public_rpc_flags() {
         RPC_INBOUND_IP=""
         PUBLIC_IP=""
     fi
-    if [[ -n "$RPC_PRIVATE_NOTE" ]] && json_mode; then
-        public_rpc_no_domain_notice
-    fi
     if [[ -n "$PUBLIC_RPC_DOMAIN" ]]; then
         ENABLE_PUBLIC_RPC="true"
     fi
     derive_public_rpc_urls
+    # A --json run knows here whether it is a mainnet validator's (an interactive run knows
+    # once the network is chosen): the notes below, and the URLs keygen gets, follow from it.
+    setup_rpc_gateway_posture
+    if [[ -n "$RPC_PRIVATE_NOTE" ]] && json_mode; then
+        public_rpc_no_domain_notice
+    fi
     # --json: the flags are final here. Interactive: step_config warns, once the welcome
     # screen has cleared and the prompt may have supplied a domain.
     if json_mode; then
@@ -1881,13 +1886,26 @@ derive_public_rpc_urls() {
 # too), and a mainnet validator's public RPC is served by its worker gateway, never by
 # a Caddy site on the validator. There --rpc-domain <d> and --rpc-http <url> name the
 # gateway: an https URL and no WebSocket URL, so the wss URLs --rpc-domain derives are
-# dropped and a --rpc-ws given is dropped with a warning. Sets RPC_VIA_GATEWAY. Called
-# once the network and the admission mode are final: by step_generate_keys, and by a
-# finalize once it has read them back. Safe to call more than once.
+# dropped and a --rpc-ws given is dropped with a warning. An --rpc-http that is not
+# https:// stops setup. Sets RPC_VIA_GATEWAY. Called as soon as the network and the
+# admission mode are known, before anything uses them: a --json run checks its flags in
+# init_public_rpc_flags (NETWORK is set later, by json_set_network, from the --network
+# read here; --admission may still be in the case it was given in), an interactive one
+# once the network is chosen (step_preflight). step_generate_keys asks again, and so does
+# a finalize once it has read the mode back. Safe to call more than once.
 setup_rpc_gateway_posture() {
-    [[ "$NETWORK" == "mainnet" && "$ADMISSION_MODE" == "closed" ]] || return 0
+    local net="$NETWORK" mode
+    if [[ -z "$net" ]] && json_mode; then
+        net="$JSON_NETWORK_INPUT"
+    fi
+    mode="$(printf '%s' "$ADMISSION_MODE" | tr '[:upper:]' '[:lower:]')"
+    [[ "$net" == "mainnet" && "$mode" == "closed" ]] || return 0
     RPC_VIA_GATEWAY=true
-    if [[ -n "$ADVERTISE_RPC_HTTP" && -n "$ADVERTISE_RPC_WS" && "$ADVERTISE_RPC_WS" != "wss://${PUBLIC_RPC_DOMAIN}/" ]]; then
+    case "$ADVERTISE_RPC_HTTP" in
+        ""|https://*) ;;
+        *) setup_fail "--rpc-http ${ADVERTISE_RPC_HTTP} is refused: a mainnet validator's RPC URL (admission closed) is its worker gateway's, and must be https://. Pass --rpc-http https://<name>/ or --rpc-domain <name>.$(json_mode && printf ' Nothing on this host was changed.')" ;;
+    esac
+    if [[ -n "$ADVERTISE_RPC_WS" && "$ADVERTISE_RPC_WS" != "wss://${PUBLIC_RPC_DOMAIN}/" ]]; then
         setup_warn "--rpc-ws ${ADVERTISE_RPC_WS} is dropped: on a mainnet validator (admission closed) the RPC URL names its worker gateway, which serves HTTPS only, so node-info.yaml advertises no WebSocket URL."
     fi
     ADVERTISE_RPC_WS=""
@@ -2148,7 +2166,8 @@ public_rpc_url_warnings() {
     if [[ "$ADVERTISE_RPC_HTTP" != "https://${d}/" ]]; then
         given="--rpc-http ${ADVERTISE_RPC_HTTP}"
     fi
-    if [[ "$ADVERTISE_RPC_WS" != "wss://${d}/" ]]; then
+    # A mainnet validator's --rpc-ws is dropped (setup_rpc_gateway_posture says so).
+    if [[ "$RPC_VIA_GATEWAY" != "true" && "$ADVERTISE_RPC_WS" != "wss://${d}/" ]]; then
         given="${given:+${given} and }--rpc-ws ${ADVERTISE_RPC_WS}"
     fi
     if [[ -n "$given" ]]; then
@@ -2409,7 +2428,8 @@ setup_rpc_advertise_cmd() {
     printf 'sudo bash %s/install-caddy.sh --phase=rpc-advertise --rpc-domain %s' "$SCRIPT_DIR" "$1"
 }
 
-# setup_rpc_url_host URL -- print the host of URL when URL is exactly https://<host>/.
+# setup_rpc_url_host URL -- print the host of URL when URL is exactly https://<host>/ and
+# <host> a DNS name (validate_rpc_domain: no port, not an IP address).
 setup_rpc_url_host() {
     local h=""
     case "${1:-}" in
@@ -2418,29 +2438,56 @@ setup_rpc_url_host() {
             h="${h%/}"
             ;;
     esac
-    [[ -n "$h" && "$h" != */* ]] || return 1
+    validate_rpc_domain "$h" || return 1
     printf '%s\n' "$h"
+}
+
+# setup_rpc_url_normal URL -- URL as the keytool stores it (url::Url): the scheme and
+# the host in lower case, no default port (443 for https and wss, 80 for http and ws),
+# and / for an empty path. node-info.yaml is read back in that form.
+setup_rpc_url_normal() {
+    local re='^([A-Za-z][A-Za-z0-9+.-]*)://([^/?#]*)(.*)$' scheme auth rest
+    if [[ ! "$1" =~ $re ]]; then
+        printf '%s\n' "$1"
+        return 0
+    fi
+    scheme="${BASH_REMATCH[1]}"
+    auth="${BASH_REMATCH[2]}"
+    rest="${BASH_REMATCH[3]}"
+    scheme="$(printf '%s' "$scheme" | tr '[:upper:]' '[:lower:]')"
+    auth="$(printf '%s' "$auth" | tr '[:upper:]' '[:lower:]')"
+    case "${scheme}:${auth}" in
+        https:*:443|wss:*:443) auth="${auth%:443}" ;;
+        http:*:80|ws:*:80)     auth="${auth%:80}" ;;
+    esac
+    [[ "$rest" == /* ]] || rest="/${rest}"
+    printf '%s\n' "${scheme}://${auth}${rest}"
 }
 
 # A mainnet keygen that records no worker gateway owner leaves none behind: write_node_meta
 # keeps the keys it does not write, so an RPC_ADVERTISED_VIA of earlier keys would stay.
+# The keys exist by then, so a failure is a warning (rc 1), never the end of keygen.
 setup_rpc_owner_clear() {
     local meta="${CONFIG_DIR}/.node-meta"
-    meta_unset RPC_ADVERTISED_VIA "$meta" || setup_fail "Could not remove RPC_ADVERTISED_VIA from ${meta}."
-    return 0
+    meta_unset RPC_ADVERTISED_VIA "$meta" && return 0
+    setup_warn "Could not remove RPC_ADVERTISED_VIA, which earlier keys recorded, from ${meta}. The keys are fine; remove that line once the file can be written."
+    return 1
 }
 
 # setup_rpc_gateway_write URL -- worker 0 of node-info.yaml advertises URL and no
 # WebSocket URL, recorded in .node-meta as the worker gateway's: PUBLIC_RPC_DOMAIN (the
-# host, when URL is https://<host>/), PUBLIC_RPC_URL (no trailing slash, as rpc-advertise
-# writes it), RPC_ADVERTISED_VIA=gateway, and no PUBLIC_WS_URL. keytool set-rpc of the
-# release that made the keys writes it unless worker 0 already reads so; it reads no
-# passphrase, and its output is captured, so its OK line stays off the --json stream.
-# Worker 0 is read back either way. rc 0 recorded (RPC_GATEWAY_URL); 1 not: a warning
-# said why, no owner is recorded, and the keys are fine.
+# host, when URL is https://<host>/ with a DNS name, setup_rpc_url_host), PUBLIC_RPC_URL
+# (no trailing slash, as rpc-advertise writes it), RPC_ADVERTISED_VIA=gateway, and no
+# PUBLIC_WS_URL. Once the keys exist nothing here stops setup. URL is taken in the form
+# the keytool stores (setup_rpc_url_normal). keytool set-rpc of the release that made the
+# keys writes it unless worker 0 already reads so; it reads no passphrase, and its output
+# is captured, so its OK line stays off the --json stream. Worker 0 is read back either
+# way. rc 0 recorded (RPC_GATEWAY_URL); 1 not: a warning said why, no owner is recorded,
+# and the keys are fine.
 setup_rpc_gateway_write() {
-    local url="$1" ni="${DATA_DIR}/node-info.yaml" meta="${CONFIG_DIR}/.node-meta"
-    local cur="" out="" rc=0 first="" host="" name="<name>"
+    local url="" ni="${DATA_DIR}/node-info.yaml" meta="${CONFIG_DIR}/.node-meta"
+    local cur="" out="" rc=0 first="" host="" name="<name>" key=""
+    url="$(setup_rpc_url_normal "$1")"
     host="$(setup_rpc_url_host "$url")" || host=""
     [[ -z "$host" ]] || name="$host"
     cur="$(tn_node_info_rpc "$ni" 2>/dev/null)" || cur=""
@@ -2449,23 +2496,30 @@ setup_rpc_gateway_write() {
         if [[ "$rc" -ne 0 ]]; then
             first="$(printf '%s\n' "$out" | awk 'NF { print; exit }')" || first=""
             setup_warn "keytool set-rpc failed (rc ${rc}${first:+: ${first}}), so node-info.yaml advertises no RPC URL. The keys are fine. Set one with: $(setup_rpc_advertise_cmd "$name")"
-            setup_rpc_owner_clear
+            setup_rpc_owner_clear || true
             return 1
         fi
         cur="$(tn_node_info_rpc "$ni" 2>/dev/null)" || cur="unreadable"
         if [[ "$cur" != "${url} none" ]]; then
             setup_warn "After keytool set-rpc, worker 0 of ${ni} reads '${cur}' instead of '${url} none', so no RPC URL is recorded for your worker gateway. The keys are fine. Set one with: $(setup_rpc_advertise_cmd "$name")"
-            setup_rpc_owner_clear
+            setup_rpc_owner_clear || true
             return 1
         fi
     fi
+    # Key by key, the owner last: a key that cannot be written records no owner.
     if [[ -n "$host" ]]; then
-        write_node_meta "PUBLIC_RPC_DOMAIN=${host}"
+        meta_set PUBLIC_RPC_DOMAIN "$host" "$meta" || key=PUBLIC_RPC_DOMAIN
     else
-        meta_unset PUBLIC_RPC_DOMAIN "$meta" || setup_fail "Could not remove PUBLIC_RPC_DOMAIN from ${meta}."
+        meta_unset PUBLIC_RPC_DOMAIN "$meta" || key=PUBLIC_RPC_DOMAIN
     fi
-    meta_unset PUBLIC_WS_URL "$meta" || setup_fail "Could not remove PUBLIC_WS_URL from ${meta}."
-    write_node_meta "PUBLIC_RPC_URL=${url%/}" "RPC_ADVERTISED_VIA=gateway"
+    [[ -n "$key" ]] || meta_unset PUBLIC_WS_URL "$meta" || key=PUBLIC_WS_URL
+    [[ -n "$key" ]] || meta_set PUBLIC_RPC_URL "${url%/}" "$meta" || key=PUBLIC_RPC_URL
+    [[ -n "$key" ]] || meta_set RPC_ADVERTISED_VIA gateway "$meta" || key=RPC_ADVERTISED_VIA
+    if [[ -n "$key" ]]; then
+        setup_warn "Could not record ${url} for your worker gateway: ${key} in ${meta} could not be updated, so no owner is recorded. node-info.yaml advertises it and the keys are fine. Record it with: $(setup_rpc_advertise_cmd "$name")"
+        setup_rpc_owner_clear || true
+        return 1
+    fi
     RPC_GATEWAY_URL="$url"
     return 0
 }
@@ -2491,7 +2545,7 @@ setup_rpc_advertise_record() {
         if [[ "$RPC_VIA_GATEWAY" == "true" ]]; then
             setup_rpc_gateway_write "$given" || true
         else
-            setup_rpc_owner_clear
+            setup_rpc_owner_clear || true
         fi
         return 0
     fi
@@ -2503,7 +2557,7 @@ setup_rpc_advertise_record() {
     fi
     if [[ -n "$why" ]]; then
         setup_warn "Could not derive the default RPC name from bls_public_key in ${ni} (${why}), so node-info.yaml advertises no RPC URL. The keys are fine. Set one with: $(setup_rpc_advertise_cmd '<name>')"
-        setup_rpc_owner_clear
+        setup_rpc_owner_clear || true
         return 0
     fi
     if setup_rpc_gateway_write "https://${host}/"; then
@@ -2516,14 +2570,19 @@ setup_rpc_advertise_record() {
 # recorded for the worker gateway, and what makes it answer. On stderr and, in --json
 # mode, as log events. Nothing when it recorded none.
 setup_rpc_default_next() {
-    local h="$RPC_DEFAULT_HOST" url="$RPC_GATEWAY_URL" line
+    local h="$RPC_DEFAULT_HOST" url="$RPC_GATEWAY_URL" line auth
     [[ -n "$url" ]] || return 0
     if [[ -z "$h" ]]; then
-        # The operator's own name for the gateway.
+        # The operator's own name for the gateway, or its address: a URL whose host is an
+        # IP address has no name to point anywhere.
         h="$(setup_rpc_url_host "$url")" || h=""
+        auth="${url#*://}"
+        auth="${auth%%[/?]*}"
         set -- "Advertised RPC URL: ${url} (worker 0 in node-info.yaml, no WebSocket URL). It belongs to your worker gateway (RPC_ADVERTISED_VIA=gateway in .node-meta), which serves it over HTTPS. No public RPC site runs on this host."
         if [[ -n "$h" ]]; then
             set -- "$@" "To make it answer, create the A record of ${h} for the static public IP of your worker gateway host, then run your gateway with --domain ${h} (OPERATOR.md 4.15)."
+        elif [[ "$auth" == \[* || "${auth%:*}" =~ ^[0-9.]+$ ]]; then
+            set -- "$@" "To make it answer, run your worker gateway on the host with that IP address (OPERATOR.md 4.15)."
         else
             set -- "$@" "To make it answer, point its name at the static public IP of your worker gateway host and run your gateway for it (OPERATOR.md 4.15)."
         fi

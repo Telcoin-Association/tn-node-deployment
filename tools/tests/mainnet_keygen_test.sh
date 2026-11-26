@@ -46,7 +46,9 @@ check "the switch-off copy sets TN_MAINNET_KEYGEN_ENABLED=0" yes \
 # and write nothing. Any other keytool call records its argv and stdin and writes an
 # encrypted-looking key and node-info.yaml in --datadir, the latter naming the
 # --address it was given and the BLS public key STUB_BLS, with worker 0 advertising the
-# --rpc-http and --rpc-ws it was given, as the real keytool's does.
+# --rpc-http and --rpc-ws it was given, as the real keytool's does. Both keytool calls
+# store a URL as url::Url writes it: the scheme and host in lower case, no default port,
+# and / for an empty path.
 cat > "$T/bin/stub" <<'STUB'
 #!/bin/sh
 if [ "$1" = "--version" ]; then
@@ -65,12 +67,26 @@ if [ "$last" = "--help" ]; then
     done
     exit 0
 fi
+# norm URL -- URL as url::Url stores it.
+norm() {
+    s="$(printf '%s' "${1%%://*}" | tr 'A-Z' 'a-z')"
+    r="${1#*://}"
+    a="${r%%[/?]*}"
+    p="${r#"$a"}"
+    a="$(printf '%s' "$a" | tr 'A-Z' 'a-z')"
+    case "$s:$a" in
+        https:*:443|wss:*:443) a="${a%:443}" ;;
+        http:*:80|ws:*:80) a="${a%:80}" ;;
+    esac
+    case "$p" in /*) ;; *) p="/$p" ;; esac
+    printf '%s' "$s://$a$p"
+}
 # rpc FILE HTTP WS -- FILE with worker 0 (its last entry) advertising HTTP and WS.
 rpc() {
     awk '/^      rpc:/ { exit } { print }' "$1" > "$1.new"
     if [ -n "$2" ]; then
-        printf '      rpc:\n        http: %s\n' "$2" >> "$1.new"
-        [ -z "$3" ] || printf '        ws: %s\n' "$3" >> "$1.new"
+        printf '      rpc:\n        http: %s\n' "$(norm "$2")" >> "$1.new"
+        [ -z "$3" ] || printf '        ws: %s\n' "$(norm "$3")" >> "$1.new"
     else
         printf '      rpc: null\n' >> "$1.new"
     fi
@@ -229,6 +245,12 @@ child "$T/sn" "${MK[@]/$ADDR/0x0000000000000000000000000000000000000000}" --inst
 refused "the zero address" "--address is the zero address: the proof of possession is signed over the node's execution address, which receives its rewards; give that address."
 child "$T/sn" "${MK[@]}" --install-method existing --binary-path "$T/bin/tn-main" --passphrase-method stdin
 refused "the passphrase in a root-only file" "--passphrase-method stdin is not taken on mainnet: the passphrase is kept only as an encrypted credential there."
+# A mainnet validator's RPC URL is its worker gateway's, which serves HTTPS only.
+HTTP_REFUSED="is refused: a mainnet validator's RPC URL (admission closed) is its worker gateway's, and must be https://. Pass --rpc-http https://<name>/ or --rpc-domain <name>."
+child "$T/sn" "${MK[@]}" --install-method existing --binary-path "$T/bin/tn-main" --admission closed --rpc-http http://gw8.example.org:8655/
+refused "validator --rpc-http http://" "--rpc-http http://gw8.example.org:8655/ ${HTTP_REFUSED} Nothing on this host was changed."
+child "$T/sn" "${MK[@]}" --install-method existing --binary-path "$T/bin/tn-main" --admission Closed --rpc-http http://gw8.example.org/
+refused "validator (--admission Closed) --rpc-http http://" "--rpc-http http://gw8.example.org/ ${HTTP_REFUSED} Nothing on this host was changed."
 PASS_SAVED="$PASS"
 PASS="abcdefghijklmno"
 child "$T/sn" "${MK[@]}" --install-method existing --binary-path "$T/bin/tn-main"
@@ -274,8 +296,10 @@ create_directories() {
     if [[ "$(id -u)" == 0 ]]; then chown nobody "$DATA_DIR"; fi
 }
 tn_install_logrotate() { return 0; }
+# A key named in META_FAIL cannot be written or removed (rc 2, as a failed rewrite).
 write_node_meta() { printf '%s\n' "$@" >> "$REC/meta.log"; }
-meta_unset() { printf 'unset %s\n' "$1" >> "$REC/meta.log"; }
+meta_set() { [[ "$1" != "${META_FAIL:-}" ]] || return 2; printf '%s=%s\n' "$1" "$2" >> "$REC/meta.log"; }
+meta_unset() { [[ "$1" != "${META_FAIL:-}" ]] || return 2; printf 'unset %s\n' "$1" >> "$REC/meta.log"; }
 ensure_chain_configs_available() { : > "$REC/chain-configs"; return 1; }
 tn_as_service_user() { "$@"; }
 tn_store_credential() { printf '%s %s\n' "$1" "$2" > "$REC/credential"; }
@@ -405,6 +429,27 @@ check_has "set-rpc writes nothing: the read-back warns" \
     "{\"event\":\"log\",\"msg\":\"WARNING: After keytool set-rpc, worker 0 of $T/data/node-info.yaml reads 'none none' instead of 'https://${H}/ none', so no RPC URL is recorded for your worker gateway. The keys are fine. Set one with: ${ADV_CMD} ${H}\"}" \
     "$(cat "$T/out")"
 no_owner "set-rpc writes nothing"
+# So is a .node-meta key that cannot be written or removed once the keys exist.
+META_FAIL=PUBLIC_WS_URL
+check_rc "PUBLIC_WS_URL cannot be removed: rc 0" 0 "$(keygen "${KGM[@]}")"
+META_FAIL=""
+check_has "PUBLIC_WS_URL cannot be removed: warned" \
+    "{\"event\":\"log\",\"msg\":\"WARNING: Could not record https://${H}/ for your worker gateway: PUBLIC_WS_URL in $CONFIG_DIR/.node-meta could not be updated, so no owner is recorded. node-info.yaml advertises it and the keys are fine. Record it with: ${ADV_CMD} ${H}\"}" \
+    "$(cat "$T/out")"
+no_owner "PUBLIC_WS_URL cannot be removed"
+STALE_OWNER="{\"event\":\"log\",\"msg\":\"WARNING: Could not remove RPC_ADVERTISED_VIA, which earlier keys recorded, from $CONFIG_DIR/.node-meta. The keys are fine; remove that line once the file can be written.\"}"
+META_FAIL=RPC_ADVERTISED_VIA
+check_rc "RPC_ADVERTISED_VIA cannot be written: rc 0" 0 "$(keygen "${KGM[@]}")"
+META_FAIL=""
+check "RPC_ADVERTISED_VIA cannot be written: done ok, no owner, no advertised_rpc" "yes no no" \
+    "$(has "$(tail -n 1 "$T/out")" "\"event\":\"done\",\"ok\":true,\"phase\":\"keygen\"") $(has "$(cat "$REC/meta.log")" "RPC_ADVERTISED_VIA=gateway") $(has "$(tail -n 1 "$T/out")" "advertised_rpc")"
+check "RPC_ADVERTISED_VIA cannot be written: both warnings" "yes yes" \
+    "$(has "$(cat "$T/out")" "WARNING: Could not record https://${H}/ for your worker gateway: RPC_ADVERTISED_VIA in $CONFIG_DIR/.node-meta could not be updated, so no owner is recorded.") $(has "$(cat "$T/out")" "$STALE_OWNER")"
+META_FAIL=RPC_ADVERTISED_VIA
+check_rc "a non-validator's old owner cannot be removed: rc 0" 0 "$(keygen "${KGM[@]}" --admission open --rpc-domain node7.example.org)"
+META_FAIL=""
+check "a non-validator's old owner cannot be removed: done ok, warned" "yes yes" \
+    "$(has "$(tail -n 1 "$T/out")" "\"event\":\"done\",\"ok\":true,\"phase\":\"keygen\"") $(has "$(cat "$T/out")" "$STALE_OWNER")"
 # An Open node with --rpc-domain keeps the behaviour of before: keygen advertises
 # https and wss for the Caddy site rpc-enable serves later, and records no owner.
 check_rc "--rpc-domain, admission open: rc 0" 0 "$(keygen "${KGM[@]}" --admission open --rpc-domain node7.example.org)"
@@ -459,6 +504,39 @@ owner "validator --rpc-ws" "https://${GW}/" "PUBLIC_RPC_DOMAIN=${GW}"
 check_rc "validator --rpc-http with a path: rc 0" 0 "$(keygen "${VAL[@]}" --rpc-http https://gw8.example.org/rpc/)"
 owner "validator --rpc-http with a path" "https://gw8.example.org/rpc/" "unset PUBLIC_RPC_DOMAIN"
 check_lacks "validator --rpc-http with a path: no PUBLIC_RPC_DOMAIN" "PUBLIC_RPC_DOMAIN=" "$(cat "$REC/meta.log")"
+# The keytool stores the URL as url::Url writes it. The read-back and the record take
+# that form, so every spelling of one URL records the owner with it.
+for u in https://GW8.Example.org https://gw8.example.org:443 https://gw8.example.org; do
+    check_rc "validator --rpc-http ${u}: rc 0" 0 "$(keygen "${VAL[@]}" --rpc-http "$u")"
+    owner "validator --rpc-http ${u}" "https://gw8.example.org/" "PUBLIC_RPC_DOMAIN=gw8.example.org"
+    check "validator --rpc-http ${u}: no set-rpc over what keygen wrote" no "$([[ -e "$REC/setrpc.argv" ]] && echo yes || echo no)"
+done
+# Only a DNS name with no port is PUBLIC_RPC_DOMAIN. A host:port or an IP address is
+# recorded by its URL alone, and no A record is advised for it.
+check_rc "validator --rpc-http host:port: rc 0" 0 "$(keygen "${VAL[@]}" --rpc-http https://gw8.example.org:8443/)"
+owner "validator --rpc-http host:port" "https://gw8.example.org:8443/" "unset PUBLIC_RPC_DOMAIN"
+check "validator --rpc-http host:port: no PUBLIC_RPC_DOMAIN, no A record advised" "no no" \
+    "$(has "$(cat "$REC/meta.log")" "PUBLIC_RPC_DOMAIN=") $(has "$(cat "$T/out")" "A record")"
+check_has "validator --rpc-http host:port: its name points at the gateway" \
+    "{\"event\":\"log\",\"msg\":\"To make it answer, point its name at the static public IP of your worker gateway host and run your gateway for it (OPERATOR.md 4.15).\"}" \
+    "$(cat "$T/out")"
+check_rc "validator --rpc-http IP: rc 0" 0 "$(keygen "${VAL[@]}" --rpc-http https://203.0.113.9/)"
+owner "validator --rpc-http IP" "https://203.0.113.9/" "unset PUBLIC_RPC_DOMAIN"
+check "validator --rpc-http IP: no PUBLIC_RPC_DOMAIN, no A record, no name advised" "no no no" \
+    "$(has "$(cat "$REC/meta.log")" "PUBLIC_RPC_DOMAIN=") $(has "$(cat "$T/out")" "A record") $(has "$(cat "$T/out")" "point its name")"
+check_has "validator --rpc-http IP: the gateway runs on that address" \
+    "{\"event\":\"log\",\"msg\":\"To make it answer, run your worker gateway on the host with that IP address (OPERATOR.md 4.15).\"}" \
+    "$(cat "$T/out")"
+# Where the network or the admission mode is known later (an interactive run, a finalize),
+# the same check refuses an http:// URL, before any key exists.
+rc=0
+out="$( (NETWORK=mainnet; ADMISSION_MODE=closed; ADVERTISE_RPC_HTTP=http://gw8.example.org/; JSON_MODE=false; setup_rpc_gateway_posture) 2>&1 )" || rc=$?
+check "posture, http:// once the network is known: refused" "1 yes" "$rc $(has "$out" "--rpc-http http://gw8.example.org/ ${HTTP_REFUSED}")"
+check_lacks "posture, interactive: no claim that nothing on the host changed" "Nothing on this host was changed." "$out"
+# Outside the posture an http:// --rpc-http is taken as before.
+check_rc "open node --rpc-http http://: rc 0" 0 "$(keygen "${KGM[@]}" --admission open --rpc-http http://gw8.example.org:8655/)"
+check "open node --rpc-http http://: advertised as given, no owner" "http://gw8.example.org:8655/ none no" \
+    "$(tn_node_info_rpc "$T/data/node-info.yaml") $(has "$(cat "$REC/meta.log")" "RPC_ADVERTISED_VIA=gateway")"
 # A keytool from before --rpc-http: keygen goes ahead without the URL, and set-rpc writes
 # the operator's name afterwards, never the default over it.
 export STUB_OLD_KEYTOOL=1
