@@ -1764,7 +1764,7 @@ network_config_admission_mode() {
 # node's network-config, else unset, which the node runs as Open. Silent off
 # mainnet, for any other stake status and when the status cannot be read.
 check_admission_mainnet() {
-    local st meta mode="" src="" rc=0 nc fix
+    local st meta mode="" src="" rc=0 dd nc fix
     have_fns tn_detect_network node_stake_status || return 0
     [[ "$(tn_detect_network 2>/dev/null || true)" == "mainnet" ]] || return 0
     st="$(stake_status_for_rule)"
@@ -1786,8 +1786,13 @@ check_admission_mainnet() {
     if [[ -n "$mode" ]]; then
         src=".node-meta"
     else
-        nc="$(detect_data_dir 2>/dev/null)/network-config"
-        if [[ -e "$nc" && ! -r "$nc" ]]; then
+        if ! dd="$(detect_data_dir 2>/dev/null)"; then
+            print_info "Admission mode: not checked (the node's data dir is not known; the disk section says why)"
+            return 0
+        fi
+        nc="${dd}/network-config"
+        # Without root a data dir it cannot search hides network-config.
+        if [[ -e "$nc" && ! -r "$nc" ]] || [[ ! -e "$nc" && "$(id -u 2>/dev/null)" != "0" && ! -x "$dd" ]]; then
             print_info "Admission mode: not checked (${nc} is not readable; run with sudo)"
             return 0
         fi
@@ -2301,7 +2306,7 @@ check_health_score() {
 # the flag is the worker gateway's readiness port, which the node must keep;
 # whether it is bound for the gateway is check_gateway_upstream's to say.
 check_healthcheck_on_mainnet() {
-    local launch v="" flag="" hc="" up=""
+    local launch v="" flag="" hc="" up="" urc=0
     if ! have_fns tn_detect_network tn_launch_flag_get; then
         CN_SKIPPED_CHECKS="${CN_SKIPPED_CHECKS:-} check_healthcheck_on_mainnet"
         return 0
@@ -2312,7 +2317,13 @@ check_healthcheck_on_mainnet() {
         flag="yes"
     fi
     v="$(meta_get ENABLE_HEALTHCHECK_MONITOR 2>/dev/null || true)"
-    up="$(meta_get GATEWAY_UPSTREAM 2>/dev/null || true)"
+    up="$(meta_get GATEWAY_UPSTREAM 2>/dev/null)" || urc=$?
+    if [[ $urc -eq 2 ]]; then
+        # check_gateway_upstream counts the duplicate; whether a gateway reads
+        # --healthcheck is unknown until one line is left.
+        print_warn "GATEWAY_UPSTREAM is set more than once in .node-meta, so the testnet health monitor was not checked; remove the extra lines"
+        return 0
+    fi
     if [[ -n "$up" ]]; then
         if [[ "$v" == "true" ]]; then
             print_error "The testnet health monitor is on for this mainnet node (ENABLE_HEALTHCHECK_MONITOR=true in .node-meta); remove that line. Keep --healthcheck on the node line: the worker gateway at ${up} reads it."
@@ -2464,12 +2475,13 @@ check_gateway() {
 #           --resolve <domain>:443:127.0.0.1) must answer 200 over a verified
 #           certificate, else an issue; a warning when that certificate expires
 #           within 14 days (openssl, when the host has it)
-#   ufw     active, with allow rules for 80/tcp and 443/tcp, which Caddy needs
-#           for https://<domain>/ and its certificate; reading ufw needs root
+#   ufw     active, allowing 80/tcp and 443/tcp from anywhere, which Caddy
+#           needs for https://<domain>/ and its certificate; reading ufw needs
+#           root
 # A cloud firewall cannot be seen from the host; one information line says so.
 check_gateway_edge() {
     local dom json="" tool="${SCRIPT_DIR}/install-caddy.sh" re resolved="" pub=""
-    local url code crc=0 got fix cert="" end="" missing=""
+    local url code crc=0 got fix cert="" end="" missing="" ufw_out p
     [[ "${GW_ST_INSTALLED:-}" == "true" && "${GW_ST_FRONT:-}" == "caddy" ]] || return 0
     dom="${GW_ST_DOMAIN:-}"
     echo ""
@@ -2567,7 +2579,7 @@ check_gateway_edge() {
 
     if [[ "$(id -u 2>/dev/null)" != "0" ]]; then
         print_info "Gateway firewall (ufw): not checked (reading ufw needs sudo)"
-    elif ! have_fns ufw_installed ufw_active ufw_has_allow; then
+    elif ! have_fns ufw_installed ufw_active; then
         print_info "Gateway firewall (ufw): not checked (lib/common.sh ${COMMON_VERSION:-unknown} is older than this check-node.sh; run update-scripts.sh)"
     elif ! ufw_installed; then
         print_error "ufw is not installed, so this host has no firewall of its own; install it (sudo apt-get install ufw), then run: sudo bash firewall-setup.sh --enable"
@@ -2576,12 +2588,17 @@ check_gateway_edge() {
         print_error "ufw is not active, so this host has no firewall rules in force; run: sudo bash firewall-setup.sh --enable (it keeps 80/tcp and 443/tcp open for Caddy)"
         (( ++HEALTH_ISSUES ))
     else
-        ufw_has_allow 80 tcp || missing="80/tcp"
-        ufw_has_allow 443 tcp || missing="${missing:+${missing} and }443/tcp"
+        # From Anywhere (the IPv4 rule): a rule for some sources only keeps the
+        # public and the certificate authority out.
+        ufw_out="$(ufw status 2>/dev/null)" || ufw_out=""
+        for p in 80 443; do
+            grep -qE "^${p}/tcp[[:space:]]+ALLOW([[:space:]]+IN)?[[:space:]]+Anywhere([[:space:]]|\$)" <<< "$ufw_out" \
+                || missing="${missing:+${missing} and }${p}/tcp"
+        done
         if [[ -z "$missing" ]]; then
             print_ok "ufw is active and allows 80/tcp and 443/tcp for Caddy"
         else
-            print_error "ufw has no allow rule for ${missing}; Caddy needs TCP 80 and 443 open from anywhere to serve https://${dom:-<gateway name>}/ and renew its certificate; run: sudo bash firewall-setup.sh --enable"
+            print_error "ufw does not allow ${missing} from anywhere; Caddy needs TCP 80 and 443 open from anywhere to serve https://${dom:-<gateway name>}/ and renew its certificate; run: sudo bash firewall-setup.sh --enable"
             (( ++HEALTH_ISSUES ))
         fi
     fi

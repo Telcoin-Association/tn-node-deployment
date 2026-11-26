@@ -219,9 +219,20 @@ check "ufw inactive: names firewall-setup.sh --enable" yes \
     "$(has '[ERROR] ufw is not active, so this host has no firewall rules in force; run: sudo bash firewall-setup.sh --enable' "$OUT")"
 fresh; UFW_OUT="${UFW_WEB//443\/tcp/8443\/tcp}"; runc
 check_has "no 443/tcp rule: one issue" "issues=1" "$OUT"
-check "no 443/tcp rule: names the port" yes "$(has '[ERROR] ufw has no allow rule for 443/tcp; Caddy needs TCP 80 and 443 open' "$OUT")"
+check "no 443/tcp rule: names the port" yes \
+    "$(has '[ERROR] ufw does not allow 443/tcp from anywhere; Caddy needs TCP 80 and 443 open from anywhere to serve https://gw.example.org/ and renew its certificate; run: sudo bash firewall-setup.sh --enable' "$OUT")"
 fresh; UFW_OUT="Status: active\n\nTo   Action   From\n22/tcp   ALLOW   Anywhere\n"; runc
-check "no web rules: names both ports" yes "$(has 'ufw has no allow rule for 80/tcp and 443/tcp' "$OUT")"
+check "no web rules: names both ports" yes "$(has 'ufw does not allow 80/tcp and 443/tcp from anywhere' "$OUT")"
+# A rule for some sources only keeps the public and the certificate authority out.
+fresh; UFW_OUT="${UFW_WEB//443\/tcp                    ALLOW       Anywhere/443/tcp                    ALLOW       10.0.0.0/8}"; runc
+check_has "443/tcp from 10.0.0.0/8 only: one issue" "issues=1" "$OUT"
+check "443/tcp from 10.0.0.0/8 only: names the port" yes "$(has '[ERROR] ufw does not allow 443/tcp from anywhere;' "$OUT")"
+check_lacks "443/tcp from 10.0.0.0/8 only: not ok" "[OK]  ufw is active" "$OUT"
+fresh; UFW_OUT="Status: active\n\nTo   Action   From\n80/tcp   ALLOW   203.0.113.0/24\n443/tcp   ALLOW   Anywhere   # caddy\n80/tcp (v6)   ALLOW   Anywhere (v6)\n"; runc
+check "80/tcp from one range, open on IPv6 only: names 80/tcp alone" yes \
+    "$(has '[ERROR] ufw does not allow 80/tcp from anywhere;' "$OUT")"
+fresh; UFW_OUT="Status: active\n\nTo   Action   From\n80/tcp   ALLOW   Anywhere   # caddy\n443/tcp   ALLOW   Anywhere\n"; runc
+check_has "rules from anywhere, one with a comment: no issue" "issues=0" "$OUT"
 fresh; FAKE_UID=1000; runc
 check_has "not root: no false issue" "issues=0" "$OUT"
 check "not root: ufw not checked, said" yes "$(has 'Gateway firewall (ufw): not checked (reading ufw needs sudo)' "$OUT")"

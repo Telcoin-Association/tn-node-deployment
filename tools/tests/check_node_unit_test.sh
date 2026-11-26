@@ -108,6 +108,16 @@ runc check_healthcheck_on_mainnet
 check_has "mainnet behind a gateway without --healthcheck: no issue here" "issues=0" "$OUT"
 check_has "mainnet behind a gateway without --healthcheck: no monitor" "yes" \
     "$(printf '%s' "$OUT" | grep -qF 'No testnet health monitor on this mainnet node' && echo yes)"
+# GATEWAY_UPSTREAM twice: which gateway, if any, reads --healthcheck is unknown.
+printf 'NETWORK=mainnet\nINSTALL_METHOD=source\nGATEWAY_UPSTREAM=10.0.0.5\nGATEWAY_UPSTREAM=10.0.0.6\n' > "$T/fx/etc/telcoin/.node-meta"
+_tn_start_script_text source /opt/telcoin/telcoin-network "$ARGS --healthcheck 0.0.0.0:43174" > "$SCRIPT"
+runc check_healthcheck_on_mainnet
+check_has "GATEWAY_UPSTREAM twice: no issue here (the gateway check counts it)" "issues=0" "$OUT"
+check_has "GATEWAY_UPSTREAM twice: names the duplicate" "yes" \
+    "$(printf '%s' "$OUT" | grep -qF 'GATEWAY_UPSTREAM is set more than once in .node-meta, so the testnet health monitor was not checked; remove the extra lines' && echo yes)"
+check_lacks "GATEWAY_UPSTREAM twice: not told to remove --healthcheck" "remove it" "$OUT"
+check_lacks "GATEWAY_UPSTREAM twice: no monitor claim" "health monitor is on" "$OUT"
+current
 
 # ---- LIB-B: resolve_network picks the network's own RPC, never another's -------------
 # resolve_network and the helpers it calls, cut from check-node.sh, over the
@@ -321,6 +331,24 @@ admeta NETWORK=mainnet ADMISSION_MODE=open ADMISSION_MODE=closed
 adm 0 "3 12 0 0"
 check_has "ADMISSION_MODE twice: not judged" \
     "  [WARN] ADMISSION_MODE is set more than once in .node-meta, so the admission mode was not checked; remove the extra lines" "$OUT"
+# The data dir unknown or unreadable: network-config cannot be read, so the
+# mode is unknown, not unset.
+admeta NETWORK=mainnet "DATA_DIR=$T/fx/elsewhere"
+adm 0 "3 12 0 0"
+check_has "DATA_DIR twice: not checked" "  ->  Admission mode: not checked (the node's data dir is not known; the disk section says why)" "$OUT"
+check_lacks "DATA_DIR twice: no claim that it runs Open" "runs Open" "$OUT"
+admeta NETWORK=mainnet
+printf '%s\n' 'admission:' '  mode: Closed' > "$NC"
+if [ "$(id -u)" = 0 ]; then
+    skip "data dir not readable: not checked" "root reads every directory"
+else
+    chmod 0 "$ADD"
+    adm 0 "3 12 0 0"
+    chmod 0755 "$ADD"
+    check_has "data dir not readable: not checked" "  ->  Admission mode: not checked (${NC} is not readable; run with sudo)" "$OUT"
+    check_lacks "data dir not readable: no claim that it runs Open" "runs Open" "$OUT"
+fi
+rm -f "$NC"
 check "the report runs the rule right after the epoch section" "report_epoch_committee check_admission_mainnet" \
     "$(grep -A1 -x 'report_epoch_committee' "$CN" | tr '\n' ' ' | sed 's/ $//')"
 check_lacks "the admission rule never counts a health issue" "HEALTH_ISSUES" "$(sed -n '/^check_admission_mainnet() {/,/^}/p' "$CN")"
