@@ -252,4 +252,76 @@ check "scripts, real date: expires 2999-12-31" "yes" \
 TODAY=""
 check "the report runs the scripts block" 1 "$(grep -c '^report_scripts_release$' "$CN")"
 check_lacks "the scripts block warns and never counts a health issue" "HEALTH_ISSUES" "$(sed -n '/^report_scripts_release() {/,/^}/p' "$CN")"
+
+# ---- ADM: a staked mainnet validator runs Closed admission (check_admission_mainnet) ----
+# The rule and its helpers, cut from check-node.sh, over the fixture .node-meta
+# and network-config. The stake status is §3's cached read for the node's own
+# address; no RPC answers, so nothing else can be read.
+{
+    for f in lower stake_label stake_status_for_rule network_config_admission_mode check_admission_mainnet; do
+        sed -n "/^${f}() {/,/^}/p" "$CN"
+    done
+} > "$T/adm.sh"
+# shellcheck source=/dev/null
+. "$T/adm.sh"
+ADD="$T/fx/var/lib/telcoin"
+NC="$ADD/network-config"
+mkdir -p "$ADD"
+A1=0x00000000000000000000000000000000000000a1
+# shellcheck disable=SC2034  # read by stake_status_for_rule
+EXEC_SRC=node-info.yaml EXEC_ADDR="$A1" VALIDATOR_ADDRESS="$A1" NETWORK_OK=false LOCAL_RPC_MODE=DOWN
+admeta() { printf '%s\n' "DATA_DIR=$ADD" "$@" > "$NWMETA"; }
+adm() {  # adm RC LINE -- the cached stake read, then the rule: OUT without colour escapes, then issues=N
+    # shellcheck disable=SC2034  # read by stake_status_for_rule
+    ONCHAIN_STAKE_RC="$1" ONCHAIN_STAKE_LINE="$2"
+    HEALTH_ISSUES=0
+    OUT="$(check_admission_mainnet 2>&1; printf '\nissues=%s' "$HEALTH_ISSUES")"
+    OUT="$(printf '%s\n' "$OUT" | sed "s/${ESC}\[[0-9;]*m//g")"
+}
+silent() { sed '/^$/d' <<< "$OUT"; }
+FIX="Run: sudo bash edit-config.sh --set admission=closed"
+HUBS=", then sudo bash edit-config.sh --set trusted_nodes=<hubs file>"
+
+admeta NETWORK=mainnet ADMISSION_MODE=closed
+adm 0 "3 12 0 0"
+check_has "active, closed in .node-meta: ok" "  [OK]  Admission mode closed (from .node-meta), as mainnet validators run" "$OUT"
+check_has "active, closed: no issue" "issues=0" "$OUT"
+admeta NETWORK=mainnet ADMISSION_MODE=open
+adm 0 "3 12 0 0"
+check_has "active, open: a warning naming the setter and the hubs" \
+    "  [WARN] This node is Active on mainnet, but its admission mode is open (from .node-meta); mainnet validators run Closed admission with their trusted hubs. ${FIX}${HUBS}" "$OUT"
+check_has "active, open: never an issue" "issues=0" "$OUT"
+admeta NETWORK=mainnet ADMISSION_MODE=grace TRUSTED_NODES_FILE=/etc/telcoin/trusted-nodes.yaml
+adm 0 "4 12 0 4294967295"
+check_has "pending exit, grace with hubs recorded: only the admission setter" \
+    "  [WARN] This node is Pending Exit on mainnet, but its admission mode is grace (from .node-meta); mainnet validators run Closed admission with their trusted hubs. ${FIX}" "$OUT"
+admeta NETWORK=mainnet
+printf '%s\n' 'hostname: "v1"' 'peers:' '  mode: Closed' 'admission:' '  snapshot_max_age_secs: 300' '  mode: Grace   # by hand' 'trusted_nodes: {}' > "$NC"
+adm 0 "1 0 0 0"
+check_has "staked, no ADMISSION_MODE: network-config's admission.mode" \
+    "  [WARN] This node is Staked on mainnet, but its admission mode is grace (from network-config); mainnet validators run Closed admission with their trusted hubs. ${FIX}${HUBS}" "$OUT"
+printf '%s\n' 'hostname: "v1"' 'admission:' '  mode: "Closed"' > "$NC"
+adm 0 "2 13 0 0"
+check_has "pending activation, network-config Closed (quoted): ok" "  [OK]  Admission mode closed (from network-config), as mainnet validators run" "$OUT"
+rm -f "$NC"
+adm 0 "3 12 0 0"
+check_has "active, no mode anywhere: runs Open" \
+    "  [WARN] This node is Active on mainnet, but no admission mode is set, so it runs Open; mainnet validators run Closed admission with their trusted hubs. ${FIX}${HUBS}" "$OUT"
+check_has "active, no mode: never an issue" "issues=0" "$OUT"
+adm 0 "5 12 0 20"
+check "exited: silent" "issues=0" "$(silent)"
+adm 0 "none"
+check "no validator record: silent" "issues=0" "$(silent)"
+adm 2 "unknown transport timeout"
+check "stake status unreadable: silent" "issues=0" "$(silent)"
+admeta NETWORK=testnet ADMISSION_MODE=open
+adm 0 "3 12 0 0"
+check "testnet: silent" "issues=0" "$(silent)"
+admeta NETWORK=mainnet ADMISSION_MODE=open ADMISSION_MODE=closed
+adm 0 "3 12 0 0"
+check_has "ADMISSION_MODE twice: not judged" \
+    "  [WARN] ADMISSION_MODE is set more than once in .node-meta, so the admission mode was not checked; remove the extra lines" "$OUT"
+check "the report runs the rule right after the epoch section" "report_epoch_committee check_admission_mainnet" \
+    "$(grep -A1 -x 'report_epoch_committee' "$CN" | tr '\n' ' ' | sed 's/ $//')"
+check_lacks "the admission rule never counts a health issue" "HEALTH_ISSUES" "$(sed -n '/^check_admission_mainnet() {/,/^}/p' "$CN")"
 finish

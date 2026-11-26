@@ -1736,6 +1736,81 @@ stake_status_for_rule() {
     echo ""
 }
 
+# network_config_admission_mode <file> -- admission.mode in the node's
+# network-config (Open, Grace or Closed, as written), quotes and a trailing
+# comment removed; nothing when the file has no such entry or cannot be read.
+network_config_admission_mode() {
+    awk -v q="'" '
+        /^admission:([ \t]|$)/ { inb = 1; next }
+        inb && /^[^ \t#]/ { inb = 0 }
+        inb && /^[ \t]+mode:/ {
+            v = $0
+            sub(/^[ \t]+mode:[ \t]*/, "", v)
+            sub(/[ \t]+#.*$/, "", v)
+            gsub(/"/, "", v)
+            gsub(q, "", v)
+            sub(/[ \t\r]+$/, "", v)
+            print v
+            exit
+        }' "$1" 2>/dev/null
+}
+
+# check_admission_mainnet -- mainnet validators run Closed admission: they admit
+# only the committees, their trusted hubs and the bootstrap peers. A warning,
+# never an issue, when the node's own stake status (stake_status_for_rule) is
+# Staked, Pending Activation, Active or Pending Exit and its admission mode is
+# not closed. The mode is ADMISSION_MODE in .node-meta (setup-node.sh
+# --admission, edit-config.sh --set admission), else admission.mode in the
+# node's network-config, else unset, which the node runs as Open. Silent off
+# mainnet, for any other stake status and when the status cannot be read.
+check_admission_mainnet() {
+    local st meta mode="" src="" rc=0 nc fix
+    have_fns tn_detect_network node_stake_status || return 0
+    [[ "$(tn_detect_network 2>/dev/null || true)" == "mainnet" ]] || return 0
+    st="$(stake_status_for_rule)"
+    case "$st" in
+        1|2|3|4) ;;
+        *) return 0 ;;
+    esac
+    print_step "Checking admission (mainnet validator)..."
+    meta="$(node_meta_path 2>/dev/null || true)"
+    if [[ -n "$meta" && -f "$meta" && ! -r "$meta" ]]; then
+        print_info "Admission mode: not checked (.node-meta is not readable; run with sudo)"
+        return 0
+    fi
+    mode="$(meta_get ADMISSION_MODE 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        print_warn "ADMISSION_MODE is set more than once in .node-meta, so the admission mode was not checked; remove the extra lines"
+        return 0
+    fi
+    if [[ -n "$mode" ]]; then
+        src=".node-meta"
+    else
+        nc="$(detect_data_dir 2>/dev/null)/network-config"
+        if [[ -e "$nc" && ! -r "$nc" ]]; then
+            print_info "Admission mode: not checked (${nc} is not readable; run with sudo)"
+            return 0
+        fi
+        mode="$(network_config_admission_mode "$nc")"
+        [[ -z "$mode" ]] || src="network-config"
+    fi
+    mode="$(lower "$mode")"
+    if [[ "$mode" == "closed" ]]; then
+        print_ok "Admission mode closed (from ${src}), as mainnet validators run"
+        return 0
+    fi
+    fix="sudo bash edit-config.sh --set admission=closed"
+    if [[ -z "$(meta_get TRUSTED_NODES_FILE 2>/dev/null || true)" ]]; then
+        fix="${fix}, then sudo bash edit-config.sh --set trusted_nodes=<hubs file>"
+    fi
+    if [[ -n "$mode" ]]; then
+        print_warn "This node is $(stake_label "$st") on mainnet, but its admission mode is ${mode} (from ${src}); mainnet validators run Closed admission with their trusted hubs. Run: ${fix}"
+    else
+        print_warn "This node is $(stake_label "$st") on mainnet, but no admission mode is set, so it runs Open; mainnet validators run Closed admission with their trusted hubs. Run: ${fix}"
+    fi
+    return 0
+}
+
 # report_participation <authors> <reputation pairs> -- §6. Is this node's
 # authority among the authors of the latest commit, and what does absence mean?
 #   in the committee (on-chain, §5.5)  -> error, a health issue
@@ -3423,8 +3498,11 @@ probe_onchain_validator_status
 
 # =============================================================================
 # 5.5 EPOCH AND COMMITTEE (epoch timing, committee seats, workers)
+# The admission rule for a staked mainnet validator follows: the stake status is
+# known from here on.
 # =============================================================================
 report_epoch_committee
+check_admission_mainnet
 
 # =============================================================================
 # 6. AUTHORITY-SPECIFIC CHECKS (author presence + own reputation)
