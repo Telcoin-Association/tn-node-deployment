@@ -4,8 +4,9 @@ locals {
     # range's own: setup-gateway.sh takes only a private --upstream.
     private_cidr = "^(10\\.[0-9.]+/([89]|[12][0-9]|3[0-2])|172\\.(1[6-9]|2[0-9]|3[01])\\.[0-9.]+/(1[2-9]|2[0-9]|3[0-2])|192\\.168\\.[0-9.]+/(1[6-9]|2[0-9]|3[0-2])|100\\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\\.[0-9.]+/(1[0-9]|2[0-9]|3[0-2]))$"
     ipv4_cidr    = "^[0-9]{1,3}(\\.[0-9]{1,3}){3}/[0-9]{1,2}$"
-    # Lowercase, no scheme, path or trailing dot: the same rule as host-plan.
-    host_name = "^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$"
+    # Lowercase, no scheme, path or trailing dot, a last label of letters: the
+    # same rule as host-plan.
+    host_name = "^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$"
   }
 
   # The storage minimums of the README's hardware table. The table is in GB
@@ -99,7 +100,7 @@ variable "rpc_domain" {
 
   validation {
     condition     = var.rpc_domain == "" || (length(var.rpc_domain) <= 253 && can(regex(local.re.host_name, var.rpc_domain)))
-    error_message = "rpc_domain must be empty or a lowercase host name such as rpc.example.org: no scheme, no path, no trailing dot, no IP address."
+    error_message = "rpc_domain must be empty or a lowercase host name of at most 253 characters, such as rpc.example.org, whose last label is 2 to 63 letters: no scheme, no path, no trailing dot, no IP address."
   }
 
   validation {
@@ -354,6 +355,18 @@ variable "node_release_tag" {
   }
 }
 
+variable "min_scripts_release" {
+  description = "The oldest node-scripts release whose setup-gateway.sh, key generation and checks this deployment relies on, such as scripts-v2.3.0. First boot refuses a host whose installed scripts are older."
+  type        = string
+  default     = "scripts-v2.3.0"
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^scripts-v[0-9]+\\.[0-9]+\\.[0-9]+$", var.min_scripts_release))
+    error_message = "min_scripts_release must be a node-scripts release tag, such as scripts-v2.3.0."
+  }
+}
+
 variable "trusted_nodes_file" {
   description = "A local path to the trusted hubs map (public data), written to the validator at first boot as /etc/telcoin-first-boot/trusted-nodes.yaml; it travels in the VM's custom data. Empty means you copy it to the host yourself; next_steps names the path."
   type        = string
@@ -375,8 +388,8 @@ variable "redirect_queries_url" {
   nullable    = false
 
   validation {
-    condition     = var.redirect_queries_url == "" || can(regex("^https?://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._/-]*)?$", var.redirect_queries_url))
-    error_message = "redirect_queries_url must be empty or an http(s):// URL of letters, digits and . _ / - only."
+    condition     = var.redirect_queries_url == "" || can(regex("^https?://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?(/[A-Za-z0-9._/:@,-]*)?$", var.redirect_queries_url))
+    error_message = "redirect_queries_url must be empty or an http(s):// URL whose host starts and ends with a letter or digit, with a port of at most five digits and a path of letters, digits and . _ / : @ , - only."
   }
 }
 

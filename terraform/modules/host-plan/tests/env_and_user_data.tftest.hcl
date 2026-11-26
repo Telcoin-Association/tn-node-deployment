@@ -27,12 +27,12 @@ run "env_keys_per_role" {
   command = plan
 
   assert {
-    condition     = join(",", [for l in compact(split("\n", output.validator_env)) : split("=", l)[0]]) == "TN_FB_ROLE,TN_FB_NETWORK,TN_FB_CLOUD,TN_FB_LOGIN_USER,TN_FB_INSTALLER_URL,TN_FB_DATA_DEVICE,TN_FB_TRUSTED_NODES"
+    condition     = join(",", [for l in compact(split("\n", output.validator_env)) : split("=", l)[0]]) == "TN_FB_ROLE,TN_FB_NETWORK,TN_FB_CLOUD,TN_FB_LOGIN_USER,TN_FB_INSTALLER_URL,TN_FB_MIN_RELEASE,TN_FB_DATA_DEVICE,TN_FB_TRUSTED_NODES"
     error_message = "The validator env must hold exactly the shared keys plus TN_FB_DATA_DEVICE and TN_FB_TRUSTED_NODES."
   }
 
   assert {
-    condition     = join(",", [for l in compact(split("\n", output.gateway_env)) : split("=", l)[0]]) == "TN_FB_ROLE,TN_FB_NETWORK,TN_FB_CLOUD,TN_FB_LOGIN_USER,TN_FB_INSTALLER_URL,TN_FB_UPSTREAM,TN_FB_DOMAIN,TN_FB_PUBLIC_IP,TN_FB_REDIRECT_QUERIES,TN_FB_RATE_LIMIT_SUBMISSIONS,TN_FB_SSH_FROM"
+    condition     = join(",", [for l in compact(split("\n", output.gateway_env)) : split("=", l)[0]]) == "TN_FB_ROLE,TN_FB_NETWORK,TN_FB_CLOUD,TN_FB_LOGIN_USER,TN_FB_INSTALLER_URL,TN_FB_MIN_RELEASE,TN_FB_UPSTREAM,TN_FB_DOMAIN,TN_FB_PUBLIC_IP,TN_FB_REDIRECT_QUERIES,TN_FB_RATE_LIMIT_SUBMISSIONS,TN_FB_SSH_FROM"
     error_message = "The gateway env must hold exactly the shared keys plus the six gateway keys."
   }
 
@@ -49,6 +49,7 @@ run "env_keys_per_role" {
       "TN_FB_CLOUD='aws'\n",
       "TN_FB_LOGIN_USER='ubuntu'\n",
       "TN_FB_INSTALLER_URL='https://install.telcoin.network'\n",
+      "TN_FB_MIN_RELEASE='scripts-v2.3.0'\n",
       "TN_FB_DATA_DEVICE='/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol0123456789abcdef0'\n",
       "TN_FB_TRUSTED_NODES='/etc/telcoin-first-boot/trusted-nodes.yaml'\n",
     ] : strcontains(output.validator_env, want)])
@@ -58,6 +59,7 @@ run "env_keys_per_role" {
   assert {
     condition = alltrue([for want in [
       "TN_FB_ROLE='gateway'\n",
+      "TN_FB_MIN_RELEASE='scripts-v2.3.0'\n",
       "TN_FB_UPSTREAM='10.42.1.10'\n",
       "TN_FB_DOMAIN='rpc.example.org'\n",
       "TN_FB_PUBLIC_IP='203.0.113.20'\n",
@@ -66,6 +68,41 @@ run "env_keys_per_role" {
       "TN_FB_SSH_FROM='198.51.100.7/32,10.42.0.0/16'\n",
     ] : strcontains(output.gateway_env, want)])
     error_message = "The gateway env values are wrong: TN_FB_UPSTREAM must be the validator's private address."
+  }
+}
+
+# First boot refuses scripts older than the release both env files name.
+run "min_release_given" {
+  command = plan
+
+  variables {
+    min_scripts_release = "scripts-v2.4.1"
+  }
+
+  assert {
+    condition     = strcontains(output.validator_env, "TN_FB_MIN_RELEASE='scripts-v2.4.1'\n") && strcontains(output.gateway_env, "TN_FB_MIN_RELEASE='scripts-v2.4.1'\n")
+    error_message = "Both env files must carry min_scripts_release as TN_FB_MIN_RELEASE."
+  }
+
+  assert {
+    condition     = strcontains(output.next_steps, "node scripts scripts-v2.4.1 or newer")
+    error_message = "next_steps must name the release each host needs."
+  }
+}
+
+# The URL shapes first boot takes: a port of five digits and a path with
+# : @ , in it.
+run "url_shapes_first_boot_takes" {
+  command = plan
+
+  variables {
+    installer_url        = "https://install.example.org:65535/a"
+    redirect_queries_url = "http://rpc.example.org:8545/v1:a@b,c"
+  }
+
+  assert {
+    condition     = strcontains(output.gateway_env, "TN_FB_INSTALLER_URL='https://install.example.org:65535/a'\n") && strcontains(output.gateway_env, "TN_FB_REDIRECT_QUERIES='http://rpc.example.org:8545/v1:a@b,c'\n")
+    error_message = "A URL first boot takes must reach the env file unchanged."
   }
 }
 

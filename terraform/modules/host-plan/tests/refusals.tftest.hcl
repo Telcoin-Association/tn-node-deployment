@@ -142,3 +142,44 @@ run "release_tag_of_another_network" {
   }
   expect_failures = [var.node_release_tag]
 }
+
+# What first-boot-lib.sh refuses at boot is refused here first.
+run "punycode_tld" {
+  command = plan
+  variables {
+    rpc_domain = "rpc.example.xn--p1ai"
+  }
+  expect_failures = [var.rpc_domain]
+}
+
+run "domain_over_253_characters" {
+  command = plan
+  variables {
+    rpc_domain = "${join(".", [for i in range(4) : join("", [for j in range(62) : "a"])])}.org"
+  }
+  expect_failures = [var.rpc_domain]
+}
+
+run "redirect_port_of_six_digits" {
+  command = plan
+  variables {
+    redirect_queries_url = "https://rpc.example.org:123456"
+  }
+  expect_failures = [var.redirect_queries_url]
+}
+
+run "installer_host_ending_in_a_dot" {
+  command = plan
+  variables {
+    installer_url = "https://install.telcoin.network./"
+  }
+  expect_failures = [var.installer_url]
+}
+
+run "min_release_not_a_scripts_tag" {
+  command = plan
+  variables {
+    min_scripts_release = "v2.3.0"
+  }
+  expect_failures = [var.min_scripts_release]
+}

@@ -71,6 +71,7 @@ module "host_plan" {
   allow_no_tpm                   = var.allow_no_tpm
   session_commands               = local.session_commands
   node_release_tag               = var.node_release_tag
+  min_scripts_release            = var.min_scripts_release
 }
 
 # The node's keys and chain data. Kept whatever happens to the instance, and

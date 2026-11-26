@@ -81,4 +81,5 @@ module "host_plan" {
   validator_address              = var.validator_address
   session_commands               = local.session_commands
   node_release_tag               = var.node_release_tag
+  min_scripts_release            = var.min_scripts_release
 }

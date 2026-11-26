@@ -32,6 +32,7 @@ run "testnet" {
   assert {
     condition = alltrue([for want in [
       "ARGS=(--network testnet --install-method release --release-tag vX.Y.Z-adiri\n",
+      "# Each host needs node scripts scripts-v2.3.0 or newer: first boot\n",
       "Replace vX.Y.Z-adiri with the current testnet release\n#    from the telcoin-network releases page",
       "--address 0x1111111111111111111111111111111111111111\n",
       "--external-primary /ip4/203.0.113.10/udp/49590/quic-v1\n",

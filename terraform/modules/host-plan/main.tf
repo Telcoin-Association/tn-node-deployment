@@ -7,6 +7,12 @@ locals {
     private = "^(10\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.|192\\.168\\.|100\\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\\.)"
     # The same ranges as a CIDR whose prefix is at least the range's own.
     private_cidr = "^(10\\.[0-9.]+/([89]|[12][0-9]|3[0-2])|172\\.(1[6-9]|2[0-9]|3[01])\\.[0-9.]+/(1[2-9]|2[0-9]|3[0-2])|192\\.168\\.[0-9.]+/(1[6-9]|2[0-9]|3[0-2])|100\\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\\.[0-9.]+/(1[0-9]|2[0-9]|3[0-2]))$"
+    # first-boot-lib.sh's TN_FB_DOMAIN rule, lowercase: labels that start and
+    # end with a letter or digit, and a last label of 2 to 63 letters.
+    dns_name = "^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$"
+    # What fb_url_ok takes after the scheme: a host that starts and ends with
+    # a letter or digit, a port of at most five digits, an optional path.
+    url_rest = "://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?(/[A-Za-z0-9._/:@,-]*)?$"
   }
 
   # Host paths. Every first-boot script finds the others, the env file and the
@@ -44,6 +50,7 @@ locals {
     ["TN_FB_CLOUD", var.cloud],
     ["TN_FB_LOGIN_USER", var.login_user],
     ["TN_FB_INSTALLER_URL", var.installer_url],
+    ["TN_FB_MIN_RELEASE", var.min_scripts_release],
   ]
   validator_env_pairs = concat([["TN_FB_ROLE", "validator"]], local.shared_env, [
     ["TN_FB_DATA_DEVICE", var.data_device],
@@ -118,6 +125,7 @@ locals {
     hubs_given        = local.hubs_given
     allow_no_tpm      = var.allow_no_tpm
     release_tag       = var.node_release_tag
+    min_release       = var.min_scripts_release
     domain            = var.rpc_domain
     session_validator = var.session_commands.validator
     session_gateway   = var.session_commands.gateway

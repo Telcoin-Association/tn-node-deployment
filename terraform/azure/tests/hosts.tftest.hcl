@@ -379,3 +379,24 @@ run "next_steps_mainnet" {
     error_message = "On mainnet finalize comes only under the At launch block."
   }
 }
+
+# The release first boot holds both hosts to reaches both env files and the
+# printed steps.
+run "min_scripts_release" {
+  command = plan
+
+  variables {
+    min_scripts_release = "scripts-v2.4.1"
+    rpc_domain          = "rpc.example.org"
+  }
+
+  assert {
+    condition     = strcontains(module.host_plan.validator_env, "TN_FB_MIN_RELEASE='scripts-v2.4.1'\n") && strcontains(module.host_plan.gateway_env, "TN_FB_MIN_RELEASE='scripts-v2.4.1'\n")
+    error_message = "min_scripts_release must reach both env files as TN_FB_MIN_RELEASE."
+  }
+
+  assert {
+    condition     = strcontains(output.next_steps, "node scripts scripts-v2.4.1 or newer")
+    error_message = "next_steps must name the release each host needs."
+  }
+}

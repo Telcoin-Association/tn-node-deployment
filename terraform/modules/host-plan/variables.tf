@@ -52,8 +52,20 @@ variable "installer_url" {
   nullable    = false
 
   validation {
-    condition     = can(regex("^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._/-]*)?$", var.installer_url))
-    error_message = "installer_url must be an https:// URL of letters, digits and . _ / - only."
+    condition     = can(regex("^https${local.re.url_rest}", var.installer_url))
+    error_message = "installer_url must be an https:// URL whose host starts and ends with a letter or digit, with a port of at most five digits and a path of letters, digits and . _ / : @ , - only."
+  }
+}
+
+variable "min_scripts_release" {
+  description = "The oldest node-scripts release whose setup-gateway.sh, key generation and checks this deployment relies on, such as scripts-v2.3.0. First boot refuses a host whose installed scripts are older."
+  type        = string
+  default     = "scripts-v2.3.0"
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^scripts-v[0-9]+\\.[0-9]+\\.[0-9]+$", var.min_scripts_release))
+    error_message = "min_scripts_release must be a node-scripts release tag, such as scripts-v2.3.0."
   }
 }
 
@@ -145,8 +157,8 @@ variable "rpc_domain" {
   nullable    = false
 
   validation {
-    condition     = var.rpc_domain == "" || (length(var.rpc_domain) <= 253 && can(regex("^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$", var.rpc_domain)))
-    error_message = "rpc_domain must be empty or a lowercase host name such as rpc.example.org: no scheme, no path, no trailing dot, no IP address."
+    condition     = var.rpc_domain == "" || (length(var.rpc_domain) <= 253 && can(regex(local.re.dns_name, var.rpc_domain)))
+    error_message = "rpc_domain must be empty or a lowercase host name of at most 253 characters, such as rpc.example.org, whose last label is 2 to 63 letters: no scheme, no path, no trailing dot, no IP address."
   }
 }
 
@@ -179,8 +191,8 @@ variable "redirect_queries_url" {
   nullable    = false
 
   validation {
-    condition     = var.redirect_queries_url == "" || can(regex("^https?://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._/-]*)?$", var.redirect_queries_url))
-    error_message = "redirect_queries_url must be empty or an http(s):// URL of letters, digits and . _ / - only."
+    condition     = var.redirect_queries_url == "" || can(regex("^https?${local.re.url_rest}", var.redirect_queries_url))
+    error_message = "redirect_queries_url must be empty or an http(s):// URL whose host starts and ends with a letter or digit, with a port of at most five digits and a path of letters, digits and . _ / : @ , - only."
   }
 }
 
