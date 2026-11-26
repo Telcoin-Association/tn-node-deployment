@@ -434,3 +434,98 @@ run "rate_limit_not_whole" {
 
   expect_failures = [var.gateway_rate_limit_submissions]
 }
+
+# First boot refuses these, so the plan does: a host built with one stops at
+# its env file. host-plan's first_boot_rules.tftest.hcl holds the whole table.
+run "admin_cidr_anywhere" {
+  command = plan
+  variables { admin_ssh_cidrs = ["0.0.0.0/0"] }
+  expect_failures = [var.admin_ssh_cidrs]
+}
+
+run "admin_cidr_zero_network" {
+  command = plan
+  variables { admin_ssh_cidrs = ["0.0.0.0/8"] }
+  expect_failures = [var.admin_ssh_cidrs]
+}
+
+run "admin_cidr_wider_than_8" {
+  command = plan
+  variables { admin_ssh_cidrs = ["128.0.0.0/1"] }
+  expect_failures = [var.admin_ssh_cidrs]
+}
+
+run "admin_cidr_prefix_leading_zero" {
+  command = plan
+  variables { admin_ssh_cidrs = ["10.0.0.0/08"] }
+  expect_failures = [var.admin_ssh_cidrs]
+}
+
+run "admin_cidr_of_8_taken" {
+  command = plan
+  variables { admin_ssh_cidrs = ["10.0.0.0/8"] }
+}
+
+run "redirect_port_over_65535" {
+  command = plan
+  variables { redirect_queries_url = "https://rpc.example.org:99999" }
+  expect_failures = [var.redirect_queries_url]
+}
+
+run "redirect_port_0" {
+  command = plan
+  variables { redirect_queries_url = "https://rpc.example.org:0/" }
+  expect_failures = [var.redirect_queries_url]
+}
+
+run "redirect_port_leading_zero" {
+  command = plan
+  variables { redirect_queries_url = "https://rpc.example.org:08545/" }
+  expect_failures = [var.redirect_queries_url]
+}
+
+run "redirect_empty_label" {
+  command = plan
+  variables { redirect_queries_url = "https://rpc..example.org/" }
+  expect_failures = [var.redirect_queries_url]
+}
+
+run "redirect_label_starting_with_dash" {
+  command = plan
+  variables { redirect_queries_url = "https://rpc.-x.example.org/" }
+  expect_failures = [var.redirect_queries_url]
+}
+
+run "redirect_path_with_colon_at_comma" {
+  command = plan
+  variables { redirect_queries_url = "http://rpc.example.org:8545/v1:a@b,c" }
+  expect_failures = [var.redirect_queries_url]
+}
+
+run "redirect_path_taken" {
+  command = plan
+  variables { redirect_queries_url = "http://rpc.example.org:8545/v1/a_b-c.d" }
+}
+
+run "min_release_leading_zero" {
+  command = plan
+  variables { min_scripts_release = "scripts-v2.03.0" }
+  expect_failures = [var.min_scripts_release]
+}
+
+run "min_release_five_digits" {
+  command = plan
+  variables { min_scripts_release = "scripts-v10000.0.0" }
+  expect_failures = [var.min_scripts_release]
+}
+
+run "domain_punycode_tld_taken" {
+  command = plan
+  variables { rpc_domain = "rpc.example.xn--p1ai" }
+}
+
+run "domain_tld_of_digits" {
+  command = plan
+  variables { rpc_domain = "rpc.example.123" }
+  expect_failures = [var.rpc_domain]
+}

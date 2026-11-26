@@ -7,12 +7,18 @@ locals {
     private = "^(10\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.|192\\.168\\.|100\\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\\.)"
     # The same ranges as a CIDR whose prefix is at least the range's own.
     private_cidr = "^(10\\.[0-9.]+/([89]|[12][0-9]|3[0-2])|172\\.(1[6-9]|2[0-9]|3[01])\\.[0-9.]+/(1[2-9]|2[0-9]|3[0-2])|192\\.168\\.[0-9.]+/(1[6-9]|2[0-9]|3[0-2])|100\\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\\.[0-9.]+/(1[0-9]|2[0-9]|3[0-2]))$"
-    # first-boot-lib.sh's TN_FB_DOMAIN rule, lowercase: labels that start and
-    # end with a letter or digit, and a last label of 2 to 63 letters.
-    dns_name = "^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$"
-    # What fb_url_ok takes after the scheme: a host that starts and ends with
-    # a letter or digit, a port of at most five digits, an optional path.
-    url_rest = "://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?(/[A-Za-z0-9._/:@,-]*)?$"
+    # first-boot-lib.sh's TN_FB_DOMAIN rule (setup-gateway.sh's --domain),
+    # lowercase: two labels or more of 1 to 63 letters, digits and inner
+    # dashes; dns_tld finds a letter in the last label.
+    dns_name = "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$"
+    dns_tld  = "[a-z][a-z0-9-]*$"
+    # fb_url_ok after the scheme: labels of letters, digits and inner dashes
+    # joined by single dots, a port with no leading zero, a path of letters,
+    # digits and . _ / - only. url_port finds the port, at most 65535.
+    url_rest = "://[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*(:[1-9][0-9]{0,4})?(/[A-Za-z0-9._/-]*)?$"
+    url_port = ":([0-9]+)(/|$)"
+    # fb_release_num: each part 0 or up to four digits with no leading zero.
+    release = "^scripts-v(0|[1-9][0-9]{0,3})\\.(0|[1-9][0-9]{0,3})\\.(0|[1-9][0-9]{0,3})$"
   }
 
   # Host paths. Every first-boot script finds the others, the env file and the

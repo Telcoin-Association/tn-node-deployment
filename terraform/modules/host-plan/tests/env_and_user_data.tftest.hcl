@@ -90,18 +90,18 @@ run "min_release_given" {
   }
 }
 
-# The URL shapes first boot takes: a port of five digits and a path with
-# : @ , in it.
+# The URL shapes first boot takes: a port of five digits and a path of
+# letters, digits and . _ / -.
 run "url_shapes_first_boot_takes" {
   command = plan
 
   variables {
     installer_url        = "https://install.example.org:65535/a"
-    redirect_queries_url = "http://rpc.example.org:8545/v1:a@b,c"
+    redirect_queries_url = "http://rpc.example.org:8545/v1/a_b-c.d"
   }
 
   assert {
-    condition     = strcontains(output.gateway_env, "TN_FB_INSTALLER_URL='https://install.example.org:65535/a'\n") && strcontains(output.gateway_env, "TN_FB_REDIRECT_QUERIES='http://rpc.example.org:8545/v1:a@b,c'\n")
+    condition     = strcontains(output.gateway_env, "TN_FB_INSTALLER_URL='https://install.example.org:65535/a'\n") && strcontains(output.gateway_env, "TN_FB_REDIRECT_QUERIES='http://rpc.example.org:8545/v1/a_b-c.d'\n")
     error_message = "A URL first boot takes must reach the env file unchanged."
   }
 }

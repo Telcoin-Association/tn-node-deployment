@@ -143,15 +143,8 @@ run "release_tag_of_another_network" {
   expect_failures = [var.node_release_tag]
 }
 
-# What first-boot-lib.sh refuses at boot is refused here first.
-run "punycode_tld" {
-  command = plan
-  variables {
-    rpc_domain = "rpc.example.xn--p1ai"
-  }
-  expect_failures = [var.rpc_domain]
-}
-
+# What first-boot-lib.sh refuses at boot is refused here first
+# (first_boot_rules.tftest.hcl holds the rest).
 run "domain_over_253_characters" {
   command = plan
   variables {

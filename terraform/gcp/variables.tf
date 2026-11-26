@@ -3,10 +3,16 @@ locals {
     # 10/8, 172.16/12, 192.168/16 or 100.64/10, with a prefix at least the
     # range's own: setup-gateway.sh takes only a private --upstream.
     private_cidr = "^(10\\.[0-9.]+/([89]|[12][0-9]|3[0-2])|172\\.(1[6-9]|2[0-9]|3[01])\\.[0-9.]+/(1[2-9]|2[0-9]|3[0-2])|192\\.168\\.[0-9.]+/(1[6-9]|2[0-9]|3[0-2])|100\\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\\.[0-9.]+/(1[0-9]|2[0-9]|3[0-2]))$"
-    ipv4_cidr    = "^[0-9]{1,3}(\\.[0-9]{1,3}){3}/[0-9]{1,2}$"
-    # Lowercase, no scheme, path or trailing dot, a last label of letters: the
-    # same rule as host-plan.
-    host_name = "^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$"
+    ipv4_cidr    = "^[0-9]{1,3}(\\.[0-9]{1,3}){3}/[1-9][0-9]?$"
+    # host-plan's rules, which are first boot's. A lowercase name of two labels
+    # or more with a letter in the last (host_tld): no scheme, path or trailing
+    # dot. A URL as fb_url_ok takes it, its port at most 65535 (url_port). A
+    # release as fb_release_num reads it.
+    host_name = "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$"
+    host_tld  = "[a-z][a-z0-9-]*$"
+    url       = "^https?://[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*(:[1-9][0-9]{0,4})?(/[A-Za-z0-9._/-]*)?$"
+    url_port  = ":([0-9]+)(/|$)"
+    release   = "^scripts-v(0|[1-9][0-9]{0,3})\\.(0|[1-9][0-9]{0,3})\\.(0|[1-9][0-9]{0,3})$"
   }
 
   # The storage minimums of the README's hardware table. The table is in GB
@@ -97,8 +103,8 @@ variable "rpc_domain" {
   nullable    = false
 
   validation {
-    condition     = var.rpc_domain == "" || (length(var.rpc_domain) <= 253 && can(regex(local.re.host_name, var.rpc_domain)))
-    error_message = "rpc_domain must be empty or a lowercase host name of at most 253 characters, such as rpc.example.org, whose last label is 2 to 63 letters: no scheme, no path, no trailing dot, no IP address."
+    condition     = var.rpc_domain == "" || (length(var.rpc_domain) <= 253 && can(regex(local.re.host_name, var.rpc_domain)) && can(regex(local.re.host_tld, var.rpc_domain)))
+    error_message = "rpc_domain must be empty or a lowercase host name of at most 253 characters, such as rpc.example.org: two labels or more of letters, digits and inner dashes, with a letter in the last (rpc.example.xn--p1ai is one). No scheme, no path, no trailing dot, no IP address."
   }
 
   validation {
@@ -110,16 +116,18 @@ variable "rpc_domain" {
 # --- Admin access ------------------------------------------------------------
 
 variable "admin_ssh_cidrs" {
-  description = "IPv4 networks that may reach TCP 22 of both hosts, such as [\"198.51.100.7/32\"]. Empty (the default) opens no public SSH port: admins come in through IAP."
+  description = "IPv4 networks that may reach TCP 22 of both hosts, such as [\"198.51.100.7/32\"], each /8 or narrower: SSH from anywhere is not offered. Empty (the default) opens no public SSH port: admins come in through IAP."
   type        = list(string)
   default     = []
   nullable    = false
 
   # The network has no IPv6, and a firewall rule takes only a network address,
-  # so 198.51.100.7/24 is refused rather than widened silently.
+  # so 198.51.100.7/24 is refused rather than widened silently. The prefix is
+  # /8 or narrower and the address never 0.0.0.0, as first boot and
+  # firewall-setup.sh take an SSH source.
   validation {
-    condition     = alltrue([for c in var.admin_ssh_cidrs : can(regex(local.re.ipv4_cidr, c)) && try(cidrhost(c, 0) == split("/", c)[0], false)])
-    error_message = "Each admin_ssh_cidrs entry must be an IPv4 network in CIDR form, such as 198.51.100.7/32 or 198.51.100.0/24."
+    condition     = alltrue([for c in var.admin_ssh_cidrs : can(regex(local.re.ipv4_cidr, c)) && try(cidrhost(c, 0) == split("/", c)[0] && tonumber(split("/", c)[1]) >= 8 && split("/", c)[0] != "0.0.0.0", false)])
+    error_message = "Each admin_ssh_cidrs entry must be an IPv4 network in CIDR form, such as 198.51.100.7/32 or 198.51.100.0/24: the sources SSH is opened to must be /8 or narrower, and never 0.0.0.0, so SSH from anywhere is not offered."
   }
 }
 
@@ -186,7 +194,7 @@ variable "subnet_cidr" {
 # --- Machines and disks ------------------------------------------------------
 
 variable "validator_instance_type" {
-  description = "The validator's machine type. Its boot disk and its data disk are Hyperdisk Balanced, so the type must be of a series that takes it, such as C3, C3D, C4 or N4 (N2 and E2 do not). Null means c3-standard-8 on testnet (4 cores, 32 GiB) and c3d-standard-16 on mainnet (8 cores, 64 GiB). Mainnet refuses less than 8 physical cores and 32 GiB, the node scripts' validator floor; the default doubles the memory because a 32 GiB VM reports a little less to the host, which the scripts' hardware check reads as under that floor."
+  description = "The validator's machine type. Its boot disk and its data disk are Hyperdisk Balanced, so the type must be of a series that takes it, such as C3, C3D, C4 or N4 (N2 and E2 do not). Null means c3-standard-8 on testnet (4 cores, 32 GiB) and c3d-standard-16 on mainnet (8 cores, 64 GiB). Mainnet refuses a type with fewer than 8 physical cores or less than 32 GiB nominal, the node scripts' validator floor. The default has 64 GiB because the host reads a 32 GiB machine as 31 GiB, and the scripts' hardware check then warns."
   type        = string
   default     = null
 
@@ -314,8 +322,8 @@ variable "min_scripts_release" {
   nullable    = false
 
   validation {
-    condition     = can(regex("^scripts-v[0-9]+\\.[0-9]+\\.[0-9]+$", var.min_scripts_release))
-    error_message = "min_scripts_release must be a node-scripts release tag, such as scripts-v2.3.0."
+    condition     = can(regex(local.re.release, var.min_scripts_release))
+    error_message = "min_scripts_release must be a node-scripts release tag, such as scripts-v2.3.0: each part 0 or a number of up to four digits with no leading zero."
   }
 }
 
@@ -340,8 +348,8 @@ variable "redirect_queries_url" {
   nullable    = false
 
   validation {
-    condition     = var.redirect_queries_url == "" || can(regex("^https?://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?(/[A-Za-z0-9._/:@,-]*)?$", var.redirect_queries_url))
-    error_message = "redirect_queries_url must be empty or an http(s):// URL whose host starts and ends with a letter or digit, with a port of at most five digits and a path of letters, digits and . _ / : @ , - only."
+    condition     = var.redirect_queries_url == "" || (can(regex(local.re.url, var.redirect_queries_url)) && alltrue([for p in regexall(local.re.url_port, var.redirect_queries_url) : tonumber(p[0]) <= 65535]))
+    error_message = "redirect_queries_url must be empty or an http(s):// URL whose host is labels of letters, digits and inner dashes joined by single dots, with a port from 1 to 65535 and no leading zero, and a path of letters, digits and . _ / - only."
   }
 }
 

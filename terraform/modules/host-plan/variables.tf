@@ -52,8 +52,8 @@ variable "installer_url" {
   nullable    = false
 
   validation {
-    condition     = can(regex("^https${local.re.url_rest}", var.installer_url))
-    error_message = "installer_url must be an https:// URL whose host starts and ends with a letter or digit, with a port of at most five digits and a path of letters, digits and . _ / : @ , - only."
+    condition     = can(regex("^https${local.re.url_rest}", var.installer_url)) && alltrue([for p in regexall(local.re.url_port, var.installer_url) : tonumber(p[0]) <= 65535])
+    error_message = "installer_url must be an https:// URL whose host is labels of letters, digits and inner dashes joined by single dots, with a port from 1 to 65535 and no leading zero, and a path of letters, digits and . _ / - only."
   }
 }
 
@@ -64,8 +64,8 @@ variable "min_scripts_release" {
   nullable    = false
 
   validation {
-    condition     = can(regex("^scripts-v[0-9]+\\.[0-9]+\\.[0-9]+$", var.min_scripts_release))
-    error_message = "min_scripts_release must be a node-scripts release tag, such as scripts-v2.3.0."
+    condition     = can(regex(local.re.release, var.min_scripts_release))
+    error_message = "min_scripts_release must be a node-scripts release tag, such as scripts-v2.3.0: each part 0 or a number of up to four digits with no leading zero."
   }
 }
 
@@ -132,21 +132,31 @@ variable "vpc_cidr" {
   description = "The private network both hosts sit in. First boot lets SSH in from it, for a bastion or a tunnel inside the network."
   type        = string
 
+  # It ends TN_FB_SSH_FROM, so its address is held to fb_ipv4_ok as well.
   validation {
-    condition     = can(cidrhost(var.vpc_cidr, 0)) && can(regex(local.re.private_cidr, var.vpc_cidr))
-    error_message = "vpc_cidr must be a CIDR inside 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 or 100.64.0.0/10, such as 10.42.0.0/16."
+    condition     = can(cidrhost(var.vpc_cidr, 0)) && can(regex(local.re.private_cidr, var.vpc_cidr)) && can(regex(local.re.ipv4, split("/", var.vpc_cidr)[0]))
+    error_message = "vpc_cidr must be a CIDR inside 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 or 100.64.0.0/10, such as 10.42.0.0/16, with no leading zero in the address."
   }
 }
 
 variable "admin_ssh_cidrs" {
-  description = "Addresses that may reach TCP 22 of both hosts, as CIDRs. Empty keeps SSH to the private network."
+  description = "Addresses that may reach TCP 22 of both hosts, as CIDRs of /8 or narrower. Empty keeps SSH to the private network. SSH from anywhere (0.0.0.0/0 or ::/0) is not offered: first boot and firewall-setup.sh refuse it."
   type        = list(string)
   default     = []
   nullable    = false
 
+  # fbg_src_ok's rule: IPv4 with no leading zeros or IPv6 in hex groups, a
+  # prefix of /8 or narrower with no leading zero, never 0.0.0.0 or :: (which
+  # mean anywhere). First boot also takes a bare address; a CIDR is asked for
+  # here because each root writes these into a cloud firewall rule.
   validation {
-    condition     = alltrue([for c in var.admin_ssh_cidrs : can(cidrhost(c, 0)) && can(regex("^[0-9a-fA-F.:]+/[0-9]{1,3}$", c))])
-    error_message = "Each admin_ssh_cidrs entry must be a CIDR, such as 198.51.100.7/32."
+    condition = alltrue([for c in var.admin_ssh_cidrs : try(
+      can(cidrhost(c, 0)) &&
+      (can(regex(local.re.ipv4, split("/", c)[0])) || can(regex("^[0-9A-Fa-f:]+$", split("/", c)[0]))) &&
+      can(regex("^[1-9][0-9]{0,2}$", split("/", c)[1])) && tonumber(split("/", c)[1]) >= 8 &&
+      !contains(["0.0.0.0", "::"], split("/", c)[0]),
+    false)])
+    error_message = "Each admin_ssh_cidrs entry must be a CIDR such as 198.51.100.7/32, with no leading zeros: the sources SSH is opened to must be /8 or narrower, and never 0.0.0.0 or ::, which mean anywhere."
   }
 }
 
@@ -157,8 +167,8 @@ variable "rpc_domain" {
   nullable    = false
 
   validation {
-    condition     = var.rpc_domain == "" || (length(var.rpc_domain) <= 253 && can(regex(local.re.dns_name, var.rpc_domain)))
-    error_message = "rpc_domain must be empty or a lowercase host name of at most 253 characters, such as rpc.example.org, whose last label is 2 to 63 letters: no scheme, no path, no trailing dot, no IP address."
+    condition     = var.rpc_domain == "" || (length(var.rpc_domain) <= 253 && can(regex(local.re.dns_name, var.rpc_domain)) && can(regex(local.re.dns_tld, var.rpc_domain)))
+    error_message = "rpc_domain must be empty or a lowercase host name of at most 253 characters, such as rpc.example.org: two labels or more of letters, digits and inner dashes, with a letter in the last (rpc.example.xn--p1ai is one). No scheme, no path, no trailing dot, no IP address."
   }
 }
 
@@ -191,8 +201,15 @@ variable "redirect_queries_url" {
   nullable    = false
 
   validation {
-    condition     = var.redirect_queries_url == "" || can(regex("^https?${local.re.url_rest}", var.redirect_queries_url))
-    error_message = "redirect_queries_url must be empty or an http(s):// URL whose host starts and ends with a letter or digit, with a port of at most five digits and a path of letters, digits and . _ / : @ , - only."
+    condition     = var.redirect_queries_url == "" || (can(regex("^https?${local.re.url_rest}", var.redirect_queries_url)) && alltrue([for p in regexall(local.re.url_port, var.redirect_queries_url) : tonumber(p[0]) <= 65535]))
+    error_message = "redirect_queries_url must be empty or an http(s):// URL whose host is labels of letters, digits and inner dashes joined by single dots, with a port from 1 to 65535 and no leading zero, and a path of letters, digits and . _ / - only."
+  }
+
+  # fbg_redirect_loops: the validator's RPC or readiness port, or this
+  # gateway's own ports on a loopback name, as setup-gateway.sh refuses them.
+  validation {
+    condition     = !can(regex("^https?://(${replace(var.validator_private_ip, ".", "\\.")}:(8545|43174)|(localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0):(8655|8656|9655))(/|$)", lower(var.redirect_queries_url)))
+    error_message = "redirect_queries_url points at the validator's own RPC or readiness port (${var.validator_private_ip}:8545 or :43174), or at the gateway's own port 8655, 8656 or 9655 on a loopback name, and setup-gateway.sh refuses that: give a node that answers queries."
   }
 }
 
