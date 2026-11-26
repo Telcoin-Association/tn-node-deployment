@@ -2320,8 +2320,13 @@ check_healthcheck_on_mainnet() {
     up="$(meta_get GATEWAY_UPSTREAM 2>/dev/null)" || urc=$?
     if [[ $urc -eq 2 ]]; then
         # check_gateway_upstream counts the duplicate; whether a gateway reads
-        # --healthcheck is unknown until one line is left.
-        print_warn "GATEWAY_UPSTREAM is set more than once in .node-meta, so the testnet health monitor was not checked; remove the extra lines"
+        # --healthcheck is unknown until one line is left. The monitor line is
+        # an error with a gateway or without one.
+        if [[ "$v" == "true" ]]; then
+            print_error "The testnet health monitor is on for this mainnet node (ENABLE_HEALTHCHECK_MONITOR=true in .node-meta); remove that line."
+            (( ++HEALTH_ISSUES ))
+        fi
+        print_warn "GATEWAY_UPSTREAM is set more than once in .node-meta, so whether --healthcheck on the node line serves a gateway was not checked; remove the extra lines"
         return 0
     fi
     if [[ -n "$up" ]]; then

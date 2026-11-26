@@ -114,9 +114,18 @@ _tn_start_script_text source /opt/telcoin/telcoin-network "$ARGS --healthcheck 0
 runc check_healthcheck_on_mainnet
 check_has "GATEWAY_UPSTREAM twice: no issue here (the gateway check counts it)" "issues=0" "$OUT"
 check_has "GATEWAY_UPSTREAM twice: names the duplicate" "yes" \
-    "$(printf '%s' "$OUT" | grep -qF 'GATEWAY_UPSTREAM is set more than once in .node-meta, so the testnet health monitor was not checked; remove the extra lines' && echo yes)"
+    "$(printf '%s' "$OUT" | grep -qF 'GATEWAY_UPSTREAM is set more than once in .node-meta, so whether --healthcheck on the node line serves a gateway was not checked; remove the extra lines' && echo yes)"
 check_lacks "GATEWAY_UPSTREAM twice: not told to remove --healthcheck" "remove it" "$OUT"
 check_lacks "GATEWAY_UPSTREAM twice: no monitor claim" "health monitor is on" "$OUT"
+# ENABLE_HEALTHCHECK_MONITOR=true is an issue with a gateway or without one, so
+# the duplicate does not hide it.
+printf 'NETWORK=mainnet\nINSTALL_METHOD=source\nGATEWAY_UPSTREAM=10.0.0.5\nGATEWAY_UPSTREAM=10.0.0.6\nENABLE_HEALTHCHECK_MONITOR=true\n' > "$T/fx/etc/telcoin/.node-meta"
+runc check_healthcheck_on_mainnet
+check_has "GATEWAY_UPSTREAM twice, monitor in .node-meta: an issue" "issues=1" "$OUT"
+check_has "GATEWAY_UPSTREAM twice, monitor in .node-meta: names the line" "yes" \
+    "$(printf '%s' "$OUT" | grep -qF 'The testnet health monitor is on for this mainnet node (ENABLE_HEALTHCHECK_MONITOR=true in .node-meta); remove that line.' && echo yes)"
+check_has "GATEWAY_UPSTREAM twice, monitor in .node-meta: names the duplicate too" "yes" \
+    "$(printf '%s' "$OUT" | grep -qF 'GATEWAY_UPSTREAM is set more than once in .node-meta' && echo yes)"
 current
 
 # ---- LIB-B: resolve_network picks the network's own RPC, never another's -------------
