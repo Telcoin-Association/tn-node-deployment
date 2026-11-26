@@ -603,6 +603,13 @@ sudo bash ~/telcoin-node-scripts/edit-config.sh --set admission=closed
 - An edit whose value is already in place writes nothing and does not restart the node, and one that only adds a missing key to `.node-meta` keeps it without a restart.
 - The Node Manager UI cannot set either field yet; use `edit-config.sh` on the server.
 
+On mainnet, `check-node.sh` checks the admission mode of a node whose stake status is Staked, Pending Activation, Active or Pending Exit, in a section `Checking admission (mainnet validator)...` after the epoch and committee report.
+It reads `ADMISSION_MODE` in `.node-meta`, else `admission.mode` in `network-config`; with neither, the node runs Open.
+Closed gives `Admission mode closed (from <source>), as mainnet validators run`.
+Any other mode, or none, gives a warning that does not count as an issue: `This node is <status> on mainnet, but its admission mode is <mode> (from <source>); mainnet validators run Closed admission with their trusted hubs. Run: sudo bash edit-config.sh --set admission=closed`, with `, then sudo bash edit-config.sh --set trusted_nodes=<hubs file>` when no trusted nodes map is recorded (`... no admission mode is set, so it runs Open; ...` when none is).
+On a running validator, take the Day 2 steps above, through Grace.
+Off mainnet, for any other stake status, and when the status cannot be read, it says nothing.
+
 **Known limitations.**
 
 - `MIN_ADMISSION_VERSION` (0.17.0) is a placeholder until the node team names the first release that reads the entries; `setup-node.sh --help` and `edit-config.sh --help` repeat it.
@@ -613,7 +620,7 @@ sudo bash ~/telcoin-node-scripts/edit-config.sh --set admission=closed
 - When the release cannot be told, `--admission` and the two edits warn and write anyway rather than stop.
 - A Docker finalize without `--release-tag` asks the image registry which release the recorded image belongs to, because keygen records no release tag; when that lookup fails, it cannot tell the release and warns.
 - `update-node.sh` does not check the floor: an update to a release below 0.17.0 leaves the settings in `network-config`, where that release ignores them.
-- `check-node.sh` does not report the admission settings or the trusted nodes map yet, and `remove-node.sh` does not name the map: it goes only with the config directory, when you let it remove the keys.
+- `check-node.sh` reports the admission mode only for a staked mainnet validator (above) and never the trusted nodes map, and `remove-node.sh` does not name the map: it goes only with the config directory, when you let it remove the keys.
 - An interactive setup re-run without `--bootstrap-peers` keeps the recorded peers map only when an admission mode is in effect; without one, it drops the map as before.
 - Whether 60 seconds is long enough for every node before it reads `network-config` is not settled; the window is `TN_EDIT_VERIFY_TIMEOUT`.
 
@@ -992,6 +999,17 @@ This finalize does not fetch the mainnet chain configs itself, so on install day
 A mainnet BLS key must never sign on another network, so once keygen has recorded `NETWORK=mainnet` (before it makes the keys, and kept when a keygen fails), setup refuses a finalize, a keygen or an interactive install for testnet or devnet on this host (a `--json` run without `--network` is a testnet run) with `This host is recorded for mainnet (NETWORK=mainnet in /etc/telcoin/.node-meta, written before keygen makes mainnet keys), and a mainnet BLS key must never be used on another network, ...`.
 A `--json` finalize or keygen stops right after the root check, before anything on the host changes; an interactive install stops once you have chosen the network, after the first preflight steps (the update lock, the needrestart and apt guards that keep package upgrades from restarting the node, the data directory, and `curl` or `git` if they were missing), but before it writes the node's keys, configuration or service.
 Set up a testnet node on another host.
+
+### 2.13 Deploy with Terraform
+
+On AWS, Google Cloud and Azure, the Terraform roots under `terraform/` are the preferred way to stand up a validator with its worker gateway: one validator host and one worker-gateway host in one private network, with the firewall rules of section 4.15's standalone layout.
+[terraform/README.md](terraform/README.md) is the walkthrough, and [terraform/REHEARSAL.md](terraform/REHEARSAL.md) holds a testnet rehearsal checklist for each cloud.
+
+Terraform never sees the BLS passphrase.
+The validator's first boot mounts the data disk and installs the scripts, and stops there; you run key generation yourself in a shell on the host (section 2.12 on mainnet), from the commands the deployment prints.
+Once you give it the RPC name, a second apply creates the gateway host, which sets the gateway up unattended (section 4.15).
+Both hosts install the scripts release the installer serves, and the deployment needs `scripts-v2.3.0` or newer: until the installer serves it, the first boot of both hosts stops at its `scripts-release` step and names the command that runs it again.
+Nothing updates the hosts on their own: update the scripts and the node on each host as sections 4.1 and 4.2 say.
 
 ## 3. Confirm the node is syncing, then synced
 
@@ -1980,7 +1998,7 @@ It has no TLS, no WebSocket and no authentication of its own.
 It limits each client IP address to 100 requests a second and 32 open connections.
 It keeps 300 submissions a second (burst 600) for single `eth_sendRawTransaction` calls out of its global bucket of 3000 requests a second, so a flood of queries cannot starve submissions; `--rate-limit-submissions N` changes that number and `0` turns the reservation off.
 It never stops, starts or restarts the node, and `setup-gateway.sh` never edits the node's launch file, `.node-meta` or a firewall rule.
-It runs on testnet, from the image this scripts release pins, and on devnets; mainnet refuses it until a scripts release pins a mainnet image (see Images below).
+It runs on testnet and mainnet, from the image this scripts release pins for each (for mainnet a placeholder until telcoin-network publishes a mainnet release, see Images below), and on devnets.
 
 Pick a layout with `--mode`:
 
@@ -2006,7 +2024,10 @@ Each pin is the image a signed telcoin-network release names in its `IMAGE_DIGES
 CI checks each pin against that release's signed `SHA256SUMS-edge`, and the installer of a scripts release is published only when the check passes.
 This release pins the testnet image of telcoin-network `v0.18.0-adiri`, `ghcr.io/telcoin-association/tn-worker-gateway@sha256:efed742a8a32db4f71b397d17ac448bcd98dcc0d14083197c1f7cecbc72bcffb`.
 `setup-gateway.sh --enable ... --network testnet` without `--image` takes it, and any other `--image` is refused with `image refused: testnet runs only the worker-gateway image this scripts release pins (<pin>, from telcoin-network v0.18.0-adiri)`.
-It pins no mainnet image yet, so `--enable` on mainnet refuses with `this scripts release pins no worker-gateway image for mainnet yet`, and names `update-scripts.sh`, which brings a later scripts release that pins one.
+Until telcoin-network publishes a mainnet release, the mainnet pin is a placeholder: the same image, recorded with the same testnet release, `v0.18.0-adiri`.
+`setup-gateway.sh --enable ... --network mainnet` takes it while this scripts release does not enable mainnet (`TN_MAINNET_ENABLED=0` in `lib/common.sh`), so a mainnet gateway host can be set up and its name and certificate checked before genesis.
+`--status` and `check-node.sh` say so on such a host: `The worker-gateway image is a placeholder: <image> is the image of the testnet release v0.18.0-adiri, pinned for mainnet until telcoin-network publishes a mainnet release. A later scripts release pins the mainnet image; then run update-scripts.sh and setup-gateway.sh --refresh.`
+The scripts release that enables mainnet pins a mainnet release: the pin check refuses to publish one that keeps the placeholder or leaves the mainnet pin empty, and its `setup-gateway.sh` would refuse the placeholder as a defect of the release.
 A pin that is not such an image, or that has no release of the network's own tag form beside it, is refused as a defect of the scripts release: `this scripts release's <network> worker-gateway pin cannot be used: ...`.
 On devnet the repository must be one of `ghcr.io/telcoin-association/tn-dev` (telcoin-network's unsigned builds, tagged `dev-worker-gateway-<tag>`), `ghcr.io/telcoin-association/tn-worker-gateway` (the release images) or `us-docker.pkg.dev/telcoin-network/tn-public/worker-gateway`.
 Before it writes anything, the enable pulls the digest when Docker does not hold it, then runs the image's `--help` and refuses an image that lacks a flag the unit passes.
@@ -2082,6 +2103,7 @@ Two hosts: the validator, at private IPv4 `10.0.0.12`, and the gateway host, at 
 They need a private network that routes between them.
 `--upstream` must be a private IPv4 address (10/8, 172.16/12, 192.168/16, 100.64/10 or 169.254/16).
 Do the steps in this order: the validator refuses to listen until its firewall admits the gateway host.
+The Terraform deployment of section 2.13 builds this layout: the gateway host's first boot runs steps 3 and 4, with Docker from Docker's apt repository, and the commands it prints for the validator hold steps 1, 2 and 5.
 
 On the validator:
 
@@ -2233,10 +2255,26 @@ It exits 0 whenever it could read the state; with `--json` its `done` line carri
 `ready` false is not counted as an issue: the node may be down or restarting, and the gateway keeps running and recovers on its own when the node accepts transactions again.
 
 `check-node.sh` checks the gateway too, in a section `Checking the worker gateway...`: the unit enabled and active, the image held by Docker, the three listeners bound where `gateway.meta` says, `/health`, the Caddy site with front `caddy`, and in same-host mode that the node's `--healthcheck` is on the port the gateway polls.
-It reports `/ready` without counting it.
+That section reports `/ready` without counting it.
 On a host with a gateway and no node it says `No Telcoin node on this server, only a worker gateway: the node sections are skipped.`
+
+With front `caddy`, a section `Checking the worker gateway's public edge (Caddy)...` follows, which checks what the public sees:
+
+- `/ready` not 200 while the gateway runs: a warning on a node host, and on a host with no node an error that counts as an issue, since taking transactions to the validator is that host's one job (`The gateway's /ready is not 200, so it refuses transactions (503): the validator at <upstream> is down, catching up or not reachable from this host. Run bash check-node.sh on the validator host.`).
+- DNS, through `install-caddy.sh --json --phase=gateway-check-dns`: a name that does not resolve is an issue (`DNS: <name> does not resolve, so nobody reaches the gateway by its name; ...`), and one that resolves to an address neither this host's nor local is a warning, since NAT or a proxy can make that right.
+- `GET https://<name>/health` sent through Caddy on this host (`curl --resolve <name>:443:127.0.0.1`) must answer 200 over a verified certificate, else an issue that names the fix; a TLS or certificate error says that Caddy has no valid certificate yet.
+  With `openssl` on the host, a certificate that expires within 14 days is a warning, since Caddy renews it on its own and the renewal is failing.
+- `ufw` active, allowing 80/tcp and 443/tcp from anywhere, which Caddy needs for the site and its certificate, else an issue naming `firewall-setup.sh --enable`.
+  Reading `ufw` needs `sudo`.
+- One information line: the cloud's own firewall rules (security groups, firewall rules, network security groups) cannot be seen from the host.
+
+The gateway's name, DNS and certificate need `sudo`, because the name is in `gateway.meta`.
+
 On a validator with `GATEWAY_ALLOW_FROM` or `GATEWAY_UPSTREAM` in `.node-meta`, a section `Checking the gateway upstream (validator side)...` checks the `ufw` rules for each listed host, that the RPC and `--healthcheck` listen on `0.0.0.0` exactly when `GATEWAY_UPSTREAM` is set, and that `node-info.yaml` advertises an `https` URL and no WebSocket URL.
 When they listen on `0.0.0.0`, it also reports a firewall that lets more than the gateways reach them.
+Any other advertisement is information, except on a mainnet validator with `GATEWAY_UPSTREAM`, where transactions forwarded to it would fail: there it is an error that counts as an issue, `node-info.yaml advertises RPC <url>, ws <url>; a mainnet validator behind a worker gateway must advertise the gateway's https URL and no ws URL, or transactions forwarded to it fail: run sudo bash install-caddy.sh --phase rpc-advertise --rpc-domain <gateway host>`.
+On mainnet `--healthcheck` on the node line is an error, because the testnet health monitor never runs there, except with `GATEWAY_UPSTREAM`: then the flag is the gateway's readiness port, and the report says `--healthcheck <value> on the node line serves the worker gateway at <upstream> (GATEWAY_UPSTREAM), not the testnet health monitor`.
+`ENABLE_HEALTHCHECK_MONITOR=true` in `.node-meta` stays an error there.
 
 On a node whose `.node-meta` says `RPC_ADVERTISED_VIA=gateway`, the public RPC block of `check-node.sh` checks the gateway's name instead of a Caddy site, and never probes `wss://` or suggests `rpc-enable`:
 
@@ -2349,6 +2387,10 @@ Troubleshooting.
 | `setup-gateway.sh --refresh` says `Moving the worker gateway from ...` | On testnet and mainnet a refresh moves the gateway to the image this scripts release pins. | Nothing: that is the only image the release allows there. `--status` shows the new image. |
 | `install-caddy.sh --phase=rpc-advertise` is refused with `GET https://<name>/health from this host got ... instead of 200` | The gateway, its DNS record or its certificate is not in place, or this host cannot reach the name. On a mainnet host with no node service yet the run writes the record and warns instead. | Enable the gateway first, then run `curl -sS https://<name>/health` from this host; run `rpc-advertise` again when it answers. |
 | `check-node.sh` warns `v<label>.telcoin.network does not resolve from this host. It is this node's default name, ...` | The TAO has not created the A record of the default name yet. | Send the name and the gateway host's static public IP to the TAO (section 2.12), or advertise a name of your own with `rpc-advertise --rpc-domain <name>`. |
+| `check-node.sh` on the gateway host says `The gateway's /ready is not 200, so it refuses transactions (503): ...` | The validator is down, catching up or not reachable from the gateway host. Before a mainnet validator runs, this is expected. | `check-node.sh` on the validator, then its `firewall-setup.sh --gateway-from` and `edit-config.sh --set gateway_upstream` steps. |
+| `check-node.sh` on the gateway host says `GET https://<name>/health through Caddy on this host got a TLS or certificate error ...` | Caddy has no valid certificate for the name: its A record does not point at this host yet, or 80 and 443 do not reach the host from anywhere. | Fix the A record or the cloud firewall. Caddy keeps trying on its own, and `sudo systemctl reload caddy` starts a new attempt at once; `sudo journalctl -u caddy -n 50` shows why it failed. |
+| `check-node.sh` on the gateway host says `ufw is not active, ...` or `ufw does not allow 80/tcp ... from anywhere; ...` | The host's firewall is off, or keeps the public and the certificate authority out. | `sudo bash ~/telcoin-node-scripts/firewall-setup.sh --enable`, which keeps 80 and 443 open while Caddy serves the gateway site. |
+| `check-node.sh` on a mainnet validator says `node-info.yaml advertises RPC ...; a mainnet validator behind a worker gateway must advertise the gateway's https URL and no ws URL, ...` | The record does not name the gateway, so transactions other nodes forward to this validator fail. | `sudo bash ~/telcoin-node-scripts/install-caddy.sh --phase=rpc-advertise --rpc-domain <name>`. |
 | `install-caddy.sh --phase=rpc-enable` is refused with `This mainnet node runs admission closed, as a validator does. ...` | A mainnet validator's public RPC is its worker gateway, never a Caddy site on the validator. | Run a gateway on its own host and advertise it (`rpc-advertise --rpc-domain <name>`); serve a public RPC site from a node that is not a validator. |
 | `install-caddy.sh --phase=rpc-enable` is refused with `GATEWAY_UPSTREAM=<list>: a worker gateway fronts this node, ...` | On mainnet a node is fronted by a gateway or by its own public RPC site, not both. | `edit-config.sh --set gateway_upstream=off` first, if this node is to serve the site. |
 | `edit-config.sh --set gateway_upstream=<list>` is refused with `this host serves the public RPC site (install-caddy.sh rpc-enable), ...` | The same rule, from the other side. | `install-caddy.sh --phase=rpc-disable` first. |
