@@ -2196,18 +2196,49 @@ The mainnet refusal of `0.0.0.0` in `4) RPC access` names the worker gateway rou
 It needs lib/common.sh 2.2.8 or later.
 Full release note: [CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md).
 
-### check-node v2.2.2 — an unfinished --p2p-committee off is reported with the command that finishes it, and a gateway advertisement is checked at the gateway
+### check-node v2.2.2 — an unfinished --p2p-committee off is reported with the command that finishes it, a gateway advertisement is checked at the gateway, and so are a gateway host's public edge and a staked mainnet validator's admission
 With `P2P_COMMITTEE=on` in `.node-meta` and the allowlist timer's unit file gone, check-node reports one error, `P2P committee mode is on in .node-meta, but a --p2p-committee off did not finish (...)`, which says whether the table is still loaded, and names `firewall-setup.sh --p2p-committee off` as the fix.
 It checks nothing else of the allowlist then.
 Fix for nodes that advertise a worker gateway (`RPC_ADVERTISED_VIA=gateway`), on every network: the public RPC block probed a Caddy site they do not have and named `rpc-enable`, which refuses there.
 It now compares worker 0 with `https://<name>/` and no WebSocket URL and asks `GET https://<name>/health` once: a name that does not resolve gets the A record to create (for the node's default name, the TAO handoff), and any other answer but 200 names `setup-gateway.sh --status` on the gateway host.
 It only warns.
+On a host where Caddy fronts a worker gateway, a new section `Checking the worker gateway's public edge (Caddy)...` checks `/ready` (an issue on a host with no node), the name's DNS, `GET https://<name>/health` through Caddy over a verified certificate (a warning when it expires within 14 days) and `ufw` allowing 80/tcp and 443/tcp from anywhere, and says that the cloud's own firewall rules cannot be seen from the host.
+Fix for a mainnet validator behind a worker gateway: with `GATEWAY_UPSTREAM` in `.node-meta`, the node's `--healthcheck` is the gateway's readiness port and passes, instead of failing as the testnet health monitor.
+There, an advertisement other than the gateway's `https` URL with no WebSocket URL is now an issue.
+On mainnet, a staked validator whose admission mode is not closed gets a warning that names `edit-config.sh --set admission=closed`; it never counts as an issue.
+See [OPERATOR.md section 4.15](OPERATOR.md#415-worker-gateway) and [section 2.9](OPERATOR.md#29-node-admission).
 Full release note: [CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md).
 
 ### migrate-node-naming v2.0.1 — a source list the kill switch set aside stays aside
 A P2P source list that `--p2p-committee off` set aside (`P2P_PER_SOURCE=off`) is not turned into per-source rules when the migration opens the P2P ports: both ports open to every source.
 The warning after the migration's allowlist resync names the command that works: `--p2p-committee sync --accept-floor-shrink` after exit 4, `--p2p-committee off` after exit 5, else `--p2p-committee sync`.
 Full release note: [CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md).
+
+### terraform/ — a validator and its worker gateway on AWS, Google Cloud or Azure (new)
+`terraform/` holds root modules for AWS, Google Cloud and Azure that build a validator host and a worker-gateway host in one private network ([terraform/README.md](terraform/README.md), [OPERATOR.md section 2.13](OPERATOR.md#213-deploy-with-terraform)).
+The validator's first boot only mounts the data disk and installs the scripts; the operator runs key generation by hand from the printed `next_steps`, so the BLS passphrase never enters Terraform.
+A second apply, once `rpc_domain` is set, creates the gateway host, which sets the gateway up unattended.
+Both hosts need `scripts-v2.3.0` or newer from the installer, and their first boot stops at its `scripts-release` step on an older release.
+`terraform/` is not shipped to hosts: `update-scripts.sh` does not track it, and it has no `.sha256` sidecars.
+Full release note: [CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md).
+
+### lib/gateway.sh v2.3.0 — the testnet release's image stands in as the mainnet pin
+Until telcoin-network publishes a mainnet release, `lib/gateway.sh` pins the testnet release's worker-gateway image, from `v0.18.0-adiri`, for mainnet too, as a placeholder, so a mainnet gateway host can be set up and its name and certificate checked before genesis; before, `setup-gateway.sh --enable` on mainnet refused with `this scripts release pins no worker-gateway image for mainnet yet`.
+It takes the placeholder only while `TN_MAINNET_ENABLED` is 0, never for a release candidate, and `--status` and `check-node.sh` say that the image is a placeholder.
+`tools/check-gateway-pin.sh` checks it against that release's signed files with a `mainnet: note: placeholder` line, and refuses it, and an empty mainnet pin, once `TN_MAINNET_ENABLED` is 1, so the release that enables mainnet pins a mainnet release.
+See [OPERATOR.md section 4.15](OPERATOR.md#415-worker-gateway).
+Full release note: [CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md).
+
+### setup-gateway v2.3.0 -- the worker gateway's submission reservation is on
+`setup-gateway.sh` 2.3.0, with `lib/gateway.sh` 2.3.0, gains `--rate-limit-submissions N`: the
+submissions a second the gateway keeps for single `eth_sendRawTransaction` calls out of its global
+bucket, so a flood of queries cannot starve them. The default is 300 (burst 600); `0` turns the
+reservation off. The value lives in `gateway.meta` as `RATE_LIMIT_SUBMISSIONS`. A `gateway.meta`
+from scripts-v2.2.0 has no such line: it loads with the default, `--status` says the unit differs,
+and `--refresh` writes the key and the flag with one restart. `--rate-limit-submissions` joins
+`GW_REQUIRED_FLAGS`, so an image whose `--help` lacks it is refused: the testnet pin
+`v0.18.0-adiri` has it, and a mainnet pin must be a release that has it. The default is not
+load-tested (issue #83).
 
 ### lib/common.sh v2.2.8 — the map checks setup-node and edit-config share, the mainnet keygen switch, and the default RPC name
 New `tn_committee_peers_check`, `tn_trusted_nodes_shape_ok` (moved here from edit-config), `tn_map_addr_check`, `tn_trusted_nodes_node_check` and `tn_local_worker_count`: setup-node and edit-config call them before they write `network-config`.
@@ -2348,17 +2379,6 @@ mainnet) are unchanged. Full release note:
 ### setup-node v2.1.1 — Ubuntu 26.04 recommended
 Ubuntu 26.04 LTS is the recommended OS; 24.04 stays supported. `--help` says so for mainnet,
 which still needs systemd 255 or later.
-
-### setup-gateway v2.3.0 -- the worker gateway's submission reservation is on
-`setup-gateway.sh` 2.3.0, with `lib/gateway.sh` 2.3.0, gains `--rate-limit-submissions N`: the
-submissions a second the gateway keeps for single `eth_sendRawTransaction` calls out of its global
-bucket, so a flood of queries cannot starve them. The default is 300 (burst 600); `0` turns the
-reservation off. The value lives in `gateway.meta` as `RATE_LIMIT_SUBMISSIONS`. A `gateway.meta`
-from scripts-v2.2.0 has no such line: it loads with the default, `--status` says the unit differs,
-and `--refresh` writes the key and the flag with one restart. `--rate-limit-submissions` joins
-`GW_REQUIRED_FLAGS`, so an image whose `--help` lacks it is refused: the testnet pin
-`v0.18.0-adiri` has it, and a mainnet pin must be a release that has it. The default is not
-load-tested (issue #83).
 
 ### setup-gateway v2.2.0 — the worker gateway, a public JSON-RPC front for transaction submissions (new)
 `setup-gateway.sh` 2.2.0, with `lib/gateway.sh` 2.2.0 (`GATEWAY_VERSION`), is new. It runs

@@ -7,6 +7,24 @@ For recent entries (v1.1.40 onwards), see the Changelog section of README.md.
 
 ## Unreleased
 
+### Terraform deployment, the mainnet worker-gateway placeholder pin and the gateway checks, November 2026 -- check-node 2.2.2, lib/gateway 2.3.0
+Not yet in a scripts release; part of the pending note
+[CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md). `terraform/` builds a validator host
+and a worker-gateway host in one private network on AWS, Google Cloud or Azure
+([terraform/README.md](terraform/README.md)). The validator's first boot mounts the data disk and
+installs the scripts, the operator runs key generation by hand from the printed `next_steps`, so
+the BLS passphrase never enters Terraform, and a second apply with `rpc_domain` set creates the
+gateway host, which sets the gateway up unattended. Both hosts need this release from the
+installer and stop at their `scripts-release` step until it is published. `terraform/` is not
+shipped to hosts. Until telcoin-network publishes a mainnet release, `lib/gateway.sh` pins the
+testnet release's gateway image (`v0.18.0-adiri`) for mainnet as a placeholder, taken only while
+`TN_MAINNET_ENABLED` is 0, so a mainnet gateway can be set up before genesis;
+`tools/check-gateway-pin.sh` refuses the placeholder and an empty mainnet pin once the flag is 1.
+check-node checks a Caddy-fronted gateway host's `/ready`, DNS, certificate and `ufw`, takes a
+mainnet validator's `--healthcheck` as its gateway's readiness port when `GATEWAY_UPSTREAM` is
+set, counts an advertisement other than the gateway's `https` URL behind a mainnet gateway as an
+issue, and warns a staked mainnet validator whose admission mode is not closed.
+
 ### Default RPC name for a mainnet validator's worker gateway, November 2026 -- setup-node 2.1.7, install-caddy 2.2.2, edit-config 2.2.4, check-node 2.2.2, lib/common 2.2.8
 Not yet in a scripts release; part of the pending note
 [CHANGELOG/scripts-v2.3.0.md](CHANGELOG/scripts-v2.3.0.md). A mainnet keygen given no RPC URL

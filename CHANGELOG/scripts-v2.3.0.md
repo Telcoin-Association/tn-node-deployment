@@ -7,10 +7,12 @@ merged into `main` since `scripts-v2.2.0`; `update-scripts.sh` and the installer
 may still change.
 
 So far it holds five fixes for what could cut a mainnet validator off, or stop it, on genesis day,
-a way to generate mainnet keys before the mainnet genesis exists, and an RPC URL for a mainnet
-validator's worker gateway from those keys on. Mainnet starts with ten staked validators on a
-closed subnet that the rest of the network reaches through trusted observer hubs, and a validator
-that cannot be reached at genesis cannot be fixed in time.
+a way to generate mainnet keys before the mainnet genesis exists, an RPC URL for a mainnet
+validator's worker gateway from those keys on, a worker gateway that can run for mainnet before
+genesis with checks of its public side, and a Terraform deployment of a validator and its gateway.
+Mainnet starts with ten staked validators on a closed subnet that the rest of the network reaches
+through trusted observer hubs, and a validator that cannot be reached at genesis cannot be fixed in
+time.
 
 1. The kill switch opens the P2P ports. `firewall-setup.sh --p2p-committee off` on a host with a
    static source list put the per-source rules back and cut off every committee peer outside
@@ -29,9 +31,18 @@ that cannot be reached at genesis cannot be fixed in time.
    mainnet the node-side public RPC site and a worker gateway no longer front one node together
    (see [setup-node 2.1.7](#setup-node-217) and [install-caddy 2.2.2](#install-caddy-222);
    OPERATOR.md sections 2.12 and 4.15).
+7. A mainnet worker gateway can be set up, and its name and certificate checked, before genesis:
+   the testnet release's gateway image stands in as the mainnet pin while mainnet is not enabled,
+   and check-node checks a gateway host's DNS, certificate and firewall (see
+   [setup-gateway 2.3.0 and lib/gateway 2.3.0](#setup-gateway-230-and-libgateway-230) and
+   [check-node 2.2.2](#check-node-222); OPERATOR.md section 4.15).
+8. A Terraform deployment for AWS, Google Cloud and Azure builds a validator host and its
+   worker-gateway host; it is not shipped to hosts, and its hosts need this release from the
+   installer (see [Terraform deployment](#terraform-deployment); OPERATOR.md section 2.13).
 
 Nothing here enables mainnet: `TN_MAINNET_ENABLED` stays 0, and finalize, the interactive install
-and the Node Manager UI stay refused on mainnet.
+and the Node Manager UI stay refused on mainnet. The mainnet gateway pin is a placeholder that the
+release enabling mainnet must replace with a mainnet release.
 
 | Component | Version |
 |---|---|
@@ -40,8 +51,10 @@ and the Node Manager UI stay refused on mainnet.
 | edit-config | 2.2.4 |
 | check-node | 2.2.2 |
 | install-caddy | 2.2.2 |
+| setup-gateway | 2.3.0 |
 | migrate-node-naming | 2.0.1 |
 | lib/common (`COMMON_VERSION`) | 2.2.8 |
+| lib/gateway (`GATEWAY_VERSION`) | 2.3.0 |
 
 Every other script, library and UI file keeps its version. setup-node 2.1.7 and edit-config 2.2.4
 need lib/common 2.2.8, which the release installs with them.
@@ -155,6 +168,19 @@ need lib/common 2.2.8, which the release installs with them.
   It now prints `public RPC: https://<name>/ (the worker gateway's, RPC_ADVERTISED_VIA=gateway; no Caddy site on this host)`, compares worker 0 in `node-info.yaml` with `https://<name>/` and no WebSocket URL (a mismatch names `rpc-advertise --rpc-domain <name>`), and asks `GET https://<name>/health` once, with the options of `rpc-advertise`'s own check.
   A 200 is `public RPC: OK`. A name that does not resolve and is the node's default name (`tn_rpc_default_host`, when the library has it) gets a warning that its A record comes from the TAO, with the handoff and the route to a name of one's own; another such name gets `fix: point the A record of <name> at your worker gateway's static IP`; any other answer names `bash setup-gateway.sh --status` on the gateway host.
   It never probes wss or names `rpc-enable` there, and, like the rest of the block, it only warns: no health issue, no change to the exit code.
+- A host where Caddy fronts a worker gateway gets a section `Checking the worker gateway's public edge (Caddy)...` after the gateway section (OPERATOR.md section 4.15).
+  `/ready` not 200 while the gateway runs is a warning on a node host, and an issue on a host with no node, whose one job is to take transactions to the validator.
+  The name's DNS comes from `install-caddy.sh --json --phase=gateway-check-dns`: a name that does not resolve is an issue, and one that resolves to an address that is neither the host's nor local is a warning.
+  `GET https://<name>/health` through Caddy on the host (`curl --resolve <name>:443:127.0.0.1`) must answer 200 over a verified certificate, else an issue with its fix; with `openssl` on the host, a certificate that expires within 14 days is a warning, since Caddy's own renewal is failing.
+  `ufw` must be active and allow 80/tcp and 443/tcp from anywhere, else an issue naming `firewall-setup.sh --enable`; reading it needs root.
+  One information line says that the cloud's own firewall rules cannot be seen from the host.
+- Fix for a mainnet validator behind a worker gateway: with `GATEWAY_UPSTREAM` in `.node-meta`, the `--healthcheck` on the node line is the gateway's readiness port, which `edit-config.sh --set gateway_upstream` sets, and check-node failed it as the testnet health monitor.
+  It now reports it as OK (`--healthcheck <value> on the node line serves the worker gateway at <upstream> (GATEWAY_UPSTREAM), not the testnet health monitor`); `ENABLE_HEALTHCHECK_MONITOR=true` stays an error, and so does the flag without `GATEWAY_UPSTREAM`.
+  A `GATEWAY_UPSTREAM` set more than once gets a warning, and the check is skipped.
+- On a mainnet validator with `GATEWAY_UPSTREAM`, a `node-info.yaml` that advertises anything but an `https` URL with no WebSocket URL is now an error that counts as an issue, because transactions forwarded to the validator fail; elsewhere it stays information.
+- On mainnet, a node whose stake status is Staked, Pending Activation, Active or Pending Exit gets a section `Checking admission (mainnet validator)...` after the epoch and committee report (OPERATOR.md section 2.9).
+  Its admission mode is `ADMISSION_MODE` in `.node-meta`, else `admission.mode` in `network-config`, else unset, which the node runs as Open.
+  Any mode but closed is a warning that names `edit-config.sh --set admission=closed`, and `--set trusted_nodes=<hubs file>` too when no trusted nodes map is recorded; it never counts as an issue.
 
 ### install-caddy 2.2.2
 
@@ -190,6 +216,29 @@ need lib/common 2.2.8, which the release installs with them.
   The alphabet is spelled out rather than written as bracket ranges, so the locale cannot widen it.
   setup-node lists it, with `tn_node_info_field` and `tn_node_info_rpc`, in its library check; check-node calls it only when the library has it.
 
+### setup-gateway 2.3.0 and lib/gateway 2.3.0
+
+- `setup-gateway.sh --rate-limit-submissions N` sets the submissions a second the worker gateway keeps for single `eth_sendRawTransaction` calls; the default is 300 (burst 600), and `0` turns the reservation off.
+  `gateway.meta` gains `RATE_LIMIT_SUBMISSIONS`, and the flag joins `GW_REQUIRED_FLAGS` (CHANGELOG.md has the entry).
+- A mainnet worker gateway can be set up before genesis.
+  `lib/gateway.sh` pinned no mainnet image, so `--enable` on mainnet refused (`this scripts release pins no worker-gateway image for mainnet yet`).
+  Until telcoin-network publishes a mainnet release, the mainnet pin is now the testnet pin and its release, `v0.18.0-adiri`, as a placeholder: `_gw_pin_ok` takes a final testnet release for mainnet only while `TN_MAINNET_ENABLED` is 0, and never a release candidate.
+  `--status` and check-node say `The worker-gateway image is a placeholder: <image> is the image of the testnet release v0.18.0-adiri, pinned for mainnet until telcoin-network publishes a mainnet release. ...` (OPERATOR.md section 4.15).
+  A scripts release that enables mainnet refuses the placeholder as a defect of the release.
+- `tools/check-gateway-pin.sh`, which CI and the installer's publication run, checks the placeholder against the signed files of the testnet release it names, with a line `mainnet: note: placeholder: ...`.
+  At `TN_MAINNET_ENABLED=1` it refuses the placeholder and an empty mainnet pin, with exit 1 and before any download, so the release that enables mainnet pins a signed mainnet release.
+  The tool is maintainer tooling and is not shipped to hosts.
+
+### Terraform deployment
+
+- New `terraform/`: root modules for AWS, Google Cloud and Azure that build a validator host and a worker-gateway host in one private network (`terraform/README.md`, OPERATOR.md section 2.13).
+  A first apply builds the network, both static IPs, every firewall rule and the validator host; a second apply, once `rpc_domain` is set, creates the gateway host and leaves the validator alone.
+- The validator's first boot mounts the data disk and installs the scripts, and stops there: the operator generates the keys from the commands the `next_steps` output prints, so the BLS passphrase never enters Terraform, its state or the hosts' user data.
+- The gateway host sets itself up unattended: Docker from Docker's apt repository with its signing key checked against the fingerprint `setup-node.sh` pins, `setup-gateway.sh --enable --mode standalone` behind Caddy, `firewall-setup.sh --enable` and `check-node.sh`.
+- Both hosts install the release the installer serves, and stop at their `scripts-release` step on one older than `min_scripts_release`, `scripts-v2.3.0` by default, with the command that runs first boot again once the installer serves it.
+- `terraform/` is not shipped to hosts: `update-scripts.sh` does not track it and it has no `.sha256` sidecars.
+  `tools/check-terraform.sh` and the CI job `terraform static checks` (pull requests and branch pushes, not a required check) run its static checks, and `terraform/REHEARSAL.md` lists what a rehearsal on each cloud must confirm.
+
 ## New keys, flags and exit codes
 
 | Key, flag or exit code | What it is |
@@ -201,6 +250,9 @@ need lib/common 2.2.8, which the release installs with them.
 | `TN_MAINNET_KEYGEN_ENABLED` in `lib/common.sh` | 1: opens setup-node's mainnet keygen, and nothing else, while `TN_MAINNET_ENABLED` is 0 |
 | `.node-meta` `RPC_ADVERTISED_VIA=gateway` from key generation | A mainnet keygen writes it with the default name, or in validator posture with the operator's own gateway name; before, only `rpc-advertise` wrote it. Setup leaves it and the `PUBLIC_RPC_*` and `PUBLIC_WS_URL` keys alone when it writes the service |
 | Keygen `done` field `advertised_rpc` | `{"http":"<url>","via":"gateway","default":true\|false}`, on a mainnet keygen that recorded a URL for the worker gateway; `default` is false for the operator's own name |
+| `GW_MAINNET_IMAGE_PIN` and `GW_MAINNET_PIN_RELEASE` in `lib/gateway.sh` | The testnet pin and `v0.18.0-adiri`, a placeholder taken only while `TN_MAINNET_ENABLED` is 0 |
+| `tools/check-gateway-pin.sh` line `mainnet: note: placeholder: ...` | The mainnet pin is the placeholder; it passed against the testnet release it names |
+| `tools/check-gateway-pin.sh` exit 1 at `TN_MAINNET_ENABLED=1` | Also for an empty mainnet pin and for the placeholder |
 
 ## Refusals and warnings you may now see
 
@@ -217,6 +269,16 @@ need lib/common 2.2.8, which the release installs with them.
 | `this host serves the public RPC site (install-caddy.sh rpc-enable), and on mainnet ...` (`edit-config.sh --set gateway_upstream=`) | `install-caddy.sh --phase=rpc-disable` first. |
 | `https://<name>/ is not verified: ...` (`install-caddy.sh rpc-advertise` on a mainnet host with no node service, warning) | Run `check-node.sh` once the node and its gateway run. |
 | `This validator now advertises no RPC URL, ...` (`install-caddy.sh rpc-unadvertise`, warning) | Advertise a name again with `rpc-advertise --rpc-domain <name>`. |
+| `The gateway's /ready is not 200, so it refuses transactions (503): ...` (`check-node.sh` on a gateway host with no node, issue) | Run `check-node.sh` on the validator host; before a mainnet validator runs this is expected. |
+| `DNS: <name> does not resolve, so nobody reaches the gateway by its name; ...` (`check-node.sh` on a gateway host, issue) | Point the name's A record at the gateway host's static public IP. |
+| `GET https://<name>/health through Caddy on this host got ... instead of 200` (`check-node.sh` on a gateway host, issue) | Follow the line under it: for a TLS or certificate error, the A record and TCP 80 and 443 from anywhere; else `setup-gateway.sh --status` and `journalctl -u caddy`. |
+| `The certificate for <name> expires <date>, within 14 days. ...` (`check-node.sh` on a gateway host, warning) | Caddy's renewal is failing: see `journalctl -u caddy`. |
+| `ufw is not active, ...` or `ufw does not allow 80/tcp ... from anywhere; ...` (`check-node.sh` on a gateway host, issue) | `sudo bash <dir>/firewall-setup.sh --enable`. |
+| `node-info.yaml advertises RPC ..., ws ...; a mainnet validator behind a worker gateway must advertise the gateway's https URL and no ws URL, ...` (`check-node.sh`, issue) | `install-caddy.sh --phase=rpc-advertise --rpc-domain <name>`. |
+| `This node is <status> on mainnet, but its admission mode is <mode> (from <source>); ...` or `... no admission mode is set, so it runs Open; ...` (`check-node.sh`, warning) | Move the validator to Closed admission with its trusted hubs, through Grace on a running node (OPERATOR.md section 2.9). |
+| `The worker-gateway image is a placeholder: ...` (`setup-gateway.sh --status`, `check-node.sh`) | Nothing until a scripts release pins a mainnet image; then `update-scripts.sh` and `setup-gateway.sh --refresh`. |
+| `mainnet: refused: GW_MAINNET_PIN_RELEASE v0.18.0-adiri is a testnet release, the placeholder taken only while TN_MAINNET_ENABLED is 0, ...` or `mainnet: refused: GW_MAINNET_IMAGE_PIN and GW_MAINNET_PIN_RELEASE are empty, ...` (`tools/check-gateway-pin.sh`) | Pin the worker-gateway image of a signed mainnet release in the release that enables mainnet. |
+| `The installer put the node scripts <release> on this host; this deployment needs scripts-v2.3.0 or newer. ...` (Terraform first boot) | Once the installer serves `scripts-v2.3.0`, run the command the line names on each host. |
 
 OPERATOR.md section 9 lists the warnings about a bootstrap peers map that is left out of
 `committee_peers` and the refusals of a trusted nodes map.
@@ -246,6 +308,14 @@ OPERATOR.md section 9 lists the warnings about a bootstrap peers map that is lef
   `PUBLIC_RPC_DOMAIN`, as after a `--rpc-http` URL with an IP address, a port other than 443 or a
   path on a mainnet validator; it says so.
 - The default name answers only once the TAO has created its A record and a worker gateway runs
-  for it, and this scripts release pins no mainnet gateway image yet.
+  for it; until telcoin-network publishes a mainnet release, that gateway runs the testnet
+  release's image as a placeholder.
+- `check-node.sh` cannot see a cloud's security groups, firewall rules or network security groups;
+  it says so on a gateway host.
+- The Terraform deployment's points that need a cloud account or a real host, listed in
+  `terraform/REHEARSAL.md`, are not confirmed yet, and its hosts need this release from the
+  installer.
+- On Azure the testnet validator size, `Standard_D8s_v5`, caps uncached disk IOPS at 12,800, below
+  the 15,000 the data disk is provisioned with.
 - The partner guide still says that `--p2p-committee off` puts the earlier rules back. It is
   updated with the release, because the published guide describes the released scripts.
