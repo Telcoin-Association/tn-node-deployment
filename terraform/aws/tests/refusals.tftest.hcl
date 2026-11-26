@@ -6,16 +6,6 @@ mock_provider "aws" {
   override_during = plan
 }
 
-mock_provider "dns" {
-  override_during = plan
-
-  mock_data "dns_a_record_set" {
-    defaults = {
-      addrs = ["203.0.113.20"]
-    }
-  }
-}
-
 variables {
   region = "us-east-1"
 }

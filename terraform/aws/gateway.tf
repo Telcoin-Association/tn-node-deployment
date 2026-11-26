@@ -51,18 +51,3 @@ resource "aws_instance" "gateway" {
     }
   }
 }
-
-# Caddy gets the gateway's certificate only once the name resolves to the
-# gateway's address. This warns, never fails: a lookup that errors is a
-# warning too. A nested data block takes no count, so before rpc_domain is set
-# it looks up localhost, which the machine answers itself.
-check "rpc_domain_points_at_gateway" {
-  data "dns_a_record_set" "rpc" {
-    host = var.rpc_domain != "" ? var.rpc_domain : "localhost"
-  }
-
-  assert {
-    condition     = !local.gateway_vm || contains(data.dns_a_record_set.rpc.addrs, aws_eip.gateway[0].public_ip)
-    error_message = "${var.rpc_domain} does not resolve to the gateway's address ${try(aws_eip.gateway[0].public_ip, "")} yet. The gateway's first boot waits up to 30 minutes for it and then installs anyway, and Caddy keeps retrying the certificate; point the A record at that address (tao_handoff) first."
-  }
-}

@@ -7,29 +7,6 @@ mock_provider "aws" {
   override_during = plan
 }
 
-# The RPC name resolves to the gateway's address.
-mock_provider "dns" {
-  override_during = plan
-
-  mock_data "dns_a_record_set" {
-    defaults = {
-      addrs = ["203.0.113.20"]
-    }
-  }
-}
-
-# The RPC name resolves somewhere else.
-mock_provider "dns" {
-  alias           = "elsewhere"
-  override_during = plan
-
-  mock_data "dns_a_record_set" {
-    defaults = {
-      addrs = ["198.51.100.99"]
-    }
-  }
-}
-
 variables {
   region            = "us-east-1"
   validator_address = "0x1111111111111111111111111111111111111111"
@@ -152,22 +129,6 @@ run "second_apply" {
     condition     = output.tao_handoff.name == "rpc.example.org" && output.tao_handoff.ipv4 == "203.0.113.20"
     error_message = "The handoff must name rpc_domain and the gateway's address."
   }
-}
-
-# Caddy needs the name to resolve first, so the plan warns when it does not.
-run "domain_not_resolving" {
-  command = plan
-
-  variables {
-    rpc_domain = "rpc.example.org"
-  }
-
-  providers = {
-    aws = aws
-    dns = dns.elsewhere
-  }
-
-  expect_failures = [check.rpc_domain_points_at_gateway]
 }
 
 run "next_steps_testnet" {
