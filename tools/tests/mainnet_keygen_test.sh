@@ -48,7 +48,9 @@ check "the switch-off copy sets TN_MAINNET_KEYGEN_ENABLED=0" yes \
 # --address it was given and the BLS public key STUB_BLS, with worker 0 advertising the
 # --rpc-http and --rpc-ws it was given, as the real keytool's does. Both keytool calls
 # store a URL as url::Url writes it: the scheme and host in lower case, no default port,
-# and / for an empty path.
+# and / for an empty path. url::Url rewrites more than that (a port with leading zeros,
+# an IPv6 address, dot segments): STUB_STORE='FROM TO' stores FROM, in that form, as TO.
+# SETRPC_WS makes set-rpc advertise that WebSocket URL too.
 cat > "$T/bin/stub" <<'STUB'
 #!/bin/sh
 if [ "$1" = "--version" ]; then
@@ -79,7 +81,11 @@ norm() {
         http:*:80|ws:*:80) a="${a%:80}" ;;
     esac
     case "$p" in /*) ;; *) p="/$p" ;; esac
-    printf '%s' "$s://$a$p"
+    o="$s://$a$p"
+    if [ -n "${STUB_STORE:-}" ] && [ "$o" = "${STUB_STORE%% *}" ]; then
+        o="${STUB_STORE#* }"
+    fi
+    printf '%s' "$o"
 }
 # rpc FILE HTTP WS -- FILE with worker 0 (its last entry) advertising HTTP and WS.
 rpc() {
@@ -111,7 +117,7 @@ case " $* " in
             printf "error: unrecognized subcommand 'set-rpc'\n\nUsage: telcoin keytool <COMMAND>\n" >&2
             exit "$SETRPC_RC"
         fi
-        [ -n "${SETRPC_SKIPWRITE:-}" ] || rpc "$dd/node-info.yaml" "$http" "$ws"
+        [ -n "${SETRPC_SKIPWRITE:-}" ] || rpc "$dd/node-info.yaml" "$http" "${ws:-${SETRPC_WS:-}}"
         echo OK
         exit 0
         ;;
@@ -579,6 +585,47 @@ check "validator --rpc-http IP: no PUBLIC_RPC_DOMAIN, no A record, no name advis
 check_has "validator --rpc-http IP: the gateway runs on that address" \
     "{\"event\":\"log\",\"msg\":\"To make it answer, run your worker gateway on the host with that IP address (OPERATOR.md 4.15).\"}" \
     "$(cat "$T/out")"
+# The keytool may store a URL in a form setup does not predict. Once set-rpc succeeded, an
+# https URL with no WebSocket URL is what node-info.yaml advertises: that is recorded, and
+# said once.
+stored() {  # stored NAME GIVEN STORED DOMAIN_LINE -- a validator keygen whose keytool stores GIVEN as STORED
+    export STUB_STORE="$2 $3"
+    check_rc "$1: rc 0" 0 "$(keygen "${VAL[@]}" --rpc-http "$2")"
+    unset STUB_STORE
+    owner "$1" "$3" "$4"
+    check_has "$1: the stored form said" \
+        "{\"event\":\"log\",\"msg\":\"The keytool stored $2 as $3, so that is the URL recorded for your worker gateway.\"}" \
+        "$(cat "$T/out")"
+    check "$1: no read-back warning, no owner removed" "no no" \
+        "$(has "$(cat "$T/out")" "After keytool set-rpc") $(has "$(cat "$REC/meta.log")" "unset RPC_ADVERTISED_VIA")"
+}
+stored "validator --rpc-http, a port with a leading zero" https://gw8.example.org:0443/ https://gw8.example.org/ "PUBLIC_RPC_DOMAIN=gw8.example.org"
+stored "validator --rpc-http, a port 08443" https://gw8.example.org:08443/ https://gw8.example.org:8443/ "unset PUBLIC_RPC_DOMAIN"
+stored "validator --rpc-http, an IPv6 address not in canonical form" "https://[2001:0db8::0001]/" "https://[2001:db8::1]/" "unset PUBLIC_RPC_DOMAIN"
+check_has "validator --rpc-http, IPv6: the gateway runs on that address" \
+    "{\"event\":\"log\",\"msg\":\"To make it answer, run your worker gateway on the host with that IP address (OPERATOR.md 4.15).\"}" \
+    "$(cat "$T/out")"
+stored "validator --rpc-http, dot segments in the path" https://gw8.example.org/rpc/../ https://gw8.example.org/ "PUBLIC_RPC_DOMAIN=gw8.example.org"
+stored "validator --rpc-http, a dot segment kept in a path" https://gw8.example.org/./rpc https://gw8.example.org/rpc "unset PUBLIC_RPC_DOMAIN"
+# A stored form that is not https, or that carries a WebSocket URL, is not the gateway's:
+# warned, and no owner is recorded.
+export STUB_STORE="https://gw8.example.org:0443/ http://gw8.example.org/"
+check_rc "validator, the keytool stores http: rc 0" 0 "$(keygen "${VAL[@]}" --rpc-http https://gw8.example.org:0443/)"
+check_has "validator, the keytool stores http: the read-back warns" \
+    "{\"event\":\"log\",\"msg\":\"WARNING: After keytool set-rpc, worker 0 of $T/data/node-info.yaml reads 'http://gw8.example.org/ none' instead of 'https://gw8.example.org:0443/ none', so no RPC URL is recorded for your worker gateway. The keys are fine. Set one with: ${ADV_CMD} <name>\"}" \
+    "$(cat "$T/out")"
+no_owner "validator, the keytool stores http"
+export STUB_STORE="https://gw8.example.org:0443/ https://gw8.example.org/" SETRPC_WS=wss://gw8.example.org/
+check_rc "validator, set-rpc adds a WebSocket URL: rc 0" 0 "$(keygen "${VAL[@]}" --rpc-http https://gw8.example.org:0443/)"
+unset STUB_STORE SETRPC_WS
+check "validator, set-rpc adds a WebSocket URL: the read-back warns" yes \
+    "$(has "$(cat "$T/out")" "reads 'https://gw8.example.org/ wss://gw8.example.org/' instead of 'https://gw8.example.org:0443/ none', so no RPC URL is recorded for your worker gateway.")"
+no_owner "validator, set-rpc adds a WebSocket URL"
+# The same URL in another spelling is not another URL: no warning that the two differ.
+check_rc "validator --rpc-domain and --rpc-http in capitals: rc 0" 0 \
+    "$(keygen "${VAL[@]}" --rpc-domain gw8.example.org --rpc-http https://GW8.example.org:443)"
+check_lacks "validator --rpc-domain and --rpc-http in capitals: no differs warning" "differs from --rpc-domain" "$(cat "$T/out")"
+owner "validator --rpc-domain and --rpc-http in capitals" "https://gw8.example.org/" "PUBLIC_RPC_DOMAIN=gw8.example.org"
 # Where the network or the admission mode is known later (an interactive run, a finalize),
 # the same check refuses an http:// URL, before any key exists.
 rc=0

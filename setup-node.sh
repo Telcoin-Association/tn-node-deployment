@@ -2186,7 +2186,7 @@ check_release_floor() {
 # advertised-RPC flag that will not end up in node-info.yaml as given. Run after
 # derive_public_rpc_urls, once the domain is final.
 public_rpc_url_warnings() {
-    local d="$PUBLIC_RPC_DOMAIN" given="" note
+    local d="$PUBLIC_RPC_DOMAIN" given="" note http="$ADVERTISE_RPC_HTTP" dom
     for note in ${RPC_INPUT_WARNINGS[@]+"${RPC_INPUT_WARNINGS[@]}"}; do
         setup_warn "$note"
     done
@@ -2199,7 +2199,14 @@ public_rpc_url_warnings() {
         fi
         return 0
     fi
-    if [[ "$ADVERTISE_RPC_HTTP" != "https://${d}/" ]]; then
+    dom="https://${d}/"
+    # A validator's --rpc-http that spells the --rpc-domain URL another way names the
+    # same gateway: the keytool stores the two alike.
+    if [[ "$RPC_VIA_GATEWAY" == "true" ]]; then
+        http="$(setup_rpc_url_normal "$http")"
+        dom="$(setup_rpc_url_normal "$dom")"
+    fi
+    if [[ "$http" != "$dom" ]]; then
         given="--rpc-http ${ADVERTISE_RPC_HTTP}"
     fi
     # A mainnet validator's --rpc-ws is dropped (setup_rpc_gateway_posture says so).
@@ -2520,11 +2527,14 @@ setup_rpc_owner_clear() {
 # the keytool stores (setup_rpc_url_normal). keytool set-rpc of the release that made the
 # keys writes it unless worker 0 already reads so; it reads no passphrase, and its output
 # is captured, so its OK line stays off the --json stream. Worker 0 is read back either
-# way. rc 0 recorded (RPC_GATEWAY_URL); 1 not: a warning said why, no owner is recorded,
-# and the keys are fine.
+# way. The keytool's URL parser rewrites more than setup_rpc_url_normal does (a port with
+# leading zeros, an IPv6 address, dot segments): once set-rpc succeeded, an https URL
+# with no WebSocket URL read back is the one it stored, and is recorded, with a note.
+# rc 0 recorded (RPC_GATEWAY_URL); 1 not: a warning said why, no owner is recorded, and
+# the keys are fine.
 setup_rpc_gateway_write() {
     local url="" ni="${DATA_DIR}/node-info.yaml" meta="${CONFIG_DIR}/.node-meta"
-    local cur="" out="" rc=0 first="" host="" name="<name>" key=""
+    local cur="" out="" rc=0 first="" host="" name="<name>" key="" stored="" line
     url="$(setup_rpc_url_normal "$1")"
     host="$(setup_rpc_url_host "$url")" || host=""
     [[ -z "$host" ]] || name="$host"
@@ -2538,6 +2548,17 @@ setup_rpc_gateway_write() {
             return 1
         fi
         cur="$(tn_node_info_rpc "$ni" 2>/dev/null)" || cur="unreadable"
+        stored="${cur% none}"
+        if [[ "$cur" != "${url} none" && "$cur" == "${stored} none" && "$stored" == https://* ]]; then
+            url="$stored"
+            host="$(setup_rpc_url_host "$url")" || host=""
+            name="${host:-<name>}"
+            line="The keytool stored ${1} as ${url}, so that is the URL recorded for your worker gateway."
+            print_info "$line"
+            if json_mode; then
+                json_event log "$line"
+            fi
+        fi
         if [[ "$cur" != "${url} none" ]]; then
             setup_warn "After keytool set-rpc, worker 0 of ${ni} reads '${cur}' instead of '${url} none', so no RPC URL is recorded for your worker gateway. The keys are fine. Set one with: $(setup_rpc_advertise_cmd "$name")"
             setup_rpc_owner_clear || true
