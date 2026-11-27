@@ -2016,6 +2016,7 @@ And a front with `--front`:
 The gateway has two more listeners, on `127.0.0.1` only: the probe listener on 8656 (`/health`, `/ready`, `/ready/any`) and the metrics listener on 9655.
 `--listen-port`, `--probe-port` and `--metrics-port` change the three; they must differ from each other and, on a node host, from the node's RPC and health ports.
 `--redirect-queries` takes `http(s)://host[:port][/path]` with a hostname or an IPv4 address, and is refused when it points at the worker's RPC or readiness port, or at one of the gateway's own ports on this host, because the gateway refuses to start with such a URL.
+On mainnet, `--enable` and `--refresh` also require that the query endpoint answers `eth_chainId` with chain ID 731 before changing the gateway.
 `--rate-limit-submissions N` takes a whole number of submissions a second, `0` to `999999`; the default is 300.
 
 Images.

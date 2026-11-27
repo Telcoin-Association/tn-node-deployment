@@ -342,6 +342,16 @@ _gw_chain_check() {
     return 1
 }
 
+# The read endpoint can differ from the worker upstream, so verify it separately.
+_gw_redirect_chain_check() {
+    # network-gated: mainnet read traffic must stay on the mainnet chain
+    if [[ "$GW_V_NETWORK" == "mainnet" ]] && ! _tn_rpc_chain_is "$GW_V_REDIRECT" "$MAINNET_CHAIN_ID"; then
+        _gw_refuse "--redirect-queries must answer eth_chainId with chain ${MAINNET_CHAIN_ID}; give a reachable read RPC for ${GW_V_NETWORK}" "${1:-}"
+        return 1
+    fi
+    return 0
+}
+
 # -----------------------------------------------------------------------------
 # Inputs
 # -----------------------------------------------------------------------------
@@ -485,6 +495,7 @@ gw_validate_inputs() {
     if [[ -z "$nnet" ]]; then
         _gw_chain_check "$net" "$GW_V_UPSTREAM_HOST" "$GW_V_RPC_PORT" "$fn" || { _gw_refuse "$GW_ERR" "$fn" || return 1; }
     fi
+    _gw_redirect_chain_check "$fn" || return 1
     return 0
 }
 
@@ -1159,6 +1170,7 @@ _gw_refresh_locked() {
         fi
     fi
     gw_image_allowed "$GW_V_IMAGE" "$GW_V_NETWORK" || { _gw_refuse "$GW_ERR" "$fn" || return 1; }
+    _gw_redirect_chain_check "$fn" || return 1
     _gw_docker_ok || { _gw_refuse "$GW_ERR" "$fn" || return 1; }
     gw_image_ensure "$GW_V_IMAGE" "$fn" || { _gw_refuse "$GW_ERR" "$fn" || return 1; }
     gw_image_probe "$GW_V_IMAGE" "$fn" || { _gw_refuse "$GW_ERR" "$fn" || return 1; }

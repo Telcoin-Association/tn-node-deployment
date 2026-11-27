@@ -2384,6 +2384,7 @@ which still needs systemd 255 or later.
 `setup-gateway.sh` 2.2.0, with `lib/gateway.sh` 2.2.0 (`GATEWAY_VERSION`), is new. It runs
 telcoin-network's worker gateway as `telcoin-gateway.service`: a transaction submission goes to
 the worker of the node it fronts, and every other call is proxied to the `--redirect-queries` URL.
+Mainnet gateway setup and refresh require the query endpoint to report chain ID 731.
 
 - `--enable`, `--status`, `--refresh` and `--remove`, each with `--json`, in the shape of
   `setup-alerts.sh`. Exit 0 done, 1 refused or rolled back, 2 older libraries, 3 a step failed

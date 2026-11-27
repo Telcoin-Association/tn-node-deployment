@@ -173,7 +173,7 @@ All three roots take these:
 | `node_release_tag` | `""` | The testnet release the printed key generation installs (`--release-tag`), such as `v0.18.0-adiri`; empty prints `vX.Y.Z-adiri`. Mainnet key generation takes an existing binary and does not use it. |
 | `min_scripts_release` | `scripts-v2.3.0` | The oldest node-scripts release first boot accepts on either host. |
 | `trusted_nodes_file` | `""` | A local path to the trusted hubs map, written to the validator as `/etc/telcoin-first-boot/trusted-nodes.yaml` through its user data. At most 64 KiB, and it must fit the cloud's user data limit, which the plan checks: 16 KiB gzipped on AWS, one 256 KiB metadata value on Google Cloud, 65535 bytes gzipped on Azure. Empty means you copy it by hand. |
-| `redirect_queries_url` | `""` | Where the gateway sends queries; empty means the network's public RPC (`https://rpc.adiri.tel` on testnet, `https://rpc.telcoin.network` on mainnet). The plan refuses a URL that points at the validator's own RPC or readiness port (8545, 43174), or at the gateway's own ports on a loopback name, as `setup-gateway.sh` does. |
+| `redirect_queries_url` | `""` | Where the gateway sends queries. An empty value selects `https://rpc.adiri.tel` on testnet or `https://rpc.telcoin.network` on mainnet. Before enabling a mainnet gateway, confirm this URL reports chain ID 731 or set an approved read RPC that does. The plan refuses a URL that points at the validator's RPC or readiness port (8545, 43174), or at the gateway's own ports on a loopback name. |
 | `gateway_rate_limit_submissions` | `300` | Submissions a second the gateway keeps for `eth_sendRawTransaction`, 0 to 999999; 0 turns the reservation off. |
 
 AWS:

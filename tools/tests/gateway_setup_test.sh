@@ -101,6 +101,11 @@ for a in "$@"; do u="$a"; done
 printf '%s\n' "$u" >> "$GWT_DIR/curl.log"
 printf '%s\n' "$*" >> "$GWT_DIR/curl.args"
 # The upstream's eth_chainId (lib/gateway.sh _gw_chain_ask): the id in chain-id.
+if [[ "$*" == *eth_chainId* && "$u" == https://rpc.example.org/ ]]; then
+    [ -f "$GWT_DIR/query-chain-id" ] || exit 7
+    printf '{"jsonrpc":"2.0","id":1,"result":"%s"}\n200' "$(cat "$GWT_DIR/query-chain-id")"
+    exit 0
+fi
 case "$u" in
     http://*:*/)
         if [ -f "$GWT_DIR/chain-id" ]; then
@@ -1099,9 +1104,28 @@ check "placeholder: a testnet release candidate never stands in for mainnet" "1 
     "${rc} $(has "$GW_ERR" "'${PREL_T}-rc1', is not a mainnet release tag")"
 chain 0x2db
 gin MODE=standalone NETWORK=mainnet UPSTREAM=10.0.0.12 DOMAIN=gw.example.org IMAGE=
+printf '%s\n' 0x7e1 > "$T/query-chain-id"
+before="$(snap)"
+logs_reset
+rc=0; gw_enable quiet || rc=$?
+check "mainnet read endpoint: a testnet chain on the read target is refused" "1 yes" \
+    "${rc} $(has "$GW_ERR" "--redirect-queries must answer eth_chainId with chain 731")"
+check "mainnet read endpoint: refusal leaves the host unchanged" "$before  0" "$(snap) $(sys_changes) $(docker_runs)"
+rm -f "$T/query-chain-id"
+rc=0; gw_enable quiet || rc=$?
+check_rc "mainnet read endpoint: an unreachable read target is refused" 1 "$rc"
+printf '%s\n' 0x2db > "$T/query-chain-id"
 rc=0; gw_enable quiet || rc=$?
 check "placeholder: mainnet without --image enables with the placeholder pin" "0 yes" \
     "${rc} $(has "$(cat "$(UNIT_P)")" "--stop-timeout 60 ${PIMG} ")"
+printf '%s\n' 0x7e1 > "$T/query-chain-id"
+before="$(snap)"
+logs_reset
+rc=0; gw_refresh quiet || rc=$?
+check "mainnet read endpoint: refresh refuses a changed read chain" "1 yes" \
+    "${rc} $(has "$GW_ERR" "--redirect-queries must answer eth_chainId with chain 731")"
+check "mainnet read endpoint: refused refresh leaves the gateway running unchanged" "$before " "$(snap) $(sys_changes)"
+rm -f "$T/query-chain-id"
 : > "$T/say.log"
 rc=0; gw_status quiet || rc=$?
 check_rc "placeholder: status counts no issue" 0 "$rc"
